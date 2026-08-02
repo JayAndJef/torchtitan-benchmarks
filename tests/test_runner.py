@@ -14,18 +14,66 @@ from benchmarks.runner import (
     validate_arm,
     write_manifest,
 )
+from analysis.compare_arms import stable_tps, training_metrics
 from benchmarks.scenarios import (
+    PIPER_1B_LM_HEAD,
     PIPER_1B_QKV,
     PIPER_1B_ROPE,
     PIPER_1B_SWIGLU,
     PIPER_1B_WORKLOAD,
     scenario_by_name,
 )
-from piper1b.config_registry import qwen3_piper_1b, qwen3_piper_1b_unfused_qkv
+from piper1b.config_registry import (
+    qwen3_piper_1b,
+    qwen3_piper_1b_full_logits,
+    qwen3_piper_1b_fused_linear_ce,
+    qwen3_piper_1b_te_fused_ce,
+    qwen3_piper_1b_unfused_qkv,
+)
+from piper1b.fused_losses import FusedLinearCrossEntropyLoss, TECrossEntropyLoss
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_piper_lm_head_has_four_explicit_configs(self) -> None:
+        scenario = scenario_by_name("piper1b_lm_head")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            ["baseline", "chunked", "fused_linear_ce", "te_fused_ce"],
+        )
+        self.assertEqual(scenario.workload.config, "qwen3_piper_1b_full_logits")
+        self.assertEqual(scenario.workload.seed, 42)
+        self.assertEqual(
+            [arm.config for arm in scenario.arms],
+            [
+                None,
+                "qwen3_piper_1b",
+                "qwen3_piper_1b_fused_linear_ce",
+                "qwen3_piper_1b_te_fused_ce",
+            ],
+        )
+        self.assertEqual(
+            scenario.arm("te_fused_ce").trace_kernel_markers,
+            ("online_softmax_kernel", "cross_entropy_kernel"),
+        )
+
+    def test_piper_lm_head_configs_use_expected_losses(self) -> None:
+        full = qwen3_piper_1b_full_logits().loss
+        chunked = qwen3_piper_1b().loss
+        fused = qwen3_piper_1b_fused_linear_ce().loss
+        te = qwen3_piper_1b_te_fused_ce().loss
+
+        self.assertIsInstance(full, CrossEntropyLoss.Config)
+        self.assertIsInstance(chunked, ChunkedLossWrapper.Config)
+        self.assertEqual(chunked.num_chunks, 8)
+        self.assertIsInstance(fused, FusedLinearCrossEntropyLoss.Config)
+        self.assertEqual(fused.batch_chunk_size, 1024)
+        self.assertIsNone(fused.chunking_method)
+        self.assertIsInstance(te, ChunkedLossWrapper.Config)
+        self.assertEqual(te.num_chunks, 8)
+        self.assertIsInstance(te.loss_fn, TECrossEntropyLoss.Config)
+
     def test_piper_qkv_compares_unfused_baseline_to_fused_config(self) -> None:
         scenario = scenario_by_name("piper1b_qkv")
         self.assertEqual([arm.name for arm in scenario.arms], ["baseline", "fused_qkv"])
@@ -66,7 +114,12 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(PIPER_1B_WORKLOAD.steps, 40)
 
     def test_all_scenarios_declare_the_piper_regions(self) -> None:
-        for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU, PIPER_1B_QKV):
+        for scenario in (
+            PIPER_1B_ROPE,
+            PIPER_1B_SWIGLU,
+            PIPER_1B_QKV,
+            PIPER_1B_LM_HEAD,
+        ):
             self.assertEqual(
                 [(r.name, r.phase, r.invocations_per_window) for r in scenario.regions],
                 [("backward_block", "backward", 80), ("forward_block", "forward", 80)],
@@ -125,7 +178,12 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--profiler.enable_profiling", command)
 
     def test_each_arm_gets_its_own_dump_folder(self) -> None:
-        for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU, PIPER_1B_QKV):
+        for scenario in (
+            PIPER_1B_ROPE,
+            PIPER_1B_SWIGLU,
+            PIPER_1B_QKV,
+            PIPER_1B_LM_HEAD,
+        ):
             for arm in scenario.arms:
                 command = command_for_arm(
                     scenario.workload, arm, Path("/out") / arm.name, []
@@ -200,6 +258,33 @@ class ValidationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, PIPER_1B_SWIGLU.workload)
+
+
+class TrainingMetricsTests(unittest.TestCase):
+    def test_stable_tps_excludes_compile_and_profiler_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "arm.log"
+            log.write_text(
+                "step:  1  loss: 1.0  memory: 10.00GiB(20%)  tps: 100\n"
+                "step:  2  loss: 1.0  memory: 11.00GiB(22%)  tps: 9,900\n"
+                "step: 10  loss: 1.0  memory: 12.00GiB(24%)  tps: 10,100\n"
+                "step: 11  loss: 1.0  memory: 12.00GiB(24%)  tps: 8,000\n"
+                "step: 21  loss: 1.0  memory: 12.00GiB(24%)  tps: 200\n"
+                "step: 22  loss: 1.0  memory: 12.00GiB(24%)  tps: 10,000\n"
+            )
+            rows = training_metrics(log)
+
+        self.assertEqual(
+            stable_tps(
+                rows,
+                {
+                    "profile_freq": 20,
+                    "profiler_warmup": 5,
+                    "profiler_active": 5,
+                },
+            ),
+            [9900, 10100, 10000],
+        )
 
 
 if __name__ == "__main__":

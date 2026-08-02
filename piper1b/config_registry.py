@@ -41,6 +41,11 @@ from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
+from piper1b.fused_losses import (
+    FusedLinearCrossEntropyLoss,
+    TECrossEntropyLoss,
+)
+
 
 def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
     dim = 1024
@@ -90,14 +95,44 @@ def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
 
 
 def qwen3_piper_1b() -> Trainer.Config:
-    return _piper_1b_trainer(fuse_qkv=True)
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="chunked",
+    )
 
 
 def qwen3_piper_1b_unfused_qkv() -> Trainer.Config:
-    return _piper_1b_trainer(fuse_qkv=False)
+    return _piper_1b_trainer(
+        fuse_qkv=False,
+        loss_kind="chunked",
+    )
 
 
-def _piper_1b_trainer(*, fuse_qkv: bool) -> Trainer.Config:
+def qwen3_piper_1b_full_logits() -> Trainer.Config:
+    """Piper's vanilla full lm_head followed by cross entropy."""
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="full_logits",
+    )
+
+
+def qwen3_piper_1b_fused_linear_ce() -> Trainer.Config:
+    """PyTorch-native chunked linear plus cross entropy."""
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="fused_linear_ce",
+    )
+
+
+def qwen3_piper_1b_te_fused_ce() -> Trainer.Config:
+    """Eight lm_head chunks followed by TransformerEngine fused CE."""
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="te_fused_ce",
+    )
+
+
+def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
     model_spec = ModelSpec(
         name="qwen3",
         flavor="piper_1B",
@@ -109,12 +144,32 @@ def _piper_1b_trainer(*, fuse_qkv: bool) -> Trainer.Config:
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
     )
+    cross_entropy = CrossEntropyLoss.Config(
+        global_vocab_size=decoder_vocab_size(model_spec),
+    )
+    if loss_kind == "full_logits":
+        loss = cross_entropy
+    elif loss_kind == "chunked":
+        loss = ChunkedLossWrapper.Config(
+            num_chunks=8,
+            loss_fn=cross_entropy,
+        )
+    elif loss_kind == "fused_linear_ce":
+        loss = FusedLinearCrossEntropyLoss.Config(
+            num_chunks=8,
+            batch_chunk_size=1024,
+            chunking_method=None,
+        )
+    elif loss_kind == "te_fused_ce":
+        loss = ChunkedLossWrapper.Config(
+            num_chunks=8,
+            loss_fn=TECrossEntropyLoss.Config(),
+        )
+    else:
+        raise ValueError(f"Unknown piper-1B loss kind: {loss_kind}")
+
     return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
-        ),
+        loss=loss,
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,

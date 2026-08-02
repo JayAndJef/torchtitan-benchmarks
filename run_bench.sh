@@ -2,11 +2,13 @@
 # Compatibility entry point for declarative end-to-end benchmark scenarios.
 #
 # Usage:
-#   ./run_bench.sh <gpu-index> [--scenario piper1b_rope|piper1b_swiglu] \
+#   ./run_bench.sh <gpu-index> [--scenario <scenario-name>] \
 #       [--arm <name>] [--hardware <label>] [-- extra torchtitan args...]
 
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TITAN_DIR="${TITAN_DIR:-/data/zejiaqi/torchtitan}"
+TITAN_PYTHON="${TITAN_PYTHON:-$TITAN_DIR/.venv/bin/python}"
 cd "$BENCH_DIR"
-exec python3 -u -m benchmarks.runner "$@"
+exec "$TITAN_PYTHON" -u -m benchmarks.runner "$@"

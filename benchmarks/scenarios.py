@@ -93,6 +93,12 @@ PIPER_1B_UNFUSED_QKV_WORKLOAD = replace(
     seed=42,
 )
 
+PIPER_1B_LM_HEAD_WORKLOAD = replace(
+    PIPER_1B_WORKLOAD,
+    config="qwen3_piper_1b_full_logits",
+    seed=42,
+)
+
 # Compiled-region layout of the piper-1B workload under --compile.enable:
 # each of the 16 transformer blocks emits one forward and one backward
 # CompiledFxGraph annotation per step, so a 5-step profiler window holds
@@ -161,9 +167,38 @@ PIPER_1B_QKV = Scenario(
 )
 
 
+PIPER_1B_LM_HEAD = Scenario(
+    name="piper1b_lm_head",
+    description=(
+        "Full logits, TorchTitan chunking, PyTorch fused linear-CE, and "
+        "TransformerEngine fused CE on piper-1B."
+    ),
+    workload=PIPER_1B_LM_HEAD_WORKLOAD,
+    regions=PIPER_1B_REGIONS,
+    arms=(
+        Arm(name="baseline"),
+        Arm(name="chunked", config="qwen3_piper_1b"),
+        Arm(
+            name="fused_linear_ce",
+            config="qwen3_piper_1b_fused_linear_ce",
+        ),
+        Arm(
+            name="te_fused_ce",
+            config="qwen3_piper_1b_te_fused_ce",
+            trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
+        ),
+    ),
+)
+
+
 SCENARIOS = {
     scenario.name: scenario
-    for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU, PIPER_1B_QKV)
+    for scenario in (
+        PIPER_1B_ROPE,
+        PIPER_1B_SWIGLU,
+        PIPER_1B_QKV,
+        PIPER_1B_LM_HEAD,
+    )
 }
 
 

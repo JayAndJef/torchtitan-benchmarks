@@ -15,7 +15,8 @@ ratio, Welch's t-test, Mann-Whitney U, and Cohen's d.
 These are whole compiled forward/backward block timings, not timings of any
 individual generated Inductor kernel: generated kernel names are unstable
 across torch versions and arms, so per-kernel attribution is out of scope.
-Loss trajectories are printed as a sanity check, not a measurement.
+Stable-step throughput, peak memory, loss, and gradient-norm trajectories are
+also reported from the training logs.
 """
 
 from __future__ import annotations
@@ -35,6 +36,11 @@ from scipy import stats as scipy_stats  # noqa: E402
 from benchmarks.profile_regions import pooled_region_samples  # noqa: E402
 from benchmarks.runner import trace_files  # noqa: E402
 from benchmarks.scenarios import PIPER_1B_REGIONS, Region  # noqa: E402
+
+
+STEP_METRICS = re.compile(
+    r"step:\s*(\d+).*?memory:\s*([0-9.]+)GiB.*?tps:\s*([0-9,]+)"
+)
 
 
 def describe(values: list[float]) -> tuple[int, float, float, float]:
@@ -98,6 +104,51 @@ def losses(log_path: Path) -> list[tuple[int, float]]:
             if match:
                 out.append((int(match.group(1)), float(match.group(2))))
     return out
+
+
+def grad_norms(log_path: Path) -> list[tuple[int, float]]:
+    if not log_path.exists():
+        return []
+    out = []
+    pattern = re.compile(r"step:\s*(\d+).*?grad_norm:\s*([0-9.eE+-]+|nan|inf)")
+    with open(log_path, errors="replace") as log_file:
+        for line in log_file:
+            match = pattern.search(line)
+            if match:
+                out.append((int(match.group(1)), float(match.group(2))))
+    return out
+
+
+def training_metrics(log_path: Path) -> list[tuple[int, float, int]]:
+    """Return (step, peak-memory-GiB, tokens/s) rows from a training log."""
+    if not log_path.exists():
+        return []
+    rows = []
+    with open(log_path, errors="replace") as log_file:
+        for line in log_file:
+            match = STEP_METRICS.search(line)
+            if match:
+                rows.append(
+                    (
+                        int(match.group(1)),
+                        float(match.group(2)),
+                        int(match.group(3).replace(",", "")),
+                    )
+                )
+    return rows
+
+
+def stable_tps(rows: list[tuple[int, float, int]], workload: dict) -> list[int]:
+    """Select post-compile steps before each profiler warmup begins."""
+    profile_freq = int(workload.get("profile_freq", 20))
+    wait = profile_freq - int(workload.get("profiler_warmup", 5)) - int(
+        workload.get("profiler_active", 5)
+    )
+    return [
+        tps
+        for step, _, tps in rows
+        if 2 <= ((step - 1) % profile_freq) + 1 <= wait
+    ]
 
 
 def load_run(out_dir: Path, arms_override: list[str] | None) -> tuple[dict, list[str], tuple[Region, ...]]:
@@ -171,6 +222,24 @@ def main() -> None:
                 f"{row['welch_p']:10.3g} {row['mwu_p']:10.3g} {row['cohens_d']:6.2f}"
             )
 
+    print("\nend-to-end training metrics:")
+    workload = manifest.get("workload", {})
+    metric_rows = {
+        arm: training_metrics(out_dir / f"{arm}.log") for arm in arms
+    }
+    base_tps = stable_tps(metric_rows["baseline"], workload)
+    base_median = statistics.median(base_tps) if base_tps else math.nan
+    for arm in arms:
+        rows = metric_rows[arm]
+        samples = stable_tps(rows, workload)
+        median_tps = statistics.median(samples) if samples else math.nan
+        peak_memory = max((memory for _, memory, _ in rows), default=math.nan)
+        ratio = median_tps / base_median if base_median and samples else math.nan
+        print(
+            f"  {arm:22s} stable tps {median_tps:10.1f} "
+            f"(n={len(samples):2d}, {ratio:7.4f}x)   peak {peak_memory:6.2f} GiB"
+        )
+
     print("\nloss trajectories (sanity check, not a measurement):")
     for arm in arms:
         arm_losses = losses(out_dir / f"{arm}.log")
@@ -183,6 +252,17 @@ def main() -> None:
         line = "  ".join(f"s{step}:{value:.5f}" for step, value in picks)
         finite = all(math.isfinite(value) for _, value in arm_losses)
         print(f"  {arm:22s} {line}" + ("" if finite else "   NON-FINITE LOSS"))
+
+    print("\ngradient norm trajectories (sanity check, not a measurement):")
+    for arm in arms:
+        values = grad_norms(out_dir / f"{arm}.log")
+        if not values:
+            print(f"  {arm:22s} (no log)")
+            continue
+        picks = [values[0]] + [values[i] for i in (9, 19, 29, 39) if i < len(values)]
+        line = "  ".join(f"s{step}:{value:.5f}" for step, value in picks)
+        finite = all(math.isfinite(value) for _, value in values)
+        print(f"  {arm:22s} {line}" + ("" if finite else "   NON-FINITE GRAD NORM"))
 
     print("\nNote: rows above time whole compiled forward/backward blocks; they")
     print("are not measurements of any individual generated Inductor kernel.")
