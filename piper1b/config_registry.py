@@ -1,4 +1,4 @@
-"""Out-of-tree torchtitan config: the piper Qwen3-1B model, for RoPE benchmarking.
+"""Out-of-tree torchtitan configs for the piper Qwen3-1B model.
 
 Ports /data/zejiaqi/piper/examples/models/qwen3.py case '1B' onto current
 torchtitan (dim=1024, n_layers=16, n_heads=16, n_kv_heads=8, head_dim=64,
@@ -42,13 +42,13 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 
-def _piper_1b_model() -> Qwen3Model.Config:
+def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
     dim = 1024
     head_dim = 64
     n_layers = 16
     vocab_size = 151936
     layers = _build_qwen3_moe_layers(
-        fuse_qkv=True,
+        fuse_qkv=fuse_qkv,
         n_layers=n_layers,
         dim=dim,
         n_heads=16,
@@ -90,10 +90,18 @@ def _piper_1b_model() -> Qwen3Model.Config:
 
 
 def qwen3_piper_1b() -> Trainer.Config:
+    return _piper_1b_trainer(fuse_qkv=True)
+
+
+def qwen3_piper_1b_unfused_qkv() -> Trainer.Config:
+    return _piper_1b_trainer(fuse_qkv=False)
+
+
+def _piper_1b_trainer(*, fuse_qkv: bool) -> Trainer.Config:
     model_spec = ModelSpec(
         name="qwen3",
         flavor="piper_1B",
-        model=_piper_1b_model(),
+        model=_piper_1b_model(fuse_qkv=fuse_qkv),
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
         # No register_moe_load_balancing_hook: load_balance_coeff is None

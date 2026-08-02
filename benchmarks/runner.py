@@ -56,7 +56,7 @@ def command_for_arm(
         "--module",
         workload.module,
         "--config",
-        workload.config,
+        arm.config or workload.config,
         "--training.seq-len",
         str(workload.seq_len),
         "--training.steps",
@@ -72,6 +72,8 @@ def command_for_arm(
         "--profiler.profiler_warmup",
         str(workload.profiler_warmup),
     ]
+    if workload.seed is not None:
+        args.extend(("--debug.seed", str(workload.seed)))
     if arm.override_imports:
         args.extend(("--override.imports", ",".join(arm.override_imports)))
     return args + extra_args + ["--dump-folder", str(arm_dir)]
@@ -228,7 +230,7 @@ def write_manifest(
     extra_args: list[str],
 ) -> None:
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "scenario": scenario.name,
         "description": scenario.description,
         "hardware": hardware,

@@ -14,12 +14,12 @@ versions -- re-check `piper1b/config_registry.py` first.
 
 ## End-to-end scenarios
 
-Both scenarios run the same piper-1B workload (batch 4, seq len 1024,
+All scenarios run the same piper-1B workload (batch 4, seq len 1024,
 40 steps, `--compile.enable`) and collect two profiler windows (5 warmup +
-5 active steps at iterations 20 and 40). A scenario only declares its arms;
-the runner turns every arm into the identical `./run_train.sh` invocation in
-the torchtitan checkout, appending only that arm's `--override.imports`
-value and an arm-specific `--dump-folder`:
+5 active steps at iterations 20 and 40). A scenario declares its arms, including
+an optional arm-specific trainer config or `--override.imports` value. The runner
+turns each arm into the shared `./run_train.sh` invocation in the torchtitan
+checkout with an arm-specific `--dump-folder`:
 
 ```
 ./run_train.sh --module piper1b --config qwen3_piper_1b \
@@ -38,6 +38,13 @@ touching the torchtitan checkout.
 |----------|------|---------|
 | `piper1b_rope` | `baseline`, `helion`, `te` | Existing RoPE comparison. |
 | `piper1b_swiglu` | `baseline`, `fused_grouped_experts` | MoE SwiGLU comparison. |
+| `piper1b_qkv` | `baseline`, `fused_qkv` | Separate Q/K/V projections versus fused QKV. |
+
+The QKV scenario uses `qwen3_piper_1b_unfused_qkv` for its baseline and the
+existing `qwen3_piper_1b` config for the fused arm. Other scenarios retain the
+existing fused-QKV config for every arm. The QKV workload also pins
+`--debug.seed 42` so both arms start from the same initialization without
+enabling slower deterministic kernels during the performance run.
 
 `piper1b_swiglu` intentionally activates only
 `torchtitan.overrides.fused_swiglu.fused_grouped_experts`. Piper-1B contains
@@ -80,6 +87,10 @@ real Qwen3 training. Measured peak memory at batch 4 / seq 1024: 16.85 GiB.
 # New SwiGLU comparison: stock MoE experts vs FusedGroupedExperts.
 ./run_bench.sh <gpu-index> --scenario piper1b_swiglu
 ./run_bench.sh <gpu-index> --scenario piper1b_swiglu --arm fused_grouped_experts
+
+# QKV comparison: separate projections vs the existing fused implementation.
+./run_bench.sh <gpu-index> --scenario piper1b_qkv
+./run_bench.sh <gpu-index> --scenario piper1b_qkv --arm fused_qkv
 
 # Adapt the workload to hardware capacity while preserving comparable arms.
 ./run_bench.sh <gpu-index> --scenario piper1b_swiglu --batch 1

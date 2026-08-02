@@ -15,14 +15,35 @@ from benchmarks.runner import (
     write_manifest,
 )
 from benchmarks.scenarios import (
+    PIPER_1B_QKV,
     PIPER_1B_ROPE,
     PIPER_1B_SWIGLU,
     PIPER_1B_WORKLOAD,
     scenario_by_name,
 )
+from piper1b.config_registry import qwen3_piper_1b, qwen3_piper_1b_unfused_qkv
+from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_piper_qkv_compares_unfused_baseline_to_fused_config(self) -> None:
+        scenario = scenario_by_name("piper1b_qkv")
+        self.assertEqual([arm.name for arm in scenario.arms], ["baseline", "fused_qkv"])
+        self.assertEqual(scenario.workload.config, "qwen3_piper_1b_unfused_qkv")
+        self.assertEqual(scenario.workload.seed, 42)
+        self.assertIsNone(scenario.arm("baseline").config)
+        self.assertEqual(scenario.arm("fused_qkv").config, "qwen3_piper_1b")
+
+    def test_piper_qkv_configs_use_expected_projection_types(self) -> None:
+        fused = qwen3_piper_1b().model_spec.model.layers[0].attention.qkv_linear
+        unfused = (
+            qwen3_piper_1b_unfused_qkv()
+            .model_spec.model.layers[0]
+            .attention.qkv_linear
+        )
+        self.assertIsInstance(fused, FusedQKVLinear.Config)
+        self.assertIsInstance(unfused, QKVLinear.Config)
+
     def test_piper_swiglu_uses_only_grouped_experts_override(self) -> None:
         scenario = scenario_by_name("piper1b_swiglu")
         self.assertEqual(
@@ -35,7 +56,7 @@ class ScenarioTests(unittest.TestCase):
         )
         self.assertEqual(fused.expected_override_count, 16)
 
-    def test_both_scenarios_use_the_fixed_piper_workload(self) -> None:
+    def test_existing_scenarios_use_the_fixed_piper_workload(self) -> None:
         for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU):
             self.assertIs(scenario.workload, PIPER_1B_WORKLOAD)
         self.assertEqual(PIPER_1B_WORKLOAD.module, "piper1b")
@@ -44,8 +65,8 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(PIPER_1B_WORKLOAD.seq_len, 1024)
         self.assertEqual(PIPER_1B_WORKLOAD.steps, 40)
 
-    def test_both_scenarios_declare_the_piper_regions(self) -> None:
-        for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU):
+    def test_all_scenarios_declare_the_piper_regions(self) -> None:
+        for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU, PIPER_1B_QKV):
             self.assertEqual(
                 [(r.name, r.phase, r.invocations_per_window) for r in scenario.regions],
                 [("backward_block", "backward", 80), ("forward_block", "forward", 80)],
@@ -53,6 +74,31 @@ class ScenarioTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_qkv_arm_selects_fused_config(self) -> None:
+        command = command_for_arm(
+            PIPER_1B_QKV.workload,
+            PIPER_1B_QKV.arm("fused_qkv"),
+            Path("/out/fused_qkv"),
+            [],
+        )
+        self.assertEqual(
+            command[command.index("--config") + 1],
+            "qwen3_piper_1b",
+        )
+        self.assertEqual(command[command.index("--debug.seed") + 1], "42")
+
+        baseline = command_for_arm(
+            PIPER_1B_QKV.workload,
+            PIPER_1B_QKV.arm("baseline"),
+            Path("/out/baseline"),
+            [],
+        )
+        self.assertEqual(
+            baseline[baseline.index("--config") + 1],
+            "qwen3_piper_1b_unfused_qkv",
+        )
+        self.assertEqual(baseline[baseline.index("--debug.seed") + 1], "42")
+
     def test_command_adds_only_the_arm_override_and_dump_folder(self) -> None:
         arm = PIPER_1B_SWIGLU.arm("fused_grouped_experts")
         command = command_for_arm(
@@ -72,13 +118,14 @@ class CommandTests(unittest.TestCase):
             PIPER_1B_ROPE.workload, PIPER_1B_ROPE.arm("baseline"), Path("/out/baseline"), []
         )
         self.assertNotIn("--override.imports", command)
+        self.assertNotIn("--debug.seed", command)
         self.assertEqual(command[:5], ["./run_train.sh", "--module", "piper1b",
                                        "--config", "qwen3_piper_1b"])
         self.assertIn("--compile.enable", command)
         self.assertIn("--profiler.enable_profiling", command)
 
     def test_each_arm_gets_its_own_dump_folder(self) -> None:
-        for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU):
+        for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU, PIPER_1B_QKV):
             for arm in scenario.arms:
                 command = command_for_arm(
                     scenario.workload, arm, Path("/out") / arm.name, []

@@ -5,7 +5,7 @@ construction, provenance collection, and validation, so new ablations do not
 need to duplicate the training harness.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -21,13 +21,20 @@ class Workload:
     profiler_warmup: int = 5
     profiler_active: int = 5
     min_trace_windows: int = 2
+    seed: int | None = None
 
 
 @dataclass(frozen=True)
 class Arm:
-    """One implementation measured by a scenario."""
+    """One implementation measured by a scenario.
+
+    ``config`` selects an arm-specific trainer config when the implementation
+    difference must be expressed while building the model rather than as an
+    override. When unset, the scenario workload config is used.
+    """
 
     name: str
+    config: str | None = None
     override_imports: tuple[str, ...] = ()
     expected_override_count: int = 0
     trace_kernel_markers: tuple[str, ...] = ()
@@ -78,6 +85,12 @@ PIPER_1B_WORKLOAD = Workload(
     seq_len=1024,
     steps=40,
     local_batch_size=4,
+)
+
+PIPER_1B_UNFUSED_QKV_WORKLOAD = replace(
+    PIPER_1B_WORKLOAD,
+    config="qwen3_piper_1b_unfused_qkv",
+    seed=42,
 )
 
 # Compiled-region layout of the piper-1B workload under --compile.enable:
@@ -136,7 +149,22 @@ PIPER_1B_SWIGLU = Scenario(
 )
 
 
-SCENARIOS = {scenario.name: scenario for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU)}
+PIPER_1B_QKV = Scenario(
+    name="piper1b_qkv",
+    description="Separate Q/K/V projections versus fused QKV on piper-1B.",
+    workload=PIPER_1B_UNFUSED_QKV_WORKLOAD,
+    regions=PIPER_1B_REGIONS,
+    arms=(
+        Arm(name="baseline"),
+        Arm(name="fused_qkv", config="qwen3_piper_1b"),
+    ),
+)
+
+
+SCENARIOS = {
+    scenario.name: scenario
+    for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU, PIPER_1B_QKV)
+}
 
 
 def scenario_by_name(name: str) -> Scenario:
