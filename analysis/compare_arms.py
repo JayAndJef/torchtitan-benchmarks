@@ -1,193 +1,191 @@
-"""Compare the three run_bench.sh arms from their profiler traces.
+"""Compare benchmark arms by compiled forward/backward region GPU spans.
 
 Usage:
-    python compare_arms.py <out-dir>          # e.g. torchtitan-benchmarks/out/<ts>
+    python compare_arms.py <out-dir>            # out/<ts>/<scenario>/<hardware>
     python compare_arms.py <out-dir> --arms baseline helion
 
 For each arm it expects <out-dir>/<arm>/profiling/traces*/iteration_*/
-rank0_trace.json.gz. Reports:
-  1. per-arm device totals (kernel sum, busy union, wall span) per window
-  2. per-compiled-region span stats, arm vs baseline, with Welch/MWU/Cohen d
-  3. RoPE-attributable kernels per arm (standalone kernels by name; for the
-     baseline the RoPE cost is fused into inductor kernels and NOT separable
-     -- the region-level comparison is the honest signal there)
-  4. loss trajectory per arm from the run logs (baseline vs helion should
-     track bitwise-closely; the te arm ignores positions and diverges)
+rank0_trace.json.gz plus <out-dir>/manifest.json written by the runner.
+The measurement is the GPU span of the scenario's declared compiled regions
+(``## Call CompiledFxGraph`` GPU annotations), pooled over all profiler
+windows, with each window's invocation count validated first. Reports per
+region: count, mean, median, standard deviation, arm-vs-baseline delta and
+ratio, Welch's t-test, Mann-Whitney U, and Cohen's d.
 
-Traces are decompressed into /data/zejiaqi/tmp/titan_bench_scratch/ (never /tmp).
+These are whole compiled forward/backward block timings, not timings of any
+individual generated Inductor kernel: generated kernel names are unstable
+across torch versions and arms, so per-kernel attribution is out of scope.
+Loss trajectories are printed as a sanity check, not a measurement.
 """
 
-import glob
-import gzip
+from __future__ import annotations
+
+import argparse
 import json
-import os
+import math
 import re
-import shutil
-import statistics as st
+import statistics
 import sys
-from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from stats import describe, rank, spans  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scipy import stats as sps  # noqa: E402
+from scipy import stats as scipy_stats  # noqa: E402
 
-SCRATCH = Path("/data/zejiaqi/tmp/titan_bench_scratch")
-
-# Kernel-name substrings that identify standalone RoPE work per arm. The
-# baseline has none: inductor fuses RoPE into neighboring kernels.
-ROPE_KERNEL_MARKERS = ("helion__rope", "fused_rope_forward", "fused_rope_backward")
+from benchmarks.profile_regions import pooled_region_samples  # noqa: E402
+from benchmarks.runner import trace_files  # noqa: E402
+from benchmarks.scenarios import PIPER_1B_REGIONS, Region  # noqa: E402
 
 
-def decompress(out_dir: Path, arm: str) -> list[Path]:
-    """Decompress all iteration traces for one arm into the scratch dir."""
-    srcs = sorted(
-        glob.glob(str(out_dir / arm / "profiling" / "traces*" / "iteration_*" / "*.json.gz"))
-    )
-    dsts = []
-    for src in srcs:
-        it = Path(src).parent.name  # iteration_NN
-        dst = SCRATCH / f"{out_dir.name}_{arm}_{it}.json"
-        if not dst.exists() or os.path.getmtime(src) > os.path.getmtime(dst):
-            with gzip.open(src, "rb") as f_in, open(dst, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-        dsts.append(dst)
-    return dsts
+def describe(values: list[float]) -> tuple[int, float, float, float]:
+    """Return (n, mean, sd, median) of one region's pooled samples."""
+    n = len(values)
+    sd = statistics.stdev(values) if n > 1 else 0.0
+    return n, statistics.mean(values), sd, statistics.median(values)
 
 
-def device_totals(path: Path) -> dict:
-    ev = json.load(open(path))["traceEvents"]
-    dev = [
-        e
-        for e in ev
-        if e.get("ph") == "X" and e.get("cat") in ("kernel", "gpu_memcpy", "gpu_memset")
-    ]
-    kern = [e for e in dev if e["cat"] == "kernel"]
-    iv = sorted((e["ts"], e["ts"] + e.get("dur", 0)) for e in dev)
-    busy, cur_s, cur_e = 0.0, None, None
-    for s, e in iv:
-        if cur_e is None or s > cur_e:
-            if cur_e is not None:
-                busy += cur_e - cur_s
-            cur_s, cur_e = s, e
-        else:
-            cur_e = max(cur_e, e)
-    if cur_e is not None:
-        busy += cur_e - cur_s
-    lo = min(e["ts"] for e in dev)
-    hi = max(e["ts"] + e.get("dur", 0) for e in dev)
-    return {
-        "kernel_ms": sum(e["dur"] for e in kern) / 1e3,
-        "n_kernels": len(kern),
-        "busy_ms": busy / 1e3,
-        "wall_ms": (hi - lo) / 1e3,
-    }
-
-
-def rope_kernels(path: Path) -> dict[str, tuple[float, int]]:
-    ev = json.load(open(path))["traceEvents"]
-    out = defaultdict(lambda: [0.0, 0])
-    for e in ev:
-        if e.get("ph") == "X" and e.get("cat") == "kernel":
-            n = e["name"]
-            if any(m in n for m in ROPE_KERNEL_MARKERS):
-                out[n][0] += e["dur"]
-                out[n][1] += 1
-    return {k: (v[0], v[1]) for k, v in out.items()}
+def region_comparison(
+    base: dict[str, list[float]],
+    arm: dict[str, list[float]],
+    regions: tuple[Region, ...],
+) -> list[dict[str, float | int | str]]:
+    """Compare each declared region's pooled samples between two arms."""
+    rows: list[dict[str, float | int | str]] = []
+    for region in regions:
+        base_values, arm_values = base[region.name], arm[region.name]
+        n_base, mean_base, sd_base, median_base = describe(base_values)
+        n_arm, mean_arm, sd_arm, median_arm = describe(arm_values)
+        welch = scipy_stats.ttest_ind(base_values, arm_values, equal_var=False)
+        mwu = scipy_stats.mannwhitneyu(base_values, arm_values, alternative="two-sided")
+        pooled_sd = (
+            (
+                ((n_base - 1) * sd_base**2 + (n_arm - 1) * sd_arm**2)
+                / (n_base + n_arm - 2)
+            )
+            ** 0.5
+            if n_base + n_arm > 2
+            else 0.0
+        )
+        rows.append(
+            {
+                "region": region.name,
+                "n_base": n_base,
+                "base_mean_us": mean_base,
+                "base_median_us": median_base,
+                "base_sd_us": sd_base,
+                "n_arm": n_arm,
+                "arm_mean_us": mean_arm,
+                "arm_median_us": median_arm,
+                "arm_sd_us": sd_arm,
+                "delta_us": mean_arm - mean_base,
+                "ratio": mean_arm / mean_base,
+                "welch_p": float(welch.pvalue),
+                "mwu_p": float(mwu.pvalue),
+                "cohens_d": (mean_arm - mean_base) / pooled_sd if pooled_sd else 0.0,
+            }
+        )
+    return rows
 
 
 def losses(log_path: Path) -> list[tuple[int, float]]:
     if not log_path.exists():
         return []
     out = []
-    pat = re.compile(r"step:\s*(\d+).*?loss:\s*([0-9.]+)")
-    for line in open(log_path, errors="replace"):
-        m = pat.search(line)
-        if m:
-            out.append((int(m.group(1)), float(m.group(2))))
+    pattern = re.compile(r"step:\s*(\d+).*?loss:\s*([0-9.eE+-]+|nan|inf)")
+    with open(log_path, errors="replace") as log_file:
+        for line in log_file:
+            match = pattern.search(line)
+            if match:
+                out.append((int(match.group(1)), float(match.group(2))))
     return out
 
 
-def compare_regions(base_files: list[Path], arm_files: list[Path], arm: str) -> None:
-    A = rank(spans([str(p) for p in base_files]))
-    B = rank(spans([str(p) for p in arm_files]))
-    labels = ["backward block", "forward block"]
-    print(f"\n  compiled-region span us/call, baseline vs {arm} "
-          f"(pooled over {len(base_files)} windows; regions paired by size rank):")
-    hdr = (f"    {'region':16s} {'n':>4} | {'base mean':>10} {'sd':>7} | "
-           f"{'arm mean':>10} {'sd':>7} | {'delta':>8} {'ratio':>7} | "
-           f"{'Welch p':>10} {'MWU p':>10} {'d':>6}")
-    print(hdr)
-    for i, ((_, av), (_, bv)) in enumerate(zip(A, B)):
-        label = labels[i] if i < len(labels) else f"region{i}"
-        na, ma, sa, _ = describe(av)
-        nb, mb, sb, _ = describe(bv)
-        t = sps.ttest_ind(av, bv, equal_var=False)
-        u = sps.mannwhitneyu(av, bv, alternative="two-sided")
-        pooled = (
-            (((na - 1) * sa**2 + (nb - 1) * sb**2) / (na + nb - 2)) ** 0.5
-            if na + nb > 2
-            else 0.0
-        )
-        d = (mb - ma) / pooled if pooled else 0.0
+def load_run(out_dir: Path, arms_override: list[str] | None) -> tuple[dict, list[str], tuple[Region, ...]]:
+    manifest_path = out_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    if not manifest:
+        print(f"WARNING: no manifest.json under {out_dir}; assuming piper-1B regions")
+    manifest_regions = manifest.get("regions", [])
+    if manifest_regions and not all("phase" in region for region in manifest_regions):
         print(
-            f"    {label:16s} {na:>4} | {ma:10.1f} {sa:7.1f} | "
-            f"{mb:10.1f} {sb:7.1f} | {mb - ma:+8.1f} {mb / ma:7.4f} | "
-            f"{t.pvalue:10.3g} {u.pvalue:10.3g} {d:6.2f}"
+            f"WARNING: {manifest_path} predates phase-based regions "
+            f"(schema {manifest.get('schema_version')}); assuming piper-1B regions"
         )
+        manifest_regions = []
+    regions = tuple(Region(**region) for region in manifest_regions) or PIPER_1B_REGIONS
+    arms = (
+        arms_override
+        or manifest.get("selected_arms")
+        or [arm["name"] for arm in manifest.get("arms", [])]
+        or ["baseline", "helion", "te"]
+    )
+    return manifest, arms, regions
 
 
 def main() -> None:
-    out_dir = Path(sys.argv[1]).resolve()
-    arms = ["baseline", "helion", "te"]
-    if "--arms" in sys.argv:
-        arms = sys.argv[sys.argv.index("--arms") + 1 :]
-    SCRATCH.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(
+        description="Compare benchmark arms by compiled-region GPU spans."
+    )
+    parser.add_argument("out_dir", type=Path)
+    parser.add_argument("--arms", nargs="+", help="Subset of arms (must include baseline).")
+    args = parser.parse_args()
 
-    files: dict[str, list[Path]] = {}
-    for arm in arms:
-        files[arm] = decompress(out_dir, arm)
-        if not files[arm]:
-            print(f"[{arm}] no traces found under {out_dir / arm}; skipping")
+    out_dir = args.out_dir.resolve()
+    manifest, arms, regions = load_run(out_dir, args.arms)
+    if "baseline" not in arms:
+        raise SystemExit("FATAL: comparison needs the baseline arm")
 
     print(f"== {out_dir} ==")
+    print(f"scenario: {manifest.get('scenario', 'unknown')}   "
+          f"hardware: {manifest.get('hardware', 'unknown')}")
 
-    print("\n1. Device totals per window:")
+    pooled: dict[str, dict[str, list[float]]] = {}
+    windows: dict[str, int] = {}
     for arm in arms:
-        for p in files.get(arm, []):
-            t = device_totals(p)
+        paths = trace_files(out_dir / arm)
+        if not paths:
+            raise SystemExit(f"FATAL: no profiler traces under {out_dir / arm}")
+        try:
+            pooled[arm] = pooled_region_samples(paths, regions)
+        except ValueError as error:
+            raise SystemExit(f"FATAL: {arm}: {error}") from error
+        windows[arm] = len(paths)
+
+    for arm in arms:
+        if arm == "baseline":
+            continue
+        print(f"\ncompiled-region GPU span us/call, baseline vs {arm} "
+              f"(pooled over {windows['baseline']}+{windows[arm]} windows):")
+        header = (f"  {'region':16s} {'n':>4} | {'base mean':>10} {'median':>9} {'sd':>7} | "
+                  f"{'arm mean':>10} {'median':>9} {'sd':>7} | {'delta':>8} {'ratio':>7} | "
+                  f"{'Welch p':>10} {'MWU p':>10} {'d':>6}")
+        print(header)
+        for row in region_comparison(pooled["baseline"], pooled[arm], regions):
             print(
-                f"  {arm:9s} {p.name.split('_')[-1]:13s} kernel {t['kernel_ms']:8.2f} ms "
-                f"(n={t['n_kernels']})  busy {t['busy_ms']:8.2f}  wall {t['wall_ms']:8.2f}"
+                f"  {row['region']:16s} {row['n_arm']:>4} | "
+                f"{row['base_mean_us']:10.1f} {row['base_median_us']:9.1f} "
+                f"{row['base_sd_us']:7.1f} | "
+                f"{row['arm_mean_us']:10.1f} {row['arm_median_us']:9.1f} "
+                f"{row['arm_sd_us']:7.1f} | "
+                f"{row['delta_us']:+8.1f} {row['ratio']:7.4f} | "
+                f"{row['welch_p']:10.3g} {row['mwu_p']:10.3g} {row['cohens_d']:6.2f}"
             )
 
-    if "baseline" in files and files["baseline"]:
-        for arm in arms:
-            if arm == "baseline" or not files.get(arm):
-                continue
-            compare_regions(files["baseline"], files[arm], arm)
-
-    print("\n3. Standalone RoPE kernels per arm (baseline: none -- fused by inductor):")
+    print("\nloss trajectories (sanity check, not a measurement):")
     for arm in arms:
-        agg: dict[str, list[float]] = defaultdict(lambda: [0.0, 0])
-        for p in files.get(arm, []):
-            for k, (us, n) in rope_kernels(p).items():
-                agg[k][0] += us
-                agg[k][1] += n
-        if not agg:
-            print(f"  {arm:9s} (no standalone rope kernels)")
-        for k, (us, n) in sorted(agg.items(), key=lambda kv: -kv[1][0]):
-            print(f"  {arm:9s} {us / 1e3:8.3f} ms  n={n:<5} {us / n:8.1f} us/call  {k[:70]}")
+        arm_losses = losses(out_dir / f"{arm}.log")
+        if not arm_losses:
+            print(f"  {arm:22s} (no log)")
+            continue
+        picks = [arm_losses[0]] + [
+            arm_losses[i] for i in (9, 19, 29, 39) if i < len(arm_losses)
+        ]
+        line = "  ".join(f"s{step}:{value:.5f}" for step, value in picks)
+        finite = all(math.isfinite(value) for _, value in arm_losses)
+        print(f"  {arm:22s} {line}" + ("" if finite else "   NON-FINITE LOSS"))
 
-    print("\n4. Loss trajectories (te arm ignores positions; divergence expected):")
-    for arm in arms:
-        ls = losses(out_dir / f"{arm}.log")
-        if ls:
-            pts = [ls[0]] + [ls[i] for i in (9, 19, 29, 39) if i < len(ls)]
-            print(f"  {arm:9s} " + "  ".join(f"s{s}:{v:.5f}" for s, v in pts))
-        else:
-            print(f"  {arm:9s} (no log)")
+    print("\nNote: rows above time whole compiled forward/backward blocks; they")
+    print("are not measurements of any individual generated Inductor kernel.")
 
 
 if __name__ == "__main__":
