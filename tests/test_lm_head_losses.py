@@ -10,13 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import torch.nn.functional as F
 
-from piper1b.fused_losses import FusedLinearCrossEntropyLoss
-from piper1b.te_cross_entropy import parallel_cross_entropy
+from piper1b.lm_head.losses import FusedLinearCrossEntropyLoss
+from piper1b.lm_head.te_cross_entropy import parallel_cross_entropy
 
 
 class TransformerEngineSourceTests(unittest.TestCase):
     def test_vendored_sources_only_change_import_paths(self) -> None:
-        root = Path(__file__).resolve().parent.parent / "piper1b"
+        root = Path(__file__).resolve().parent.parent / "piper1b" / "lm_head"
         sources = {
             "te_common_cross_entropy.py": (
                 "1af41ec1dca60268887daf279219873cbb34df6d1e8b1c3c64dc75e70cbb45c9",
@@ -26,7 +26,7 @@ class TransformerEngineSourceTests(unittest.TestCase):
                 "1c7eec23f612e022303bb11ff33d2558ec9e10abd7aaefc34fbedebadcd3dea5",
                 (
                     (
-                        "from piper1b.te_common_cross_entropy import (",
+                        "from piper1b.lm_head.te_common_cross_entropy import (",
                         "from transformer_engine.common.triton.cross_entropy import (",
                     ),
                 ),
@@ -35,7 +35,7 @@ class TransformerEngineSourceTests(unittest.TestCase):
                 "0a1670475dc40f62b3c52163967b6fe97679172f253424b28492699c5cbfd563",
                 (
                     (
-                        "from piper1b import te_triton_cross_entropy as triton_cross_entropy",
+                        "from piper1b.lm_head import te_triton_cross_entropy as triton_cross_entropy",
                         "import transformer_engine.pytorch.triton.cross_entropy as triton_cross_entropy",
                     ),
                 ),

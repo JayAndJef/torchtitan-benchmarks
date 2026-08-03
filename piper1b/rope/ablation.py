@@ -8,6 +8,7 @@ removed. The output is deliberately wrong; only the time is meaningful.
 import os
 import statistics
 import sys
+from pathlib import Path
 
 os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/data/zejiaqi/tmp/torch_extensions")
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/data/zejiaqi/tmp/inductor_cache")
@@ -20,9 +21,10 @@ from torch.utils.cpp_extension import load
 from torchtitan.overrides.helion_rope import _helion_cossin_rope_fwd
 
 DEV = "cuda"
+ROPE_SOURCE = str(Path(__file__).with_name("te_rope_standalone.cu"))
 te = load(
     name="te_rope_ablate",
-    sources=["/data/zejiaqi/torchtitan-benchmarks/te_rope_standalone.cu"],
+    sources=[ROPE_SOURCE],
     build_directory="/data/zejiaqi/tmp/torch_extensions/te_rope_ablate",
     extra_cuda_cflags=[
         "-O3",

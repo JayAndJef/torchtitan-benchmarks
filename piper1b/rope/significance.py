@@ -8,6 +8,7 @@ and the paired per-iteration delta.
 
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/data/zejiaqi/tmp/torch_extensions")
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/data/zejiaqi/tmp/inductor_cache")
@@ -23,10 +24,11 @@ from torchtitan.overrides.helion_rope import _helion_cossin_rope_fwd
 DEV = "cuda"
 N = 200
 WARMUP = 30
+ROPE_SOURCE = str(Path(__file__).with_name("te_rope_standalone.cu"))
 
 te = load(
     name="te_rope_standalone",
-    sources=["/data/zejiaqi/torchtitan-benchmarks/te_rope_standalone.cu"],
+    sources=[ROPE_SOURCE],
     build_directory="/data/zejiaqi/tmp/torch_extensions/te_rope",
     extra_cuda_cflags=[
         "-O3",

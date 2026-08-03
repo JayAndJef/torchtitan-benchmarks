@@ -14,7 +14,7 @@ documents make positions != arange. Do not use outside benchmarking.
 
 Activation:
     PYTHONPATH=/data/zejiaqi/torchtitan-benchmarks torchtitan_train ... \
-        --override.imports te_rope_override.te_rope
+        --override.imports piper1b.rope.te_rope_override.te_rope
 
 The CUDA extension builds on first import (needs a C++20-capable host compiler;
 on this box: ``source /opt/rh/gcc-toolset-13/enable``). Build artifacts go under

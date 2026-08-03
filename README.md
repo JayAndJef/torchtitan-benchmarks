@@ -39,7 +39,7 @@ touching the torchtitan checkout.
 | `piper1b_rope` | `baseline`, `helion`, `te` | Existing RoPE comparison. |
 | `piper1b_swiglu` | `baseline`, `fused_grouped_experts` | MoE SwiGLU comparison. |
 | `piper1b_qkv` | `baseline`, `fused_qkv` | Separate Q/K/V projections versus fused QKV. |
-| `piper1b_lm_head` | `baseline`, `chunked`, `fused_linear_ce`, `fused_linear_ce_full`, `te_fused_ce`, `te_fused_ce_full` | Piper full logits versus tuned and equal-granularity loss paths. |
+| `piper1b_lm_head` | `baseline`, `fused_linear_ce`, `te_fused_ce` | Three full-token LM-head/loss paths. |
 
 The QKV scenario uses `qwen3_piper_1b_unfused_qkv` for its baseline and the
 existing `qwen3_piper_1b` config for the fused arm. Other scenarios retain the
@@ -53,54 +53,44 @@ projection/loss path:
 | arm | implementation |
 |-----|----------------|
 | `baseline` | Piper-style full lm-head logits followed by standard cross entropy. |
-| `chunked` | TorchTitan `ChunkedLossWrapper`, eight sequence chunks. |
-| `fused_linear_ce` | PyTorch `F.linear_cross_entropy` with an internally tuned token chunk. |
-| `fused_linear_ce_full` | PyTorch `F.linear_cross_entropy` over all 4,096 local tokens. |
-| `te_fused_ce` | The same eight linear chunks as `chunked`, followed by TransformerEngine's fused Triton cross entropy. |
-| `te_fused_ce_full` | One full-token linear projection followed by TransformerEngine's fused Triton cross entropy. |
+| `fused_linear_ce` | PyTorch `F.linear_cross_entropy` over all 4,096 local tokens. This loss owns the lm-head through TorchTitan's `LossWithLMHead` protocol, but does not inherit from or use `ChunkedLossWrapper`. |
+| `te_fused_ce` | The normal model lm-head followed directly by TransformerEngine's fused Triton cross entropy. This is a regular `BaseLoss`, like the baseline CE. |
 
 The TE arm ports the pure-Triton kernels from TransformerEngine commit
 `bffde8f4a0a4eea9036dc753e28269247e5de69d` under
 `LICENSE.transformer-engine`; it does not require the TransformerEngine
 package. The vendored kernel file is byte-for-byte identical and the two
 wrapper files differ only in their local import paths. TE fuses softmax, loss,
-and logits-gradient generation, but not the lm-head linear itself. Initial
-LM-head arms are single-GPU benchmark paths; TP/PP integration is intentionally
-deferred.
+and logits-gradient generation, but not the lm-head linear itself. All three
+arms process the same 4,096 local tokens without outer sequence chunking. The
+fused-linear arm is currently a single-GPU path; TP/PP integration is deferred.
 
-The production-shape tuner selected a 1024-token PyTorch fused chunk. The
-full-token arms process the same 4,096-token projection as Piper's baseline.
-Isolated head medians from 10 measured iterations were:
+The isolated baseline compiles standard CE independently, matching
+TorchTitan's `--compile.enable` behavior. Production-shape medians from 10
+measured iterations were:
 
 | arm | A6000 ms / GiB | Blackwell ms / GiB |
 |-----|-----------------|--------------------|
-| full logits | 77.47 / 8.43 | 32.93 / 8.48 |
-| chunked | 93.34 / 1.63 | 39.42 / 1.67 |
-| fused linear-CE, 1,024 | 75.70 / 1.77 | 32.67 / 1.82 |
-| fused linear-CE, 4,096 | 74.15 / 4.11 | 32.19 / 4.16 |
-| TE fused CE, 512 | 68.19 / 1.19 | 30.34 / 1.24 |
-| TE fused CE, 4,096 | 53.47 / 4.95 | 24.46 / 5.00 |
+| Piper baseline | 37.77 / 2.93 | 16.30 / 2.98 |
+| PyTorch fused linear-CE | 74.16 / 4.11 | 31.37 / 4.16 |
+| TE fused CE | 53.20 / 4.95 | 23.34 / 5.00 |
 
-Equal granularity makes TE's isolated head 31.0% faster than full logits on
-A6000 and 25.7% faster on Blackwell. The 40-step end-to-end result still favors
-Piper's full-logits path because it avoids the chunk wrapper's detached-leaf,
-manual backward, gradient bridge, and FSDP lifecycle overhead:
+The corrected compiled baseline is faster and uses less memory than both fused
+arms in isolation. The 40-step end-to-end result also favors Piper:
 
 | arm | A6000 stable tps / peak GiB | Blackwell stable tps / peak GiB |
 |-----|------------------------------|---------------------------------|
-| full logits | 10,989.5 / 20.04 | 23,373.5 / 20.05 |
-| chunked | 10,199.0 / 19.17 | 21,979.5 / 19.19 |
-| fused linear-CE, 1,024 | 9,838.0 / 18.86 | 21,130.5 / 18.90 |
-| fused linear-CE, 4,096 | 9,859.0 / 21.19 | 21,149.5 / 21.21 |
-| TE fused CE, 512 | 9,768.0 / 19.17 | 20,980.5 / 19.19 |
-| TE fused CE, 4,096 | 10,365.0 / 22.36 | 21,854.5 / 22.38 |
+| Piper baseline | 11,001.5 / 20.04 | 23,455.5 / 20.05 |
+| PyTorch fused linear-CE | 9,907.5 / 21.19 | 20,274.5 / 21.21 |
+| TE fused CE | 10,405.5 / 21.19 | 21,877.0 / 21.21 |
 
-The full-token TE arm improves over its 512-token arm by 6.1% on A6000 and
-4.2% on Blackwell, but remains 5.7% and 6.5% behind Piper, respectively. The
-full-token arms also give up the end-to-end memory advantage of chunking.
+TE trails Piper by 5.4% on A6000 and 6.7% on Blackwell. Making TE a direct
+`BaseLoss` removes the previous one-chunk wrapper path and reduces peak memory
+by about 1.17 GiB, but the TE kernel still stores a full FP32 logits-gradient
+buffer and is slower than TorchTitan's compiled standard CE.
 
-PyTorch's BF16 fused-linear scalar loss is visibly quantized. Both PyTorch arms
-remain finite and reduce loss, but the full-token arm amplifies small numerical
+PyTorch's BF16 fused-linear scalar loss is visibly quantized. The arm remains
+finite and reduces loss, but it amplifies small numerical
 differences into a higher gradient-norm trajectory on this high-learning-rate
 MoE workload (step 40: 3.28 A6000 / 3.11 Blackwell, versus 1.62 / 1.54 for
 Piper). A production-shape one-step check found no scaling error: versus full
@@ -121,7 +111,7 @@ projection and torchtitan's fused SiLU-and-multiply Triton custom op.
 |----------|------|-----------|
 | baseline | stock `CosSinRoPE` | inductor fuses the rotation into neighboring kernels (QK-norm epilogue) |
 | helion   | `torchtitan.overrides.helion_rope.helion_cos_sin_rope` | fused Helion kernel via `torch.library.custom_op` |
-| te       | `te_rope_override.te_rope` (this repo) | verbatim port of TransformerEngine's `fused_rope_{forward,backward}_kernel` via `torch.library.custom_op` |
+| te       | `piper1b.rope.te_rope_override.te_rope` (this repo) | verbatim port of TransformerEngine's `fused_rope_{forward,backward}_kernel` via `torch.library.custom_op` |
 
 **TE arm caveat (benchmark-only):** TE's kernel has no per-token position
 gather; the override IGNORES torchtitan's per-token `positions` (which reset at
@@ -155,7 +145,7 @@ real Qwen3 training. Current per-arm peak-memory results are reported above.
 ./run_bench.sh <gpu-index> --scenario piper1b_qkv
 ./run_bench.sh <gpu-index> --scenario piper1b_qkv --arm fused_qkv
 
-# LM-head comparison: full logits, chunked, PyTorch fused linear-CE, TE fused CE.
+# LM-head comparison: Piper baseline, PyTorch fused linear-CE, TE fused CE.
 ./run_bench.sh <gpu-index> --scenario piper1b_lm_head
 ./run_bench.sh <gpu-index> --scenario piper1b_lm_head --arm fused_linear_ce
 
@@ -214,12 +204,11 @@ sanity check.
 
 The analyzer also reports peak training memory and median tokens/s from the
 post-compile steps before each profiler warmup window. For LM-head attribution,
-use the CUDA-event microbenchmark and chunk tuner:
+use the CUDA-event full-token microbenchmark:
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<gpu-index> \
-  /data/zejiaqi/torchtitan/.venv/bin/python microbench/bench_lm_head.py \
-  --include-auto
+  /data/zejiaqi/torchtitan/.venv/bin/python piper1b/lm_head/benchmark.py
 ```
 
 **Interpretation rule:** these are timings of full compiled forward/backward
@@ -240,21 +229,21 @@ Covers scenario/command/manifest construction and the trace analyzer over
 synthetic profiler-trace fixtures (extraction, rank mapping, pooling,
 statistics, and failure on malformed or repartitioned traces).
 
-## Legacy kernel-level microbenchmarks (`microbench/`)
+## Kernel-level microbenchmarks
 
-Legacy standalone RoPE tooling (TE vs Helion vs copy floor). These scripts
+Standalone RoPE tooling under `piper1b/rope/` (TE vs Helion vs copy floor). These scripts
 are kept as-is for kernel-level investigation and are **not part of the
 end-to-end benchmark results above** -- they measure isolated kernels with
 CUDA events, not compiled training regions. Run with the torchtitan venv
 python, `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<idx>`, and
 `source /opt/rh/gcc-toolset-13/enable` for the extension build:
 
-- `bench_rope.py` -- correctness gate + timing vs copy floor, 3 shapes
+- `benchmark.py` -- correctness gate + timing vs copy floor, 3 shapes
 - `significance.py` -- interleaved A/B, n=200, Welch/MWU/Wilcoxon
 - `piper_size.py` / `piper_burst.py` -- piper-1B shapes; burst separates CPU dispatch from kernel time
 - `accuracy_fp64.py` -- fp64 ground-truth accuracy of both kernels
 - `ablation.py` -- TE partner-load ablation (diagnostic, wrong-by-design output)
-- `bench_lm_head.py` -- full/chunked/PyTorch-fused/TE-fused head timing, memory, and fused chunk tuning
+- `piper1b/lm_head/benchmark.py` -- full-token baseline/PyTorch-fused/TE-fused head timing and memory
 
 ## Findings so far (2026-07-31, RTX A6000 unless noted)
 

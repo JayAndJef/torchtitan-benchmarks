@@ -27,28 +27,27 @@ from piper1b.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_full_logits,
     qwen3_piper_1b_fused_linear_ce,
-    qwen3_piper_1b_fused_linear_ce_full,
     qwen3_piper_1b_te_fused_ce,
-    qwen3_piper_1b_te_fused_ce_full,
     qwen3_piper_1b_unfused_qkv,
 )
-from piper1b.fused_losses import FusedLinearCrossEntropyLoss, TECrossEntropyLoss
-from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+from piper1b.lm_head.losses import FusedLinearCrossEntropyLoss, TECrossEntropyLoss
+from torchtitan.components.loss import (
+    ChunkedLossWrapper,
+    CrossEntropyLoss,
+    LossWithLMHead,
+)
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
 class ScenarioTests(unittest.TestCase):
-    def test_piper_lm_head_has_six_explicit_configs(self) -> None:
+    def test_piper_lm_head_has_three_full_token_configs(self) -> None:
         scenario = scenario_by_name("piper1b_lm_head")
         self.assertEqual(
             [arm.name for arm in scenario.arms],
             [
                 "baseline",
-                "chunked",
                 "fused_linear_ce",
-                "fused_linear_ce_full",
                 "te_fused_ce",
-                "te_fused_ce_full",
             ],
         )
         self.assertEqual(scenario.workload.config, "qwen3_piper_1b_full_logits")
@@ -57,46 +56,34 @@ class ScenarioTests(unittest.TestCase):
             [arm.config for arm in scenario.arms],
             [
                 None,
-                "qwen3_piper_1b",
                 "qwen3_piper_1b_fused_linear_ce",
-                "qwen3_piper_1b_fused_linear_ce_full",
                 "qwen3_piper_1b_te_fused_ce",
-                "qwen3_piper_1b_te_fused_ce_full",
             ],
         )
         self.assertEqual(
             scenario.arm("te_fused_ce").trace_kernel_markers,
             ("online_softmax_kernel", "cross_entropy_kernel"),
         )
-        self.assertEqual(
-            scenario.arm("te_fused_ce_full").trace_kernel_markers,
-            ("online_softmax_kernel", "cross_entropy_kernel"),
-        )
 
     def test_piper_lm_head_configs_use_expected_losses(self) -> None:
         full = qwen3_piper_1b_full_logits().loss
-        chunked = qwen3_piper_1b().loss
+        default = qwen3_piper_1b().loss
         fused = qwen3_piper_1b_fused_linear_ce().loss
-        fused_full = qwen3_piper_1b_fused_linear_ce_full().loss
         te = qwen3_piper_1b_te_fused_ce().loss
-        te_full = qwen3_piper_1b_te_fused_ce_full().loss
 
         self.assertIsInstance(full, CrossEntropyLoss.Config)
-        self.assertIsInstance(chunked, ChunkedLossWrapper.Config)
-        self.assertEqual(chunked.num_chunks, 8)
+        self.assertIsInstance(default, CrossEntropyLoss.Config)
         self.assertIsInstance(fused, FusedLinearCrossEntropyLoss.Config)
-        self.assertEqual(fused.batch_chunk_size, 1024)
+        self.assertIsNone(fused.batch_chunk_size)
         self.assertIsNone(fused.chunking_method)
-        self.assertIsInstance(fused_full, FusedLinearCrossEntropyLoss.Config)
-        self.assertEqual(fused_full.num_chunks, 1)
-        self.assertIsNone(fused_full.batch_chunk_size)
-        self.assertIsNone(fused_full.chunking_method)
-        self.assertIsInstance(te, ChunkedLossWrapper.Config)
-        self.assertEqual(te.num_chunks, 8)
-        self.assertIsInstance(te.loss_fn, TECrossEntropyLoss.Config)
-        self.assertIsInstance(te_full, ChunkedLossWrapper.Config)
-        self.assertEqual(te_full.num_chunks, 1)
-        self.assertIsInstance(te_full.loss_fn, TECrossEntropyLoss.Config)
+        self.assertIsInstance(te, TECrossEntropyLoss.Config)
+
+        fused_loss = fused.build(compile_config=None)
+        te_loss = te.build(compile_config=None)
+        self.assertIsInstance(fused_loss, LossWithLMHead)
+        self.assertNotIsInstance(fused_loss, ChunkedLossWrapper)
+        self.assertNotIsInstance(te_loss, LossWithLMHead)
+        self.assertNotIsInstance(te_loss, ChunkedLossWrapper)
 
     def test_piper_qkv_compares_unfused_baseline_to_fused_config(self) -> None:
         scenario = scenario_by_name("piper1b_qkv")

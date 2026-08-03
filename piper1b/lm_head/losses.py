@@ -11,14 +11,10 @@ import torch.nn.functional as F
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from torchtitan.components.loss import (
-    BaseLoss,
-    ChunkedLossWrapper,
-    IGNORE_INDEX,
-)
+from torchtitan.components.loss import BaseLoss, IGNORE_INDEX
 from torchtitan.config import CompileConfig
 
-from piper1b.te_cross_entropy import parallel_cross_entropy
+from piper1b.lm_head.te_cross_entropy import parallel_cross_entropy
 
 
 class TECrossEntropyLoss(BaseLoss):
@@ -47,12 +43,12 @@ class TECrossEntropyLoss(BaseLoss):
         ).sum()
 
 
-class FusedLinearCrossEntropyLoss(ChunkedLossWrapper):
-    """PyTorch native linear-CE schedule for the single-GPU benchmark."""
+class FusedLinearCrossEntropyLoss(BaseLoss):
+    """Full-token PyTorch linear-CE for the single-GPU benchmark."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ChunkedLossWrapper.Config):
-        batch_chunk_size: int | None = 1024
+    class Config(BaseLoss.Config):
+        batch_chunk_size: int | None = None
         chunking_method: str | None = None
 
     def __init__(
@@ -61,12 +57,15 @@ class FusedLinearCrossEntropyLoss(ChunkedLossWrapper):
         *,
         compile_config: CompileConfig | None = None,
     ):
-        self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
         self.options = torch.nn.LinearCrossEntropyOptions(
             batch_chunk_size=config.batch_chunk_size,
             chunking_method=config.chunking_method,
         )
+
+    def set_lm_head(self, lm_head: nn.Module) -> None:
+        """Provide the LM head skipped by the model forward."""
+        self.lm_head = lm_head
 
     def __call__(
         self,
@@ -120,15 +119,35 @@ class FusedLinearCrossEntropyLoss(ChunkedLossWrapper):
             lm_head.reshard()
 
         return (
-            self._gradient_backprop(
+            _LMHeadGradientBackprop.apply(
                 hidden_states,
                 accumulated_grad,
                 total_loss,
-                lm_head,
-                fsdp_enabled,
             ),
             {},
         )
+
+
+class _LMHeadGradientBackprop(torch.autograd.Function):
+    """Connect a separately computed LM-head gradient to the decoder graph."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        hidden_gradient: torch.Tensor,
+        loss: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(hidden_gradient)
+        return loss.detach()
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, None, None]:
+        (hidden_gradient,) = ctx.saved_tensors
+        return hidden_gradient * grad_output, None, None
 
 
 __all__ = ["FusedLinearCrossEntropyLoss", "TECrossEntropyLoss"]

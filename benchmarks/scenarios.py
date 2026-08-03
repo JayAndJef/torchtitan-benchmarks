@@ -128,7 +128,7 @@ PIPER_1B_ROPE = Scenario(
         ),
         Arm(
             name="te",
-            override_imports=("te_rope_override.te_rope",),
+            override_imports=("piper1b.rope.te_rope_override.te_rope",),
             expected_override_count=16,
             trace_kernel_markers=("fused_rope_forward_kernel",),
             requires_gcc_toolset=True,
@@ -170,30 +170,20 @@ PIPER_1B_QKV = Scenario(
 PIPER_1B_LM_HEAD = Scenario(
     name="piper1b_lm_head",
     description=(
-        "Full logits and tuned versus full-token PyTorch fused linear-CE and "
-        "TransformerEngine fused CE on piper-1B."
+        "Piper full logits versus full-token PyTorch fused linear-CE and "
+        "TransformerEngine fused CE."
     ),
     workload=PIPER_1B_LM_HEAD_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
         Arm(name="baseline"),
-        Arm(name="chunked", config="qwen3_piper_1b"),
         Arm(
             name="fused_linear_ce",
             config="qwen3_piper_1b_fused_linear_ce",
         ),
         Arm(
-            name="fused_linear_ce_full",
-            config="qwen3_piper_1b_fused_linear_ce_full",
-        ),
-        Arm(
             name="te_fused_ce",
             config="qwen3_piper_1b_te_fused_ce",
-            trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
-        ),
-        Arm(
-            name="te_fused_ce_full",
-            config="qwen3_piper_1b_te_fused_ce_full",
             trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
         ),
     ),

@@ -13,7 +13,7 @@ import torch.distributed as dist
 
 import triton
 
-from piper1b.te_common_cross_entropy import (
+from piper1b.lm_head.te_common_cross_entropy import (
     online_softmax_kernel,
     cross_entropy_kernel,
     element_mul_kernel,

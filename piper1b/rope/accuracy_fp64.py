@@ -8,6 +8,7 @@ table, so neither kernel's cache convention is privileged.
 
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/data/zejiaqi/tmp/torch_extensions")
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/data/zejiaqi/tmp/inductor_cache")
@@ -23,6 +24,7 @@ from torchtitan.overrides.helion_rope import (
 )
 
 DEV = "cuda"
+ROPE_SOURCE = str(Path(__file__).with_name("te_rope_standalone.cu"))
 NO_BF16_GUARDS = [
     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
     "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -31,14 +33,14 @@ NO_BF16_GUARDS = [
 ]
 te = load(
     name="te_rope_standalone",
-    sources=["/data/zejiaqi/torchtitan-benchmarks/te_rope_standalone.cu"],
+    sources=[ROPE_SOURCE],
     build_directory="/data/zejiaqi/tmp/torch_extensions/te_rope",
     extra_cuda_cflags=["-O3", *NO_BF16_GUARDS],
     verbose=False,
 )
 te_fm = load(
     name="te_rope_standalone_fastmath",
-    sources=["/data/zejiaqi/torchtitan-benchmarks/te_rope_standalone.cu"],
+    sources=[ROPE_SOURCE],
     build_directory="/data/zejiaqi/tmp/torch_extensions/te_rope_fm",
     extra_cuda_cflags=["-O3", "--use_fast_math", *NO_BF16_GUARDS],
     verbose=False,

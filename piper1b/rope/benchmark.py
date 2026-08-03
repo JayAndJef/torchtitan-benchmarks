@@ -8,6 +8,7 @@ against torchtitan.overrides.helion_rope on identical inputs.
 import os
 import statistics
 import sys
+from pathlib import Path
 
 os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/data/zejiaqi/tmp/torch_extensions")
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/data/zejiaqi/tmp/inductor_cache")
@@ -27,6 +28,7 @@ from torchtitan.overrides.helion_rope import (
 )
 
 DEV = "cuda"
+ROPE_SOURCE = str(Path(__file__).with_name("te_rope_standalone.cu"))
 BUILD_DIR = "/data/zejiaqi/tmp/torch_extensions/te_rope"
 os.makedirs(BUILD_DIR, exist_ok=True)
 
@@ -43,7 +45,7 @@ NO_BF16_GUARDS = [
 
 te = load(
     name="te_rope_standalone",
-    sources=["/data/zejiaqi/torchtitan-benchmarks/te_rope_standalone.cu"],
+    sources=[ROPE_SOURCE],
     build_directory=BUILD_DIR,
     extra_cuda_cflags=["-O3", *NO_BF16_GUARDS],
     verbose=False,
@@ -55,7 +57,7 @@ FM_DIR = "/data/zejiaqi/tmp/torch_extensions/te_rope_fm"
 os.makedirs(FM_DIR, exist_ok=True)
 te_fm = load(
     name="te_rope_standalone_fastmath",
-    sources=["/data/zejiaqi/torchtitan-benchmarks/te_rope_standalone.cu"],
+    sources=[ROPE_SOURCE],
     build_directory=FM_DIR,
     extra_cuda_cflags=["-O3", "--use_fast_math", *NO_BF16_GUARDS],
     verbose=False,

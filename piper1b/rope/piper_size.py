@@ -9,6 +9,7 @@ Interleaved A/B timing (drift-controlled), n=200 per shape.
 
 import os
 import sys
+from pathlib import Path
 
 os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/data/zejiaqi/tmp/torch_extensions")
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/data/zejiaqi/tmp/inductor_cache")
@@ -28,10 +29,11 @@ N = 200
 WARMUP = 30
 MAX_SEQ = 2048
 THETA = 1_000_000.0
+ROPE_SOURCE = str(Path(__file__).with_name("te_rope_standalone.cu"))
 
 te = load(
     name="te_rope_standalone",
-    sources=["/data/zejiaqi/torchtitan-benchmarks/te_rope_standalone.cu"],
+    sources=[ROPE_SOURCE],
     build_directory="/data/zejiaqi/tmp/torch_extensions/te_rope",
     extra_cuda_cflags=[
         "-O3",

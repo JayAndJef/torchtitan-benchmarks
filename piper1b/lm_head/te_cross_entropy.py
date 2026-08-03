@@ -9,7 +9,7 @@ import warnings
 
 import torch
 
-from piper1b import te_triton_cross_entropy as triton_cross_entropy
+from piper1b.lm_head import te_triton_cross_entropy as triton_cross_entropy
 
 __all__ = [
     "parallel_cross_entropy",

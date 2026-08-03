@@ -19,7 +19,7 @@ Usage:
 """
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
@@ -41,7 +41,7 @@ from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
-from piper1b.fused_losses import (
+from piper1b.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
     TECrossEntropyLoss,
 )
@@ -97,14 +97,14 @@ def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
 def qwen3_piper_1b() -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=True,
-        loss_kind="chunked",
+        loss_kind="full_logits",
     )
 
 
 def qwen3_piper_1b_unfused_qkv() -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=False,
-        loss_kind="chunked",
+        loss_kind="full_logits",
     )
 
 
@@ -117,34 +117,18 @@ def qwen3_piper_1b_full_logits() -> Trainer.Config:
 
 
 def qwen3_piper_1b_fused_linear_ce() -> Trainer.Config:
-    """PyTorch-native chunked linear plus cross entropy."""
+    """Full-token PyTorch-native fused linear plus cross entropy."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="fused_linear_ce",
     )
 
 
-def qwen3_piper_1b_fused_linear_ce_full() -> Trainer.Config:
-    """PyTorch-native linear plus cross entropy over all local tokens."""
-    return _piper_1b_trainer(
-        fuse_qkv=True,
-        loss_kind="fused_linear_ce_full",
-    )
-
-
 def qwen3_piper_1b_te_fused_ce() -> Trainer.Config:
-    """Eight lm_head chunks followed by TransformerEngine fused CE."""
+    """Full-token lm_head followed by TransformerEngine fused CE."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="te_fused_ce",
-    )
-
-
-def qwen3_piper_1b_te_fused_ce_full() -> Trainer.Config:
-    """One full-token lm_head projection followed by TE fused CE."""
-    return _piper_1b_trainer(
-        fuse_qkv=True,
-        loss_kind="te_fused_ce_full",
     )
 
 
@@ -165,33 +149,13 @@ def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
     )
     if loss_kind == "full_logits":
         loss = cross_entropy
-    elif loss_kind == "chunked":
-        loss = ChunkedLossWrapper.Config(
-            num_chunks=8,
-            loss_fn=cross_entropy,
-        )
     elif loss_kind == "fused_linear_ce":
         loss = FusedLinearCrossEntropyLoss.Config(
-            num_chunks=8,
-            batch_chunk_size=1024,
-            chunking_method=None,
-        )
-    elif loss_kind == "fused_linear_ce_full":
-        loss = FusedLinearCrossEntropyLoss.Config(
-            num_chunks=1,
             batch_chunk_size=None,
             chunking_method=None,
         )
     elif loss_kind == "te_fused_ce":
-        loss = ChunkedLossWrapper.Config(
-            num_chunks=8,
-            loss_fn=TECrossEntropyLoss.Config(),
-        )
-    elif loss_kind == "te_fused_ce_full":
-        loss = ChunkedLossWrapper.Config(
-            num_chunks=1,
-            loss_fn=TECrossEntropyLoss.Config(),
-        )
+        loss = TECrossEntropyLoss.Config()
     else:
         raise ValueError(f"Unknown piper-1B loss kind: {loss_kind}")
 
