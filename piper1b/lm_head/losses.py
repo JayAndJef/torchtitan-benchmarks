@@ -59,7 +59,21 @@ class PiperOptimizedCrossEntropyLoss(BaseLoss):
         *,
         compile_config: CompileConfig | None = None,
     ):
-        pass
+        self.fn = self._loss
+        self._maybe_compile(compile_config)
+
+    @staticmethod
+    def _loss(
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float,
+    ) -> torch.Tensor:
+        return piper_optimized_cross_entropy(
+            pred,
+            labels,
+            gradient_scale=1.0 / global_valid_tokens,
+            ignore_idx=IGNORE_INDEX,
+        )
 
     def __call__(
         self,
@@ -79,11 +93,10 @@ class PiperOptimizedCrossEntropyLoss(BaseLoss):
             raise ValueError(
                 "PiperOptimizedCrossEntropyLoss currently supports one GPU"
             )
-        loss = piper_optimized_cross_entropy(
+        loss = self.fn(
             pred,
             labels,
-            gradient_scale=1.0 / global_valid_tokens,
-            ignore_idx=IGNORE_INDEX,
+            global_valid_tokens,
         )
         return loss, {}
 
@@ -107,6 +120,27 @@ class FusedLinearCrossEntropyLoss(BaseLoss):
             batch_chunk_size=config.batch_chunk_size,
             chunking_method=config.chunking_method,
         )
+        self.fn = self._loss
+        self._maybe_compile(compile_config)
+
+    def _loss(
+        self,
+        hidden_states: torch.Tensor,
+        weight: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float | None,
+    ) -> torch.Tensor:
+        loss = F.linear_cross_entropy(
+            hidden_states.flatten(0, 1),
+            weight,
+            labels.flatten(0, 1),
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+            options=self.options,
+        )
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Provide the LM head skipped by the model forward."""
@@ -140,16 +174,12 @@ class FusedLinearCrossEntropyLoss(BaseLoss):
         if fsdp_enabled:
             lm_head.unshard()
 
-        loss = F.linear_cross_entropy(
-            hidden_leaf.flatten(0, 1),
+        loss = self.fn(
+            hidden_leaf,
             lm_head.weight,
-            labels.flatten(0, 1),
-            reduction="sum",
-            ignore_index=IGNORE_INDEX,
-            options=self.options,
+            labels,
+            global_valid_tokens,
         )
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
         total_loss = loss.detach()
 
         if not requires_grad:

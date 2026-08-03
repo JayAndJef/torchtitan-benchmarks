@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -41,6 +42,7 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     LossWithLMHead,
 )
+from torchtitan.config import CompileConfig
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
@@ -100,6 +102,21 @@ class ScenarioTests(unittest.TestCase):
         self.assertNotIsInstance(te_loss, ChunkedLossWrapper)
         self.assertNotIsInstance(optimized_loss, LossWithLMHead)
         self.assertNotIsInstance(optimized_loss, ChunkedLossWrapper)
+
+    def test_custom_lm_head_losses_honor_loss_compilation(self) -> None:
+        compile_config = CompileConfig(enable=True, components=["loss"])
+
+        def passthrough(fn, **kwargs):
+            return fn
+
+        with mock.patch("torch.compile", side_effect=passthrough) as compile_fn:
+            FusedLinearCrossEntropyLoss.Config().build(
+                compile_config=compile_config
+            )
+            PiperOptimizedCrossEntropyLoss.Config().build(
+                compile_config=compile_config
+            )
+        self.assertEqual(compile_fn.call_count, 2)
 
     def test_piper_qkv_compares_unfused_baseline_to_fused_config(self) -> None:
         scenario = scenario_by_name("piper1b_qkv")

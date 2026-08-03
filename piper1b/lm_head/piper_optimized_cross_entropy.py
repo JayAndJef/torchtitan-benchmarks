@@ -40,6 +40,7 @@ def piper_optimized_cross_entropy_kernel(
     Y_ptr += program_id * Y_stride
     loss_ptr += program_id * loss_stride
     y = tl.load(Y_ptr)
+    gradient_scale = gradient_scale.to(tl.float32)
 
     if y == ignore_idx:
         for i in range(0, n_cols, BLOCK_SIZE):

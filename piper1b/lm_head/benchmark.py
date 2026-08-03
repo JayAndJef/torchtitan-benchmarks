@@ -63,6 +63,52 @@ def main() -> None:
     # TorchTitan compiles its standard CrossEntropyLoss leaf independently.
     compiled_cross_entropy_sum = torch.compile(cross_entropy_sum)
 
+    linear_ce_options = torch.nn.LinearCrossEntropyOptions(
+        batch_chunk_size=None,
+        chunking_method=None,
+    )
+
+    def fused_linear_ce_loss(
+        hidden_states: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        return F.linear_cross_entropy(
+            hidden_states,
+            lm_head_weight,
+            targets,
+            reduction="sum",
+            options=linear_ce_options,
+        ) / num_tokens
+
+    compiled_fused_linear_ce_loss = torch.compile(fused_linear_ce_loss)
+
+    def te_cross_entropy_sum(
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        return parallel_cross_entropy(
+            logits,
+            targets,
+            reduce_loss=False,
+        ).sum()
+
+    compiled_te_cross_entropy_sum = torch.compile(te_cross_entropy_sum)
+
+    def piper_optimized_cross_entropy_loss(
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        return piper_optimized_cross_entropy(
+            logits,
+            targets,
+            gradient_scale=1.0 / num_tokens,
+        )
+
+    compiled_piper_optimized_cross_entropy_loss = torch.compile(
+        piper_optimized_cross_entropy_loss
+    )
+
     def baseline() -> torch.Tensor:
         logits = F.linear(hidden, weight)
         loss = compiled_cross_entropy_sum(logits, labels) / num_tokens
@@ -70,17 +116,11 @@ def main() -> None:
         return loss
 
     def fused_linear_ce() -> torch.Tensor:
-        options = torch.nn.LinearCrossEntropyOptions(
-            batch_chunk_size=None,
-            chunking_method=None,
-        )
-        loss = F.linear_cross_entropy(
+        loss = compiled_fused_linear_ce_loss(
             hidden,
             weight,
             labels,
-            reduction="sum",
-            options=options,
-        ) / num_tokens
+        )
         loss.backward()
         return loss
 
@@ -88,11 +128,10 @@ def main() -> None:
         logits = F.linear(hidden, weight).reshape(
             args.batch, args.seq_len, args.vocab_size
         )
-        loss = parallel_cross_entropy(
+        loss = compiled_te_cross_entropy_sum(
             logits,
             labels.reshape(args.batch, args.seq_len),
-            reduce_loss=False,
-        ).sum() / num_tokens
+        ) / num_tokens
         loss.backward()
         return loss
 
@@ -100,10 +139,9 @@ def main() -> None:
         logits = F.linear(hidden, weight).reshape(
             args.batch, args.seq_len, args.vocab_size
         )
-        loss = piper_optimized_cross_entropy(
+        loss = compiled_piper_optimized_cross_entropy_loss(
             logits,
             labels.reshape(args.batch, args.seq_len),
-            gradient_scale=1.0 / num_tokens,
         )
         loss.backward()
         return loss
