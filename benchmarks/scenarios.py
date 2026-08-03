@@ -189,10 +189,7 @@ PIPER_1B_LM_HEAD = Scenario(
         Arm(
             name="piper_optimized_te_ce",
             config="qwen3_piper_1b_piper_optimized_te_ce",
-            trace_kernel_markers=(
-                "online_softmax_kernel",
-                "piper_optimized_cross_entropy_kernel",
-            ),
+            trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
         ),
     ),
 )

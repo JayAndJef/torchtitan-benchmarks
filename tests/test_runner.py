@@ -73,7 +73,7 @@ class ScenarioTests(unittest.TestCase):
         )
         self.assertEqual(
             scenario.arm("piper_optimized_te_ce").trace_kernel_markers,
-            ("online_softmax_kernel", "piper_optimized_cross_entropy_kernel"),
+            ("piper_optimized_cross_entropy_kernel",),
         )
 
     def test_piper_lm_head_configs_use_expected_losses(self) -> None:
