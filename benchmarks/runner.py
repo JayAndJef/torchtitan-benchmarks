@@ -1,322 +1,372 @@
-"""Run declarative torchtitan benchmark scenarios and validate their artifacts."""
+"""Orchestrate declarative TorchTitan benchmark scenarios."""
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
-import json
 import os
-import re
+import shlex
 import subprocess
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Callable, Mapping
 
+from benchmarks.artifacts import (
+    archive_incomplete_arm,
+    initial_run_state,
+    load_manifest,
+    load_run_state,
+    trace_files as _trace_files,
+    update_run_state,
+    validate_arm,
+    write_manifest,
+)
+from benchmarks.runtime import (
+    BENCH_DIR,
+    RuntimePaths,
+    add_compiler_environment,
+    command_for_arm,
+    hardware_metadata,
+    runtime_environment,
+)
 from benchmarks.scenarios import Arm, Scenario, Workload, scenario_by_name
 
 
-BENCH_DIR = Path(__file__).resolve().parent.parent
-TITAN_DIR = Path(os.environ.get("TITAN_DIR", "/data/zejiaqi/torchtitan"))
-DEFAULT_CACHE_ROOT = Path("/data/zejiaqi/tmp")
+@dataclass(frozen=True)
+class RunRequest:
+    """User-selected inputs for one benchmark execution."""
+
+    gpu: str
+    scenario_name: str | None = "piper1b_rope"
+    arm_name: str | None = None
+    hardware: str = "auto"
+    out_dir: Path | None = None
+    resume_dir: Path | None = None
+    seq_len: int | None = None
+    steps: int | None = None
+    batch: int | None = None
+    extra_args: tuple[str, ...] = ()
+    titan_dir: Path | None = None
+    cache_root: Path | None = None
+    compiler_env: Path | None = None
 
 
-def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
-    parser = argparse.ArgumentParser(
-        description="Run a declarative torchtitan benchmark scenario."
-    )
-    parser.add_argument(
-        "gpu", nargs="?", help="PCI-order GPU index passed to CUDA_VISIBLE_DEVICES."
-    )
-    parser.add_argument("--scenario", default="piper1b_rope", help="Scenario name.")
-    parser.add_argument("--arm", help="Run one arm instead of every arm in the scenario.")
-    parser.add_argument(
-        "--hardware",
-        default="auto",
-        help="Hardware label for output and provenance. 'auto' derives one from nvidia-smi.",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        help="Output directory. Defaults to out/<UTC timestamp>/<scenario>/<hardware>.",
-    )
-    parser.add_argument(
-        "--list-scenarios", action="store_true", help="List scenario names and exit."
-    )
-    parser.add_argument("--seq-len", type=int, help="Override the scenario sequence length.")
-    parser.add_argument("--steps", type=int, help="Override the scenario step count.")
-    parser.add_argument("--batch", type=int, help="Override the scenario local batch size.")
-    return parser.parse_known_args(argv)
+@dataclass(frozen=True)
+class RunResult:
+    out_dir: Path
+    scenario: Scenario
+    selected_arms: tuple[Arm, ...]
+    resumed: bool
 
 
-def command_for_arm(
-    workload: Workload, arm: Arm, arm_dir: Path, extra_args: list[str]
-) -> list[str]:
-    """Build the torchtitan command shared by all scenarios."""
-    args = [
-        "./run_train.sh",
-        "--module",
-        workload.module,
-        "--config",
-        arm.config or workload.config,
-        "--training.seq-len",
-        str(workload.seq_len),
-        "--training.steps",
-        str(workload.steps),
-        "--training.local-batch-size",
-        str(workload.local_batch_size),
-        "--compile.enable",
-        "--profiler.enable_profiling",
-        "--profiler.profile_freq",
-        str(workload.profile_freq),
-        "--profiler.profiler_active",
-        str(workload.profiler_active),
-        "--profiler.profiler_warmup",
-        str(workload.profiler_warmup),
-    ]
-    if workload.seed is not None:
-        args.extend(("--debug.seed", str(workload.seed)))
-    if arm.override_imports:
-        args.extend(("--override.imports", ",".join(arm.override_imports)))
-    return args + extra_args + ["--dump-folder", str(arm_dir)]
+@dataclass(frozen=True)
+class RunEvent:
+    kind: str
+    message: str
+    arm_name: str | None = None
 
 
-def _run_text(command: list[str], *, cwd: Path | None = None) -> str:
-    try:
-        return subprocess.check_output(command, text=True, stderr=subprocess.STDOUT, cwd=cwd)
-    except (OSError, subprocess.CalledProcessError) as error:
-        return f"unavailable: {error}"
+EventHandler = Callable[[RunEvent], None]
+ProcessRunner = Callable[..., subprocess.CompletedProcess]
 
 
-def hardware_metadata(gpu: str, hardware_label: str) -> tuple[str, dict[str, str]]:
-    query = _run_text(
-        [
-            "nvidia-smi",
-            "--id=" + gpu,
-            "--query-gpu=index,name,uuid,driver_version",
-            "--format=csv,noheader",
-        ]
-    ).strip()
-    metadata = {
-        "requested_gpu": gpu,
-        "nvidia_smi": query,
-        "torch_version": _run_text(
-            [str(TITAN_DIR / ".venv/bin/python"), "-c", "import torch; print(torch.__version__)"],
-            cwd=TITAN_DIR,
-        ).strip(),
-        "torchtitan_git_rev": _run_text(["git", "rev-parse", "HEAD"], cwd=TITAN_DIR).strip(),
-        "benchmarks_git_rev": _run_text(["git", "rev-parse", "HEAD"], cwd=BENCH_DIR).strip(),
-    }
-    if hardware_label != "auto":
-        return hardware_label, metadata
-    name = query.split(",")[1].strip() if "," in query else f"gpu{gpu}"
-    return re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower(), metadata
+def trace_files(arm_dir: Path) -> list[Path]:
+    """Compatibility export for callers of the former monolithic runner."""
+    return _trace_files(arm_dir)
 
 
-def output_dir(args: argparse.Namespace, scenario: Scenario, hardware: str) -> Path:
-    if args.out is not None:
-        return args.out.resolve()
-    if env_out := os.environ.get("OUT"):
-        return Path(env_out).resolve()
-    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return BENCH_DIR / "out" / timestamp / scenario.name / hardware
+def _emit(
+    handler: EventHandler | None,
+    kind: str,
+    message: str,
+    arm_name: str | None = None,
+) -> None:
+    if handler is not None:
+        handler(RunEvent(kind=kind, message=message, arm_name=arm_name))
 
 
-def workload_from_args(args: argparse.Namespace, scenario: Scenario) -> Workload:
-    """Apply portable workload-size overrides without changing a scenario's arms."""
+def workload_with_overrides(
+    scenario: Scenario,
+    *,
+    seq_len: int | None = None,
+    steps: int | None = None,
+    batch: int | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> Workload:
+    """Apply portable size overrides without changing scenario arms."""
+    environment = environment or os.environ
     workload = scenario.workload
-    seq_len = args.seq_len if args.seq_len is not None else os.environ.get("SEQ")
-    steps = args.steps if args.steps is not None else os.environ.get("STEPS")
-    batch = args.batch if args.batch is not None else os.environ.get("BATCH")
-    if seq_len is not None:
-        workload = replace(workload, seq_len=int(seq_len))
-    if steps is not None:
-        workload = replace(workload, steps=int(steps))
-    if batch is not None:
-        workload = replace(workload, local_batch_size=int(batch))
-    if workload.steps < workload.profile_freq * workload.min_trace_windows:
+    resolved_seq_len = seq_len if seq_len is not None else environment.get("SEQ")
+    resolved_steps = steps if steps is not None else environment.get("STEPS")
+    resolved_batch = batch if batch is not None else environment.get("BATCH")
+    if resolved_seq_len is not None:
+        workload = replace(workload, seq_len=int(resolved_seq_len))
+    if resolved_steps is not None:
+        workload = replace(workload, steps=int(resolved_steps))
+    if resolved_batch is not None:
+        workload = replace(workload, local_batch_size=int(resolved_batch))
+    minimum_steps = workload.profile_freq * workload.min_trace_windows
+    if workload.steps < minimum_steps:
         raise ValueError(
-            f"steps ({workload.steps}) must be at least "
-            f"{workload.profile_freq * workload.min_trace_windows} to collect "
+            f"steps ({workload.steps}) must be at least {minimum_steps} to collect "
             f"{workload.min_trace_windows} profiler windows"
         )
     return workload
 
 
-def runtime_environment(gpu: str) -> dict[str, str]:
-    environment = os.environ.copy()
-    pythonpath = environment.get("PYTHONPATH")
-    environment.update(
-        {
-            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-            "CUDA_VISIBLE_DEVICES": gpu,
-            "PYTHONPATH": f"{BENCH_DIR}{':' + pythonpath if pythonpath else ''}",
-            "PATH": f"{TITAN_DIR / '.venv/bin'}:{environment['PATH']}",
-            "TORCH_EXTENSIONS_DIR": environment.get(
-                "TORCH_EXTENSIONS_DIR", str(DEFAULT_CACHE_ROOT / "torch_extensions")
-            ),
-            "TORCHINDUCTOR_CACHE_DIR": environment.get(
-                "TORCHINDUCTOR_CACHE_DIR", str(DEFAULT_CACHE_ROOT / "inductor_cache")
-            ),
-            "TRITON_CACHE_DIR": environment.get(
-                "TRITON_CACHE_DIR", str(DEFAULT_CACHE_ROOT / "triton_cache")
-            ),
-            "NGPU": "1",
-        }
-    )
-    return environment
-
-
-def add_gcc_toolset(environment: dict[str, str]) -> None:
-    """Load the optional host compiler environment needed by the legacy TE arm."""
-    toolset = Path("/opt/rh/gcc-toolset-13/enable")
-    if not toolset.exists():
-        return
-    # Source the enable script on top of the runner's environment. A plain -c
-    # shell is required: a login shell would rebuild PATH from the user's
-    # profile (e.g. conda) and shadow the torchtitan venv python.
-    output = subprocess.check_output(
-        ["bash", "-c", f"source {toolset} && env -0"], env=environment
-    )
-    for entry in output.decode().split("\0"):
-        if not entry:
-            continue
-        key, value = entry.split("=", 1)
-        environment[key] = value
-
-
-def trace_files(arm_dir: Path) -> list[Path]:
-    return sorted(arm_dir.glob("profiling/traces*/iteration_*/rank0_trace.json.gz"))
-
-
-def validate_arm(arm: Arm, arm_dir: Path, log_path: Path, workload: Workload) -> None:
-    """Reject partial or wrongly configured runs before they reach analysis."""
-    log = log_path.read_text(errors="replace")
-    if "Training completed" not in log:
-        raise RuntimeError(f"{arm.name}: training did not complete; see {log_path}")
-    if arm.expected_override_count:
-        override_count = len(re.findall(r"\[Override\]", log))
-        if override_count != arm.expected_override_count:
-            raise RuntimeError(
-                f"{arm.name}: expected {arm.expected_override_count} override applications, "
-                f"found {override_count}; see {log_path}"
-            )
-        for override_import in arm.override_imports:
-            # torchtitan logs each application as "[Override] <import path>: <fqn> ..."
-            if f"[Override] {override_import}:" not in log:
-                raise RuntimeError(
-                    f"{arm.name}: override {override_import!r} did not apply; see {log_path}"
-                )
-    if "falling back to the PyTorch" in log:
-        raise RuntimeError(f"{arm.name}: override fell back to PyTorch; see {log_path}")
-    traces = trace_files(arm_dir)
-    if len(traces) < workload.min_trace_windows:
-        raise RuntimeError(
-            f"{arm.name}: expected at least {workload.min_trace_windows} profiler windows, "
-            f"found {len(traces)} under {arm_dir}"
-        )
-    for marker in arm.trace_kernel_markers:
-        if not any(marker in _run_text(["zgrep", "-F", marker, str(path)]) for path in traces):
-            raise RuntimeError(
-                f"{arm.name}: marker kernel {marker!r} absent from profiler traces"
-            )
-
-
-def write_manifest(
-    out_dir: Path,
+def _default_output_dir(
     scenario: Scenario,
-    selected_arms: tuple[Arm, ...],
-    commands: dict[str, list[str]],
+    hardware: str,
+    requested: Path | None,
+    environment: Mapping[str, str],
+) -> Path:
+    if requested is not None:
+        return requested.expanduser().resolve()
+    if env_out := environment.get("OUT"):
+        return Path(env_out).expanduser().resolve()
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return BENCH_DIR / "out" / timestamp / scenario.name / hardware
+
+
+def _resume_mismatches(
+    manifest: dict,
+    scenario: Scenario,
+    arms: tuple[Arm, ...],
     hardware: str,
     metadata: dict[str, str],
-    extra_args: list[str],
-) -> None:
-    manifest = {
-        "schema_version": 4,
+    extra_args: tuple[str, ...],
+) -> list[str]:
+    expected = {
         "scenario": scenario.name,
-        "description": scenario.description,
-        "hardware": hardware,
-        "hardware_metadata": metadata,
         "workload": asdict(scenario.workload),
-        "regions": [asdict(region) for region in scenario.regions],
-        "arms": [asdict(arm) for arm in scenario.arms],
-        "selected_arms": [arm.name for arm in selected_arms],
-        "commands": commands,
-        "extra_torchtitan_args": extra_args,
+        "selected_arms": [arm.name for arm in arms],
+        "hardware": hardware,
+        "extra_torchtitan_args": list(extra_args),
     }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    mismatches = [
+        key for key, value in expected.items() if manifest.get(key) != value
+    ]
+    existing_metadata = manifest.get("hardware_metadata", {})
+    for key in ("nvidia_smi", "torchtitan_git_rev", "benchmarks_git_rev"):
+        if existing_metadata.get(key) != metadata.get(key):
+            mismatches.append(f"hardware_metadata.{key}")
+    return mismatches
 
 
-def run(args: argparse.Namespace, extra_args: list[str]) -> Path:
-    if extra_args[:1] == ["--"]:
-        extra_args = extra_args[1:]
-    if args.gpu is None:
-        raise ValueError("gpu is required unless --list-scenarios is used")
-    scenario = scenario_by_name(args.scenario)
-    workload = workload_from_args(args, scenario)
-    arms = (scenario.arm(args.arm),) if args.arm else scenario.arms
-    hardware, metadata = hardware_metadata(args.gpu, args.hardware)
-    out_dir = output_dir(args, scenario, hardware)
-    out_dir.mkdir(parents=True, exist_ok=False)
+def _resolve_run(
+    request: RunRequest,
+    environment: Mapping[str, str],
+) -> tuple[
+    RuntimePaths,
+    Scenario,
+    tuple[Arm, ...],
+    str,
+    dict[str, str],
+    Path,
+    dict[str, list[str]],
+    bool,
+]:
+    paths = RuntimePaths.resolve(
+        titan_dir=request.titan_dir,
+        cache_root=request.cache_root,
+        compiler_env=request.compiler_env,
+        environment=environment,
+    )
+    resumed = request.resume_dir is not None
+    existing_manifest = None
+    if resumed:
+        if request.out_dir is not None:
+            raise ValueError("--out cannot be combined with --resume")
+        resume_dir = request.resume_dir.expanduser().resolve()
+        existing_manifest = load_manifest(resume_dir)
+        manifest_scenario = existing_manifest.get("scenario")
+        if request.scenario_name and request.scenario_name != manifest_scenario:
+            raise ValueError(
+                f"resume manifest uses scenario {manifest_scenario!r}, not "
+                f"{request.scenario_name!r}"
+            )
+        scenario_name = manifest_scenario
+    else:
+        resume_dir = None
+        scenario_name = request.scenario_name or "piper1b_rope"
+
+    scenario = scenario_by_name(str(scenario_name))
+    workload = workload_with_overrides(
+        scenario,
+        seq_len=request.seq_len,
+        steps=request.steps,
+        batch=request.batch,
+        environment=environment,
+    )
     scenario = replace(scenario, workload=workload)
+    arms = (scenario.arm(request.arm_name),) if request.arm_name else scenario.arms
+
+    requested_hardware = request.hardware
+    if existing_manifest is not None and requested_hardware == "auto":
+        requested_hardware = str(existing_manifest.get("hardware", "auto"))
+    hardware, metadata = hardware_metadata(paths, request.gpu, requested_hardware)
+    out_dir = resume_dir or _default_output_dir(
+        scenario, hardware, request.out_dir, environment
+    )
     commands = {
-        arm.name: command_for_arm(scenario.workload, arm, out_dir / arm.name, extra_args)
+        arm.name: command_for_arm(
+            scenario.workload, arm, out_dir / arm.name, request.extra_args
+        )
         for arm in arms
     }
-    write_manifest(out_dir, scenario, arms, commands, hardware, metadata, extra_args)
 
-    print(f"GPU (PCI index): {args.gpu}")
-    print(metadata["nvidia_smi"])
-    print(f"scenario: {scenario.name}   hardware: {hardware}")
-    print(f"arms: {' '.join(arm.name for arm in arms)}")
-    print(f"output: {out_dir}")
+    if existing_manifest is not None:
+        mismatches = _resume_mismatches(
+            existing_manifest,
+            scenario,
+            arms,
+            hardware,
+            metadata,
+            request.extra_args,
+        )
+        if mismatches:
+            raise ValueError(
+                "resume request does not match the existing manifest: "
+                + ", ".join(mismatches)
+            )
+    return paths, scenario, arms, hardware, metadata, out_dir, commands, resumed
 
-    environment = runtime_environment(args.gpu)
+
+def execute_run(
+    request: RunRequest,
+    *,
+    event_handler: EventHandler | None = None,
+    process_runner: ProcessRunner = subprocess.run,
+    environment: Mapping[str, str] | None = None,
+) -> RunResult:
+    """Execute and validate the selected arms, preserving resumable state."""
+    host_environment = dict(environment or os.environ)
+    (
+        paths,
+        scenario,
+        arms,
+        hardware,
+        metadata,
+        out_dir,
+        commands,
+        resumed,
+    ) = _resolve_run(request, host_environment)
+
+    if resumed:
+        state = load_run_state(out_dir, arms)
+        update_run_state(out_dir, state, status="running")
+    else:
+        out_dir.mkdir(parents=True, exist_ok=False)
+        write_manifest(
+            out_dir,
+            scenario,
+            arms,
+            commands,
+            hardware,
+            metadata,
+            request.extra_args,
+        )
+        state = initial_run_state(arms)
+        update_run_state(out_dir, state, status="running")
+
+    _emit(event_handler, "summary", f"GPU (PCI index): {request.gpu}")
+    _emit(event_handler, "summary", metadata["nvidia_smi"])
+    _emit(
+        event_handler,
+        "summary",
+        f"scenario: {scenario.name}   hardware: {hardware}",
+    )
+    _emit(
+        event_handler,
+        "summary",
+        f"arms: {' '.join(arm.name for arm in arms)}",
+    )
+    _emit(event_handler, "summary", f"output: {out_dir}")
+
+    base_environment = runtime_environment(
+        paths, request.gpu, environment=host_environment
+    )
     for arm in arms:
-        if arm.requires_gcc_toolset:
-            add_gcc_toolset(environment)
-
         arm_dir = out_dir / arm.name
-        command = commands[arm.name]
         log_path = out_dir / f"{arm.name}.log"
-        print(f"\n=== arm: {arm.name} ===")
-        print(" ".join(command))
-        with log_path.open("w") as log:
-            log.write(
-                f"# scenario={scenario.name} arm={arm.name} "
-                f"gpu_pci_index={args.gpu} {dt.datetime.now(dt.timezone.utc):%FT%TZ}\n"
+        if resumed:
+            try:
+                validate_arm(arm, arm_dir, log_path, scenario.workload)
+            except RuntimeError:
+                archive = archive_incomplete_arm(out_dir, arm.name)
+                if archive is not None:
+                    _emit(
+                        event_handler,
+                        "archive",
+                        f"{arm.name}: archived incomplete attempt at {archive}",
+                        arm.name,
+                    )
+            else:
+                update_run_state(
+                    out_dir, state, arm_name=arm.name, status="completed"
+                )
+                _emit(
+                    event_handler,
+                    "skip",
+                    f"{arm.name}: already validated; skipping",
+                    arm.name,
+                )
+                continue
+
+        command = commands[arm.name]
+        _emit(event_handler, "arm", f"=== arm: {arm.name} ===", arm.name)
+        _emit(event_handler, "command", shlex.join(command), arm.name)
+        update_run_state(out_dir, state, arm_name=arm.name, status="running")
+        try:
+            arm_environment = base_environment
+            if arm.requires_gcc_toolset:
+                arm_environment = add_compiler_environment(
+                    base_environment, paths.compiler_env
+                )
+            with log_path.open("w") as log:
+                log.write(
+                    f"# scenario={scenario.name} arm={arm.name} "
+                    f"gpu_pci_index={request.gpu} "
+                    f"{dt.datetime.now(dt.timezone.utc):%FT%TZ}\n"
+                )
+                log.write(metadata["nvidia_smi"] + "\n")
+                log.flush()
+                completed = process_runner(
+                    command,
+                    cwd=paths.titan_dir,
+                    env=arm_environment,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+            if completed.returncode:
+                raise RuntimeError(
+                    f"{arm.name}: training exited with {completed.returncode}; "
+                    f"see {log_path}"
+                )
+            validate_arm(arm, arm_dir, log_path, scenario.workload)
+        except (Exception, KeyboardInterrupt) as error:
+            update_run_state(
+                out_dir,
+                state,
+                arm_name=arm.name,
+                status="failed",
+                error=str(error),
             )
-            log.write(metadata["nvidia_smi"] + "\n")
-            log.flush()
-            completed = subprocess.run(
-                command,
-                cwd=TITAN_DIR,
-                env=environment,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        if completed.returncode:
-            raise RuntimeError(
-                f"{arm.name}: training exited with {completed.returncode}; see {log_path}"
-            )
-        validate_arm(arm, arm_dir, log_path, scenario.workload)
-        print(f"{arm.name}: validated")
-    return out_dir
+            update_run_state(out_dir, state, status="failed")
+            raise
+
+        update_run_state(out_dir, state, arm_name=arm.name, status="completed")
+        _emit(event_handler, "validated", f"{arm.name}: validated", arm.name)
+
+    update_run_state(out_dir, state, status="completed")
+    return RunResult(out_dir, scenario, arms, resumed)
 
 
 def main(argv: list[str] | None = None) -> None:
-    args, extra_args = parse_args(argv)
-    if args.list_scenarios:
-        from benchmarks.scenarios import SCENARIOS
+    """Compatibility entry point for ``python -m benchmarks.runner``."""
+    from benchmarks.cli import legacy_main
 
-        for scenario in SCENARIOS.values():
-            print(f"{scenario.name}: {scenario.description}")
-        return
-    try:
-        out_dir = run(args, extra_args)
-    except (ValueError, RuntimeError) as error:
-        raise SystemExit(f"FATAL: {error}") from error
-    print("\nAll arms validated. Analyze with:")
-    print(f"  {TITAN_DIR / '.venv/bin/python'} {BENCH_DIR / 'analysis/compare_arms.py'} {out_dir}")
+    legacy_main(args=argv, prog_name="python -m benchmarks.runner")
 
 
 if __name__ == "__main__":

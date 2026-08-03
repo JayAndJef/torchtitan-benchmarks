@@ -1,16 +1,20 @@
 """CPU-only tests for benchmark scenario construction and validation helpers."""
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.runner import (
+    RunRequest,
     command_for_arm,
+    execute_run,
     trace_files,
     validate_arm,
     write_manifest,
@@ -335,6 +339,91 @@ class TrainingMetricsTests(unittest.TestCase):
             ),
             [9900, 10100, 10000],
         )
+
+
+class ResumeTests(unittest.TestCase):
+    def test_resume_skips_valid_arm_and_retries_incomplete_arm(self) -> None:
+        metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+        }
+        events = []
+
+        def fake_process(command, **kwargs):
+            kwargs["stdout"].write("Training completed\n")
+            arm_dir = Path(command[-1])
+            for iteration in (20, 40):
+                trace = (
+                    arm_dir
+                    / f"profiling/traces/iteration_{iteration}/rank0_trace.json.gz"
+                )
+                trace.parent.mkdir(parents=True, exist_ok=True)
+                trace.touch()
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.runner.hardware_metadata",
+            return_value=("test-gpu", metadata),
+        ):
+            out_dir = Path(temporary) / "run"
+            environment = {"PATH": os.environ["PATH"]}
+            request = RunRequest(
+                gpu="0",
+                scenario_name="piper1b_rope",
+                arm_name="baseline",
+                out_dir=out_dir,
+            )
+            execute_run(
+                request,
+                process_runner=fake_process,
+                environment=environment,
+            )
+
+            resumed = RunRequest(
+                gpu="0",
+                scenario_name=None,
+                arm_name="baseline",
+                resume_dir=out_dir,
+            )
+            process = mock.Mock(side_effect=fake_process)
+            execute_run(
+                resumed,
+                process_runner=process,
+                environment=environment,
+                event_handler=events.append,
+            )
+            process.assert_not_called()
+            self.assertTrue(any(event.kind == "skip" for event in events))
+
+            (out_dir / "baseline.log").write_text("interrupted\n")
+            execute_run(
+                resumed,
+                process_runner=fake_process,
+                environment=environment,
+            )
+            archived_logs = list(
+                (out_dir / "attempts").glob("*/baseline/baseline.log")
+            )
+            self.assertEqual(len(archived_logs), 1)
+            self.assertIn("interrupted", archived_logs[0].read_text())
+            self.assertIn("Training completed", (out_dir / "baseline.log").read_text())
+
+            incompatible = RunRequest(
+                gpu="0",
+                scenario_name=None,
+                arm_name="baseline",
+                resume_dir=out_dir,
+                steps=60,
+            )
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                execute_run(
+                    incompatible,
+                    process_runner=fake_process,
+                    environment=environment,
+                )
 
 
 if __name__ == "__main__":

@@ -154,35 +154,37 @@ real Qwen3 training. Current per-arm peak-memory results are reported above.
 
 ## Run
 
+Install the small benchmark-only CLI and statistics dependencies into the
+TorchTitan environment with `pip install -r requirements.txt`.
+
 ```bash
-# Pick an IDLE GPU from nvidia-smi first. The index is PCI order.
-# Existing RoPE comparison (default scenario).
-./run_bench.sh <gpu-index>
-./run_bench.sh <gpu-index> --scenario piper1b_rope --arm te
+# List scenarios and their arms.
+./run_bench.sh scenarios
 
-# New SwiGLU comparison: stock MoE experts vs FusedGroupedExperts.
-./run_bench.sh <gpu-index> --scenario piper1b_swiglu
-./run_bench.sh <gpu-index> --scenario piper1b_swiglu --arm fused_grouped_experts
+# Canonical full comparison: run, validate, and evaluate every arm.
+./run_bench.sh run-all <gpu-index> --scenario piper1b_rope
+./run_bench.sh run-all <gpu-index> --scenario piper1b_lm_head \
+    --hardware <stable-label>
 
-# QKV comparison: separate projections vs the existing fused implementation.
-./run_bench.sh <gpu-index> --scenario piper1b_qkv
-./run_bench.sh <gpu-index> --scenario piper1b_qkv --arm fused_qkv
+# Execute only, optionally selecting one arm or adapting the workload.
+./run_bench.sh run <gpu-index> --scenario piper1b_qkv --arm fused_qkv
+./run_bench.sh run <gpu-index> --scenario piper1b_swiglu --batch 1
 
-# LM-head comparison: Piper baseline, PyTorch fused linear-CE, TE fused CE.
-./run_bench.sh <gpu-index> --scenario piper1b_lm_head
-./run_bench.sh <gpu-index> --scenario piper1b_lm_head --arm fused_linear_ce
+# Evaluate an existing output directory without rerunning training.
+./run_bench.sh evaluate out/<timestamp>/<scenario>/<hardware>
 
-# Adapt the workload to hardware capacity while preserving comparable arms.
-./run_bench.sh <gpu-index> --scenario piper1b_swiglu --batch 1
-
-# Stable hardware label for cross-machine comparisons (default: GPU name).
-./run_bench.sh <gpu-index> --scenario piper1b_rope --hardware <stable-label>
-./run_bench.sh --list-scenarios
+# Resume an interrupted all-arm run. Valid arms are not rerun.
+./run_bench.sh run-all <gpu-index> --resume \
+    out/<timestamp>/<scenario>/<hardware>
 ```
 
-Pass extra torchtitan arguments after `--`. The runner requires at least 40
-steps because its profiler schedule collects and validates two trace windows.
-`SEQ`, `STEPS`, `BATCH`, and `OUT` environment variables remain supported.
+The original `./run_bench.sh <gpu-index> ...` and `--list-scenarios` forms
+remain compatibility aliases. Pass extra TorchTitan arguments after `--`.
+The runner requires at least 40 steps because its profiler schedule collects
+and validates two trace windows. `SEQ`, `STEPS`, `BATCH`, `OUT`, and
+`TITAN_DIR` environment variables remain supported. Cache roots and an
+optional compiler setup script can be selected with `--cache-root` and
+`--compiler-env`; command help lists their environment-variable equivalents.
 
 After every arm the runner validates completion (`Training completed` in the
 log), the exact override application count (16 per override on piper-1B, one
@@ -194,8 +196,11 @@ profiler trace windows before declaring the arm good.
 ```
 out/<timestamp>/<scenario>/<hardware>/
   manifest.json          # run configuration and provenance
+  run_state.json         # atomic per-arm status and attempt history
+  results.json           # machine-readable metrics and significance tests
   <arm>.log              # full training log per arm
   <arm>/profiling/traces/iteration_{20,40}/rank0_trace.json.gz
+  attempts/...           # preserved artifacts from retried incomplete arms
 ```
 
 `manifest.json` records the scenario name and description, hardware label
@@ -205,11 +210,18 @@ scenario arms, the arms actually selected for this run, the full
 `run_train.sh` command per selected arm, and any extra pass-through
 torchtitan arguments.
 
-### Analyze
+### Evaluate
 
 ```bash
-python analysis/compare_arms.py out/<timestamp>/<scenario>/<hardware>
+./run_bench.sh evaluate out/<timestamp>/<scenario>/<hardware>
 ```
+
+`run-all` performs this evaluation automatically. The former
+`python analysis/compare_arms.py ...` command remains a compatibility entry
+point. Both print a summary containing stable tokens/sec, peak allocated
+memory, and forward/backward compiled-region timing for every arm. They also
+print each baseline comparison with Welch's t-test, Mann-Whitney U, and
+Cohen's d, and write the same data to `results.json`.
 
 The measurement is the GPU span of whole compiled regions (`## Call
 CompiledFxGraph` GPU annotations). Regions are matched structurally: each
@@ -246,9 +258,10 @@ representative C4 convergence comparison, not just these region timings.
 python3 -m unittest discover -s tests
 ```
 
-Covers scenario/command/manifest construction and the trace analyzer over
-synthetic profiler-trace fixtures (extraction, rank mapping, pooling,
-statistics, and failure on malformed or repartitioned traces).
+Covers the Click interface, scenario/command/manifest construction, resumable
+execution, metric serialization, and the trace analyzer over synthetic
+profiler-trace fixtures (extraction, phase mapping, pooling, statistics, and
+failure on malformed or repartitioned traces).
 
 ## Kernel-level microbenchmarks
 

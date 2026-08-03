@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "analysis"))
 
 from benchmarks.profile_regions import pooled_region_samples, trace_region_samples
 from benchmarks.scenarios import Region
+from benchmarks.metrics import evaluate_run, write_results
+from benchmarks.reporting import render_evaluation
 
 import compare_arms
 
@@ -239,6 +241,85 @@ class ComparisonTests(unittest.TestCase):
             parsed = compare_arms.losses(log)
         self.assertEqual(parsed[0], (1, 7.4478))
         self.assertNotEqual(parsed[1][1], parsed[1][1])  # NaN
+
+    def test_complete_evaluation_is_human_and_machine_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            manifest = {
+                "schema_version": 4,
+                "scenario": "synthetic",
+                "hardware": "test-gpu",
+                "workload": {
+                    "profile_freq": 20,
+                    "profiler_warmup": 5,
+                    "profiler_active": 5,
+                },
+                "regions": [
+                    {
+                        "name": region.name,
+                        "phase": region.phase,
+                        "invocations_per_window": region.invocations_per_window,
+                    }
+                    for region in REGIONS
+                ],
+                "selected_arms": ["baseline", "optimized"],
+            }
+            (out_dir / "manifest.json").write_text(json.dumps(manifest))
+            for arm, backward, forward, tps, loss in (
+                (
+                    "baseline",
+                    [99.0, 100.0, 101.0, 100.0],
+                    [9.0, 10.0, 11.0, 10.0],
+                    1000,
+                    "1.0",
+                ),
+                (
+                    "optimized",
+                    [89.0, 90.0, 91.0, 90.0],
+                    [7.0, 8.0, 9.0, 8.0],
+                    1200,
+                    "nan",
+                ),
+            ):
+                write_trace(
+                    out_dir
+                    / arm
+                    / "profiling/traces/iteration_20/rank0_trace.json.gz",
+                    {
+                        "backward": ("backward", backward),
+                        "forward": ("forward", forward),
+                    },
+                )
+                (out_dir / f"{arm}.log").write_text(
+                    f"step: 2 loss: {loss} grad_norm: 2.0 "
+                    f"memory: 3.00GiB tps: {tps}\n"
+                )
+
+            result = evaluate_run(out_dir)
+            results_path = write_results(result)
+            machine = json.loads(results_path.read_text())
+            report = render_evaluation(result)
+
+        self.assertEqual(
+            machine["training"]["optimized"]["stable_tokens_per_second"], 1200
+        )
+        self.assertEqual(
+            machine["regions"]["optimized"]["forward_block"]["mean_us"], 8.0
+        )
+        self.assertEqual(
+            machine["regions"]["optimized"]["backward_block"]["mean_us"], 90.0
+        )
+        comparison = machine["comparisons"]["optimized"][0]
+        self.assertIn("welch_p", comparison)
+        self.assertIn("mwu_p", comparison)
+        self.assertIn("cohens_d", comparison)
+        self.assertIsNone(machine["losses"]["optimized"][0]["value"])
+        self.assertIn("stable tokens/s", report)
+        self.assertIn("forward mean us", report)
+        self.assertIn("backward mean us", report)
+        self.assertIn("Welch p", report)
+        self.assertIn("MWU p", report)
+        self.assertIn("NON-FINITE LOSS", report)
 
 
 if __name__ == "__main__":
