@@ -62,7 +62,7 @@ def run_shape(b, s, nh, nkv, hd):
     q = torch.randn(b, s, nh, hd, device=DEV, dtype=torch.bfloat16, generator=g)
     k = torch.randn(b, s, nkv, hd, device=DEV, dtype=torch.bfloat16, generator=g)
     pos = (
-        torch.arange(s, device=DEV, dtype=torch.int32)
+        torch.arange(s, device=DEV, dtype=torch.int64)
         .unsqueeze(0)
         .expand(b, -1)
         .contiguous()
@@ -72,8 +72,8 @@ def run_shape(b, s, nh, nkv, hd):
 
     # correctness spot check at this head_dim (64 is a new specialization)
     hq, hk = _helion_cossin_rope_fwd(q, k, cache, pos)
-    tq = te.forward(q, freqs, False)
-    tk = te.forward(k, freqs, False)
+    tq = te.forward_positions(q, freqs, pos, False)
+    tk = te.forward_positions(k, freqs, pos, False)
     max_abs = max(
         (hq.float() - tq.float()).abs().max().item(),
         (hk.float() - tk.float()).abs().max().item(),
@@ -87,8 +87,8 @@ def run_shape(b, s, nh, nkv, hd):
         _helion_cossin_rope_fwd(q, k, cache, pos)
 
     def tef():
-        te.forward(q, freqs, False)
-        te.forward(k, freqs, False)
+        te.forward_positions(q, freqs, pos, False)
+        te.forward_positions(k, freqs, pos, False)
 
     for _ in range(WARMUP):
         cp()

@@ -7,7 +7,7 @@ while the shared runner owns launch mechanics, run provenance, and validation.
 Out-of-tree: needs zero edits to the torchtitan checkout (`--module` accepts a
 fully qualified module path, and overrides activate by import path).
 
-Validated against torchtitan checkout `b5eb9d92` and its `.venv`
+Validated against torchtitan checkout `b5eb9d92`
 (torch 2.14.0.dev20260729+cu130). The config port imports private torchtitan
 helpers (`_build_qwen3_moe_layers` etc.), so expect breakage across torchtitan
 versions -- re-check `piper1b/config_registry.py` first.
@@ -134,17 +134,17 @@ projection and torchtitan's fused SiLU-and-multiply Triton custom op.
 |----------|------|-----------|
 | baseline | stock `CosSinRoPE` | inductor fuses the rotation into neighboring kernels (QK-norm epilogue) |
 | helion   | `torchtitan.overrides.helion_rope.helion_cos_sin_rope` | fused Helion kernel via `torch.library.custom_op` |
-| te       | `piper1b.rope.te_rope_override.te_rope` (this repo) | verbatim port of TransformerEngine's `fused_rope_{forward,backward}_kernel` via `torch.library.custom_op` |
+| te       | `piper1b.rope.te_rope_override.te_rope` (this repo) | verbatim TE block rotation with a Piper BSHD entry point that gathers per-token positions, exposed via `torch.library.custom_op` |
 
-**TE arm caveat (benchmark-only):** TE's kernel has no per-token position
-gather; the override IGNORES torchtitan's per-token `positions` (which reset at
-document boundaries). Perf is representative of TE's kernel design; the loss
-trajectory diverges from the other arms on packed documents. Never use it for
-real training.
+The TE-derived entry point loads TorchTitan's int64 position for each
+`[batch, sequence]` row before invoking TE's unchanged rotation routine. A
+compiled packed-document regression test verifies forward and backward against
+stock `CosSinRoPE` across multiple position resets on both tested GPU
+architectures.
 
 ## Model: piper Qwen3-1B port
 
-From `/data/zejiaqi/piper/examples/models/qwen3.py` case `'1B'`: dim 1024,
+From piper's `examples/models/qwen3.py` case `'1B'`: dim 1024,
 16 layers, 16 q / 8 kv heads, head_dim 64, MoE (4 experts, top_k 2,
 inter_dim 3584), qk_norm, rope theta 1e6, max_seq_len 2048, vocab 151936, no
 weight tying. Known deltas (identical across arms): `route_norm=True`
@@ -176,7 +176,7 @@ real Qwen3 training. Current per-arm peak-memory results are reported above.
 ./run_bench.sh <gpu-index> --scenario piper1b_swiglu --batch 1
 
 # Stable hardware label for cross-machine comparisons (default: GPU name).
-./run_bench.sh <gpu-index> --scenario piper1b_rope --hardware a6000-node1
+./run_bench.sh <gpu-index> --scenario piper1b_rope --hardware <stable-label>
 ./run_bench.sh --list-scenarios
 ```
 
@@ -208,8 +208,7 @@ torchtitan arguments.
 ### Analyze
 
 ```bash
-/data/zejiaqi/torchtitan/.venv/bin/python analysis/compare_arms.py \
-    out/<timestamp>/<scenario>/<hardware>
+python analysis/compare_arms.py out/<timestamp>/<scenario>/<hardware>
 ```
 
 The measurement is the GPU span of whole compiled regions (`## Call
@@ -230,8 +229,7 @@ post-compile steps before each profiler warmup window. For LM-head attribution,
 use the CUDA-event full-token microbenchmark:
 
 ```bash
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<gpu-index> \
-  /data/zejiaqi/torchtitan/.venv/bin/python piper1b/lm_head/benchmark.py
+python piper1b/lm_head/benchmark.py
 ```
 
 **Interpretation rule:** these are timings of full compiled forward/backward
@@ -257,9 +255,8 @@ statistics, and failure on malformed or repartitioned traces).
 Standalone RoPE tooling under `piper1b/rope/` (TE vs Helion vs copy floor). These scripts
 are kept as-is for kernel-level investigation and are **not part of the
 end-to-end benchmark results above** -- they measure isolated kernels with
-CUDA events, not compiled training regions. Run with the torchtitan venv
-python, `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<idx>`, and
-`source /opt/rh/gcc-toolset-13/enable` for the extension build:
+CUDA events, not compiled training regions. The TE extension requires a
+C++20-capable host compiler:
 
 - `benchmark.py` -- correctness gate + timing vs copy floor, 3 shapes
 - `significance.py` -- interleaved A/B, n=200, Welch/MWU/Wilcoxon
@@ -268,24 +265,27 @@ python, `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<idx>`, and
 - `ablation.py` -- TE partner-load ablation (diagnostic, wrong-by-design output)
 - `piper1b/lm_head/benchmark.py` -- full-token baseline/PyTorch-fused/TE-fused head timing and memory
 
-## Findings so far (2026-07-31, RTX A6000 unless noted)
+## Findings so far (2026-08-03, RTX A6000 unless noted)
 
-Standalone kernels (see `/data/zejiaqi/tmp/te_bench/*.log` for raw runs):
+Standalone kernel results:
 
 - Large shapes (e.g. q `8x4096x16x128`): Helion at 1.016x the copy floor --
   effectively optimal; TE 11.5% slower (scalar 2-byte access, shown by
   ablation). On Blackwell (from 2026-07-30 traces) Helion hits 1518 GB/s.
-- piper-1B microbatch shape (`1x1024x16x64`): reverses -- TE 3.3x faster;
-  Helion's shipped config buckets (tuned on GB200/head_dim-128/large tokens)
-  leave it 3.4x off the floor, plus ~20 us/call CPU dispatch.
+- Piper-1B microbatch shape (`1x1024x16/8x64`): the position-correct TE Q+K
+  path takes 29.70 us on A6000 and 31.20 us on Blackwell, versus Helion's
+  98.30 and 100.80 us. TE is 3.2-3.3x faster and within 4% of the copy floor.
+  At the end-to-end batch-4 shape, TE remains 22% faster than Helion on A6000
+  and 3.2x faster on Blackwell in isolation. In saturated 64-call bursts at
+  batch 1, TE takes 12.82/12.27 us per call on A6000/Blackwell versus Helion's
+  66.02/67.72 us, so the gap is not solely Python dispatch.
 - Numerics: Helion and TE agree to 1 bf16 ULP on ~0.001% of elements; vs fp64
   ground truth their error stats are identical (mean 0.254 ULP). Neither is
-  bitwise-identical to the other or to stock.
-- e2e on qwen3_debugmodel (Blackwell, 2026-07-30 traces in torchtitan
-  `outputs/profiling/`): the Helion override is a net LOSS under
-  `--compile.enable` (+5% forward region) because the baseline gets RoPE fused
-  into the QK-norm kernel for ~30 us marginal cost, while any custom op is a
-  fusion barrier.
-
-The e2e piper-1B three-arm comparison is what `run_bench.sh` produces; see
-`out/<ts>/` and the session notes.
+  generally bitwise-identical to the other or to stock. The compiled packed
+  reset regression shape is bitwise identical to stock in forward and backward.
+- End-to-end Piper-1B does not inherit the standalone win. On A6000, stable TPS
+  is 10,985.5 baseline, 10,975.5 Helion, and 10,963.0 TE. On Blackwell it is
+  23,302.5 baseline, 22,690.5 Helion, and 22,498.5 TE. TE's forward block is
+  3.25% slower than baseline on A6000 and 2.89% slower on Blackwell because the
+  baseline rotation fuses into QK norm while both custom ops remain fusion
+  barriers.

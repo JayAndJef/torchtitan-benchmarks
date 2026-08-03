@@ -229,6 +229,41 @@ __global__ void fused_rope_backward_kernel(
 // END verbatim TE device code
 // ---------------------------------------------------------------------------
 
+// Piper specialization: select the frequency row from a per-token position
+// tensor. The TE block rotation remains unchanged; only sequence indexing is
+// specialized for contiguous BSHD tensors without context parallelism.
+template <typename scalar_t>
+__global__ void fused_rope_forward_positions_kernel(
+    const scalar_t *src, const int64_t *positions, const float *freqs, scalar_t *dst,
+    const bool interleaved, const int s, const int h, const int d, const int d2,
+    const int stride_s, const int stride_b, const int stride_h, const int stride_d,
+    const int o_stride_s, const int o_stride_b, const int o_stride_h, const int o_stride_d) {
+  const int s_id = blockIdx.x;
+  const int b_id = blockIdx.y;
+  const int position = static_cast<int>(positions[b_id * s + s_id]);
+  const int offset_block = s_id * stride_s + b_id * stride_b;
+  const int offset_block_dst = s_id * o_stride_s + b_id * o_stride_b;
+  fused_rope_block_forward(src, freqs, dst, interleaved, position, offset_block,
+                           offset_block_dst, h, d, d2, stride_h, stride_d, o_stride_h,
+                           o_stride_d);
+}
+
+template <typename scalar_t>
+__global__ void fused_rope_backward_positions_kernel(
+    const scalar_t *src, const int64_t *positions, const float *freqs, scalar_t *dst,
+    const bool interleaved, const int s, const int h, const int d, const int d2,
+    const int stride_s, const int stride_b, const int stride_h, const int stride_d,
+    const int o_stride_s, const int o_stride_b, const int o_stride_h, const int o_stride_d) {
+  const int s_id = blockIdx.x;
+  const int b_id = blockIdx.y;
+  const int position = static_cast<int>(positions[b_id * s + s_id]);
+  const int offset_block = s_id * stride_s + b_id * stride_b;
+  const int offset_block_dst = s_id * o_stride_s + b_id * o_stride_b;
+  fused_rope_block_backward(src, freqs, dst, interleaved, position, offset_block,
+                            offset_block_dst, h, d, d2, stride_h, stride_d, o_stride_h,
+                            o_stride_d);
+}
+
 // DIAGNOSTIC ABLATION ONLY -- produces WRONG results by design.
 // Identical to fused_rope_block_forward / fused_rope_forward_kernel except that
 // the rotate-half partner load is dropped (v_src is reused in its place). This
@@ -283,7 +318,8 @@ __global__ void ablate_forward_kernel_no_partner_load(
 // Reproduces TE's fused_rope_{forward,backward}_launcher for NVTE_BSHD, with the
 // THD linear-grid branch removed (it is unreachable for BSHD).
 template <bool BACKWARD>
-torch::Tensor launch_bshd(const torch::Tensor &input, const torch::Tensor &freqs, bool interleaved) {
+torch::Tensor launch_bshd(const torch::Tensor &input, const torch::Tensor &freqs, bool interleaved,
+                          const torch::Tensor *positions = nullptr) {
   TORCH_CHECK(input.dim() == 4, "expected (b, s, h, d) input");
   TORCH_CHECK(input.scalar_type() == at::kBFloat16, "only bf16 is benchmarked here");
   TORCH_CHECK(freqs.scalar_type() == at::kFloat && freqs.is_contiguous(),
@@ -298,6 +334,13 @@ torch::Tensor launch_bshd(const torch::Tensor &input, const torch::Tensor &freqs
   TORCH_CHECK(s <= freqs.numel() / d2,
               "seq_len (", s, ") exceeds freqs table rows (", freqs.numel() / d2,
               "); the kernel would read out of bounds");
+  if (positions != nullptr) {
+    TORCH_CHECK(positions->is_cuda(), "positions must be a CUDA tensor");
+    TORCH_CHECK(positions->scalar_type() == at::kLong, "positions must be int64");
+    TORCH_CHECK(positions->is_contiguous(), "positions must be contiguous");
+    TORCH_CHECK(positions->dim() == 2 && positions->size(0) == b && positions->size(1) == s,
+                "positions must have shape (batch, seq_len)");
+  }
 
   auto output = torch::empty_like(input);
 
@@ -322,10 +365,20 @@ torch::Tensor launch_bshd(const torch::Tensor &input, const torch::Tensor &freqs
   auto *dst = reinterpret_cast<__nv_bfloat16 *>(output.data_ptr());
   const float *freqs_ptr = freqs.data_ptr<float>();
 
-  if (BACKWARD) {
+  if (BACKWARD && positions != nullptr) {
+    fused_rope_backward_positions_kernel<<<blocks, threads, shared_mem_size, stream>>>(
+        src, positions->data_ptr<int64_t>(), freqs_ptr, dst, interleaved, s, h, d, d2,
+        stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
+        o_stride_d);
+  } else if (BACKWARD) {
     fused_rope_backward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
         src, nullptr, freqs_ptr, nullptr, dst, interleaved, /*cp_size=*/1, /*cp_rank=*/0, s, h, d,
         d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
+        o_stride_d);
+  } else if (positions != nullptr) {
+    fused_rope_forward_positions_kernel<<<blocks, threads, shared_mem_size, stream>>>(
+        src, positions->data_ptr<int64_t>(), freqs_ptr, dst, interleaved, s, h, d, d2,
+        stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
         o_stride_d);
   } else {
     fused_rope_forward_kernel<<<blocks, threads, shared_mem_size, stream>>>(
@@ -349,6 +402,16 @@ torch::Tensor te_rope_backward(const torch::Tensor &grad_out, const torch::Tenso
   return launch_bshd<true>(grad_out, freqs, interleaved);
 }
 
+torch::Tensor te_rope_forward_positions(const torch::Tensor &input, const torch::Tensor &freqs,
+                                        const torch::Tensor &positions, bool interleaved) {
+  return launch_bshd<false>(input, freqs, interleaved, &positions);
+}
+
+torch::Tensor te_rope_backward_positions(const torch::Tensor &grad_out, const torch::Tensor &freqs,
+                                         const torch::Tensor &positions, bool interleaved) {
+  return launch_bshd<true>(grad_out, freqs, interleaved, &positions);
+}
+
 // DIAGNOSTIC ONLY -- see the ablation comment above. Results are incorrect.
 torch::Tensor ablate_forward_no_partner_load(const torch::Tensor &input,
                                              const torch::Tensor &freqs) {
@@ -370,6 +433,10 @@ torch::Tensor ablate_forward_no_partner_load(const torch::Tensor &input,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &te_rope_forward, "TE fused RoPE forward (BSHD, bf16)");
   m.def("backward", &te_rope_backward, "TE fused RoPE backward (BSHD, bf16)");
+  m.def("forward_positions", &te_rope_forward_positions,
+        "TE fused RoPE forward with per-token positions (BSHD, bf16)");
+  m.def("backward_positions", &te_rope_backward_positions,
+        "TE fused RoPE backward with per-token positions (BSHD, bf16)");
   m.def("ablate_no_partner_load", &ablate_forward_no_partner_load,
         "DIAGNOSTIC ONLY: TE forward with the rotate-half partner load removed");
 }

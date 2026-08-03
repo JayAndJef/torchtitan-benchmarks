@@ -46,7 +46,7 @@ freqs = ang.contiguous().to(DEV)
 g = torch.Generator(device=DEV).manual_seed(0)
 q = torch.randn(b, s, nh, hd, device=DEV, dtype=torch.bfloat16, generator=g)
 k = torch.randn(b, s, nkv, hd, device=DEV, dtype=torch.bfloat16, generator=g)
-pos = torch.arange(s, device=DEV, dtype=torch.int32).unsqueeze(0).expand(b, -1).contiguous()
+pos = torch.arange(s, device=DEV, dtype=torch.int64).unsqueeze(0).expand(b, -1).contiguous()
 
 
 def hel():
@@ -54,8 +54,8 @@ def hel():
 
 
 def tef():
-    te.forward(q, freqs, False)
-    te.forward(k, freqs, False)
+    te.forward_positions(q, freqs, pos, False)
+    te.forward_positions(k, freqs, pos, False)
 
 
 def burst_us(fn, burst, iters=50):

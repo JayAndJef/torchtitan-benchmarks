@@ -157,6 +157,12 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(PIPER_1B_WORKLOAD.seq_len, 1024)
         self.assertEqual(PIPER_1B_WORKLOAD.steps, 40)
 
+    def test_te_rope_trace_uses_position_aware_kernel(self) -> None:
+        self.assertEqual(
+            PIPER_1B_ROPE.arm("te").trace_kernel_markers,
+            ("fused_rope_forward_positions_kernel",),
+        )
+
     def test_all_scenarios_declare_the_piper_regions(self) -> None:
         for scenario in (
             PIPER_1B_ROPE,

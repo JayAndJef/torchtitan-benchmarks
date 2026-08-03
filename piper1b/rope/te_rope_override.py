@@ -1,16 +1,10 @@
-"""Out-of-tree torchtitan override: RoPE via TransformerEngine's fused kernel.
+"""Out-of-tree torchtitan override: RoPE via a TransformerEngine-derived kernel.
 
-Wraps the standalone verbatim port of TE's fused_rope_{forward,backward}_kernel
-(te_rope_standalone.cu, next to this file) as torch.library custom ops (fake +
-autograd registered) and swaps CosSinRoPE for a TE-backed module, the same way
-torchtitan.overrides.helion_rope does for Helion.
-
-BENCHMARK-ONLY SEMANTICS CAVEAT: TE's kernel has no per-token position gather.
-It rotates row s of every sequence by angle(s) (optionally plus one scalar
-offset per sequence). torchtitan passes per-token ``positions`` that reset at
-document boundaries; this override IGNORES them. Performance is representative
-of TE's design; losses will NOT match the stock or Helion arms whenever packed
-documents make positions != arange. Do not use outside benchmarking.
+The TE block rotation is copied verbatim. A Piper-specific BSHD entry point
+selects the frequency row from TorchTitan's per-token ``positions`` tensor so
+packed-document position resets match the stock RoPE implementation. The
+extension is exposed as torch.library custom ops with fake and autograd
+registrations and swaps CosSinRoPE for the TE-backed module.
 
 Activation:
     PYTHONPATH=/data/zejiaqi/torchtitan-benchmarks torchtitan_train ... \
@@ -30,7 +24,7 @@ import torch
 from torch.utils.cpp_extension import load
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
 from torchtitan.tools.logging import logger, warn_once
 
 _EXT_DIR = Path(
@@ -61,17 +55,20 @@ _te = load(
     "torchtitan_benchmarks::te_rope_fwd", mutates_args=(), device_types="cuda"
 )
 def _te_rope_fwd(
-    xq: torch.Tensor, xk: torch.Tensor, angles: torch.Tensor
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    angles: torch.Tensor,
+    positions: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # TE handles one tensor per launch; q and k are two launches.
     return (
-        _te.forward(xq, angles, False),
-        _te.forward(xk, angles, False),
+        _te.forward_positions(xq, angles, positions, False),
+        _te.forward_positions(xk, angles, positions, False),
     )
 
 
 @_te_rope_fwd.register_fake
-def _te_rope_fwd_fake(xq, xk, angles):
+def _te_rope_fwd_fake(xq, xk, angles, positions):
     return (
         torch.empty(xq.size(), device=xq.device, dtype=xq.dtype),
         torch.empty(xk.size(), device=xk.device, dtype=xk.dtype),
@@ -82,18 +79,21 @@ def _te_rope_fwd_fake(xq, xk, angles):
     "torchtitan_benchmarks::te_rope_bwd", mutates_args=(), device_types="cuda"
 )
 def _te_rope_bwd(
-    grad_xq: torch.Tensor, grad_xk: torch.Tensor, angles: torch.Tensor
+    grad_xq: torch.Tensor,
+    grad_xk: torch.Tensor,
+    angles: torch.Tensor,
+    positions: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     grad_xq = grad_xq.contiguous()
     grad_xk = grad_xk.contiguous()
     return (
-        _te.backward(grad_xq, angles, False),
-        _te.backward(grad_xk, angles, False),
+        _te.backward_positions(grad_xq, angles, positions, False),
+        _te.backward_positions(grad_xk, angles, positions, False),
     )
 
 
 @_te_rope_bwd.register_fake
-def _te_rope_bwd_fake(grad_xq, grad_xk, angles):
+def _te_rope_bwd_fake(grad_xq, grad_xk, angles, positions):
     return (
         torch.empty(grad_xq.size(), device=grad_xq.device, dtype=grad_xq.dtype),
         torch.empty(grad_xk.size(), device=grad_xk.device, dtype=grad_xk.dtype),
@@ -101,14 +101,19 @@ def _te_rope_bwd_fake(grad_xq, grad_xk, angles):
 
 
 def _te_setup_context(ctx, inputs, output) -> None:
-    _, _, angles = inputs
-    ctx.save_for_backward(angles)
+    _, _, angles, positions = inputs
+    ctx.save_for_backward(angles, positions)
 
 
 def _te_backward(ctx, grad_xq_out, grad_xk_out):
-    (angles,) = ctx.saved_tensors
-    grad_xq, grad_xk = _te_rope_bwd(grad_xq_out, grad_xk_out, angles)
-    return grad_xq, grad_xk, None
+    angles, positions = ctx.saved_tensors
+    grad_xq, grad_xk = _te_rope_bwd(
+        grad_xq_out,
+        grad_xk_out,
+        angles,
+        positions,
+    )
+    return grad_xq, grad_xk, None, None
 
 
 _te_rope_fwd.register_autograd(_te_backward, setup_context=_te_setup_context)
@@ -129,13 +134,6 @@ class TECosSinRoPE(CosSinRoPE):
     def __init__(self, config: "TECosSinRoPE.Config"):
         super().__init__(config)
         self.register_buffer("te_angles", self._precompute_angles(), persistent=False)
-        # The forward-path warnings are suppressed under torch.compile (Dynamo
-        # cannot trace logging), so state the benchmark caveat once at build.
-        logger.warning(
-            "TECosSinRoPE BENCHMARK MODE: per-token positions are IGNORED by "
-            "the TE kernel (rotates by sequence index). Losses will diverge "
-            "from the stock/Helion arms on packed documents."
-        )
 
     def _precompute_angles(self) -> torch.Tensor:
         cfg = self.config
@@ -168,23 +166,35 @@ class TECosSinRoPE(CosSinRoPE):
             or query.dtype != torch.bfloat16
             or not query.is_cuda
             or query.ndim != 4
+            or positions is None
+            or positions.dtype != torch.int64
+            or not positions.is_cuda
+            or positions.ndim != 2
+            or positions.shape[:2] != query.shape[:2]
         ):
-            # Dynamo cannot trace logging.Logger methods; guard so the module
-            # stays fullgraph-compilable (the caveat is logged at __init__).
+            # Dynamo cannot trace logging.Logger methods; keep the fallback
+            # warning out of compiled graphs.
             if not torch.compiler.is_compiling():
                 warn_once(
                     logger,
                     "TECosSinRoPE: unsupported inputs (need plain 4D CUDA bf16 "
-                    "tensors); falling back to the PyTorch cos/sin RoPE.",
+                    "tensors and CUDA int64 positions shaped [batch, seq]); "
+                    "falling back to the PyTorch cos/sin RoPE.",
                 )
             return super().forward(query, key, positions)
-        return _te_rope_fwd(query.contiguous(), key.contiguous(), self.te_angles)
+        _maybe_check_max_pos(positions, max_valid_pos=self.te_angles.shape[0] - 1)
+        return _te_rope_fwd(
+            query.contiguous(),
+            key.contiguous(),
+            self.te_angles,
+            positions.contiguous(),
+        )
 
 
 @override(
     target=CosSinRoPE.Config,
     exact=True,
-    description="TransformerEngine fused RoPE (benchmark-only; ignores positions).",
+    description="TransformerEngine-derived fused RoPE with per-token positions.",
 )
 def te_rope(cfg: CosSinRoPE.Config) -> TECosSinRoPE.Config:
     return derive(cfg, TECosSinRoPE.Config)

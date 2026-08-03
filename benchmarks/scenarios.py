@@ -130,7 +130,7 @@ PIPER_1B_ROPE = Scenario(
             name="te",
             override_imports=("piper1b.rope.te_rope_override.te_rope",),
             expected_override_count=16,
-            trace_kernel_markers=("fused_rope_forward_kernel",),
+            trace_kernel_markers=("fused_rope_forward_positions_kernel",),
             requires_gcc_toolset=True,
         ),
     ),
