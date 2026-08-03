@@ -171,7 +171,7 @@ PIPER_1B_LM_HEAD = Scenario(
     name="piper1b_lm_head",
     description=(
         "Piper full logits versus full-token PyTorch fused linear-CE and "
-        "TransformerEngine fused CE."
+        "reference and Piper-optimized TransformerEngine fused CE."
     ),
     workload=PIPER_1B_LM_HEAD_WORKLOAD,
     regions=PIPER_1B_REGIONS,
@@ -185,6 +185,14 @@ PIPER_1B_LM_HEAD = Scenario(
             name="te_fused_ce",
             config="qwen3_piper_1b_te_fused_ce",
             trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
+        ),
+        Arm(
+            name="piper_optimized_te_ce",
+            config="qwen3_piper_1b_piper_optimized_te_ce",
+            trace_kernel_markers=(
+                "online_softmax_kernel",
+                "piper_optimized_cross_entropy_kernel",
+            ),
         ),
     ),
 )

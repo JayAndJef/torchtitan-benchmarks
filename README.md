@@ -39,7 +39,7 @@ touching the torchtitan checkout.
 | `piper1b_rope` | `baseline`, `helion`, `te` | Existing RoPE comparison. |
 | `piper1b_swiglu` | `baseline`, `fused_grouped_experts` | MoE SwiGLU comparison. |
 | `piper1b_qkv` | `baseline`, `fused_qkv` | Separate Q/K/V projections versus fused QKV. |
-| `piper1b_lm_head` | `baseline`, `fused_linear_ce`, `te_fused_ce` | Three full-token LM-head/loss paths. |
+| `piper1b_lm_head` | `baseline`, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | Four full-token LM-head/loss paths. |
 
 The QKV scenario uses `qwen3_piper_1b_unfused_qkv` for its baseline and the
 existing `qwen3_piper_1b` config for the fused arm. Other scenarios retain the
@@ -55,15 +55,19 @@ projection/loss path:
 | `baseline` | Piper-style full lm-head logits followed by standard cross entropy. |
 | `fused_linear_ce` | PyTorch `F.linear_cross_entropy` over all 4,096 local tokens. This loss owns the lm-head through TorchTitan's `LossWithLMHead` protocol, but does not inherit from or use `ChunkedLossWrapper`. |
 | `te_fused_ce` | The normal model lm-head followed directly by TransformerEngine's fused Triton cross entropy. This is a regular `BaseLoss`, like the baseline CE. |
+| `piper_optimized_te_ce` | A separate TE-derived single-GPU kernel that normalizes in FP32 registers and writes the saved logits gradient directly in the logits dtype. Piper's BF16 path therefore avoids TE's FP32 gradient buffer, scaling pass, and FP32-to-BF16 handoff. |
 
 The TE arm ports the pure-Triton kernels from TransformerEngine commit
 `bffde8f4a0a4eea9036dc753e28269247e5de69d` under
 `LICENSE.transformer-engine`; it does not require the TransformerEngine
 package. The vendored kernel file is byte-for-byte identical and the two
 wrapper files differ only in their local import paths. TE fuses softmax, loss,
-and logits-gradient generation, but not the lm-head linear itself. All three
+and logits-gradient generation, but not the lm-head linear itself. All four
 arms process the same 4,096 local tokens without outer sequence chunking. The
 fused-linear arm is currently a single-GPU path; TP/PP integration is deferred.
+The Piper-optimized TE arm is also single-GPU and requires its internally
+normalized loss to be the terminal loss passed directly to `backward()`;
+arbitrary downstream loss scaling would require another gradient pass.
 
 The isolated baseline compiles standard CE independently, matching
 TorchTitan's `--compile.enable` behavior. Production-shape medians from 10
@@ -71,23 +75,35 @@ measured iterations were:
 
 | arm | A6000 ms / GiB | Blackwell ms / GiB |
 |-----|-----------------|--------------------|
-| Piper baseline | 37.77 / 2.93 | 16.30 / 2.98 |
-| PyTorch fused linear-CE | 74.16 / 4.11 | 31.37 / 4.16 |
-| TE fused CE | 53.20 / 4.95 | 23.34 / 5.00 |
+| Piper baseline | 37.68 / 2.93 | 16.86 / 2.98 |
+| PyTorch fused linear-CE | 73.80 / 4.11 | 31.36 / 4.16 |
+| TE fused CE | 53.17 / 4.95 | 23.57 / 5.00 |
+| Piper-optimized TE CE | 37.62 / 2.93 | 17.76 / 2.98 |
 
-The corrected compiled baseline is faster and uses less memory than both fused
-arms in isolation. The 40-step end-to-end result also favors Piper:
+The optimized TE arm ties baseline time on A6000 and is 5.3% slower on
+Blackwell in isolation, while matching baseline memory on both. The 40-step
+end-to-end result was:
 
 | arm | A6000 stable tps / peak GiB | Blackwell stable tps / peak GiB |
 |-----|------------------------------|---------------------------------|
-| Piper baseline | 11,001.5 / 20.04 | 23,455.5 / 20.05 |
-| PyTorch fused linear-CE | 9,907.5 / 21.19 | 20,274.5 / 21.21 |
-| TE fused CE | 10,405.5 / 21.19 | 21,877.0 / 21.21 |
+| Piper baseline | 10,957.0 / 20.04 | 22,577.5 / 20.05 |
+| PyTorch fused linear-CE | 9,885.0 / 21.19 | 20,957.5 / 21.21 |
+| TE fused CE | 10,517.0 / 21.19 | 21,897.0 / 21.21 |
+| Piper-optimized TE CE | 10,985.5 / 20.04 | 21,907.5 / 20.05 |
 
-TE trails Piper by 5.4% on A6000 and 6.7% on Blackwell. Making TE a direct
-`BaseLoss` removes the previous one-chunk wrapper path and reduces peak memory
-by about 1.17 GiB, but the TE kernel still stores a full FP32 logits-gradient
-buffer and is slower than TorchTitan's compiled standard CE.
+The optimized arm improves over reference TE by 4.5% end-to-end on A6000 and
+is effectively tied with reference TE in the Blackwell run. The Blackwell
+kernel trace still shows the intended gain: TE's online-softmax, CE, and
+gradient-scaling kernels total about 6.9 ms, while the optimized online-softmax
+and CE kernels total about 2.45 ms. Unchanged transformer-block timings drifted
+enough between sequential arms to mask that approximately 4.4 ms kernel saving
+in whole-step throughput. On A6000 the corresponding TE path falls from about
+17.0 to 6.2 ms. The optimized arm saves about 1.17 GiB end-to-end on both GPUs.
+
+The optimized BF16 logits gradient is bitwise identical to the reference TE
+FP32 gradient after reference normalization and BF16 conversion on both GPUs,
+including ignored labels and vocabulary size 151,936. Its 40-step loss and
+gradient-norm trajectory matches the reference TE arm at every printed step.
 
 PyTorch's BF16 fused-linear scalar loss is visibly quantized. The arm remains
 finite and reduces loss, but it amplifies small numerical

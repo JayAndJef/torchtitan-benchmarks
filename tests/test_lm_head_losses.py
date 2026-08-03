@@ -11,6 +11,9 @@ import torch
 import torch.nn.functional as F
 
 from piper1b.lm_head.losses import FusedLinearCrossEntropyLoss
+from piper1b.lm_head.piper_optimized_cross_entropy import (
+    piper_optimized_cross_entropy,
+)
 from piper1b.lm_head.te_cross_entropy import parallel_cross_entropy
 
 
@@ -144,6 +147,60 @@ class TECrossEntropyTests(unittest.TestCase):
 
     def test_piper_non_power_of_two_vocab(self) -> None:
         self._check(torch.bfloat16, 151936)
+
+    def _check_piper_optimized(self, dtype: torch.dtype, vocab_size: int) -> None:
+        torch.manual_seed(42)
+        logits = torch.randn(
+            1,
+            4,
+            vocab_size,
+            device="cuda",
+            dtype=dtype,
+            requires_grad=True,
+        )
+        te_logits = logits.detach().clone().requires_grad_()
+        labels = torch.tensor([[0, vocab_size - 1, -100, 17]], device="cuda")
+        num_valid = float((labels != -100).sum())
+
+        te_loss = parallel_cross_entropy(
+            te_logits,
+            labels,
+            reduce_loss=False,
+        ).sum() / num_valid
+        te_loss.backward()
+
+        optimized_loss = piper_optimized_cross_entropy(
+            logits,
+            labels,
+            gradient_scale=1.0 / num_valid,
+        )
+        optimized_loss.backward()
+
+        torch.testing.assert_close(
+            optimized_loss,
+            te_loss.detach(),
+            rtol=2e-5,
+            atol=2e-5,
+        )
+        torch.testing.assert_close(
+            logits.grad,
+            te_logits.grad,
+            rtol=2e-2 if dtype == torch.bfloat16 else 2e-5,
+            atol=2e-3 if dtype == torch.bfloat16 else 2e-6,
+        )
+        if dtype == torch.bfloat16:
+            self.assertTrue(torch.equal(logits.grad, te_logits.grad))
+        self.assertEqual(float(optimized_loss.detach()), float(te_loss.detach()))
+        self.assertTrue(torch.count_nonzero(logits.grad[0, 2]) == 0)
+
+    def test_piper_optimized_float32(self) -> None:
+        self._check_piper_optimized(torch.float32, 257)
+
+    def test_piper_optimized_bfloat16(self) -> None:
+        self._check_piper_optimized(torch.bfloat16, 257)
+
+    def test_piper_optimized_full_vocabulary(self) -> None:
+        self._check_piper_optimized(torch.bfloat16, 151936)
 
 
 if __name__ == "__main__":

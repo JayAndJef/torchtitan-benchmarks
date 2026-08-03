@@ -14,6 +14,9 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.loss import BaseLoss, IGNORE_INDEX
 from torchtitan.config import CompileConfig
 
+from piper1b.lm_head.piper_optimized_cross_entropy import (
+    piper_optimized_cross_entropy,
+)
 from piper1b.lm_head.te_cross_entropy import parallel_cross_entropy
 
 
@@ -41,6 +44,48 @@ class TECrossEntropyLoss(BaseLoss):
             reduce_loss=False,
             ignore_idx=IGNORE_INDEX,
         ).sum()
+
+
+class PiperOptimizedCrossEntropyLoss(BaseLoss):
+    """Single-GPU TE-derived CE optimized for Piper's BF16 gradient boundary."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseLoss.Config):
+        pass
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        compile_config: CompileConfig | None = None,
+    ):
+        pass
+
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: float | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if isinstance(pred, DTensor) or isinstance(labels, DTensor):
+            raise ValueError(
+                "PiperOptimizedCrossEntropyLoss does not support DTensor"
+            )
+        if global_valid_tokens is None:
+            raise ValueError(
+                "PiperOptimizedCrossEntropyLoss requires global_valid_tokens"
+            )
+        if not isinstance(global_valid_tokens, float):
+            raise ValueError(
+                "PiperOptimizedCrossEntropyLoss currently supports one GPU"
+            )
+        loss = piper_optimized_cross_entropy(
+            pred,
+            labels,
+            gradient_scale=1.0 / global_valid_tokens,
+            ignore_idx=IGNORE_INDEX,
+        )
+        return loss, {}
 
 
 class FusedLinearCrossEntropyLoss(BaseLoss):
@@ -150,4 +195,8 @@ class _LMHeadGradientBackprop(torch.autograd.Function):
         return hidden_gradient * grad_output, None, None
 
 
-__all__ = ["FusedLinearCrossEntropyLoss", "TECrossEntropyLoss"]
+__all__ = [
+    "FusedLinearCrossEntropyLoss",
+    "PiperOptimizedCrossEntropyLoss",
+    "TECrossEntropyLoss",
+]

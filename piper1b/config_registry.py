@@ -43,6 +43,7 @@ from torchtitan.trainer import Trainer
 
 from piper1b.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
+    PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
 )
 
@@ -132,6 +133,14 @@ def qwen3_piper_1b_te_fused_ce() -> Trainer.Config:
     )
 
 
+def qwen3_piper_1b_piper_optimized_te_ce() -> Trainer.Config:
+    """Full-token lm_head followed by Piper-optimized TE-derived CE."""
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="piper_optimized_te_ce",
+    )
+
+
 def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
     model_spec = ModelSpec(
         name="qwen3",
@@ -156,6 +165,8 @@ def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
         )
     elif loss_kind == "te_fused_ce":
         loss = TECrossEntropyLoss.Config()
+    elif loss_kind == "piper_optimized_te_ce":
+        loss = PiperOptimizedCrossEntropyLoss.Config()
     else:
         raise ValueError(f"Unknown piper-1B loss kind: {loss_kind}")
 

@@ -27,10 +27,15 @@ from piper1b.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_full_logits,
     qwen3_piper_1b_fused_linear_ce,
+    qwen3_piper_1b_piper_optimized_te_ce,
     qwen3_piper_1b_te_fused_ce,
     qwen3_piper_1b_unfused_qkv,
 )
-from piper1b.lm_head.losses import FusedLinearCrossEntropyLoss, TECrossEntropyLoss
+from piper1b.lm_head.losses import (
+    FusedLinearCrossEntropyLoss,
+    PiperOptimizedCrossEntropyLoss,
+    TECrossEntropyLoss,
+)
 from torchtitan.components.loss import (
     ChunkedLossWrapper,
     CrossEntropyLoss,
@@ -40,7 +45,7 @@ from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
 class ScenarioTests(unittest.TestCase):
-    def test_piper_lm_head_has_three_full_token_configs(self) -> None:
+    def test_piper_lm_head_has_four_full_token_configs(self) -> None:
         scenario = scenario_by_name("piper1b_lm_head")
         self.assertEqual(
             [arm.name for arm in scenario.arms],
@@ -48,6 +53,7 @@ class ScenarioTests(unittest.TestCase):
                 "baseline",
                 "fused_linear_ce",
                 "te_fused_ce",
+                "piper_optimized_te_ce",
             ],
         )
         self.assertEqual(scenario.workload.config, "qwen3_piper_1b_full_logits")
@@ -58,11 +64,16 @@ class ScenarioTests(unittest.TestCase):
                 None,
                 "qwen3_piper_1b_fused_linear_ce",
                 "qwen3_piper_1b_te_fused_ce",
+                "qwen3_piper_1b_piper_optimized_te_ce",
             ],
         )
         self.assertEqual(
             scenario.arm("te_fused_ce").trace_kernel_markers,
             ("online_softmax_kernel", "cross_entropy_kernel"),
+        )
+        self.assertEqual(
+            scenario.arm("piper_optimized_te_ce").trace_kernel_markers,
+            ("online_softmax_kernel", "piper_optimized_cross_entropy_kernel"),
         )
 
     def test_piper_lm_head_configs_use_expected_losses(self) -> None:
@@ -70,6 +81,7 @@ class ScenarioTests(unittest.TestCase):
         default = qwen3_piper_1b().loss
         fused = qwen3_piper_1b_fused_linear_ce().loss
         te = qwen3_piper_1b_te_fused_ce().loss
+        optimized = qwen3_piper_1b_piper_optimized_te_ce().loss
 
         self.assertIsInstance(full, CrossEntropyLoss.Config)
         self.assertIsInstance(default, CrossEntropyLoss.Config)
@@ -77,13 +89,17 @@ class ScenarioTests(unittest.TestCase):
         self.assertIsNone(fused.batch_chunk_size)
         self.assertIsNone(fused.chunking_method)
         self.assertIsInstance(te, TECrossEntropyLoss.Config)
+        self.assertIsInstance(optimized, PiperOptimizedCrossEntropyLoss.Config)
 
         fused_loss = fused.build(compile_config=None)
         te_loss = te.build(compile_config=None)
+        optimized_loss = optimized.build(compile_config=None)
         self.assertIsInstance(fused_loss, LossWithLMHead)
         self.assertNotIsInstance(fused_loss, ChunkedLossWrapper)
         self.assertNotIsInstance(te_loss, LossWithLMHead)
         self.assertNotIsInstance(te_loss, ChunkedLossWrapper)
+        self.assertNotIsInstance(optimized_loss, LossWithLMHead)
+        self.assertNotIsInstance(optimized_loss, ChunkedLossWrapper)
 
     def test_piper_qkv_compares_unfused_baseline_to_fused_config(self) -> None:
         scenario = scenario_by_name("piper1b_qkv")

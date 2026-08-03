@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 import torch.nn.functional as F
 
+from piper1b.lm_head.piper_optimized_cross_entropy import (
+    piper_optimized_cross_entropy,
+)
 from piper1b.lm_head.te_cross_entropy import parallel_cross_entropy
 
 
@@ -93,6 +96,18 @@ def main() -> None:
         loss.backward()
         return loss
 
+    def piper_optimized_te_ce() -> torch.Tensor:
+        logits = F.linear(hidden, weight).reshape(
+            args.batch, args.seq_len, args.vocab_size
+        )
+        loss = piper_optimized_cross_entropy(
+            logits,
+            labels.reshape(args.batch, args.seq_len),
+            gradient_scale=1.0 / num_tokens,
+        )
+        loss.backward()
+        return loss
+
     def benchmark(name: str, function) -> dict[str, float | int | str]:
         for _ in range(args.warmup):
             reset_grads()
@@ -125,6 +140,7 @@ def main() -> None:
         benchmark("baseline", baseline),
         benchmark("fused_linear_ce", fused_linear_ce),
         benchmark("te_fused_ce", te_fused_ce),
+        benchmark("piper_optimized_te_ce", piper_optimized_te_ce),
     ]
     print(
         json.dumps(
