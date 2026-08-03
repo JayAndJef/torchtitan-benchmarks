@@ -353,6 +353,8 @@ class ResumeTests(unittest.TestCase):
         events = []
 
         def fake_process(command, **kwargs):
+            import gzip as gzip_module
+
             kwargs["stdout"].write("Training completed\n")
             arm_dir = Path(command[-1])
             for iteration in (20, 40):
@@ -361,7 +363,49 @@ class ResumeTests(unittest.TestCase):
                     / f"profiling/traces/iteration_{iteration}/rank0_trace.json.gz"
                 )
                 trace.parent.mkdir(parents=True, exist_ok=True)
-                trace.touch()
+                trace_events = []
+                slot = 0
+                for graph, phase in (
+                    ("backward", "backward"),
+                    ("forward", "forward"),
+                ):
+                    graph_name = f"## Call CompiledFxGraph {graph} ##"
+                    for _ in range(80):
+                        start = slot * 1000
+                        slot += 1
+                        if phase == "backward":
+                            trace_events.append(
+                                {
+                                    "ph": "X",
+                                    "cat": "cpu_op",
+                                    "name": "CompiledFunctionBackward",
+                                    "tid": 1,
+                                    "ts": start,
+                                    "dur": 900,
+                                }
+                            )
+                        trace_events.extend(
+                            (
+                                {
+                                    "ph": "X",
+                                    "cat": "user_annotation",
+                                    "name": graph_name,
+                                    "tid": 1,
+                                    "ts": start + 10,
+                                    "dur": 800,
+                                },
+                                {
+                                    "ph": "X",
+                                    "cat": "gpu_user_annotation",
+                                    "name": graph_name,
+                                    "tid": 100,
+                                    "ts": start + 20,
+                                    "dur": 100,
+                                },
+                            )
+                        )
+                with gzip_module.open(trace, "wt") as trace_file:
+                    json.dump({"traceEvents": trace_events}, trace_file)
             return SimpleNamespace(returncode=0)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
@@ -375,6 +419,10 @@ class ResumeTests(unittest.TestCase):
                 scenario_name="piper1b_rope",
                 arm_name="baseline",
                 out_dir=out_dir,
+                seq_len=512,
+                steps=60,
+                batch=2,
+                extra_args=("--debug.deterministic",),
             )
             execute_run(
                 request,
@@ -399,11 +447,26 @@ class ResumeTests(unittest.TestCase):
             self.assertTrue(any(event.kind == "skip" for event in events))
 
             (out_dir / "baseline.log").write_text("interrupted\n")
+            retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
                 resumed,
-                process_runner=fake_process,
+                process_runner=retry_process,
                 environment=environment,
             )
+            retry_command = retry_process.call_args.args[0]
+            self.assertEqual(
+                retry_command[retry_command.index("--training.seq-len") + 1], "512"
+            )
+            self.assertEqual(
+                retry_command[retry_command.index("--training.steps") + 1], "60"
+            )
+            self.assertEqual(
+                retry_command[
+                    retry_command.index("--training.local-batch-size") + 1
+                ],
+                "2",
+            )
+            self.assertIn("--debug.deterministic", retry_command)
             archived_logs = list(
                 (out_dir / "attempts").glob("*/baseline/baseline.log")
             )
@@ -416,11 +479,25 @@ class ResumeTests(unittest.TestCase):
                 scenario_name=None,
                 arm_name="baseline",
                 resume_dir=out_dir,
-                steps=60,
+                steps=80,
             )
-            with self.assertRaisesRegex(ValueError, "does not match"):
+            with self.assertRaisesRegex(ValueError, "conflicts with the recorded"):
                 execute_run(
                     incompatible,
+                    process_runner=fake_process,
+                    environment=environment,
+                )
+
+            conflicting_args = RunRequest(
+                gpu="0",
+                scenario_name=None,
+                arm_name="baseline",
+                resume_dir=out_dir,
+                extra_args=("--debug.seed", "7"),
+            )
+            with self.assertRaisesRegex(ValueError, "extra_torchtitan_args"):
+                execute_run(
+                    conflicting_args,
                     process_runner=fake_process,
                     environment=environment,
                 )

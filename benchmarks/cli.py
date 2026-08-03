@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import click
 
+from benchmarks.artifacts import record_evaluation_status
 from benchmarks.metrics import evaluate_run, write_results
 from benchmarks.reporting import render_evaluation
 from benchmarks.runner import RunEvent, RunRequest, RunResult, execute_run
@@ -29,24 +30,33 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             show_default=True,
             help="Stable output/provenance label; auto uses the GPU name.",
         ),
-        click.option("--out", "out_dir", type=click.Path(path_type=Path)),
-        click.option("--seq-len", type=int, envvar="SEQ"),
-        click.option("--steps", type=int, envvar="STEPS"),
-        click.option("--batch", type=int, envvar="BATCH"),
+        click.option(
+            "--out",
+            "out_dir",
+            type=click.Path(path_type=Path),
+            envvar="OUT",
+            show_envvar=True,
+        ),
+        click.option("--seq-len", type=int, envvar="SEQ", show_envvar=True),
+        click.option("--steps", type=int, envvar="STEPS", show_envvar=True),
+        click.option("--batch", type=int, envvar="BATCH", show_envvar=True),
         click.option(
             "--titan-dir",
             type=click.Path(path_type=Path),
             envvar="TITAN_DIR",
+            show_envvar=True,
         ),
         click.option(
             "--cache-root",
             type=click.Path(path_type=Path),
             envvar="BENCHMARK_CACHE_ROOT",
+            show_envvar=True,
         ),
         click.option(
             "--compiler-env",
             type=click.Path(path_type=Path),
             envvar="BENCH_COMPILER_ENV",
+            show_envvar=True,
             help="Shell script that enables the host compiler for CUDA extensions.",
         ),
     ]
@@ -71,7 +81,9 @@ def _request(
         scenario_name=scenario_name,
         arm_name=arm_name,
         resume_dir=resume_dir,
-        extra_args=torchtitan_args,
+        extra_args=(
+            None if resume_dir is not None and not torchtitan_args else torchtitan_args
+        ),
         **options,
     )
 
@@ -177,7 +189,14 @@ def run_all_command(
         _request(gpu, torchtitan_args, resume_dir=resume_dir, **options)
     )
     click.echo("\nAll arms validated. Evaluating...")
-    _evaluate(result.out_dir, (), results_path)
+    try:
+        _evaluate(result.out_dir, (), results_path)
+    except click.ClickException as error:
+        record_evaluation_status(
+            result.out_dir, completed=False, error=error.format_message()
+        )
+        raise
+    record_evaluation_status(result.out_dir, completed=True)
 
 
 def _legacy_args(args: list[str]) -> list[str]:

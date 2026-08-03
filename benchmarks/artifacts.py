@@ -11,7 +11,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from benchmarks.scenarios import Arm, Scenario, Workload
+from benchmarks.profile_regions import pooled_region_samples
+from benchmarks.scenarios import Arm, Region, Scenario, Workload
 
 
 MANIFEST_SCHEMA_VERSION = 4
@@ -36,7 +37,14 @@ def _trace_contains(trace_path: Path, marker: str) -> bool:
         return False
 
 
-def validate_arm(arm: Arm, arm_dir: Path, log_path: Path, workload: Workload) -> None:
+def validate_arm(
+    arm: Arm,
+    arm_dir: Path,
+    log_path: Path,
+    workload: Workload,
+    *,
+    regions: tuple[Region, ...] = (),
+) -> None:
     """Reject partial or wrongly configured runs before analysis."""
     if not log_path.is_file():
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
@@ -72,6 +80,13 @@ def validate_arm(arm: Arm, arm_dir: Path, log_path: Path, workload: Workload) ->
             raise RuntimeError(
                 f"{arm.name}: marker kernel {marker!r} absent from profiler traces"
             )
+    if regions:
+        try:
+            pooled_region_samples(traces, regions)
+        except ValueError as error:
+            raise RuntimeError(
+                f"{arm.name}: profiler traces failed structural validation: {error}"
+            ) from error
 
 
 def manifest_data(
@@ -173,6 +188,28 @@ def update_run_state(
         elif "error" in arm_state:
             del arm_state["error"]
     atomic_write_json(out_dir / "run_state.json", state)
+
+
+def record_evaluation_status(
+    out_dir: Path, *, completed: bool, error: str | None = None
+) -> None:
+    """Record automatic evaluation without requiring arm definitions."""
+    path = out_dir / "run_state.json"
+    if not path.exists():
+        return
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as state_error:
+        raise ValueError(
+            f"cannot read run state {path}: {state_error}"
+        ) from state_error
+    now = dt.datetime.now(dt.timezone.utc).strftime("%FT%TZ")
+    status = "completed" if completed else "evaluation_failed"
+    state["status"] = status
+    state["evaluation"] = {"status": status, f"{status}_at": now}
+    if error is not None:
+        state["evaluation"]["error"] = error
+    atomic_write_json(path, state)
 
 
 def archive_incomplete_arm(out_dir: Path, arm_name: str) -> Path | None:

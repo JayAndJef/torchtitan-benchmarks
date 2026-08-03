@@ -60,13 +60,15 @@ def render_evaluation(result: EvaluationResult) -> str:
         lines.extend(
             [
                 "",
-                f"compiled-region GPU span us/call, baseline vs {arm} "
+                f"compiled-region invocation-distribution diagnostics, "
+                f"baseline vs {arm} "
                 f"(pooled over {result.trace_windows['baseline']}+"
                 f"{result.trace_windows[arm]} windows):",
                 "  "
                 + f"{'region':16s} {'n':>4} | {'base mean':>10} {'median':>9} "
                 + f"{'sd':>7} | {'arm mean':>10} {'median':>9} {'sd':>7} | "
-                + f"{'delta':>8} {'ratio':>7} | {'Welch p':>10} {'MWU p':>10} "
+                + f"{'delta':>8} {'ratio':>7} | {'diag Welch p':>12} "
+                + f"{'diag MWU p':>10} "
                 + f"{'d':>6}",
             ]
         )
@@ -77,9 +79,19 @@ def render_evaluation(result: EvaluationResult) -> str:
                 f"{row['base_sd_us']:7.1f} | {row['arm_mean_us']:10.1f} "
                 f"{row['arm_median_us']:9.1f} {row['arm_sd_us']:7.1f} | "
                 f"{row['delta_us']:+8.1f} {row['ratio']:7.4f} | "
-                f"{row['welch_p']:10.3g} {row['mwu_p']:10.3g} "
+                f"{row['welch_p']:12.3g} {row['mwu_p']:10.3g} "
                 f"{row['cohens_d']:6.2f}"
             )
+
+    lines.extend(
+        [
+            "",
+            "Significance limitation: pooled compiled-region invocations share",
+            "training steps and layer structure. Welch/MWU p-values and Cohen's d",
+            "describe invocation distributions; they are not inference from",
+            "independent benchmark repetitions.",
+        ]
+    )
 
     lines.extend(["", "loss trajectories (sanity check, not a measurement):"])
     for arm in result.arms:

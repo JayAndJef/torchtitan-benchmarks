@@ -44,7 +44,7 @@ class RunRequest:
     seq_len: int | None = None
     steps: int | None = None
     batch: int | None = None
-    extra_args: tuple[str, ...] = ()
+    extra_args: tuple[str, ...] | None = None
     titan_dir: Path | None = None
     cache_root: Path | None = None
     compiler_env: Path | None = None
@@ -152,6 +152,41 @@ def _resume_mismatches(
     return mismatches
 
 
+def _resume_workload(
+    manifest: dict,
+    request: RunRequest,
+    environment: Mapping[str, str],
+) -> Workload:
+    """Hydrate unspecified settings and reject explicit resume conflicts."""
+    try:
+        workload = Workload(**manifest["workload"])
+    except (KeyError, TypeError) as error:
+        raise ValueError("resume manifest has an invalid workload") from error
+
+    requested_values = {
+        "seq_len": request.seq_len
+        if request.seq_len is not None
+        else environment.get("SEQ"),
+        "steps": request.steps
+        if request.steps is not None
+        else environment.get("STEPS"),
+        "local_batch_size": request.batch
+        if request.batch is not None
+        else environment.get("BATCH"),
+    }
+    conflicts = [
+        name
+        for name, value in requested_values.items()
+        if value is not None and int(value) != getattr(workload, name)
+    ]
+    if conflicts:
+        raise ValueError(
+            "resume request conflicts with the recorded workload: "
+            + ", ".join(conflicts)
+        )
+    return workload
+
+
 def _resolve_run(
     request: RunRequest,
     environment: Mapping[str, str],
@@ -190,13 +225,25 @@ def _resolve_run(
         scenario_name = request.scenario_name or "piper1b_rope"
 
     scenario = scenario_by_name(str(scenario_name))
-    workload = workload_with_overrides(
-        scenario,
-        seq_len=request.seq_len,
-        steps=request.steps,
-        batch=request.batch,
-        environment=environment,
-    )
+    if existing_manifest is not None:
+        workload = _resume_workload(existing_manifest, request, environment)
+        recorded_extra_args = tuple(
+            existing_manifest.get("extra_torchtitan_args", ())
+        )
+        extra_args = (
+            recorded_extra_args
+            if request.extra_args is None
+            else request.extra_args
+        )
+    else:
+        workload = workload_with_overrides(
+            scenario,
+            seq_len=request.seq_len,
+            steps=request.steps,
+            batch=request.batch,
+            environment=environment,
+        )
+        extra_args = request.extra_args or ()
     scenario = replace(scenario, workload=workload)
     arms = (scenario.arm(request.arm_name),) if request.arm_name else scenario.arms
 
@@ -209,7 +256,7 @@ def _resolve_run(
     )
     commands = {
         arm.name: command_for_arm(
-            scenario.workload, arm, out_dir / arm.name, request.extra_args
+            scenario.workload, arm, out_dir / arm.name, extra_args
         )
         for arm in arms
     }
@@ -221,7 +268,7 @@ def _resolve_run(
             arms,
             hardware,
             metadata,
-            request.extra_args,
+            extra_args,
         )
         if mismatches:
             raise ValueError(
@@ -263,7 +310,7 @@ def execute_run(
             commands,
             hardware,
             metadata,
-            request.extra_args,
+            request.extra_args or (),
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -290,7 +337,13 @@ def execute_run(
         log_path = out_dir / f"{arm.name}.log"
         if resumed:
             try:
-                validate_arm(arm, arm_dir, log_path, scenario.workload)
+                validate_arm(
+                    arm,
+                    arm_dir,
+                    log_path,
+                    scenario.workload,
+                    regions=scenario.regions,
+                )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
                 if archive is not None:
@@ -343,7 +396,13 @@ def execute_run(
                     f"{arm.name}: training exited with {completed.returncode}; "
                     f"see {log_path}"
                 )
-            validate_arm(arm, arm_dir, log_path, scenario.workload)
+            validate_arm(
+                arm,
+                arm_dir,
+                log_path,
+                scenario.workload,
+                regions=scenario.regions,
+            )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(
                 out_dir,
@@ -358,7 +417,7 @@ def execute_run(
         update_run_state(out_dir, state, arm_name=arm.name, status="completed")
         _emit(event_handler, "validated", f"{arm.name}: validated", arm.name)
 
-    update_run_state(out_dir, state, status="completed")
+    update_run_state(out_dir, state, status="arms_completed")
     return RunResult(out_dir, scenario, arms, resumed)
 
 

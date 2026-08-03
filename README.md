@@ -223,6 +223,13 @@ memory, and forward/backward compiled-region timing for every arm. They also
 print each baseline comparison with Welch's t-test, Mann-Whitney U, and
 Cohen's d, and write the same data to `results.json`.
 
+The significance values compare pooled per-layer invocation distributions.
+Invocations within a run share training steps and layer structure, so they are
+not independent experimental repetitions. The reported Welch and
+Mann-Whitney p-values are diagnostics for distribution shifts, not inferential
+evidence about repeated benchmark runs; `results.json` records this limitation
+and the sample unit explicitly. Cohen's d is likewise descriptive here.
+
 The measurement is the GPU span of whole compiled regions (`## Call
 CompiledFxGraph` GPU annotations). Regions are matched structurally: each
 compiled graph's direction is read from the CPU side of the trace (backward

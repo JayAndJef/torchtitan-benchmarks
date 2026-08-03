@@ -24,6 +24,16 @@ LOSS_METRIC = re.compile(r"step:\s*(\d+).*?loss:\s*([0-9.eE+-]+|nan|inf)")
 GRAD_NORM_METRIC = re.compile(
     r"step:\s*(\d+).*?grad_norm:\s*([0-9.eE+-]+|nan|inf)"
 )
+SIGNIFICANCE_METHODOLOGY = {
+    "interpretation": "invocation_distribution_diagnostic",
+    "sample_unit": "compiled_region_invocation",
+    "independence_assumption_met": False,
+    "limitation": (
+        "Invocations share training steps and layer structure within one run. "
+        "Welch and Mann-Whitney p-values are distribution diagnostics, not "
+        "inferential evidence from independent benchmark repetitions."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -56,11 +66,12 @@ class EvaluationResult:
     training: dict[str, TrainingSummary]
     losses: dict[str, list[tuple[int, float]]]
     gradient_norms: dict[str, list[tuple[int, float]]]
+    significance_methodology: dict[str, Any]
     warnings: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "output_dir": self.output_dir,
             "scenario": self.scenario,
             "hardware": self.hardware,
@@ -82,6 +93,7 @@ class EvaluationResult:
                 arm: [{"step": step, "value": value} for step, value in values]
                 for arm, values in self.gradient_norms.items()
             },
+            "significance_methodology": self.significance_methodology,
             "warnings": list(self.warnings),
         }
         return _json_safe(value)
@@ -122,7 +134,7 @@ def region_comparison(
     arm: dict[str, list[float]],
     regions: tuple[Region, ...],
 ) -> list[dict[str, float | int | str]]:
-    """Compare each declared region between an arm and the baseline."""
+    """Compare invocation distributions without claiming independent samples."""
     rows: list[dict[str, float | int | str]] = []
     for region in regions:
         base_values, arm_values = base[region.name], arm[region.name]
@@ -319,6 +331,7 @@ def evaluate_run(
         training=training,
         losses={arm: losses(out_dir / f"{arm}.log") for arm in arms},
         gradient_norms={arm: grad_norms(out_dir / f"{arm}.log") for arm in arms},
+        significance_methodology=SIGNIFICANCE_METHODOLOGY.copy(),
         warnings=tuple(warnings),
     )
 

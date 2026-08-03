@@ -313,12 +313,20 @@ class ComparisonTests(unittest.TestCase):
         self.assertIn("welch_p", comparison)
         self.assertIn("mwu_p", comparison)
         self.assertIn("cohens_d", comparison)
+        methodology = machine["significance_methodology"]
+        self.assertEqual(
+            methodology["interpretation"],
+            "invocation_distribution_diagnostic",
+        )
+        self.assertFalse(methodology["independence_assumption_met"])
+        self.assertEqual(methodology["sample_unit"], "compiled_region_invocation")
         self.assertIsNone(machine["losses"]["optimized"][0]["value"])
         self.assertIn("stable tokens/s", report)
         self.assertIn("forward mean us", report)
         self.assertIn("backward mean us", report)
         self.assertIn("Welch p", report)
         self.assertIn("MWU p", report)
+        self.assertIn("not inference from", report)
         self.assertIn("NON-FINITE LOSS", report)
 
 
