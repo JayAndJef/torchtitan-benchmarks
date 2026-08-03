@@ -1,4 +1,5 @@
 out/
+/reports/
 __pycache__/
 *.pyc
 AGENTS.md
