@@ -147,9 +147,13 @@ PIPER_1B_SWIGLU = Scenario(
         Arm(
             name="fused_grouped_experts",
             override_imports=(
-                "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+                "piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts",
             ),
             expected_override_count=16,
+            trace_kernel_markers=(
+                "_combined_silu_and_mul_forward_kernel",
+                "_combined_silu_and_mul_backward_kernel",
+            ),
         ),
     ),
 )

@@ -1,5 +1,6 @@
 """CPU-only tests for benchmark scenario construction and validation helpers."""
 
+import gzip
 import json
 import os
 import sys
@@ -48,6 +49,11 @@ from torchtitan.components.loss import (
 )
 from torchtitan.config import CompileConfig
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
+
+
+PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
+    "piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts"
+)
 
 
 class ScenarioTests(unittest.TestCase):
@@ -148,9 +154,16 @@ class ScenarioTests(unittest.TestCase):
         fused = scenario.arm("fused_grouped_experts")
         self.assertEqual(
             fused.override_imports,
-            ("torchtitan.overrides.fused_swiglu.fused_grouped_experts",),
+            (PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
         )
         self.assertEqual(fused.expected_override_count, 16)
+        self.assertEqual(
+            fused.trace_kernel_markers,
+            (
+                "_combined_silu_and_mul_forward_kernel",
+                "_combined_silu_and_mul_backward_kernel",
+            ),
+        )
 
     def test_existing_scenarios_use_the_fixed_piper_workload(self) -> None:
         for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU):
@@ -214,7 +227,7 @@ class CommandTests(unittest.TestCase):
         override_index = command.index("--override.imports")
         self.assertEqual(
             command[override_index + 1],
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+            PIPER_OPTIMIZED_SWIGLU_OVERRIDE,
         )
         self.assertNotIn("torchtitan.overrides.fused_swiglu.fused_swiglu", command)
         self.assertEqual(command[-2:], ["--dump-folder", "/out/fused"])
@@ -276,9 +289,7 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
         fused_command = manifest["commands"]["fused_grouped_experts"]
-        self.assertIn(
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts", fused_command
-        )
+        self.assertIn(PIPER_OPTIMIZED_SWIGLU_OVERRIDE, fused_command)
         self.assertIn("--debug.seed", fused_command)
         self.assertEqual(fused_command[-2], "--dump-folder")
 
@@ -291,10 +302,12 @@ class ValidationTests(unittest.TestCase):
             for iteration in ("iteration_20", "iteration_40"):
                 trace = root / "profiling" / "traces" / iteration / "rank0_trace.json.gz"
                 trace.parent.mkdir(parents=True, exist_ok=True)
-                trace.touch()
+                with gzip.open(trace, "wt") as trace_file:
+                    trace_file.write("_combined_silu_and_mul_forward_kernel\n")
+                    trace_file.write("_combined_silu_and_mul_backward_kernel\n")
             # Mirrors torchtitan's log format: "[Override] <import path>: <fqn> ..."
             applied = (
-                "[Override] torchtitan.overrides.fused_swiglu.fused_grouped_experts: "
+                f"[Override] {PIPER_OPTIMIZED_SWIGLU_OVERRIDE}: "
                 "model_spec.model.layers.0.moe ...\n"
             )
             log = root / "fused_grouped_experts.log"
