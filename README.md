@@ -122,11 +122,33 @@ logits, full-token fused linear-CE had dH relative L2 error 0.41% with cosine
 and standard CE arms retain FP32 loss values; full-token TE closely tracks the
 baseline loss and gradient norms.
 
-`piper1b_swiglu` intentionally activates only
-`torchtitan.overrides.fused_swiglu.fused_grouped_experts`. Piper-1B contains
-routed MoE experts, not dense `FeedForward` blocks, so the dense
-`fused_swiglu` override would not apply. The fused arm uses one grouped gate/up
-projection and torchtitan's fused SiLU-and-multiply Triton custom op.
+`piper1b_swiglu` changes only the routed MoE experts; Piper-1B does not contain
+the dense `FeedForward` blocks targeted by TorchTitan's separate
+`fused_swiglu` override. The `fused_grouped_experts` arm uses the benchmark-local
+`piper_optimized_fused_grouped_experts` override derived from TorchTitan's
+grouped-expert implementation under `LICENSE.torchtitan`. Its grouped gate/up
+projection produces the usual interleaved `[gate, up]` tensor. The local
+SiLU-and-multiply backward kernel writes one gradient in that same interleaved
+layout, instead of returning separate gate and up gradients that TorchInductor
+must stack and interleave again before the grouped-MM backward.
+
+The local implementation is bitwise identical to TorchTitan's upstream fused
+grouped experts in forward, input gradient, and all expert weight gradients
+when initialized with the same weights. The compiled custom-op forward and
+backward also match the upstream operation bitwise on both tested GPU
+architectures. Forty-step end-to-end results were:
+
+| GPU | baseline tps | fused tps | forward block | backward block | peak GiB |
+|-----|--------------|-----------|---------------|----------------|----------|
+| A6000 | 10,987.5 | 10,993.5 (+0.05%) | 3,248.4 -> 3,202.3 us (-1.42%) | 8,659.9 -> 8,598.2 us (-0.71%) | 20.04 -> 19.98 |
+| Blackwell | 23,117.5 | 24,417.0 (+5.62%) | 2,434.0 -> 2,323.0 us (-4.56%) | 4,700.7 -> 4,232.2 us (-9.97%) | 20.05 -> 20.00 |
+
+Trace inspection confirms that the former grouped-MM stack/repack kernel is
+absent while both local custom-op kernels execute. On A6000, that removed a
+604.5 us median repack even though the combined-gradient backward kernel itself
+was 61.6 us slower than the upstream split-gradient kernel. The net compiled
+backward block changed from 505.3 us slower than baseline with the upstream
+implementation to 61.8 us faster with the local implementation.
 
 ### RoPE arms
 
@@ -272,17 +294,17 @@ failure on malformed or repartitioned traces).
 
 ## Kernel-level microbenchmarks
 
-Standalone RoPE tooling under `piper1b/rope/` (TE vs Helion vs copy floor). These scripts
-are kept as-is for kernel-level investigation and are **not part of the
-end-to-end benchmark results above** -- they measure isolated kernels with
-CUDA events, not compiled training regions. The TE extension requires a
-C++20-capable host compiler:
+Standalone tooling under `piper1b/` is kept for kernel-level investigation and
+is **not part of the end-to-end benchmark results above** -- these scripts
+measure isolated kernels with CUDA events, not compiled training regions. The
+RoPE TE extension requires a C++20-capable host compiler:
 
 - `benchmark.py` -- correctness gate + timing vs copy floor, 3 shapes
 - `significance.py` -- interleaved A/B, n=200, Welch/MWU/Wilcoxon
 - `piper_size.py` / `piper_burst.py` -- piper-1B shapes; burst separates CPU dispatch from kernel time
 - `accuracy_fp64.py` -- fp64 ground-truth accuracy of both kernels
 - `ablation.py` -- TE partner-load ablation (diagnostic, wrong-by-design output)
+- `piper1b/swiglu/benchmark.py` -- upstream split-gradient versus local combined-gradient SwiGLU kernels
 - `piper1b/lm_head/benchmark.py` -- full-token baseline/PyTorch-fused/TE-fused head timing and memory
 
 ## Findings so far (2026-08-03, RTX A6000 unless noted)
