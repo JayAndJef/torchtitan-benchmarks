@@ -79,10 +79,12 @@ def main() -> None:
             loss.backward()
         return total
 
-    def fused_linear_ce(chunk_size: int | None) -> torch.Tensor:
+    def fused_linear_ce(
+        chunk_size: int | None, *, chunking_method: str | None = None
+    ) -> torch.Tensor:
         options = torch.nn.LinearCrossEntropyOptions(
             batch_chunk_size=chunk_size,
-            chunking_method="auto" if chunk_size is None else None,
+            chunking_method=chunking_method,
         )
         loss = F.linear_cross_entropy(
             hidden,
@@ -94,13 +96,16 @@ def main() -> None:
         loss.backward()
         return loss
 
-    def te_fused_ce() -> torch.Tensor:
+    def te_fused_ce(num_chunks: int) -> torch.Tensor:
         total = torch.zeros((), device=device, dtype=torch.float32)
         hidden_3d = hidden.reshape(args.batch, args.seq_len, args.dim)
         labels_2d = labels.reshape(args.batch, args.seq_len)
+        if args.seq_len % num_chunks != 0:
+            raise ValueError("seq_len must be divisible by the number of TE chunks")
+        chunk_size = args.seq_len // num_chunks
         for hidden_chunk, label_chunk in zip(
-            hidden_3d.split(128, dim=1),
-            labels_2d.split(128, dim=1),
+            hidden_3d.split(chunk_size, dim=1),
+            labels_2d.split(chunk_size, dim=1),
         ):
             logits = F.linear(hidden_chunk, weight)
             loss = parallel_cross_entropy(
@@ -146,7 +151,10 @@ def main() -> None:
     ]
     if args.include_auto:
         rows.append(
-            benchmark("fused_linear_ce_auto", lambda: fused_linear_ce(None))
+            benchmark(
+                "fused_linear_ce_auto",
+                lambda: fused_linear_ce(None, chunking_method="auto"),
+            )
         )
     rows.extend(
         benchmark(
@@ -155,7 +163,19 @@ def main() -> None:
         )
         for chunk_size in args.fused_chunks
     )
-    rows.append(benchmark("te_fused_ce", te_fused_ce))
+    if num_tokens not in args.fused_chunks:
+        rows.append(
+            benchmark(
+                "fused_linear_ce_full",
+                lambda: fused_linear_ce(num_tokens),
+            )
+        )
+    rows.extend(
+        (
+            benchmark("te_fused_ce", lambda: te_fused_ce(8)),
+            benchmark("te_fused_ce_full", lambda: te_fused_ce(1)),
+        )
+    )
     print(
         json.dumps(
             {

@@ -39,7 +39,7 @@ touching the torchtitan checkout.
 | `piper1b_rope` | `baseline`, `helion`, `te` | Existing RoPE comparison. |
 | `piper1b_swiglu` | `baseline`, `fused_grouped_experts` | MoE SwiGLU comparison. |
 | `piper1b_qkv` | `baseline`, `fused_qkv` | Separate Q/K/V projections versus fused QKV. |
-| `piper1b_lm_head` | `baseline`, `chunked`, `fused_linear_ce`, `te_fused_ce` | Piper full logits versus two chunked paths and PyTorch fused linear-CE. |
+| `piper1b_lm_head` | `baseline`, `chunked`, `fused_linear_ce`, `fused_linear_ce_full`, `te_fused_ce`, `te_fused_ce_full` | Piper full logits versus tuned and equal-granularity loss paths. |
 
 The QKV scenario uses `qwen3_piper_1b_unfused_qkv` for its baseline and the
 existing `qwen3_piper_1b` config for the fused arm. Other scenarios retain the
@@ -55,7 +55,9 @@ projection/loss path:
 | `baseline` | Piper-style full lm-head logits followed by standard cross entropy. |
 | `chunked` | TorchTitan `ChunkedLossWrapper`, eight sequence chunks. |
 | `fused_linear_ce` | PyTorch `F.linear_cross_entropy` with an internally tuned token chunk. |
+| `fused_linear_ce_full` | PyTorch `F.linear_cross_entropy` over all 4,096 local tokens. |
 | `te_fused_ce` | The same eight linear chunks as `chunked`, followed by TransformerEngine's fused Triton cross entropy. |
+| `te_fused_ce_full` | One full-token linear projection followed by TransformerEngine's fused Triton cross entropy. |
 
 The TE arm ports the pure-Triton kernels from TransformerEngine commit
 `bffde8f4a0a4eea9036dc753e28269247e5de69d` under
@@ -66,30 +68,46 @@ and logits-gradient generation, but not the lm-head linear itself. Initial
 LM-head arms are single-GPU benchmark paths; TP/PP integration is intentionally
 deferred.
 
-The production-shape tuner selected a 1024-token PyTorch fused chunk: it had
-the best A6000/Blackwell geometric-mean time. Isolated head medians were:
+The production-shape tuner selected a 1024-token PyTorch fused chunk. The
+full-token arms process the same 4,096-token projection as Piper's baseline.
+Isolated head medians from 10 measured iterations were:
 
 | arm | A6000 ms / GiB | Blackwell ms / GiB |
 |-----|-----------------|--------------------|
-| full logits | 77.43 / 8.43 | 32.75 / 8.48 |
-| chunked | 93.19 / 1.63 | 38.55 / 1.67 |
-| fused linear-CE, 1024 | 75.66 / 1.77 | 33.47 / 1.82 |
-| TE fused CE | 68.35 / 1.19 | 29.20 / 1.24 |
+| full logits | 77.47 / 8.43 | 32.93 / 8.48 |
+| chunked | 93.34 / 1.63 | 39.42 / 1.67 |
+| fused linear-CE, 1,024 | 75.70 / 1.77 | 32.67 / 1.82 |
+| fused linear-CE, 4,096 | 74.15 / 4.11 | 32.19 / 4.16 |
+| TE fused CE, 512 | 68.19 / 1.19 | 30.34 / 1.24 |
+| TE fused CE, 4,096 | 53.47 / 4.95 | 24.46 / 5.00 |
 
-The 40-step end-to-end result reverses the isolated ordering because the
-full-logits path avoids the chunk wrapper's detached-leaf, repeated backward,
-and FSDP lifecycle overhead:
+Equal granularity makes TE's isolated head 31.0% faster than full logits on
+A6000 and 25.7% faster on Blackwell. The 40-step end-to-end result still favors
+Piper's full-logits path because it avoids the chunk wrapper's detached-leaf,
+manual backward, gradient bridge, and FSDP lifecycle overhead:
 
 | arm | A6000 stable tps / peak GiB | Blackwell stable tps / peak GiB |
 |-----|------------------------------|---------------------------------|
-| full logits | 10,983.5 / 20.04 | 23,394.0 / 20.05 |
-| chunked | 10,173.5 / 19.17 | 22,022.0 / 19.19 |
-| fused linear-CE | 9,853.0 / 18.86 | 21,371.0 / 18.90 |
-| TE fused CE | 9,781.0 / 19.17 | 21,059.5 / 19.19 |
+| full logits | 10,989.5 / 20.04 | 23,373.5 / 20.05 |
+| chunked | 10,199.0 / 19.17 | 21,979.5 / 19.19 |
+| fused linear-CE, 1,024 | 9,838.0 / 18.86 | 21,130.5 / 18.90 |
+| fused linear-CE, 4,096 | 9,859.0 / 21.19 | 21,149.5 / 21.21 |
+| TE fused CE, 512 | 9,768.0 / 19.17 | 20,980.5 / 19.19 |
+| TE fused CE, 4,096 | 10,365.0 / 22.36 | 21,854.5 / 22.38 |
 
-PyTorch's BF16 fused-linear scalar loss is visibly quantized, but its gradient
-path and the 40-step loss/gradient-norm trajectories remain finite and
-convergent. The TE and standard CE arms retain FP32 loss values.
+The full-token TE arm improves over its 512-token arm by 6.1% on A6000 and
+4.2% on Blackwell, but remains 5.7% and 6.5% behind Piper, respectively. The
+full-token arms also give up the end-to-end memory advantage of chunking.
+
+PyTorch's BF16 fused-linear scalar loss is visibly quantized. Both PyTorch arms
+remain finite and reduce loss, but the full-token arm amplifies small numerical
+differences into a higher gradient-norm trajectory on this high-learning-rate
+MoE workload (step 40: 3.28 A6000 / 3.11 Blackwell, versus 1.62 / 1.54 for
+Piper). A production-shape one-step check found no scaling error: versus full
+logits, full-token fused linear-CE had dH relative L2 error 0.41% with cosine
+0.999991 and dW relative L2 error 0.037% with cosine effectively 1.0. The TE
+and standard CE arms retain FP32 loss values; full-token TE closely tracks the
+baseline loss and gradient norms.
 
 `piper1b_swiglu` intentionally activates only
 `torchtitan.overrides.fused_swiglu.fused_grouped_experts`. Piper-1B contains

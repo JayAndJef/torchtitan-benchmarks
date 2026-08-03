@@ -61,11 +61,6 @@ class FusedLinearCrossEntropyLoss(ChunkedLossWrapper):
         *,
         compile_config: CompileConfig | None = None,
     ):
-        if config.num_chunks != 8:
-            raise ValueError(
-                "FusedLinearCrossEntropyLoss uses PyTorch's internal chunks; "
-                "leave outer num_chunks at its default value"
-            )
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
         self.options = torch.nn.LinearCrossEntropyOptions(

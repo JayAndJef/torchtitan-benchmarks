@@ -170,7 +170,7 @@ PIPER_1B_QKV = Scenario(
 PIPER_1B_LM_HEAD = Scenario(
     name="piper1b_lm_head",
     description=(
-        "Full logits, TorchTitan chunking, PyTorch fused linear-CE, and "
+        "Full logits and tuned versus full-token PyTorch fused linear-CE and "
         "TransformerEngine fused CE on piper-1B."
     ),
     workload=PIPER_1B_LM_HEAD_WORKLOAD,
@@ -183,8 +183,17 @@ PIPER_1B_LM_HEAD = Scenario(
             config="qwen3_piper_1b_fused_linear_ce",
         ),
         Arm(
+            name="fused_linear_ce_full",
+            config="qwen3_piper_1b_fused_linear_ce_full",
+        ),
+        Arm(
             name="te_fused_ce",
             config="qwen3_piper_1b_te_fused_ce",
+            trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
+        ),
+        Arm(
+            name="te_fused_ce_full",
+            config="qwen3_piper_1b_te_fused_ce_full",
             trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
         ),
     ),

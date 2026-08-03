@@ -124,11 +124,27 @@ def qwen3_piper_1b_fused_linear_ce() -> Trainer.Config:
     )
 
 
+def qwen3_piper_1b_fused_linear_ce_full() -> Trainer.Config:
+    """PyTorch-native linear plus cross entropy over all local tokens."""
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="fused_linear_ce_full",
+    )
+
+
 def qwen3_piper_1b_te_fused_ce() -> Trainer.Config:
     """Eight lm_head chunks followed by TransformerEngine fused CE."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="te_fused_ce",
+    )
+
+
+def qwen3_piper_1b_te_fused_ce_full() -> Trainer.Config:
+    """One full-token lm_head projection followed by TE fused CE."""
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="te_fused_ce_full",
     )
 
 
@@ -160,9 +176,20 @@ def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
             batch_chunk_size=1024,
             chunking_method=None,
         )
+    elif loss_kind == "fused_linear_ce_full":
+        loss = FusedLinearCrossEntropyLoss.Config(
+            num_chunks=1,
+            batch_chunk_size=None,
+            chunking_method=None,
+        )
     elif loss_kind == "te_fused_ce":
         loss = ChunkedLossWrapper.Config(
             num_chunks=8,
+            loss_fn=TECrossEntropyLoss.Config(),
+        )
+    elif loss_kind == "te_fused_ce_full":
+        loss = ChunkedLossWrapper.Config(
+            num_chunks=1,
             loss_fn=TECrossEntropyLoss.Config(),
         )
     else:
