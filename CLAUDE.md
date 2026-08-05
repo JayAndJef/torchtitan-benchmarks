@@ -67,6 +67,11 @@ and `NGPU=1`, so runs are single-GPU and the index is stable.
   always runs every arm in the scenario.
 - `run-all` accepts `--resume <out_dir>`; `--resume` and `--out` are mutually
   exclusive.
+- `run-all --all-scenarios` sweeps every scenario in sequence, sharing one
+  timestamp so they group under `out/<timestamp>/`. It is **fail-fast**: the
+  first failing arm aborts the sweep and later scenarios never run. It cannot be
+  combined with `--scenario`, `--out`, `--resume`, or `--results` (note `--out`
+  also trips on an exported `OUT`). Budget roughly 25 minutes for all 11 arms.
 
 Shared options, with env equivalents:
 

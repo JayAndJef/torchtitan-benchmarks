@@ -10,7 +10,13 @@ import click
 from benchmarks.artifacts import record_evaluation_status
 from benchmarks.metrics import evaluate_run, write_results
 from benchmarks.reporting import render_evaluation
-from benchmarks.runner import RunEvent, RunRequest, RunResult, execute_run
+from benchmarks.runner import (
+    RunEvent,
+    RunRequest,
+    RunResult,
+    execute_run,
+    run_timestamp,
+)
 from benchmarks.scenarios import SCENARIOS
 
 
@@ -157,6 +163,12 @@ def evaluate_command(
 @cli.command("run-all", context_settings=PASSTHROUGH_CONTEXT)
 @click.argument("gpu")
 @click.option(
+    "--all-scenarios",
+    "all_scenarios",
+    is_flag=True,
+    help="Run every scenario in sequence, stopping at the first failure.",
+)
+@click.option(
     "--resume",
     "resume_dir",
     type=click.Path(path_type=Path, exists=True, file_okay=False),
@@ -172,15 +184,42 @@ def evaluate_command(
 @click.argument("torchtitan_args", nargs=-1, type=click.UNPROCESSED)
 def run_all_command(
     gpu: str,
+    all_scenarios: bool,
     resume_dir: Path | None,
     results_path: Path | None,
     torchtitan_args: tuple[str, ...],
     **options: Any,
 ) -> None:
-    """Run, validate, and evaluate every arm in one scenario."""
-    result = _execute(
-        _request(gpu, torchtitan_args, resume_dir=resume_dir, **options)
-    )
+    """Run, validate, and evaluate every arm in one or every scenario."""
+    if not all_scenarios:
+        _run_and_evaluate(
+            _request(gpu, torchtitan_args, resume_dir=resume_dir, **options),
+            results_path,
+        )
+        return
+
+    for flag, value in (
+        ("--scenario", options["scenario"]),
+        ("--out", options["out_dir"]),
+        ("--resume", resume_dir),
+        ("--results", results_path),
+    ):
+        if value is not None:
+            raise click.UsageError(f"--all-scenarios cannot be combined with {flag}")
+
+    # One stamp for the sweep so every scenario lands under out/<stamp>/.
+    timestamp = run_timestamp()
+    for name in SCENARIOS:
+        click.echo(f"\n===== scenario: {name} =====")
+        scenario_options: dict[str, Any] = {**options, "scenario": name}
+        _run_and_evaluate(
+            _request(gpu, torchtitan_args, timestamp=timestamp, **scenario_options),
+            None,
+        )
+
+
+def _run_and_evaluate(request: RunRequest, results_path: Path | None) -> None:
+    result = _execute(request)
     click.echo("\nAll arms validated. Evaluating...")
     try:
         _evaluate(result.out_dir, (), results_path)

@@ -14,7 +14,7 @@ from click.testing import CliRunner
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.cli import cli
-from benchmarks.scenarios import PIPER_1B_ROPE
+from benchmarks.scenarios import PIPER_1B_ROPE, SCENARIOS
 
 
 class CliTests(unittest.TestCase):
@@ -90,6 +90,43 @@ class CliTests(unittest.TestCase):
         request = execute.call_args.args[0]
         self.assertIsNone(request.arm_name)
         evaluate.assert_called_once_with(out_dir, (), None)
+
+    def test_all_scenarios_runs_each_scenario_under_one_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli._evaluate"):
+                result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            [request.scenario_name for request in requests], list(SCENARIOS)
+        )
+        self.assertEqual(len({request.timestamp for request in requests}), 1)
+        self.assertIsNotNone(requests[0].timestamp)
+
+    def test_all_scenarios_stops_at_the_first_failing_scenario(self) -> None:
+        with mock.patch(
+            "benchmarks.cli.execute_run", side_effect=RuntimeError("arm failed")
+        ) as execute, mock.patch("benchmarks.cli._evaluate") as evaluate:
+            result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(execute.call_count, 1)
+        evaluate.assert_not_called()
+
+    def test_all_scenarios_rejects_conflicting_options(self) -> None:
+        for conflicting in (
+            ["--scenario", "piper1b_rope"],
+            ["--out", "/tmp/output"],
+            ["--results", "/tmp/results.json"],
+        ):
+            with self.subTest(option=conflicting[0]):
+                result = self.runner.invoke(
+                    cli, ["run-all", "0", "--all-scenarios", *conflicting]
+                )
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("--all-scenarios cannot be combined", result.output)
 
     def test_run_all_does_not_evaluate_a_failed_execution(self) -> None:
         with mock.patch(

@@ -78,6 +78,9 @@ one launches training, so the CLI and the training process cannot diverge.
 # Run, validate, and evaluate every arm in one scenario.
 ./run_bench.sh run-all <gpu-index> --scenario piper1b_rope
 
+# Sweep every scenario in sequence, grouped under one out/<timestamp>/.
+./run_bench.sh run-all <gpu-index> --all-scenarios
+
 # Run one arm only.
 ./run_bench.sh run <gpu-index> --scenario piper1b_qkv --arm fused_qkv
 
@@ -92,6 +95,10 @@ one launches training, so the CLI and the training process cannot diverge.
 `run-all` runs every selected arm, validates completion and traces, then writes
 `results.json` automatically. `run` performs only execution and validation.
 Pass additional TorchTitan arguments after `--`.
+
+`--all-scenarios` runs every scenario in sequence and stops at the first
+failure. It cannot be combined with `--scenario`, `--out`, `--resume`, or
+`--results`.
 
 The runner accepts `--batch`, `--seq-len`, `--steps`, `--out`, `--cache-root`,
 and `--compiler-env`; `--help` shows their environment-variable

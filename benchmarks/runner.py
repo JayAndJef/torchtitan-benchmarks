@@ -44,6 +44,7 @@ class RunRequest:
     steps: int | None = None
     batch: int | None = None
     extra_args: tuple[str, ...] | None = None
+    timestamp: str | None = None
     cache_root: Path | None = None
     compiler_env: Path | None = None
 
@@ -106,18 +107,23 @@ def workload_with_overrides(
     return workload
 
 
+def run_timestamp() -> str:
+    """Directory-safe UTC stamp; shared across a multi-scenario sweep."""
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
 def _default_output_dir(
     scenario: Scenario,
     hardware: str,
     requested: Path | None,
     environment: Mapping[str, str],
+    timestamp: str | None = None,
 ) -> Path:
     if requested is not None:
         return requested.expanduser().resolve()
     if env_out := environment.get("OUT"):
         return Path(env_out).expanduser().resolve()
-    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return BENCH_DIR / "out" / timestamp / scenario.name / hardware
+    return BENCH_DIR / "out" / (timestamp or run_timestamp()) / scenario.name / hardware
 
 
 def _resume_mismatches(
@@ -244,7 +250,7 @@ def _resolve_run(
         requested_hardware = str(existing_manifest.get("hardware", "auto"))
     hardware, metadata = hardware_metadata(paths, request.gpu, requested_hardware)
     out_dir = resume_dir or _default_output_dir(
-        scenario, hardware, request.out_dir, environment
+        scenario, hardware, request.out_dir, environment, request.timestamp
     )
     commands = {
         arm.name: command_for_arm(
