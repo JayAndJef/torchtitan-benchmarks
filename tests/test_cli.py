@@ -38,7 +38,6 @@ class CliTests(unittest.TestCase):
             "SEQ",
             "STEPS",
             "BATCH",
-            "TITAN_DIR",
             "BENCHMARK_CACHE_ROOT",
             "BENCH_COMPILER_ENV",
         ):

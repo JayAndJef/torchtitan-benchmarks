@@ -41,12 +41,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
         click.option("--steps", type=int, envvar="STEPS", show_envvar=True),
         click.option("--batch", type=int, envvar="BATCH", show_envvar=True),
         click.option(
-            "--titan-dir",
-            type=click.Path(path_type=Path),
-            envvar="TITAN_DIR",
-            show_envvar=True,
-        ),
-        click.option(
             "--cache-root",
             type=click.Path(path_type=Path),
             envvar="BENCHMARK_CACHE_ROOT",

@@ -4,9 +4,10 @@ Declarative end-to-end and kernel microbenchmarks for the Piper Qwen3-1B
 TorchTitan port. The repository is out-of-tree: it registers the `piper1b`
 module and experiment overrides without modifying the TorchTitan checkout.
 
-The port currently targets TorchTitan revision `b5eb9d92` and imports private
-TorchTitan Qwen3 helpers. Revalidate `piper1b/config_registry.py` when
-updating TorchTitan.
+TorchTitan is pinned as a submodule at `third_party/torchtitan`. The port imports
+private TorchTitan Qwen3 helpers, so bumping the submodule means revalidating
+`piper1b/config_registry.py`. Every run records the revision it used in
+`manifest.json`.
 
 ## Layout
 
@@ -17,6 +18,7 @@ updating TorchTitan.
 | `analysis/` | Compatibility entry point for evaluation. |
 | `microbench/` | Standalone kernel measurements. |
 | `tests/` | CLI, runner, artifact, metric, and kernel correctness tests. |
+| `third_party/torchtitan/` | Pinned TorchTitan submodule; installed editable into `.venv`. |
 
 The model configuration is registered as `qwen3_piper_1b`. The port represents
 Piper's 1B routed-MoE Qwen3 variant; all scenarios use the same model except
@@ -34,13 +36,41 @@ where an arm explicitly selects an alternate trainer configuration.
 Scenario definitions live in `benchmarks/scenarios.py`. They declare the
 workload, arm-specific trainer config, overrides, and expected trace markers.
 
-## Run
+## Requirements
 
-Install benchmark dependencies into the TorchTitan environment:
+- An NVIDIA driver reporting CUDA 13.0 or newer in the `nvidia-smi` header. The
+  locked wheels are cu130 builds covering `sm_75` through `sm_120`, so Ampere
+  (A6000, A100) and Hopper (H100, H200) work without changes. On an older driver,
+  relock against a cu128 nightly index; results from a relocked environment are
+  not comparable to those already in `out/`.
+- `uv`, and a host compiler satisfying C++20 for the standalone TE CUDA
+  extensions.
+
+torch is pinned to an exact nightly. The PyTorch nightly index retains roughly
+sixty days of builds, so the pin eventually stops resolving and has to be bumped;
+a bump changes the numbers, so rerun the baselines rather than comparing across
+it.
+
+## Setup
 
 ```bash
-pip install -r requirements.txt
+git clone --recurse-submodules https://github.com/JayAndJef/torchtitan-benchmarks
+cd torchtitan-benchmarks
+uv sync
 ```
+
+For a clone made without `--recurse-submodules`:
+
+```bash
+git submodule update --init third_party/torchtitan
+uv sync
+```
+
+`uv sync` creates `.venv` with the pinned torch, the submodule installed editable,
+and the benchmark dependencies. `run_bench.sh` uses that interpreter, and the same
+one launches training, so the CLI and the training process cannot diverge.
+
+## Run
 
 ```bash
 # List available scenarios and arms.
@@ -64,8 +94,8 @@ pip install -r requirements.txt
 `results.json` automatically. `run` performs only execution and validation.
 Pass additional TorchTitan arguments after `--`.
 
-The runner accepts `--batch`, `--seq-len`, `--steps`, `--out`, `--titan-dir`,
-`--cache-root`, and `--compiler-env`; `--help` shows their environment-variable
+The runner accepts `--batch`, `--seq-len`, `--steps`, `--out`, `--cache-root`,
+and `--compiler-env`; `--help` shows their environment-variable
 equivalents. The default workload is batch 4, sequence length 1024, and 40
 steps. It requires at least two profiler windows, so use at least 40 steps
 unless the scenario schedule is also changed.
@@ -95,7 +125,8 @@ research conclusions in this README.
 
 ## Kernel microbenchmarks
 
-Standalone tools measure isolated CUDA kernels and are not end-to-end results:
+Standalone tools measure isolated CUDA kernels and are not end-to-end results.
+Run them with `.venv/bin/python`:
 
 - `piper1b/rope/` contains RoPE correctness, timing, significance, accuracy,
   and ablation tools.
@@ -105,7 +136,7 @@ Standalone tools measure isolated CUDA kernels and are not end-to-end results:
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests
+.venv/bin/python -m unittest discover -s tests
 ```
 
 GPU kernel tests are skipped when CUDA is unavailable. The runner validates

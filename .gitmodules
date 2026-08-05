@@ -1,0 +1,3 @@
+[submodule "third_party/torchtitan"]
+	path = third_party/torchtitan
+	url = https://github.com/JayAndJef/torchtitan.git

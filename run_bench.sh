@@ -7,7 +7,12 @@
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TITAN_DIR="${TITAN_DIR:-$BENCH_DIR/../torchtitan}"
-TITAN_PYTHON="${TITAN_PYTHON:-$TITAN_DIR/.venv/bin/python}"
+PYTHON="$BENCH_DIR/.venv/bin/python"
+
+if [ ! -x "$PYTHON" ]; then
+    echo "run_bench.sh: no environment at $PYTHON; run 'uv sync'." >&2
+    exit 1
+fi
+
 cd "$BENCH_DIR"
-exec "$TITAN_PYTHON" -u -m benchmarks.cli "$@"
+exec "$PYTHON" -u -m benchmarks.cli "$@"

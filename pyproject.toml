@@ -1,0 +1,28 @@
+[project]
+name = "torchtitan-benchmarks"
+version = "0.1.0"
+description = "End-to-end and kernel benchmarks for the Piper Qwen3-1B TorchTitan port"
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.14.0.dev20260729+cu130",
+    # Declared only so tool.uv.sources can route it; sources ignore transitives.
+    "triton==3.8.0+git10f6be36 ; sys_platform == 'linux'",
+    "torchtitan",
+    "helion==1.4.0",
+    "click>=8.1,<9",
+    "scipy>=1.11",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-nightly-cu130"
+url = "https://download.pytorch.org/whl/nightly/cu130"
+explicit = true
+
+[tool.uv.sources]
+# torch's metadata requires triton==3.8.0+git10f6be36, which PyPI cannot host.
+torch = { index = "pytorch-nightly-cu130" }
+triton = { index = "pytorch-nightly-cu130" }
+torchtitan = { path = "third_party/torchtitan", editable = true }

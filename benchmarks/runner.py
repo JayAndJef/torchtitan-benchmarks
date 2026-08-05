@@ -45,7 +45,6 @@ class RunRequest:
     steps: int | None = None
     batch: int | None = None
     extra_args: tuple[str, ...] | None = None
-    titan_dir: Path | None = None
     cache_root: Path | None = None
     compiler_env: Path | None = None
 
@@ -201,7 +200,6 @@ def _resolve_run(
     bool,
 ]:
     paths = RuntimePaths.resolve(
-        titan_dir=request.titan_dir,
         cache_root=request.cache_root,
         compiler_env=request.compiler_env,
         environment=environment,

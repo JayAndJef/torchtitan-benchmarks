@@ -2,4 +2,5 @@ out/
 /reports/
 __pycache__/
 *.pyc
+.venv/
 AGENTS.md

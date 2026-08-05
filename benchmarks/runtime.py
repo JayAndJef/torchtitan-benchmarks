@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from benchmarks.scenarios import Arm, Workload
 
 
 BENCH_DIR = Path(__file__).resolve().parent.parent
+TITAN_DIR = BENCH_DIR / "third_party" / "torchtitan"
 
 
 @dataclass(frozen=True)
@@ -29,16 +31,11 @@ class RuntimePaths:
     def resolve(
         cls,
         *,
-        titan_dir: Path | None = None,
         cache_root: Path | None = None,
         compiler_env: Path | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> RuntimePaths:
         environment = environment or os.environ
-        titan = titan_dir or _optional_path(environment.get("TITAN_DIR"))
-        if titan is None:
-            titan = BENCH_DIR.parent / "torchtitan"
-
         cache = cache_root or _optional_path(environment.get("BENCHMARK_CACHE_ROOT"))
         if cache is None:
             cache = Path(tempfile.gettempdir()) / "torchtitan-benchmarks"
@@ -50,7 +47,7 @@ class RuntimePaths:
 
         return cls(
             bench_dir=BENCH_DIR,
-            titan_dir=titan.expanduser().resolve(),
+            titan_dir=TITAN_DIR,
             cache_root=cache.expanduser().resolve(),
             compiler_env=compiler.expanduser().resolve() if compiler else None,
         )
@@ -121,11 +118,7 @@ def hardware_metadata(
         "requested_gpu": gpu,
         "nvidia_smi": query,
         "torch_version": run_text(
-            [
-                str(paths.titan_dir / ".venv/bin/python"),
-                "-c",
-                "import torch; print(torch.__version__)",
-            ],
+            [sys.executable, "-c", "import torch; print(torch.__version__)"],
             cwd=paths.titan_dir,
         ).strip(),
         "torchtitan_git_rev": run_text(
@@ -156,7 +149,7 @@ def runtime_environment(
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
             "CUDA_VISIBLE_DEVICES": gpu,
             "PYTHONPATH": f"{paths.bench_dir}{':' + pythonpath if pythonpath else ''}",
-            "PATH": f"{paths.titan_dir / '.venv/bin'}:{result['PATH']}",
+            "PATH": f"{Path(sys.executable).parent}:{result['PATH']}",
             "TORCH_EXTENSIONS_DIR": result.get(
                 "TORCH_EXTENSIONS_DIR", str(paths.cache_root / "torch_extensions")
             ),
