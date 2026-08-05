@@ -8,14 +8,16 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "analysis"))
 
 from benchmarks.profile_regions import pooled_region_samples, trace_region_samples
 from benchmarks.scenarios import Region
-from benchmarks.metrics import evaluate_run, write_results
+from benchmarks.metrics import (
+    evaluate_run,
+    losses,
+    region_comparison,
+    write_results,
+)
 from benchmarks.reporting import render_evaluation
-
-import compare_arms
 
 
 REGIONS = (
@@ -214,7 +216,7 @@ class ComparisonTests(unittest.TestCase):
             "backward_block": [90.0, 91.0, 89.0, 90.0, 90.5, 89.5, 90.0, 90.0],
             "forward_block": [10.0, 10.2, 9.8, 10.0, 10.1, 9.9, 10.0, 10.0],
         }
-        rows = compare_arms.region_comparison(base, arm, REGIONS)
+        rows = region_comparison(base, arm, REGIONS)
         self.assertEqual([row["region"] for row in rows], ["backward_block", "forward_block"])
 
         backward, forward = rows
@@ -238,7 +240,7 @@ class ComparisonTests(unittest.TestCase):
                 "step:  1  loss:  7.44780\n"
                 "step:  2  loss:  nan\n"
             )
-            parsed = compare_arms.losses(log)
+            parsed = losses(log)
         self.assertEqual(parsed[0], (1, 7.4478))
         self.assertNotEqual(parsed[1][1], parsed[1][1])  # NaN
 

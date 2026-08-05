@@ -15,7 +15,6 @@ from benchmarks.artifacts import (
     initial_run_state,
     load_manifest,
     load_run_state,
-    trace_files as _trace_files,
     update_run_state,
     validate_arm,
     write_manifest,
@@ -66,11 +65,6 @@ class RunEvent:
 
 EventHandler = Callable[[RunEvent], None]
 ProcessRunner = Callable[..., subprocess.CompletedProcess]
-
-
-def trace_files(arm_dir: Path) -> list[Path]:
-    """Compatibility export for callers of the former monolithic runner."""
-    return _trace_files(arm_dir)
 
 
 def _emit(
@@ -417,14 +411,3 @@ def execute_run(
 
     update_run_state(out_dir, state, status="arms_completed")
     return RunResult(out_dir, scenario, arms, resumed)
-
-
-def main(argv: list[str] | None = None) -> None:
-    """Compatibility entry point for ``python -m benchmarks.runner``."""
-    from benchmarks.cli import legacy_main
-
-    legacy_main(args=argv, prog_name="python -m benchmarks.runner")
-
-
-if __name__ == "__main__":
-    main()

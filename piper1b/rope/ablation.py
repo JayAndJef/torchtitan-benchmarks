@@ -18,8 +18,6 @@ sys.path.insert(0, "/data/zejiaqi/torchtitan")
 import torch
 from torch.utils.cpp_extension import load
 
-from torchtitan.overrides.helion_rope import _helion_cossin_rope_fwd
-
 DEV = "cuda"
 ROPE_SOURCE = str(Path(__file__).with_name("te_rope_standalone.cu"))
 te = load(

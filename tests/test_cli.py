@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.cli import _legacy_args, cli
+from benchmarks.cli import cli
 from benchmarks.scenarios import PIPER_1B_ROPE
 
 
@@ -42,13 +42,6 @@ class CliTests(unittest.TestCase):
             "BENCH_COMPILER_ENV",
         ):
             self.assertIn(envvar, result.output)
-
-    def test_legacy_gpu_and_scenario_forms_translate_to_click(self) -> None:
-        self.assertEqual(
-            _legacy_args(["3", "--scenario", "piper1b_qkv"]),
-            ["run", "3", "--scenario", "piper1b_qkv"],
-        )
-        self.assertEqual(_legacy_args(["--list-scenarios"]), ["scenarios"])
 
     def test_run_preserves_torchtitan_passthrough_arguments(self) -> None:
         completed = SimpleNamespace(

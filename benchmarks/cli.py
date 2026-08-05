@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -193,43 +192,5 @@ def run_all_command(
     record_evaluation_status(result.out_dir, completed=True)
 
 
-def _legacy_args(args: list[str]) -> list[str]:
-    if args[:1] == ["--help"]:
-        return args
-    if "--list-scenarios" in args:
-        return ["scenarios"]
-    if args[:1] and args[0] in {"scenarios", "run", "evaluate", "run-all"}:
-        return args
-    return ["run", *args]
-
-
-def legacy_main(
-    args: list[str] | None = None,
-    *,
-    prog_name: str = "run_bench.sh",
-) -> None:
-    """Accept the original positional-GPU form while using Click underneath."""
-    actual_args = list(sys.argv[1:] if args is None else args)
-    cli.main(args=_legacy_args(actual_args), prog_name=prog_name)
-
-
-def legacy_evaluate_main(args: list[str] | None = None) -> None:
-    """Translate the old ``--arms A B`` analyzer syntax to repeated options."""
-    tokens = list(sys.argv[1:] if args is None else args)
-    translated: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token != "--arms":
-            translated.append(token)
-            index += 1
-            continue
-        index += 1
-        while index < len(tokens) and not tokens[index].startswith("--"):
-            translated.extend(("--arm", tokens[index]))
-            index += 1
-    cli.main(args=["evaluate", *translated], prog_name="analysis/compare_arms.py")
-
-
 if __name__ == "__main__":
-    legacy_main(prog_name="python -m benchmarks.cli")
+    cli(prog_name="run_bench.sh")

@@ -12,15 +12,15 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.artifacts import trace_files
 from benchmarks.runner import (
     RunRequest,
     command_for_arm,
     execute_run,
-    trace_files,
     validate_arm,
     write_manifest,
 )
-from analysis.compare_arms import stable_tps, training_metrics
+from benchmarks.metrics import stable_tps, training_metrics
 from benchmarks.scenarios import (
     PIPER_1B_LM_HEAD,
     PIPER_1B_QKV,

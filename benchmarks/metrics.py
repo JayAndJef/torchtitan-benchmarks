@@ -111,7 +111,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def describe(values: list[float]) -> tuple[int, float, float, float]:
-    """Return (n, mean, sd, median) for compatibility with prior analysis."""
+    """Return (n, mean, sd, median) for one sample."""
     count = len(values)
     if not count:
         raise ValueError("cannot summarize an empty sample")

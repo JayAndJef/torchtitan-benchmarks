@@ -15,8 +15,7 @@ private TorchTitan Qwen3 helpers, so bumping the submodule means revalidating
 |---|---|
 | `piper1b/` | Piper Qwen3-1B config port and benchmark-local kernel overrides. |
 | `benchmarks/` | Declarative scenarios, Click CLI, runner, artifacts, metrics, and reporting. |
-| `analysis/` | Compatibility entry point for evaluation. |
-| `microbench/` | Standalone kernel measurements. |
+| `analysis/` | Standalone trace-diagnostic scripts. |
 | `tests/` | CLI, runner, artifact, metric, and kernel correctness tests. |
 | `third_party/torchtitan/` | Pinned TorchTitan submodule; installed editable into `.venv`. |
 

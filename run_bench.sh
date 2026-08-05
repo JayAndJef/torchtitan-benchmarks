@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Compatibility entry point for declarative end-to-end benchmark scenarios.
-#
 # Usage: ./run_bench.sh run-all <gpu-index> --scenario <name>
-# Legacy usage remains supported: ./run_bench.sh <gpu-index> --scenario <name>
 
 set -euo pipefail
 
