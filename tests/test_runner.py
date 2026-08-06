@@ -150,7 +150,8 @@ class ScenarioTests(unittest.TestCase):
     def test_piper_swiglu_uses_only_grouped_experts_override(self) -> None:
         scenario = scenario_by_name("piper1b_swiglu")
         self.assertEqual(
-            [arm.name for arm in scenario.arms], ["baseline", "piper_optimized"]
+            [arm.name for arm in scenario.arms],
+            ["baseline", "piper_optimized", "piper_inductor"],
         )
         fused = scenario.arm("piper_optimized")
         self.assertEqual(
@@ -165,6 +166,18 @@ class ScenarioTests(unittest.TestCase):
                 "_combined_silu_and_mul_backward_kernel",
             ),
         )
+        inductor = scenario.arm("piper_inductor")
+        self.assertEqual(
+            inductor.override_imports,
+            (
+                "piper1b.swiglu.combined_swiglu."
+                "piper_inductor_fused_grouped_experts",
+            ),
+        )
+        self.assertEqual(inductor.expected_override_count, 16)
+        # Plain-ops activation has no distinctive kernel name by design;
+        # the override count is the application check.
+        self.assertEqual(inductor.trace_kernel_markers, ())
 
     def test_existing_scenarios_use_the_fixed_piper_workload(self) -> None:
         for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU):

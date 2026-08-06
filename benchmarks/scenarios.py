@@ -155,6 +155,17 @@ PIPER_1B_SWIGLU = Scenario(
                 "_combined_silu_and_mul_backward_kernel",
             ),
         ),
+        Arm(
+            name="piper_inductor",
+            override_imports=(
+                "piper1b.swiglu.combined_swiglu.piper_inductor_fused_grouped_experts",
+            ),
+            expected_override_count=16,
+            # No trace_kernel_markers: the activation is deliberately plain
+            # ops with no distinctive kernel name; Inductor fuses it into
+            # neighboring generated kernels. The [Override] count is the
+            # application check.
+        ),
     ),
 )
 
