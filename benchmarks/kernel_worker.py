@@ -41,6 +41,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
+    from torch._functorch import config as functorch_config
+
+    # Backward-mode timing re-runs a compiled backward graph with
+    # retain_graph=True; AOT autograd's donated-buffer optimization forbids
+    # re-execution and raises on arms that save intermediates (swiglu's
+    # gate_up). Disabling it changes backward buffer reuse, not the
+    # generated kernels, and applies to every arm alike.
+    functorch_config.donated_buffer = False
+
     from benchmarks.kernel_bench import RunOptions, run_kernel_scenario
     from benchmarks.kernel_results import write_kernel_results
 

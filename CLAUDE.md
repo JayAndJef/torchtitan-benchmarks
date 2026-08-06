@@ -264,7 +264,10 @@ whose `correctness_outputs` returns named tensors for the gates.
   arms and `copy_floor` stay eager on purpose -- they answer the
   kernel-vs-kernel question. lm_head losses are built with the production
   `CompileConfig(components=["loss"])`. `KernelArm.compiled` records the
-  treatment in the manifest.
+  treatment in the manifest. The worker sets
+  `torch._functorch.config.donated_buffer = False`: retained-graph backward
+  timing re-runs compiled backward graphs, which buffer donation forbids.
+  This changes backward memory reuse, not the generated kernels.
 - Arms are timed **round-robin**: one cycle runs every arm once between
   adjacent entries of a preallocated CUDA event matrix, with a single
   synchronize at the end. Drift hits all arms equally, so the per-cycle
