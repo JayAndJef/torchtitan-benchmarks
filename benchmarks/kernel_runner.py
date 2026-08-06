@@ -196,9 +196,22 @@ def execute_kernel_run(
         )
         scenario_environment = base_environment
         if scenario.requires_gcc_toolset:
-            scenario_environment = add_compiler_environment(
-                base_environment, paths.compiler_env
-            )
+            # Containment: a broken compiler environment is this scenario's
+            # failure, not grounds for abandoning the ones that do not need it.
+            try:
+                scenario_environment = add_compiler_environment(
+                    base_environment, paths.compiler_env
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                outcome = KernelScenarioOutcome(
+                    scenario=name,
+                    out_dir=out_dir,
+                    result=None,
+                    error=f"{name}: cannot prepare the compiler environment: {error}",
+                )
+                _emit(event_handler, "error", f"ERROR {outcome.error}")
+                outcomes.append(outcome)
+                continue
 
         log_path = out_dir / "kernel_bench.log"
         _emit(event_handler, "command", " ".join(command))
@@ -228,13 +241,23 @@ def execute_kernel_run(
         elif result is None and error is None:
             error = f"{name}: worker wrote no results; see {log_path}"
 
-        outcomes.append(
-            KernelScenarioOutcome(
-                scenario=name,
-                out_dir=out_dir,
-                result=result,
-                correctness_failed=completed.returncode == 3,
-                error=error,
-            )
+        outcome = KernelScenarioOutcome(
+            scenario=name,
+            out_dir=out_dir,
+            result=result,
+            correctness_failed=completed.returncode == 3,
+            error=error,
         )
+        # Report a failure the moment it happens. Scenarios continue past one
+        # another, so holding this until the end would show a first-scenario
+        # failure only after every later scenario had run.
+        if outcome.error:
+            _emit(event_handler, "error", f"ERROR {name}: {outcome.error}")
+        elif outcome.correctness_failed:
+            _emit(
+                event_handler,
+                "error",
+                f"ERROR {name}: correctness gates failed; see the report below",
+            )
+        outcomes.append(outcome)
     return tuple(outcomes)

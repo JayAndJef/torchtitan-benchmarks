@@ -120,6 +120,77 @@ class KernelCliTests(unittest.TestCase):
 
 
 class KernelRunnerTests(unittest.TestCase):
+    def test_failures_are_reported_before_later_scenarios_run(self) -> None:
+        """A first-scenario failure must not wait for the whole sweep."""
+        events = []
+
+        def fake_process(command, **kwargs):
+            name = command[command.index("--scenario") + 1]
+            if name == "rope":
+                kwargs["stdout"].write("boom\n")
+                return SimpleNamespace(returncode=1)
+            out_dir = Path(command[command.index("--out-dir") + 1])
+            (out_dir / "results.json").write_text(
+                json.dumps(sample_result().to_dict())
+            )
+            return SimpleNamespace(returncode=0)
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
+            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+        ):
+            compiler_env = Path(temporary) / "enable.sh"
+            compiler_env.write_text("# no-op compiler environment\n")
+            execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("rope", "swiglu"),
+                    timestamp="stamp",
+                    compiler_env=compiler_env,
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+                event_handler=events.append,
+            )
+        kinds = [(event.kind, event.message) for event in events]
+        error_index = next(
+            index for index, (kind, _) in enumerate(kinds) if kind == "error"
+        )
+        swiglu_index = next(
+            index
+            for index, (kind, message) in enumerate(kinds)
+            if kind == "arm" and "swiglu" in message
+        )
+        self.assertLess(error_index, swiglu_index)
+        self.assertIn("boom", kinds[error_index][1])
+
+    def test_broken_compiler_env_fails_only_its_scenario(self) -> None:
+        def fake_process(command, **kwargs):
+            out_dir = Path(command[command.index("--out-dir") + 1])
+            (out_dir / "results.json").write_text(
+                json.dumps(sample_result().to_dict())
+            )
+            return SimpleNamespace(returncode=0)
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
+            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+        ):
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("rope", "swiglu"),
+                    timestamp="stamp",
+                    compiler_env=Path(temporary) / "missing.sh",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+            )
+        by_name = {outcome.scenario: outcome for outcome in outcomes}
+        self.assertTrue(by_name["rope"].failed)
+        self.assertIn("compiler environment", by_name["rope"].error)
+        self.assertFalse(by_name["swiglu"].failed)
+
     def test_worker_command_carries_pinning_env_and_manifest(self) -> None:
         captured = {}
 

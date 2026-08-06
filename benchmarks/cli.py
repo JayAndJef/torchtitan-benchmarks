@@ -92,7 +92,7 @@ def _request(
 def _show_event(event: RunEvent) -> None:
     if event.kind == "arm":
         click.echo()
-    click.echo(event.message)
+    click.echo(event.message, err=event.kind == "error")
 
 
 def _execute(request: RunRequest) -> RunResult:
@@ -293,13 +293,12 @@ def kernel_bench_command(
     except (OSError, ValueError, RuntimeError) as error:
         raise click.ClickException(str(error)) from error
 
+    # Errors were streamed as they happened; only reports are rendered here.
     for outcome in outcomes:
-        click.echo()
         if outcome.result is not None:
+            click.echo()
             click.echo(render_kernel_results(outcome.result))
             click.echo(f"\nmachine-readable results: {outcome.out_dir}/results.json")
-        if outcome.error:
-            click.echo(f"ERROR {outcome.scenario}: {outcome.error}", err=True)
 
     failures = [outcome for outcome in outcomes if outcome.failed]
     if failures:
