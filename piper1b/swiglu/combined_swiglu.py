@@ -31,9 +31,11 @@ from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
     "CombinedSwiGLUFusedGroupedExperts",
+    "InductorSwiGLUFusedGroupedExperts",
     "combined_silu_and_mul_backward_kernel",
     "combined_silu_and_mul_forward_kernel",
     "combined_silu_and_mul_op",
+    "piper_inductor_fused_grouped_experts",
     "piper_optimized_fused_grouped_experts",
 ]
 
@@ -398,6 +400,62 @@ class CombinedSwiGLUFusedGroupedExperts(GroupedExperts):
             )
 
 
+class InductorSwiGLUFusedGroupedExperts(CombinedSwiGLUFusedGroupedExperts):
+    """Fused w13 projection with a plain-ops SwiGLU left to Inductor.
+
+    Keeps the single fused gate/up grouped GEMM (same ``w13`` parameter and
+    state-dict merge hooks as ``CombinedSwiGLUFusedGroupedExperts``) but
+    computes ``silu(gate) * up`` with ordinary torch ops instead of an opaque
+    custom op. Under ``torch.compile`` Inductor can then fuse the activation
+    into neighboring kernels -- including the recompute that SelectiveAC
+    schedules in the backward graph, which the custom-op variant must re-run
+    as a standalone kernel.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(CombinedSwiGLUFusedGroupedExperts.Config):
+        pass
+
+    def forward(
+        self,
+        x_RD: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        if isinstance(self.w13, DTensor):
+            w13 = self.w13.to_local()
+            assert isinstance(self.w2_EDF, DTensor)
+            w2_EDF = self.w2_EDF.to_local()
+        else:
+            w13 = self.w13
+            w2_EDF = self.w2_EDF
+
+        num_experts, hidden_dim, _, dim = w13.shape
+        offsets_E = torch.cumsum(
+            num_tokens_per_expert_E,
+            dim=0,
+            dtype=torch.int32,
+        )
+        w13_E_D_2F = w13.bfloat16().reshape(
+            num_experts,
+            hidden_dim * 2,
+            dim,
+        ).transpose(-2, -1)
+        gate_up_R2F = torch._grouped_mm(
+            x_RD.bfloat16(),
+            w13_E_D_2F,
+            offs=offsets_E,
+        )
+        # Interleaved columns: even = gate, odd = up (matches the combined
+        # Triton kernel's layout). Plain ops keep this fusible by Inductor.
+        gate_RF, up_RF = gate_up_R2F.reshape(-1, hidden_dim, 2).unbind(-1)
+        h_RF = torch.nn.functional.silu(gate_RF) * up_RF
+        return torch._grouped_mm(
+            h_RF,
+            w2_EDF.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
+        ).type_as(x_RD)
+
+
 def _fused_param_init(param_init: dict | None) -> dict | None:
     if param_init is None:
         return None
@@ -437,6 +495,29 @@ def piper_optimized_fused_grouped_experts(
     fused = derive(
         cfg,
         CombinedSwiGLUFusedGroupedExperts.Config,
+        param_init=_fused_param_init(cfg.param_init),
+    )
+    if cfg.sharding_config is not None:
+        fused.sharding_config = _fused_sharding(cfg.sharding_config)
+    return fused
+
+
+@override(
+    target=GroupedExperts.Config,
+    description=(
+        "Fuse routed-expert gate/up projection and compute SwiGLU with plain "
+        "ops so Inductor can fuse the activation."
+    ),
+)
+def piper_inductor_fused_grouped_experts(
+    cfg: GroupedExperts.Config,
+) -> GroupedExperts.Config:
+    if type(cfg) is not GroupedExperts.Config:
+        return cfg
+
+    fused = derive(
+        cfg,
+        InductorSwiGLUFusedGroupedExperts.Config,
         param_init=_fused_param_init(cfg.param_init),
     )
     if cfg.sharding_config is not None:

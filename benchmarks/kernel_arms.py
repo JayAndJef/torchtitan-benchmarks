@@ -41,6 +41,7 @@ from piper1b.lm_head.losses import (
 )
 from piper1b.swiglu.combined_swiglu import (
     CombinedSwiGLUFusedGroupedExperts,
+    InductorSwiGLUFusedGroupedExperts,
     combined_silu_and_mul_backward_kernel,
     combined_silu_and_mul_forward_kernel,
 )
@@ -495,6 +496,17 @@ def build_swiglu_piper_optimized(
     )
     return _swiglu_module_arm(
         "piper_optimized", module, inputs, _fused_weight_grads
+    )
+
+
+def build_swiglu_piper_inductor(
+    spec: Piper1BSpec, inputs: SwigluInputs
+) -> BuiltArm:
+    module = _build_swiglu_module(
+        InductorSwiGLUFusedGroupedExperts, spec, inputs
+    )
+    return _swiglu_module_arm(
+        "piper_inductor", module, inputs, _fused_weight_grads
     )
 
 

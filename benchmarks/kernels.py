@@ -301,6 +301,21 @@ SWIGLU = KernelScenario(
             ),
         ),
         KernelArm(
+            name="piper_inductor",
+            description="Piper layer: fused w13 GEMM, plain-ops SwiGLU left to Inductor",
+            builder="benchmarks.kernel_arms:build_swiglu_piper_inductor",
+            modes=MODES,
+            compiled=True,
+            correctness=(
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="baseline",
+                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
             name="titan_triton",
             description="TorchTitan SwiGLU Triton kernel alone (stride-2 gate/up views)",
             builder="benchmarks.kernel_arms:build_swiglu_titan_triton",
