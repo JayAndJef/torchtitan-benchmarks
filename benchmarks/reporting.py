@@ -37,21 +37,42 @@ def render_evaluation(result: EvaluationResult) -> str:
             "benchmark summary:",
             "  "
             + f"{'arm':22s} {'stable tokens/s':>15s} {'n':>4s} {'ratio':>8s} "
-            + f"{'peak GiB':>9s} {'forward mean us':>16s} {'backward mean us':>17s}",
+            + f"{'peak GiB':>9s}",
         ]
     )
     for arm in result.arms:
         training = result.training[arm]
-        forward = result.regions[arm].get("forward_block")
-        backward = result.regions[arm].get("backward_block")
         lines.append(
             f"  {arm:22s} "
             f"{_value(training.stable_tokens_per_second, 15)} "
             f"{training.stable_sample_count:4d} "
             f"{_value(training.baseline_ratio, 8, 4)} "
-            f"{_value(training.peak_memory_gib, 9, 2)} "
-            f"{_value(forward.mean_us if forward else None, 16)} "
-            f"{_value(backward.mean_us if backward else None, 17)}"
+            f"{_value(training.peak_memory_gib, 9, 2)}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "gpu kernel time (host-speed-immune; compare kernels with this):",
+            "  "
+            + f"{'arm':22s} {'kernel ms/step':>14s} {'vs base':>8s} "
+            + f"{'regions ms':>11s} {'other ms':>9s} {'fwd kernel us':>14s} "
+            + f"{'bwd kernel us':>14s} {'launch us':>10s}",
+        ]
+    )
+    for arm in result.arms:
+        gpu = result.gpu_time[arm]
+        forward = result.regions[arm].get("forward_block")
+        backward = result.regions[arm].get("backward_block")
+        lines.append(
+            f"  {arm:22s} "
+            f"{_value(gpu.kernel_ms_per_step, 14, 2)} "
+            f"{_value(gpu.baseline_kernel_ratio, 8, 4)} "
+            f"{_value(gpu.region_kernel_ms_per_step, 11, 2)} "
+            f"{_value(gpu.other_kernel_ms_per_step, 9, 2)} "
+            f"{_value(forward.kernel.mean_us if forward else None, 14)} "
+            f"{_value(backward.kernel.mean_us if backward else None, 14)} "
+            f"{_value(gpu.launch_latency_us, 10, 2)}"
         )
 
     for arm in result.arms:
@@ -60,27 +81,27 @@ def render_evaluation(result: EvaluationResult) -> str:
         lines.extend(
             [
                 "",
-                f"compiled-region invocation-distribution diagnostics, "
-                f"baseline vs {arm} "
+                f"compiled-region distributions, baseline vs {arm} "
                 f"(pooled over {result.trace_windows['baseline']}+"
                 f"{result.trace_windows[arm]} windows):",
                 "  "
-                + f"{'region':16s} {'n':>4} | {'base mean':>10} {'median':>9} "
-                + f"{'sd':>7} | {'arm mean':>10} {'median':>9} {'sd':>7} | "
-                + f"{'delta':>8} {'ratio':>7} | {'diag Welch p':>12} "
-                + f"{'diag MWU p':>10} "
+                + f"{'region':16s} {'n':>4} | {'base kern':>10} {'arm kern':>9} "
+                + f"{'ratio':>7} | {'base span':>10} {'arm span':>9} "
+                + f"{'ratio':>7} | {'diag Welch p':>12} {'diag MWU p':>10} "
                 + f"{'d':>6}",
             ]
         )
         for row in result.comparisons[arm]:
             lines.append(
                 f"  {row['region']:16s} {row['n_arm']:>4} | "
-                f"{row['base_mean_us']:10.1f} {row['base_median_us']:9.1f} "
-                f"{row['base_sd_us']:7.1f} | {row['arm_mean_us']:10.1f} "
-                f"{row['arm_median_us']:9.1f} {row['arm_sd_us']:7.1f} | "
-                f"{row['delta_us']:+8.1f} {row['ratio']:7.4f} | "
-                f"{row['welch_p']:12.3g} {row['mwu_p']:10.3g} "
-                f"{row['cohens_d']:6.2f}"
+                f"{row['base_kernel_mean_us']:10.1f} "
+                f"{row['arm_kernel_mean_us']:9.1f} "
+                f"{_value(row['kernel_ratio'], 7, 4)} | "
+                f"{row['base_span_mean_us']:10.1f} "
+                f"{row['arm_span_mean_us']:9.1f} "
+                f"{_value(row['span_ratio'], 7, 4)} | "
+                f"{row['span_welch_p']:12.3g} {row['span_mwu_p']:10.3g} "
+                f"{row['span_cohens_d']:6.2f}"
             )
 
     lines.extend(
@@ -88,7 +109,7 @@ def render_evaluation(result: EvaluationResult) -> str:
             "",
             "Significance limitation: pooled compiled-region invocations share",
             "training steps and layer structure. Welch/MWU p-values and Cohen's d",
-            "describe invocation distributions; they are not inference from",
+            "describe span distributions; they are not inference from",
             "independent benchmark repetitions.",
         ]
     )
@@ -109,6 +130,8 @@ def render_evaluation(result: EvaluationResult) -> str:
             "",
             "Note: region rows time whole compiled forward/backward blocks; they",
             "are not measurements of an individual generated Inductor kernel.",
+            "Span times include idle gaps where the GPU waited on the host, so",
+            "they move with host speed; kernel times count only GPU execution.",
         ]
     )
     return "\n".join(lines)

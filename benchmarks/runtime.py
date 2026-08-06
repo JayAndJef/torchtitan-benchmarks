@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,6 +56,56 @@ class RuntimePaths:
 
 def _optional_path(value: str | None) -> Path | None:
     return Path(value) if value else None
+
+
+PCI_BUS_ID = re.compile(
+    r"^([0-9a-fA-F]{4,8}):([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])$"
+)
+
+
+@dataclass(frozen=True)
+class CpuPinning:
+    """Command prefix binding training to the GPU's NUMA node.
+
+    The training step is host-bound at benchmark sizes, so where the scheduler
+    places the process decides tokens/s. Binding CPU and memory to the GPU's
+    own NUMA node removes that draw. An empty prefix means unpinned; the
+    description says why and is recorded in the manifest, where resume treats
+    it as a comparability boundary like the GPU itself.
+    """
+
+    prefix: tuple[str, ...]
+    description: str
+
+
+def resolve_cpu_pinning(gpu: str, *, sysfs_root: Path = Path("/sys")) -> CpuPinning:
+    if shutil.which("numactl") is None:
+        return CpuPinning((), "none: numactl not available")
+    bus_id = run_text(
+        [
+            "nvidia-smi",
+            "--id=" + gpu,
+            "--query-gpu=pci.bus_id",
+            "--format=csv,noheader",
+        ]
+    ).strip()
+    match = PCI_BUS_ID.match(bus_id)
+    if match is None:
+        return CpuPinning((), f"none: cannot resolve PCI bus id ({bus_id})")
+    if int(match.group(1), 16) > 0xFFFF:
+        return CpuPinning((), f"none: unsupported PCI domain in {bus_id}")
+    device = f"{match.group(1)[-4:]}:{match.group(2)}".lower()
+    node_path = sysfs_root / "bus/pci/devices" / device / "numa_node"
+    try:
+        node = int(node_path.read_text())
+    except (OSError, ValueError):
+        return CpuPinning((), f"none: cannot read {node_path}")
+    if node < 0:
+        return CpuPinning((), f"none: {device} reports no NUMA affinity")
+    return CpuPinning(
+        ("numactl", f"--cpunodebind={node}", f"--membind={node}"),
+        f"numactl --cpunodebind={node} --membind={node}",
+    )
 
 
 def command_for_arm(

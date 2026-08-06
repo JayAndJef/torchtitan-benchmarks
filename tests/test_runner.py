@@ -20,6 +20,7 @@ from benchmarks.runner import (
     validate_arm,
     write_manifest,
 )
+from benchmarks.runtime import CpuPinning, resolve_cpu_pinning
 from benchmarks.metrics import stable_tps, training_metrics
 from benchmarks.scenarios import (
     PIPER_1B_LM_HEAD,
@@ -258,6 +259,61 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(command[-1], f"/out/{arm.name}")
 
 
+class CpuPinningTests(unittest.TestCase):
+    def _sysfs(self, root: Path, device: str, node: str) -> Path:
+        node_dir = root / "bus/pci/devices" / device
+        node_dir.mkdir(parents=True)
+        (node_dir / "numa_node").write_text(node + "\n")
+        return root
+
+    def test_pins_to_the_gpu_numa_node(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.runtime.run_text", return_value="00000000:E3:00.0\n"
+        ), mock.patch("benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"):
+            sysfs = self._sysfs(Path(temporary), "0000:e3:00.0", "1")
+            pinning = resolve_cpu_pinning("7", sysfs_root=sysfs)
+        self.assertEqual(
+            pinning.prefix, ("numactl", "--cpunodebind=1", "--membind=1")
+        )
+        self.assertEqual(pinning.description, "numactl --cpunodebind=1 --membind=1")
+
+    def test_unpinned_when_prerequisites_are_missing(self) -> None:
+        with mock.patch("benchmarks.runtime.shutil.which", return_value=None):
+            self.assertEqual(
+                resolve_cpu_pinning("7").prefix, ()
+            )
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.runtime.run_text",
+            return_value="unavailable: nvidia-smi not found",
+        ), mock.patch(
+            "benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"
+        ):
+            pinning = resolve_cpu_pinning("7", sysfs_root=Path(temporary))
+        self.assertEqual(pinning.prefix, ())
+        self.assertIn("cannot resolve PCI bus id", pinning.description)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.runtime.run_text", return_value="00000000:E3:00.0\n"
+        ), mock.patch(
+            "benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"
+        ):
+            no_affinity = self._sysfs(Path(temporary), "0000:e3:00.0", "-1")
+            pinning = resolve_cpu_pinning("7", sysfs_root=no_affinity)
+        self.assertEqual(pinning.prefix, ())
+        self.assertIn("no NUMA affinity", pinning.description)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.runtime.run_text", return_value="00010001:03:00.0\n"
+        ), mock.patch(
+            "benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"
+        ):
+            truncatable = self._sysfs(Path(temporary), "0001:03:00.0", "0")
+            pinning = resolve_cpu_pinning("7", sysfs_root=truncatable)
+        self.assertEqual(pinning.prefix, ())
+        self.assertIn("unsupported PCI domain", pinning.description)
+
+
 class ManifestTests(unittest.TestCase):
     def test_manifest_records_run_configuration(self) -> None:
         scenario = scenario_by_name("piper1b_swiglu")
@@ -424,6 +480,9 @@ class ResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
             "benchmarks.runner.hardware_metadata",
             return_value=("test-gpu", metadata),
+        ), mock.patch(
+            "benchmarks.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
         ):
             out_dir = Path(temporary) / "run"
             environment = {"PATH": os.environ["PATH"]}

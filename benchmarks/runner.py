@@ -25,6 +25,7 @@ from benchmarks.runtime import (
     add_compiler_environment,
     command_for_arm,
     hardware_metadata,
+    resolve_cpu_pinning,
     runtime_environment,
 )
 from benchmarks.scenarios import Arm, Scenario, Workload, scenario_by_name
@@ -145,7 +146,12 @@ def _resume_mismatches(
         key for key, value in expected.items() if manifest.get(key) != value
     ]
     existing_metadata = manifest.get("hardware_metadata", {})
-    for key in ("nvidia_smi", "torchtitan_git_rev", "benchmarks_git_rev"):
+    for key in (
+        "nvidia_smi",
+        "cpu_pinning",
+        "torchtitan_git_rev",
+        "benchmarks_git_rev",
+    ):
         if existing_metadata.get(key) != metadata.get(key):
             mismatches.append(f"hardware_metadata.{key}")
     return mismatches
@@ -249,13 +255,14 @@ def _resolve_run(
     if existing_manifest is not None and requested_hardware == "auto":
         requested_hardware = str(existing_manifest.get("hardware", "auto"))
     hardware, metadata = hardware_metadata(paths, request.gpu, requested_hardware)
+    pinning = resolve_cpu_pinning(request.gpu)
+    metadata = {**metadata, "cpu_pinning": pinning.description}
     out_dir = resume_dir or _default_output_dir(
         scenario, hardware, request.out_dir, environment, request.timestamp
     )
     commands = {
-        arm.name: command_for_arm(
-            scenario.workload, arm, out_dir / arm.name, extra_args
-        )
+        arm.name: list(pinning.prefix)
+        + command_for_arm(scenario.workload, arm, out_dir / arm.name, extra_args)
         for arm in arms
     }
 
@@ -315,6 +322,7 @@ def execute_run(
 
     _emit(event_handler, "summary", f"GPU (PCI index): {request.gpu}")
     _emit(event_handler, "summary", metadata["nvidia_smi"])
+    _emit(event_handler, "summary", f"cpu pinning: {metadata['cpu_pinning']}")
     _emit(
         event_handler,
         "summary",

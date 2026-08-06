@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.runner import RunRequest, execute_run
+from benchmarks.runtime import CpuPinning
 
 
 class RunCompletionTests(unittest.TestCase):
@@ -41,6 +42,9 @@ class RunCompletionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
             "benchmarks.runner.hardware_metadata",
             return_value=("test-gpu", metadata),
+        ), mock.patch(
+            "benchmarks.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
         ):
             out_dir = Path(temporary) / "run"
             request = RunRequest(

@@ -120,17 +120,27 @@ model structure; the RoPE and SwiGLU scenarios do not.
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 4: workload, regions, arms, commands, hardware_metadata
+  manifest.json     # schema 5: workload, regions, arms, commands, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
-  results.json      # schema 2: throughput, memory, region stats, significance
+  results.json      # schema 3: throughput, memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
   <arm>/profiling/traces/iteration_*/rank0_trace.json.gz
   attempts/<ts>/<arm>/   # archived artifacts from a failed prior attempt
 ```
 
 `manifest.json` `hardware_metadata` records `requested_gpu`, `nvidia_smi`,
-`torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev`. Always cite
-`torchtitan_git_rev` and `torch_version` when reporting numbers.
+`cpu_pinning`, `torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev`.
+Always cite `torchtitan_git_rev` and `torch_version` when reporting numbers.
+
+### CPU pinning
+
+The training step is host-bound at benchmark sizes, so unpinned runs measure
+scheduler placement, not kernels. The runner therefore binds each training
+process to the GPU's own NUMA node with `numactl --cpunodebind --membind`,
+resolved from the GPU's PCI bus id via sysfs. When that cannot be resolved
+(no `numactl`, unknown bus id, or the device reports no NUMA affinity) the
+run proceeds unpinned and `cpu_pinning` records why. Pinned and unpinned runs
+are not comparable; `--resume` refuses to mix them.
 
 ### Validation
 
@@ -144,7 +154,7 @@ out/<timestamp>/<scenario>/<hardware>/
    degraded. This fails the arm regardless of anything else.
 5. Fewer than `min_trace_windows` trace files.
 6. A declared `trace_kernel_markers` string absent from every trace.
-7. `pooled_region_samples` structural failure -- a declared region did not match
+7. `pooled_window_metrics` structural failure -- a declared region did not match
    exactly one same-phase compiled graph with the expected invocation count.
    This means Inductor repartitioned the graph; the region mapping is invalid.
 
@@ -157,8 +167,8 @@ them by relaxing the check.
 skips those that already pass, archives partial artifacts under `attempts/`,
 and re-runs the rest. It aborts if any of these changed since the manifest was
 written: scenario, workload, selected arms, hardware label, extra TorchTitan
-args, `nvidia_smi`, `torchtitan_git_rev`, `benchmarks_git_rev`. A different GPU
-or a different commit will not resume -- that is intentional.
+args, `nvidia_smi`, `cpu_pinning`, `torchtitan_git_rev`, `benchmarks_git_rev`.
+A different GPU or a different commit will not resume -- that is intentional.
 
 ### Evaluation
 
@@ -167,8 +177,19 @@ Requires `baseline` among the arms. Reports:
 - **stable tokens/s** -- median over steps 2..10 of each 20-step cycle, excluding
   step 1 (startup noise) and steps 11..20 (profiler overhead).
 - **peak memory** over all steps.
-- **per-region GPU span** stats pooled across windows, with Welch's t-test,
+- **GPU kernel time** -- per-step summed kernel/memcpy/memset durations from the
+  traces (`gpu_time` in `results.json`): total, within declared regions, the
+  remainder, and the ratio vs baseline. This is the host-speed-immune metric;
+  **compare kernels with it**, not with tokens/s.
+- **per-region span and kernel time** -- each declared region measured two ways:
+  the annotation span (first kernel to last, includes host-idle gaps) and the
+  summed kernel time inside it. Span distributions carry Welch's t-test,
   Mann-Whitney U, and Cohen's d against baseline.
+- **host launch latency** -- mean host-side duration of kernel-launch calls
+  (runtime and driver APIs) per arm.
+  The workload is host-bound at benchmark sizes, so tokens/s tracks this, not
+  kernel quality. Evaluation warns when it spreads more than 1.15x across
+  arms: that run's tokens/s and span comparisons are contaminated.
 - loss and grad-norm trajectories, as a sanity check only.
 
 The significance numbers are **distribution diagnostics within a single run**,

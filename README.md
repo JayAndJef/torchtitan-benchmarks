@@ -114,15 +114,21 @@ Each run writes:
 out/<timestamp>/<scenario>/<hardware>/
   manifest.json          # workload, commands, source revisions, and hardware metadata
   run_state.json         # resumable arm and evaluation status
-  results.json           # throughput, memory, region timings, and diagnostics
+  results.json           # throughput, memory, gpu kernel time, region timings
   <arm>.log              # training output
   <arm>/profiling/traces/iteration_*/rank0_trace.json.gz
 ```
 
-Evaluation reports stable tokens/s, peak allocated memory, and the GPU span of
-the compiled forward and backward transformer-block regions. It also reports
-Welch's t-test, Mann-Whitney U, and Cohen's d for pooled per-layer invocation
-durations. Those values diagnose differences within a trace; they are not
+Training runs are bound to the GPU's NUMA node with `numactl` when available,
+so host scheduling does not decide throughput; the manifest records the
+binding as `cpu_pinning`.
+
+Evaluation reports stable tokens/s, peak allocated memory, per-step GPU kernel
+time (the host-speed-immune way to compare kernel implementations), and each
+compiled transformer-block region measured both as a GPU span and as summed
+kernel time. It also reports Welch's t-test, Mann-Whitney U, and Cohen's d for
+pooled per-layer span distributions. Those values diagnose differences within
+a trace; they are not
 independent repeated-run significance tests.
 
 Keep local benchmark reports and investigation notes under `/reports/`; the

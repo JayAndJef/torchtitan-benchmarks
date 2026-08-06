@@ -11,11 +11,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from benchmarks.profile_regions import pooled_region_samples
+from benchmarks.profile_regions import pooled_window_metrics
 from benchmarks.scenarios import Arm, Region, Scenario, Workload
 
 
-MANIFEST_SCHEMA_VERSION = 4
+MANIFEST_SCHEMA_VERSION = 5
 STATE_SCHEMA_VERSION = 1
 
 
@@ -82,7 +82,7 @@ def validate_arm(
             )
     if regions:
         try:
-            pooled_region_samples(traces, regions)
+            pooled_window_metrics(traces, regions)
         except ValueError as error:
             raise RuntimeError(
                 f"{arm.name}: profiler traces failed structural validation: {error}"
