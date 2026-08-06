@@ -135,15 +135,31 @@ Keep local benchmark reports and investigation notes under `/reports/`; the
 directory is intentionally ignored. Do not put hardware-specific results or
 research conclusions in this README.
 
-## Kernel microbenchmarks
+## Kernel-isolation benchmarks
 
-Standalone tools measure isolated CUDA kernels and are not end-to-end results.
-Run them with `.venv/bin/python`:
+`kernel-bench` times competing implementations of one kernel family
+head-to-head on synthetic tensors at Piper-1B shapes. These are not
+end-to-end results: a kernel that wins in isolation can be irrelevant once
+the compiler fuses the graph around it.
 
-- `piper1b/rope/` contains RoPE correctness, timing, significance, accuracy,
-  and ablation tools.
-- `piper1b/swiglu/benchmark.py` compares upstream and local SwiGLU kernels.
-- `piper1b/lm_head/benchmark.py` measures full-token LM-head/loss paths.
+```bash
+./run_bench.sh kernel-bench <gpu>                      # all scenarios
+./run_bench.sh kernel-bench <gpu> --scenario swiglu    # one scenario
+./run_bench.sh kernel-bench <gpu> --n 200 --burst      # more cycles + dispatch diagnostic
+```
+
+| scenario | compares |
+|---|---|
+| `rope` | stock `CosSinRoPE` vs Helion vs TransformerEngine, against a copy-bandwidth floor |
+| `swiglu` | stock vs fused vs combined-layout grouped experts, at module and raw-kernel level |
+| `qkv` | separate Q/K/V projections vs one fused QKV GEMM |
+| `lm_head` | full logits vs fused linear-CE vs TE and Piper-optimized cross entropy |
+
+Arms are timed round-robin so drift affects them equally, correctness gates
+run before timing and fail the run loudly, and each scenario writes a
+manifest and results JSON (with raw per-cycle samples) under
+`out/<timestamp>/kernels/`. `./run_bench.sh scenarios` lists every scenario
+and arm.
 
 ## Tests
 

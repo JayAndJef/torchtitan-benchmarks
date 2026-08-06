@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+from benchmarks.kernel_results import KernelScenarioResult
 from benchmarks.metrics import EvaluationResult
 
 
@@ -11,6 +12,13 @@ def _value(value: float | None, width: int, precision: int = 1) -> str:
     if value is None:
         return f"{'n/a':>{width}s}"
     return f"{value:{width}.{precision}f}"
+
+
+def _pvalue(value: float | None, width: int) -> str:
+    """Significant-digit form; p-values span many orders of magnitude."""
+    if value is None:
+        return f"{'n/a':>{width}s}"
+    return f"{value:{width}.3g}"
 
 
 def _trajectory(values: list[tuple[int, float]], nonfinite_label: str) -> str:
@@ -132,6 +140,122 @@ def render_evaluation(result: EvaluationResult) -> str:
             "are not measurements of an individual generated Inductor kernel.",
             "Span times include idle gaps where the GPU waited on the host, so",
             "they move with host speed; kernel times count only GPU execution.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_kernel_results(result: KernelScenarioResult) -> str:
+    """Render one kernel scenario: per-mode timings and correctness gates."""
+    shapes = "  ".join(
+        f"{name}={value}" for name, value in result.shapes.items()
+    )
+    lines = [
+        f"== kernel scenario: {result.scenario}   hardware: {result.hardware} ==",
+        f"shapes: {shapes}",
+        f"n={result.n} interleaved cycles, warmup={result.warmup}, "
+        f"seed={result.seed}",
+    ]
+    lines.extend(f"WARNING: {warning}" for warning in result.warnings)
+
+    comparisons = {
+        (row["arm"], row["mode"]): row for row in result.comparisons
+    }
+    for mode in ("forward", "backward", "forward_backward"):
+        arms = [
+            name
+            for name, arm in result.arms.items()
+            if mode in arm.modes
+        ]
+        if not arms:
+            continue
+        lines.extend(
+            [
+                "",
+                f"{mode}:",
+                "  "
+                + f"{'arm':22s} {'median us':>10s} {'sd':>8s} {'vs':>18s} "
+                + f"{'ratio':>7s} {'GB/s':>8s} {'x floor':>8s} "
+                + f"{'Welch p':>9s} {'MWU p':>9s} {'Wilcoxon p':>11s} {'d':>6s}",
+            ]
+        )
+        for name in arms:
+            mode_result = result.arms[name].modes[mode]
+            row = comparisons.get((name, mode))
+            derived = mode_result.derived
+            lines.append(
+                f"  {name:22s} "
+                f"{mode_result.summary.median_us:10.2f} "
+                f"{mode_result.summary.standard_deviation_us:8.2f} "
+                f"{(row['opponent'] if row else '-'):>18s} "
+                f"{_value(row['median_ratio'] if row else None, 7, 4)} "
+                f"{_value(derived.get('gbps'), 8, 1)} "
+                f"{_value(derived.get('x_floor'), 8, 2)} "
+                f"{_pvalue(row['welch_p'] if row else None, 9)} "
+                f"{_pvalue(row['mwu_p'] if row else None, 9)} "
+                f"{_pvalue(row['wilcoxon_p'] if row else None, 11)} "
+                f"{_value(row['cohens_d'] if row else None, 6, 2)}"
+            )
+
+    memory = {
+        name: arm.peak_memory_gib
+        for name, arm in result.arms.items()
+        if arm.peak_memory_gib is not None
+    }
+    if memory:
+        lines.extend(["", "peak memory (GiB, heaviest mode, isolated):"])
+        for name, peak in memory.items():
+            lines.append(f"  {name:22s} {peak:8.3f}")
+
+    bursts = {
+        name: arm.burst_us_per_call
+        for name, arm in result.arms.items()
+        if arm.burst_us_per_call
+    }
+    if bursts:
+        sizes = sorted(next(iter(bursts.values())), key=int)
+        lines.extend(
+            [
+                "",
+                "burst dispatch diagnostic (us per call, forward):",
+                "  " + f"{'arm':22s} " + " ".join(f"{size:>9s}" for size in sizes),
+            ]
+        )
+        for name, values in bursts.items():
+            lines.append(
+                f"  {name:22s} "
+                + " ".join(f"{values[size]:9.2f}" for size in sizes)
+            )
+        lines.append(
+            "  Falling per-call time means single calls were dispatch-bound."
+        )
+
+    lines.extend(["", "correctness:"])
+    if not result.correctness:
+        lines.append("  (no checks declared)")
+    for row in result.correctness:
+        if row.passed is None:
+            verdict = "INFO"
+        else:
+            verdict = "PASS" if row.passed else "FAIL"
+        limit = "-" if row.threshold is None else f"{row.threshold:g}"
+        lines.append(
+            f"  {verdict:4s} {row.arm:22s} {row.output:14s} vs "
+            f"{row.reference:16s} {row.metric}={row.value:.4g} (limit {limit})"
+        )
+    lines.append(
+        "  ALL CORRECTNESS PASSED"
+        if result.all_correctness_passed
+        else "  CORRECTNESS FAILURES PRESENT"
+    )
+
+    lines.extend(
+        [
+            "",
+            "Arms are timed round-robin within each cycle, so drift affects all",
+            "arms equally and these p-values are inferential for this run. These",
+            "are isolated-kernel numbers on synthetic inputs; never present them",
+            "as end-to-end training results.",
         ]
     )
     return "\n".join(lines)

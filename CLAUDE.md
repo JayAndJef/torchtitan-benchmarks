@@ -1,15 +1,18 @@
 # torchtitan-benchmarks: Agent Guide
 
-Out-of-tree benchmarks for the Piper Qwen3-1B TorchTitan port. Two distinct
-systems live here and are operated differently:
+Out-of-tree benchmarks for the Piper Qwen3-1B TorchTitan port. One CLI,
+two kinds of measurement:
 
-1. **Declarative end-to-end scenarios** -- `./run_bench.sh`, driven by
-   `benchmarks/`. Runs real TorchTitan training, validates, and evaluates.
-2. **Standalone per-kernel microbenchmarks** -- individual scripts under
-   `piper1b/*/`. Mostly hardcoded, no shared CLI. A refactor to fold these into
-   the CLI is planned; until then treat them as one-off scripts.
+1. **Declarative end-to-end scenarios** -- `./run_bench.sh run` / `run-all`,
+   driven by `benchmarks/scenarios.py`. Runs real TorchTitan training,
+   validates, and evaluates.
+2. **Declarative kernel-isolation benchmarks** -- `./run_bench.sh
+   kernel-bench`, driven by `benchmarks/kernels.py`. Times competing kernel
+   implementations head-to-head on synthetic tensors at Piper-1B shapes.
 
-Never present microbenchmark numbers as end-to-end results, or vice versa.
+Never present kernel numbers as end-to-end results, or vice versa: a kernel
+that wins in isolation can be irrelevant once Inductor fuses the graph around
+it.
 
 ## Environment
 
@@ -36,11 +39,11 @@ uv sync                      # creates .venv, installs pinned torch + submodule
 
 | path | contents |
 |---|---|
-| `benchmarks/` | Scenario definitions, Click CLI, runner, validation, metrics, reporting |
+| `benchmarks/` | Click CLI plus both systems: e2e (`scenarios/runner/metrics`) and kernel (`kernels/kernel_arms/kernel_bench/kernel_runner/kernel_worker/kernel_stats/kernel_results`) |
 | `piper1b/config_registry.py` | The `--module piper1b` config port; all registered `--config` names |
-| `piper1b/rope/` | RoPE overrides and 6 standalone microbenchmarks + `te_rope_standalone.cu` |
-| `piper1b/swiglu/` | Combined-SwiGLU Triton kernels, override, 1 microbenchmark |
-| `piper1b/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses, 1 microbenchmark |
+| `piper1b/rope/` | TE RoPE override + `te_rope_standalone.cu` |
+| `piper1b/swiglu/` | Combined-SwiGLU Triton kernels and override |
+| `piper1b/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
 | `analysis/` | Two argv-driven trace diagnostics (`analyze.py`, `per_block.py`) |
 | `tests/` | CPU + GPU unit tests |
 | `third_party/torchtitan/` | Pinned submodule |
@@ -197,70 +200,129 @@ not independent repeated-run tests: invocations share steps and layer structure.
 `results.json` states this in `significance_methodology`. Do not report them as
 evidence that one kernel is faster than another across runs.
 
-## Per-kernel microbenchmarks
+## Kernel-isolation benchmarks
 
-These are standalone scripts, not part of the CLI. Run them with
-`.venv/bin/python`. All require a GPU except the `analysis/` tools.
+`run_bench.sh kernel-bench` times competing implementations of one kernel
+family head-to-head on synthetic tensors at Piper-1B shapes. Same CLI, same
+provenance discipline, same NUMA pinning as the end-to-end runs -- but the
+numbers answer a different question and **must never be presented as
+end-to-end results** (a kernel that wins in isolation can be irrelevant, or
+even absent, once Inductor fuses the surrounding graph).
+
+```bash
+./run_bench.sh kernel-bench <gpu> [OPTIONS]
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--scenario` (repeatable) | all four | subset of kernel scenarios |
+| `--n` | 200 | interleaved measurement cycles |
+| `--warmup` | 30 | warmup cycles per mode |
+| `--burst` | off | adds the 1/4/16/64 dispatch-cost diagnostic |
+| `--batch` / `--seq-len` | 4 / 1024 | `Piper1BSpec` overrides (seq <= 2048) |
+| `--seed` | 0 | input generator seed |
+| `--hardware` | `auto` | provenance label |
+| `--out` | `out/<ts>/kernels/<scenario>/<hardware>` | single `--scenario` only |
+| `--cache-root` / `--compiler-env` | as e2e | `rope` needs the compiler env |
+
+Unlike `run-all --all-scenarios`, a failing scenario does not abort the rest;
+every scenario is reported and the command exits nonzero if any failed.
+Deliberately ignores the `OUT`/`SEQ`/`BATCH` env vars -- flags only, so an
+e2e shell cannot leak settings into a kernel run.
+
+### Scenarios and arms
+
+| scenario | arms | modes | notes |
+|---|---|---|---|
+| `rope` | `copy_floor`, `stock`*, `helion`, `te` | fwd, bwd | `te` needs gcc-13; GB/s and x-floor reported |
+| `swiglu` | `stock_module`*, `fused_module`, `combined_module`, `stock_kernel`, `combined_kernel` | fwd, bwd, fwd+bwd (modules) | `combined_kernel` faces `stock_kernel`, not the module baseline |
+| `qkv` | `unfused`*, `fused` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
+| `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
+
+`*` = scenario baseline. `benchmarks/kernels.py` is the registry: add an arm
+by appending a `KernelArm` with a builder path, and a scenario by appending a
+`KernelScenario`. Builders live in `benchmarks/kernel_arms.py` and return a
+`BuiltArm` whose `calls` map a mode to a zero-argument timed closure and
+whose `correctness_outputs` returns named tensors for the gates.
+
+### Method
+
+- Arms are timed **round-robin**: one cycle runs every arm once between
+  adjacent entries of a preallocated CUDA event matrix, with a single
+  synchronize at the end. Drift hits all arms equally, so the per-cycle
+  deltas are paired and the Welch/MWU/Wilcoxon/Cohen's d numbers **are**
+  inferential for that run (unlike the e2e span diagnostics).
+- Verified not to distort: interleaved and isolated timings of the same
+  kernels agree within 0.7%.
+- Python's garbage collector is paused during the timed region. A collection
+  starves the launch queue and lands as idle time inside whichever arm's
+  interval is open; pausing it cut the swiglu module sd from ~63 us to
+  ~1.4 us and removed every 2x outlier, medians unchanged.
+- The first cycle after the warmup synchronize is discarded (empty queue,
+  systematically high).
+- No L2 flush: interleaving equalizes cache state across arms.
+- Backward is measured separately wherever the arm exposes a backward entry
+  point; module arms retain the graph and re-run `torch.autograd.backward`,
+  so only backward kernels are timed. `lm_head` is fwd+bwd only because
+  `FusedLinearCrossEntropyLoss` runs its backward inside `__call__`.
+- Correctness runs before timing and fails the run loudly (worker exit 3).
+
+### Choosing a correctness metric
+
+- **`max_rel_l2`** (`||a-b|| / ||b||`) is the default and the only safe choice
+  when magnitudes differ: weight gradients accumulate over thousands of rows
+  and sit ~30x above activations, so one bf16 ULP there is a large absolute
+  number. bf16 kernels land at ~2e-3; gates sit at 2e-2.
+- **`fp64_ulp`** reports the **mean** bf16 ULP (~0.24 for RoPE) and suits
+  elementwise kernels only. Never gate a reduction on max-ULP: cancellation
+  drives individual dot-product outputs toward zero, and dividing their
+  negligible error by that tiny magnitude reports thousands of ULPs for a
+  numerically perfect kernel -- including the stock one.
+- **`bitwise`** where implementations must agree exactly (the combined-layout
+  SwiGLU kernels, and fused vs unfused QKV outputs, both of which do).
+
+### Silent-fallback guard
+
+`HelionCosSinRoPE` and `TECosSinRoPE` fall back to the *numerically correct*
+stock path when their eligibility checks fail, so correctness gates cannot
+catch a mis-timed arm. Their builders profile one call and refuse to continue
+unless the arm's marker kernel (`_helion__rope_cos_sin_fwd`,
+`fused_rope_forward_positions_kernel`) actually appears.
+
+### Output layout
+
+```
+out/<timestamp>/kernels/<scenario>/<hardware>/
+  manifest.json      # schema 1: spec, shapes, arms, n/warmup/seed, command, provenance
+  results.json       # schema 1: per-arm per-mode summaries + raw samples, comparisons, correctness
+  kernel_bench.log   # worker stdout+stderr
+```
+
+Raw per-cycle samples are kept in `results.json` so a run can be re-analyzed
+without re-measuring.
+
+### Trace diagnostics
 
 | script | measures | args |
 |---|---|---|
-| `piper1b/rope/benchmark.py` | TE vs Helion RoPE speed + correctness, 3 large shapes | none, all hardcoded |
-| `piper1b/rope/significance.py` | Same, n=200 interleaved A/B with Welch/MWU/Wilcoxon/Cohen's d | none |
-| `piper1b/rope/piper_size.py` | TE vs Helion at Piper-1B shapes, n=200 with MWU/Wilcoxon | none |
-| `piper1b/rope/piper_burst.py` | Whether single-call timing is CPU-dispatch-bound (bursts of 1/4/16/64) | none |
-| `piper1b/rope/accuracy_fp64.py` | Helion and TE accuracy vs fp64 ground truth, in bf16 ULPs | none |
-| `piper1b/rope/ablation.py` | Where TE's bandwidth deficit comes from, via a partner-load ablation kernel | none |
-| `piper1b/swiglu/benchmark.py` | Stock vs combined-layout SwiGLU Triton kernels, fwd/bwd + exactness | none |
-| `piper1b/lm_head/benchmark.py` | 4 lm-head/CE implementations, compiled, fwd+bwd | argparse |
 | `analysis/analyze.py` | Two-trace diff: device/host totals, per-kernel movers | 2 positional trace paths |
 | `analysis/per_block.py` | Per-compiled-region GPU time, paired by size rank | 2 positional trace paths |
 
-Only `piper1b/lm_head/benchmark.py` has real flags:
-
-```bash
-.venv/bin/python piper1b/lm_head/benchmark.py \
-    --batch 4 --seq-len 1024 --dim 1024 --vocab-size 151936 --warmup 2 --iters 10
-```
-
-It prints a JSON blob to stdout; redirect it if you want to keep it. Everything
-else prints tables to stdout and writes nothing.
-
-To change what any other script measures you must **edit the source**. The
-shapes live in module-level constants near the top (`SHAPES`, `NUM_ROWS`,
-`HIDDEN_DIM`, `N`, `WARMUP`, or literal `run_shape(...)` calls at the bottom).
-
-The `analysis/` tools take uncompressed Chrome traces, but runs write
-`.json.gz`. Decompress first:
+These take uncompressed Chrome traces, but runs write `.json.gz`. Decompress
+first:
 
 ```bash
 gunzip -c out/<...>/baseline/profiling/traces/iteration_40/rank0_trace.json.gz > /tmp/a.json
 ```
 
-### Known hazards in these scripts
-
-These are real defects to be aware of, and worth fixing in the planned CLI
-refactor:
-
-- **The `piper1b/rope/*` scripts import the wrong TorchTitan.** Each does
-  `sys.path.insert(0, "/data/zejiaqi/torchtitan")`, which takes priority over
-  the editable install. If that directory exists they measure against an
-  unpinned checkout, not `third_party/torchtitan`. Verify with
-  `python -c "import torchtitan; print(torchtitan.__file__)"` inside the script's
-  import path before trusting a RoPE microbenchmark number.
-- **Absolute cache paths are hardcoded** (`/data/zejiaqi/tmp/torch_extensions`
-  and siblings) in the same scripts, so they will not build on another machine
-  without editing or presetting `TORCH_EXTENSIONS_DIR`.
-- Several rope scripts share the extension build name `te_rope_standalone` and
-  build directory. A stale build from one script is reused by another.
-
 ### CUDA extension builds
 
 `piper1b/rope/te_rope_standalone.cu` is JIT-built via
-`torch.utils.cpp_extension.load` by every rope script and by
-`te_rope_override.py` on import. It needs a C++20 host compiler; the stock one
-usually is not. The scenario runner handles this automatically for the `te` arm
-via `requires_gcc_toolset` and `BENCH_COMPILER_ENV`. For standalone scripts,
-enable it yourself first:
+`torch.utils.cpp_extension.load` when `te_rope_override.py` is imported. It
+needs a C++20 host compiler; the stock one usually is not. Both the scenario
+runner (`requires_gcc_toolset`) and `kernel-bench` handle this automatically
+via `BENCH_COMPILER_ENV`, defaulting to `/opt/rh/gcc-toolset-13/enable`. To
+import the override by hand, enable it yourself first:
 
 ```bash
 source /opt/rh/gcc-toolset-13/enable
@@ -314,6 +376,19 @@ of these still exist with unchanged behavior:
   line format that `validate_arm` regexes
 - `CosSinRoPE` and `_maybe_check_max_pos` from `torchtitan.models.common.rope`
 - `GroupedExperts` from `torchtitan.models.common.moe`
+
+The kernel scenarios additionally depend on:
+
+- `HelionCosSinRoPE` from `torchtitan.overrides.helion_rope` and the op
+  `torchtitan::helion_cossin_rope_bwd`, plus the marker kernel name
+  `_helion__rope_cos_sin_fwd` the fallback guard greps for
+- `FusedGroupedExperts`, `silu_and_mul_forward_kernel`,
+  `silu_and_mul_backward_kernel` from `torchtitan.overrides.fused_swiglu`
+- `QKVLinear` / `FusedQKVLinear` / `Linear` from `torchtitan.models.common`,
+  and the fused module's state-dict merge hook (arms rely on
+  `fused.load_state_dict(unfused.state_dict())` producing bit-identical
+  weights)
+- `CrossEntropyLoss` from `torchtitan.components.loss`
 
 Also recheck the documented deltas vs Piper: the builder hardcodes
 `route_norm=True` (Piper wants `False`), experts are `GroupedExperts` rather
