@@ -116,13 +116,13 @@ PIPER_1B_REGIONS = (
 
 PIPER_1B_ROPE = Scenario(
     name="piper1b_rope",
-    description="Stock RoPE, Helion RoPE, and TransformerEngine RoPE on piper-1B.",
+    description="TorchTitan RoPE, Helion RoPE, and TransformerEngine RoPE on piper-1B.",
     workload=PIPER_1B_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
         Arm(
             name="baseline",
-            description="stock CosSinRoPE; rotate-half math fused by Inductor into block kernels",
+            description="TorchTitan CosSinRoPE; rotate-half math fused by Inductor into block kernels",
         ),
         Arm(
             name="helion",
@@ -147,13 +147,13 @@ PIPER_1B_ROPE = Scenario(
 
 PIPER_1B_SWIGLU = Scenario(
     name="piper1b_swiglu",
-    description="Stock MoE SwiGLU versus the two Piper grouped-expert variants on piper-1B.",
+    description="TorchTitan MoE SwiGLU versus the two Piper grouped-expert variants on piper-1B.",
     workload=PIPER_1B_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
         Arm(
             name="baseline",
-            description="TorchTitan modern stock GroupedExperts: separate w1/w3 grouped GEMMs, plain-ops activation",
+            description="TorchTitan modern GroupedExperts: separate w1/w3 grouped GEMMs, plain-ops activation",
         ),
         Arm(
             name="piper_optimized_triton",
@@ -217,7 +217,7 @@ PIPER_1B_LM_HEAD = Scenario(
         ),
         Arm(
             name="fused_linear_ce",
-            description="PyTorch fused linear-CE via FusedLinearCrossEntropyLoss (no logits materialized)",
+            description="torch.nn.functional.linear_cross_entropy: CE without materializing full logits",
             config="qwen3_piper_1b_fused_linear_ce",
         ),
         Arm(
@@ -228,7 +228,7 @@ PIPER_1B_LM_HEAD = Scenario(
         ),
         Arm(
             name="piper_optimized_te_ce",
-            description="full logits then the Piper-optimized TE-derived cross entropy",
+            description="TE CE reworked into one Triton kernel writing the pre-scaled bf16 grad in forward (TE: 2 fwd kernels + a bwd scaling pass)",
             config="qwen3_piper_1b_piper_optimized_te_ce",
             trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
         ),

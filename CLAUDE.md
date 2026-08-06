@@ -115,10 +115,10 @@ All four share `PIPER_1B_REGIONS`: `forward_block` and `backward_block`, each
 
 | scenario | arm | mechanism |
 |---|---|---|
-| `piper1b_rope` | `baseline` | stock `CosSinRoPE` |
+| `piper1b_rope` | `baseline` | TorchTitan `CosSinRoPE` |
 | | `helion` | override `torchtitan.overrides.helion_rope.helion_cos_sin_rope` |
 | | `te` | override `piper1b.rope.te_rope_override.te_rope`, needs gcc-13 |
-| `piper1b_swiglu` | `baseline` | stock `GroupedExperts` |
+| `piper1b_swiglu` | `baseline` | TorchTitan `GroupedExperts` |
 | | `piper_optimized_triton` | override `piper1b.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts` |
 | | `piper_optimized_inductor` | override `piper1b.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts` |
 | `piper1b_qkv` | `baseline` | config `qwen3_piper_1b_unfused_qkv` |

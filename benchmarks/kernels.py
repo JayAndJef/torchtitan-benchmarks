@@ -164,7 +164,7 @@ class KernelScenario:
 
 ROPE = KernelScenario(
     name="rope",
-    description="Stock CosSinRoPE vs Helion and TE RoPE kernels, BSHD bf16.",
+    description="TorchTitan CosSinRoPE vs Helion and TE RoPE kernels, BSHD bf16.",
     inputs_builder="benchmarks.kernel_arms:rope_inputs",
     reference_builder="benchmarks.kernel_arms:rope_reference",
     baseline_arm="baseline",
@@ -253,14 +253,14 @@ ROPE = KernelScenario(
 
 SWIGLU = KernelScenario(
     name="swiglu",
-    description="Grouped-expert SwiGLU layer: stock vs the two Piper variants.",
+    description="Grouped-expert SwiGLU layer: TorchTitan vs the two Piper variants.",
     inputs_builder="benchmarks.kernel_arms:swiglu_inputs",
     reference_builder=None,
     baseline_arm="baseline",
     arms=(
         KernelArm(
             name="baseline",
-            description="TorchTitan modern stock GroupedExperts: separate w1/w3 GEMMs, plain-ops activation",
+            description="TorchTitan modern GroupedExperts: separate w1/w3 GEMMs, plain-ops activation",
             builder="benchmarks.kernel_arms:build_swiglu_baseline",
             modes=MODES,
             compiled=True,
@@ -368,7 +368,7 @@ LM_HEAD = KernelScenario(
         ),
         KernelArm(
             name="fused_linear_ce",
-            description="F.linear_cross_entropy via FusedLinearCrossEntropyLoss",
+            description="torch.nn.functional.linear_cross_entropy: CE without materializing full logits",
             builder="benchmarks.kernel_arms:build_lm_head_fused_linear_ce",
             modes=("forward_backward",),
             compiled=True,
@@ -410,7 +410,7 @@ LM_HEAD = KernelScenario(
         ),
         KernelArm(
             name="piper_optimized_te_ce",
-            description="Full logits then Piper-optimized TE-derived CE",
+            description="TE CE reworked into one Triton kernel writing the pre-scaled bf16 grad in forward (TE: 2 fwd kernels + a bwd scaling pass)",
             builder="benchmarks.kernel_arms:build_lm_head_piper_optimized_te_ce",
             modes=("forward_backward",),
             compiled=True,
