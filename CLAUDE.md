@@ -32,8 +32,13 @@ uv sync                      # creates .venv, installs pinned torch + submodule
 - torch is pinned to an exact nightly (`2.14.0.dev20260729+cu130`). The nightly
   index retains roughly 60 days, so the pin will eventually need bumping. A bump
   changes the numbers -- rerun baselines, do not compare across it.
-- Requires a driver reporting CUDA 13.0+ (`nvidia-smi` header). The cu130 wheels
-  cover `sm_75` through `sm_120`: Ampere and Hopper both work unchanged.
+- Requires a driver reporting CUDA 13.0+ (`nvidia-smi` header). On drivers that
+  report less (this box's 570.211.01 reports 12.8), `run_bench.sh` sources
+  `cuda_compat.sh`, which stages NVIDIA's forward-compat userspace driver under
+  `.cuda-compat/` (gitignored; downloaded from the rhel9 repo when absent) and
+  prepends it to `LD_LIBRARY_PATH`. Manual sessions: `source ./cuda_compat.sh`.
+  The cu130 wheels cover `sm_75` through `sm_120`: Ampere and Hopper both work
+  unchanged.
 
 ## Repository map
 

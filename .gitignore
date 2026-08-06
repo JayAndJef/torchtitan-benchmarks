@@ -1,5 +1,6 @@
 out/
 /reports/
+/.cuda-compat/
 __pycache__/
 *.pyc
 .venv/
