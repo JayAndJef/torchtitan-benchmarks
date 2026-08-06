@@ -53,7 +53,7 @@ from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
 PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
-    "piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts"
+    "piper1b.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts"
 )
 
 
@@ -151,9 +151,9 @@ class ScenarioTests(unittest.TestCase):
         scenario = scenario_by_name("piper1b_swiglu")
         self.assertEqual(
             [arm.name for arm in scenario.arms],
-            ["baseline", "piper_optimized", "piper_inductor"],
+            ["baseline", "piper_optimized_triton", "piper_optimized_inductor"],
         )
-        fused = scenario.arm("piper_optimized")
+        fused = scenario.arm("piper_optimized_triton")
         self.assertEqual(
             fused.override_imports,
             (PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
@@ -166,12 +166,12 @@ class ScenarioTests(unittest.TestCase):
                 "_combined_silu_and_mul_backward_kernel",
             ),
         )
-        inductor = scenario.arm("piper_inductor")
+        inductor = scenario.arm("piper_optimized_inductor")
         self.assertEqual(
             inductor.override_imports,
             (
                 "piper1b.swiglu.combined_swiglu."
-                "piper_inductor_fused_grouped_experts",
+                "piper_optimized_inductor_fused_grouped_experts",
             ),
         )
         self.assertEqual(inductor.expected_override_count, 16)
@@ -234,7 +234,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(baseline[baseline.index("--debug.seed") + 1], "42")
 
     def test_command_adds_only_the_arm_override_and_dump_folder(self) -> None:
-        arm = PIPER_1B_SWIGLU.arm("piper_optimized")
+        arm = PIPER_1B_SWIGLU.arm("piper_optimized_triton")
         command = command_for_arm(
             PIPER_1B_SWIGLU.workload, arm, Path("/out/fused"), ["--debug.seed", "42"]
         )
@@ -330,7 +330,7 @@ class CpuPinningTests(unittest.TestCase):
 class ManifestTests(unittest.TestCase):
     def test_manifest_records_run_configuration(self) -> None:
         scenario = scenario_by_name("piper1b_swiglu")
-        selected = (scenario.arm("piper_optimized"),)
+        selected = (scenario.arm("piper_optimized_triton"),)
         extra_args = ["--debug.seed", "42"]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
@@ -351,13 +351,13 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["hardware_metadata"], metadata)
         self.assertEqual(manifest["workload"]["local_batch_size"], 4)
         self.assertEqual(manifest["workload"]["seq_len"], 1024)
-        self.assertEqual(manifest["selected_arms"], ["piper_optimized"])
+        self.assertEqual(manifest["selected_arms"], ["piper_optimized_triton"])
         self.assertEqual(
             [region["name"] for region in manifest["regions"]],
             ["backward_block", "forward_block"],
         )
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
-        fused_command = manifest["commands"]["piper_optimized"]
+        fused_command = manifest["commands"]["piper_optimized_triton"]
         self.assertIn(PIPER_OPTIMIZED_SWIGLU_OVERRIDE, fused_command)
         self.assertIn("--debug.seed", fused_command)
         self.assertEqual(fused_command[-2], "--dump-folder")
@@ -365,7 +365,7 @@ class ManifestTests(unittest.TestCase):
 
 class ValidationTests(unittest.TestCase):
     def test_validation_requires_completion_overrides_and_trace_windows(self) -> None:
-        arm = PIPER_1B_SWIGLU.arm("piper_optimized")
+        arm = PIPER_1B_SWIGLU.arm("piper_optimized_triton")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for iteration in ("iteration_20", "iteration_40"):

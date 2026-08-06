@@ -64,14 +64,18 @@ class RegistryTests(unittest.TestCase):
             for arm in scenario.arms
             if not arm.compiled
         }
-        self.assertEqual(
-            eager,
-            {
-                ("rope", "copy_floor"),
-                ("swiglu", "titan_triton"),
-                ("swiglu", "piper_optimized_triton"),
-            },
-        )
+        self.assertEqual(eager, {("rope", "copy_floor")})
+
+    def test_every_arm_has_a_description(self) -> None:
+        from benchmarks.scenarios import SCENARIOS
+
+        for registry in (KERNEL_SCENARIOS, SCENARIOS):
+            for scenario in registry.values():
+                for arm in scenario.arms:
+                    self.assertTrue(
+                        arm.description.strip(),
+                        f"{scenario.name}/{arm.name} needs a description",
+                    )
 
     def test_only_te_requires_gcc_toolset(self) -> None:
         self.assertTrue(kernel_scenario_by_name("rope").requires_gcc_toolset)
@@ -91,7 +95,6 @@ class RegistryTests(unittest.TestCase):
         spec.validate()
         swiglu = shape_summary("swiglu", spec)
         self.assertEqual(swiglu["x"], [8192, 1024])
-        self.assertEqual(swiglu["gate_up"], [8192, 7168])
         self.assertEqual(swiglu["tokens_per_expert"], [2048] * 4)
         qkv = shape_summary("qkv", spec)
         self.assertEqual(qkv["wqkv"], [2048, 1024])

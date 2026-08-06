@@ -105,8 +105,10 @@ trace validation and region pooling. Do not lower `--steps` to save time.
 ### Scenarios and arms
 
 Arm names match the kernel scenarios wherever the same implementation is
-measured, so `piper1b_swiglu/piper_optimized` and `swiglu/piper_optimized`
-are the same code at two scopes.
+measured, so `piper1b_swiglu/piper_optimized_triton` and
+`swiglu/piper_optimized_triton` are the same code at two scopes. Every arm
+in both registries carries a one-line `description`; `./run_bench.sh
+scenarios` prints them and manifests record them.
 
 All four share `PIPER_1B_REGIONS`: `forward_block` and `backward_block`, each
 80 invocations per window (16 layers x 5 active steps).
@@ -117,7 +119,8 @@ All four share `PIPER_1B_REGIONS`: `forward_block` and `backward_block`, each
 | | `helion` | override `torchtitan.overrides.helion_rope.helion_cos_sin_rope` |
 | | `te` | override `piper1b.rope.te_rope_override.te_rope`, needs gcc-13 |
 | `piper1b_swiglu` | `baseline` | stock `GroupedExperts` |
-| | `piper_optimized` | override `piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts` |
+| | `piper_optimized_triton` | override `piper1b.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts` |
+| | `piper_optimized_inductor` | override `piper1b.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts` |
 | `piper1b_qkv` | `baseline` | config `qwen3_piper_1b_unfused_qkv` |
 | | `fused_qkv` | config `qwen3_piper_1b` |
 | `piper1b_lm_head` | `baseline` | config `qwen3_piper_1b_full_logits` |
@@ -244,7 +247,7 @@ e2e shell cannot leak settings into a kernel run.
 | scenario | arms | modes | notes |
 |---|---|---|---|
 | `rope` | `copy_floor`, `baseline`*, `helion`, `te` | fwd, bwd | `te` needs gcc-13; GB/s and x-floor reported |
-| `swiglu` | `baseline`*, `titan_fused`, `piper_optimized` (layers); `titan_triton`, `piper_optimized_triton` (kernels) | fwd, bwd, fwd+bwd (layers) | two scopes: whole expert layer vs the SwiGLU Triton kernel alone. `piper_optimized_triton` faces `titan_triton`, not the layer baseline |
+| `swiglu` | `baseline`*, `piper_optimized_triton`, `piper_optimized_inductor` | fwd, bwd, fwd+bwd | whole expert layer only; both Piper arms fuse the w13 GEMM and differ in the activation (custom Triton op vs plain ops left to Inductor) |
 | `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
 | `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
 
@@ -256,13 +259,13 @@ whose `correctness_outputs` returns named tensors for the gates.
 
 ### Method
 
-- Module-scope arms (all rope modules, the three swiglu layer arms, both
+- Module-scope arms (all rope modules, the swiglu layer arms, both
   qkv arms) run under `torch.compile(fullgraph=True)`, because that is what
   they face end-to-end: eager isolation races custom ops against
   materialization costs Inductor deletes, which inverts verdicts (the
-  swiglu combined layout wins eager, loses compiled). The raw Triton kernel
-  arms and `copy_floor` stay eager on purpose -- they answer the
-  kernel-vs-kernel question. lm_head losses are built with the production
+  swiglu combined layout wins eager, loses compiled). `copy_floor` is the
+  one deliberately eager arm: a bandwidth floor, not an implementation.
+  lm_head losses are built with the production
   `CompileConfig(components=["loss"])`. `KernelArm.compiled` records the
   treatment in the manifest. The worker sets
   `torch._functorch.config.donated_buffer = False`: retained-graph backward
@@ -305,8 +308,10 @@ whose `correctness_outputs` returns named tensors for the gates.
   drives individual dot-product outputs toward zero, and dividing their
   negligible error by that tiny magnitude reports thousands of ULPs for a
   numerically perfect kernel -- including the stock one.
-- **`bitwise`** where implementations must agree exactly (the combined-layout
-  SwiGLU kernels, and fused vs unfused QKV outputs, both of which do).
+- **`bitwise`** where implementations must agree exactly. Currently only
+  the fused-vs-unfused QKV outputs use it, and informationally: compiled
+  GEMM epilogues broke bit-identity, so the gate records equality without
+  enforcing it while the rel_l2 gates still enforce closeness.
 
 ### Silent-fallback guard
 
@@ -410,7 +415,9 @@ The kernel scenarios additionally depend on:
   `torchtitan::helion_cossin_rope_bwd`, plus the marker kernel name
   `_helion__rope_cos_sin_fwd` the fallback guard greps for
 - `FusedGroupedExperts`, `silu_and_mul_forward_kernel`,
-  `silu_and_mul_backward_kernel` from `torchtitan.overrides.fused_swiglu`
+  `silu_and_mul_backward_kernel` from `torchtitan.overrides.fused_swiglu` --
+  no longer benchmarked; only `tests/test_swiglu.py` imports them as the
+  bitwise ground truth for the combined-layout kernels
 - `QKVLinear` / `FusedQKVLinear` / `Linear` from `torchtitan.models.common`,
   and the fused module's state-dict merge hook (arms rely on
   `fused.load_state_dict(unfused.state_dict())` producing bit-identical

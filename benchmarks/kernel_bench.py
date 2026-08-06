@@ -428,9 +428,9 @@ def run_kernel_scenario(
         )
 
     # An arm that serves as another arm's opponent is itself a reference and
-    # gets no comparison row: titan_triton anchors piper_optimized_triton,
-    # so comparing it to the scenario's layer baseline would be
-    # kernel-vs-layer, exactly what compare_to exists to prevent.
+    # gets no comparison row; compare_to exists so an arm measured at a
+    # different scope than the scenario baseline can face a same-scope
+    # opponent instead of an apples-to-oranges baseline ratio.
     references = {scenario.baseline_arm} | {
         arm.compare_to for arm in scenario.arms if arm.compare_to
     }

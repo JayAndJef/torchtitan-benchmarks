@@ -25,11 +25,6 @@ from torchtitan.config import CompileConfig
 from torchtitan.models.common import FusedQKVLinear, Linear, QKVLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.overrides.fused_swiglu import (
-    FusedGroupedExperts,
-    silu_and_mul_backward_kernel,
-    silu_and_mul_forward_kernel,
-)
 from torchtitan.overrides.helion_rope import HelionCosSinRoPE
 
 from benchmarks.kernel_bench import BuiltArm
@@ -42,8 +37,6 @@ from piper1b.lm_head.losses import (
 from piper1b.swiglu.combined_swiglu import (
     CombinedSwiGLUFusedGroupedExperts,
     InductorSwiGLUFusedGroupedExperts,
-    combined_silu_and_mul_backward_kernel,
-    combined_silu_and_mul_forward_kernel,
 )
 
 
@@ -349,10 +342,7 @@ def build_rope_te(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
 class SwigluInputs:
     x: torch.Tensor
     grad_out: torch.Tensor
-    gate_up: torch.Tensor
-    kernel_grad_out: torch.Tensor
     counts: torch.Tensor
-    offsets: torch.Tensor
     stock_state: dict[str, torch.Tensor]
 
 
@@ -365,7 +355,6 @@ def swiglu_inputs(
     counts = torch.full(
         (spec.num_experts,), per_expert, device=device, dtype=torch.int32
     )
-    offsets = torch.cumsum(counts, dim=0, dtype=torch.int32)
     stock_state = {
         "w1_EFD": _randn(
             (spec.num_experts, hidden, spec.dim),
@@ -392,10 +381,7 @@ def swiglu_inputs(
     return SwigluInputs(
         x=_randn((rows, spec.dim), device, generator),
         grad_out=_randn((rows, spec.dim), device, generator),
-        gate_up=_randn((rows, 2 * hidden), device, generator),
-        kernel_grad_out=_randn((rows, hidden), device, generator),
         counts=counts,
-        offsets=offsets,
         stock_state=stock_state,
     )
 
@@ -479,86 +465,25 @@ def build_swiglu_baseline(
     )
 
 
-def build_swiglu_titan_fused(
-    spec: Piper1BSpec, inputs: SwigluInputs
-) -> BuiltArm:
-    module = _build_swiglu_module(FusedGroupedExperts, spec, inputs)
-    return _swiglu_module_arm(
-        "titan_fused", module, inputs, _fused_weight_grads
-    )
-
-
-def build_swiglu_piper_optimized(
+def build_swiglu_piper_optimized_triton(
     spec: Piper1BSpec, inputs: SwigluInputs
 ) -> BuiltArm:
     module = _build_swiglu_module(
         CombinedSwiGLUFusedGroupedExperts, spec, inputs
     )
     return _swiglu_module_arm(
-        "piper_optimized", module, inputs, _fused_weight_grads
+        "piper_optimized_triton", module, inputs, _fused_weight_grads
     )
 
 
-def build_swiglu_piper_inductor(
+def build_swiglu_piper_optimized_inductor(
     spec: Piper1BSpec, inputs: SwigluInputs
 ) -> BuiltArm:
     module = _build_swiglu_module(
         InductorSwiGLUFusedGroupedExperts, spec, inputs
     )
     return _swiglu_module_arm(
-        "piper_inductor", module, inputs, _fused_weight_grads
-    )
-
-
-def build_swiglu_titan_triton(
-    spec: Piper1BSpec, inputs: SwigluInputs
-) -> BuiltArm:
-    rows = inputs.gate_up.shape[0]
-    hidden = spec.moe_hidden_dim
-    gate, up = inputs.gate_up.reshape(rows, hidden, 2).unbind(-1)
-
-    def forward():
-        return silu_and_mul_forward_kernel(gate, up, inputs.offsets)
-
-    def backward():
-        return silu_and_mul_backward_kernel(
-            inputs.kernel_grad_out, gate, up, inputs.offsets
-        )
-
-    def correctness_outputs() -> dict[str, torch.Tensor]:
-        grad_gate, grad_up = backward()
-        grad_gate_up = torch.stack((grad_gate, grad_up), dim=-1).reshape_as(
-            inputs.gate_up
-        )
-        return {"fwd_out": forward(), "grad_gate_up": grad_gate_up}
-
-    return BuiltArm(
-        name="titan_triton",
-        calls={"forward": forward, "backward": backward},
-        correctness_outputs=correctness_outputs,
-    )
-
-
-def build_swiglu_piper_optimized_triton(
-    spec: Piper1BSpec, inputs: SwigluInputs
-) -> BuiltArm:
-    def forward():
-        return combined_silu_and_mul_forward_kernel(
-            inputs.gate_up, inputs.offsets
-        )
-
-    def backward():
-        return combined_silu_and_mul_backward_kernel(
-            inputs.kernel_grad_out, inputs.gate_up, inputs.offsets
-        )
-
-    def correctness_outputs() -> dict[str, torch.Tensor]:
-        return {"fwd_out": forward(), "grad_gate_up": backward()}
-
-    return BuiltArm(
-        name="piper_optimized_triton",
-        calls={"forward": forward, "backward": backward},
-        correctness_outputs=correctness_outputs,
+        "piper_optimized_inductor", module, inputs, _fused_weight_grads
     )
 
 

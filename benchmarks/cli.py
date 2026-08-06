@@ -122,14 +122,14 @@ def scenarios_command() -> None:
     """List benchmark scenarios and their arms."""
     click.echo("end-to-end scenarios (run / run-all):")
     for scenario in SCENARIOS.values():
-        arms = ", ".join(arm.name for arm in scenario.arms)
         click.echo(f"{scenario.name}: {scenario.description}")
-        click.echo(f"  arms: {arms}")
+        for arm in scenario.arms:
+            click.echo(f"  {arm.name} — {arm.description}")
     click.echo("\nkernel scenarios (kernel-bench):")
     for scenario in KERNEL_SCENARIOS.values():
-        arms = ", ".join(arm.name for arm in scenario.arms)
         click.echo(f"{scenario.name}: {scenario.description}")
-        click.echo(f"  arms: {arms}")
+        for arm in scenario.arms:
+            click.echo(f"  {arm.name} — {arm.description}")
 
 
 @cli.command("run", context_settings=PASSTHROUGH_CONTEXT)

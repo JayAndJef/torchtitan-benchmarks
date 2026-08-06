@@ -28,12 +28,15 @@ class Workload:
 class Arm:
     """One implementation measured by a scenario.
 
-    ``config`` selects an arm-specific trainer config when the implementation
+    ``description`` is the one-line answer to "what is this arm?", shown by
+    the ``scenarios`` command and recorded in the manifest. ``config``
+    selects an arm-specific trainer config when the implementation
     difference must be expressed while building the model rather than as an
     override. When unset, the scenario workload config is used.
     """
 
     name: str
+    description: str
     config: str | None = None
     override_imports: tuple[str, ...] = ()
     expected_override_count: int = 0
@@ -117,9 +120,13 @@ PIPER_1B_ROPE = Scenario(
     workload=PIPER_1B_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
-        Arm(name="baseline"),
+        Arm(
+            name="baseline",
+            description="stock CosSinRoPE; rotate-half math fused by Inductor into block kernels",
+        ),
         Arm(
             name="helion",
+            description="TorchTitan HelionCosSinRoPE kernel, swapped in via config override",
             override_imports=(
                 "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
             ),
@@ -128,6 +135,7 @@ PIPER_1B_ROPE = Scenario(
         ),
         Arm(
             name="te",
+            description="TransformerEngine CUDA RoPE (JIT-built, needs gcc-13), via config override",
             override_imports=("piper1b.rope.te_rope_override.te_rope",),
             expected_override_count=16,
             trace_kernel_markers=("fused_rope_forward_positions_kernel",),
@@ -139,15 +147,19 @@ PIPER_1B_ROPE = Scenario(
 
 PIPER_1B_SWIGLU = Scenario(
     name="piper1b_swiglu",
-    description="Stock MoE SwiGLU versus the Piper-optimized grouped experts on piper-1B.",
+    description="Stock MoE SwiGLU versus the two Piper grouped-expert variants on piper-1B.",
     workload=PIPER_1B_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
-        Arm(name="baseline"),
         Arm(
-            name="piper_optimized",
+            name="baseline",
+            description="TorchTitan modern stock GroupedExperts: separate w1/w3 grouped GEMMs, plain-ops activation",
+        ),
+        Arm(
+            name="piper_optimized_triton",
+            description="fused w13 grouped GEMM + combined [R,2F] custom Triton activation op, via config override",
             override_imports=(
-                "piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts",
+                "piper1b.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts",
             ),
             expected_override_count=16,
             trace_kernel_markers=(
@@ -156,9 +168,10 @@ PIPER_1B_SWIGLU = Scenario(
             ),
         ),
         Arm(
-            name="piper_inductor",
+            name="piper_optimized_inductor",
+            description="fused w13 grouped GEMM, plain-ops SwiGLU left to Inductor, via config override",
             override_imports=(
-                "piper1b.swiglu.combined_swiglu.piper_inductor_fused_grouped_experts",
+                "piper1b.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts",
             ),
             expected_override_count=16,
             # No trace_kernel_markers: the activation is deliberately plain
@@ -176,8 +189,15 @@ PIPER_1B_QKV = Scenario(
     workload=PIPER_1B_UNFUSED_QKV_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
-        Arm(name="baseline"),
-        Arm(name="fused_qkv", config="qwen3_piper_1b"),
+        Arm(
+            name="baseline",
+            description="TorchTitan QKVLinear: separate Q and KV GEMMs (qwen3_piper_1b_unfused_qkv config)",
+        ),
+        Arm(
+            name="fused_qkv",
+            description="TorchTitan FusedQKVLinear: one wqkv GEMM plus split (qwen3_piper_1b config)",
+            config="qwen3_piper_1b",
+        ),
     ),
 )
 
@@ -191,18 +211,24 @@ PIPER_1B_LM_HEAD = Scenario(
     workload=PIPER_1B_LM_HEAD_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
-        Arm(name="baseline"),
+        Arm(
+            name="baseline",
+            description="full-logits F.linear then TorchTitan CrossEntropyLoss, compiled",
+        ),
         Arm(
             name="fused_linear_ce",
+            description="PyTorch fused linear-CE via FusedLinearCrossEntropyLoss (no logits materialized)",
             config="qwen3_piper_1b_fused_linear_ce",
         ),
         Arm(
             name="te_fused_ce",
+            description="full logits then the vendored TransformerEngine Triton cross entropy",
             config="qwen3_piper_1b_te_fused_ce",
             trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
         ),
         Arm(
             name="piper_optimized_te_ce",
+            description="full logits then the Piper-optimized TE-derived cross entropy",
             config="qwen3_piper_1b_piper_optimized_te_ce",
             trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
         ),

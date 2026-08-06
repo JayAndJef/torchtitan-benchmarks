@@ -253,85 +253,45 @@ ROPE = KernelScenario(
 
 SWIGLU = KernelScenario(
     name="swiglu",
-    description="Grouped-expert SwiGLU, at layer and Triton-kernel scope.",
+    description="Grouped-expert SwiGLU layer: stock vs the two Piper variants.",
     inputs_builder="benchmarks.kernel_arms:swiglu_inputs",
     reference_builder=None,
     baseline_arm="baseline",
     arms=(
         KernelArm(
             name="baseline",
-            description="stock GroupedExperts layer: separate w1/w3 GEMMs, unfused activation",
+            description="TorchTitan modern stock GroupedExperts: separate w1/w3 GEMMs, plain-ops activation",
             builder="benchmarks.kernel_arms:build_swiglu_baseline",
             modes=MODES,
             compiled=True,
         ),
         KernelArm(
-            name="titan_fused",
-            description="TorchTitan FusedGroupedExperts layer: fused w13, stride-2 activation views",
-            builder="benchmarks.kernel_arms:build_swiglu_titan_fused",
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="baseline",
-                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
-                    max_rel_l2=2e-2,
-                ),
-            ),
-        ),
-        KernelArm(
-            name="piper_optimized",
-            description="Piper layer: titan_fused with a combined [R,2F] activation layout",
-            builder="benchmarks.kernel_arms:build_swiglu_piper_optimized",
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="baseline",
-                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
-                    max_rel_l2=2e-2,
-                ),
-                CorrectnessCheck(
-                    kind="bitwise",
-                    reference="titan_fused",
-                    outputs=("out", "x_grad"),
-                ),
-            ),
-        ),
-        KernelArm(
-            name="piper_inductor",
-            description="Piper layer: fused w13 GEMM, plain-ops SwiGLU left to Inductor",
-            builder="benchmarks.kernel_arms:build_swiglu_piper_inductor",
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="baseline",
-                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
-                    max_rel_l2=2e-2,
-                ),
-            ),
-        ),
-        KernelArm(
-            name="titan_triton",
-            description="TorchTitan SwiGLU Triton kernel alone (stride-2 gate/up views)",
-            builder="benchmarks.kernel_arms:build_swiglu_titan_triton",
-            modes=("forward", "backward"),
-        ),
-        KernelArm(
             name="piper_optimized_triton",
-            description="Piper SwiGLU Triton kernel alone (combined [R,2F] layout)",
+            description="Piper layer: fused w13 GEMM + combined [R,2F] custom Triton activation op",
             builder="benchmarks.kernel_arms:build_swiglu_piper_optimized_triton",
-            modes=("forward", "backward"),
-            compare_to="titan_triton",
+            modes=MODES,
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
-                    kind="bitwise",
-                    reference="titan_triton",
-                    outputs=("fwd_out", "grad_gate_up"),
+                    kind="tolerance",
+                    reference="baseline",
+                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="piper_optimized_inductor",
+            description="Piper layer: fused w13 GEMM, plain-ops SwiGLU left to Inductor",
+            builder="benchmarks.kernel_arms:build_swiglu_piper_optimized_inductor",
+            modes=MODES,
+            compiled=True,
+            correctness=(
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="baseline",
+                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
+                    max_rel_l2=2e-2,
                 ),
             ),
         ),
@@ -503,7 +463,6 @@ def shape_summary(scenario_name: str, spec: Piper1BSpec) -> dict[str, object]:
         per_expert = rows // spec.num_experts
         return {
             "x": [rows, spec.dim],
-            "gate_up": [rows, 2 * spec.moe_hidden_dim],
             "tokens_per_expert": [per_expert] * spec.num_experts,
         }
     if scenario_name == "qkv":

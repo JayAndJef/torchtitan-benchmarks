@@ -35,8 +35,8 @@ __all__ = [
     "combined_silu_and_mul_backward_kernel",
     "combined_silu_and_mul_forward_kernel",
     "combined_silu_and_mul_op",
-    "piper_inductor_fused_grouped_experts",
-    "piper_optimized_fused_grouped_experts",
+    "piper_optimized_inductor_fused_grouped_experts",
+    "piper_optimized_triton_fused_grouped_experts",
 ]
 
 
@@ -486,7 +486,7 @@ def _fused_sharding(base: ShardingConfig) -> ShardingConfig:
         "in combined layout."
     ),
 )
-def piper_optimized_fused_grouped_experts(
+def piper_optimized_triton_fused_grouped_experts(
     cfg: GroupedExperts.Config,
 ) -> GroupedExperts.Config:
     if type(cfg) is not GroupedExperts.Config:
@@ -509,7 +509,7 @@ def piper_optimized_fused_grouped_experts(
         "ops so Inductor can fuse the activation."
     ),
 )
-def piper_inductor_fused_grouped_experts(
+def piper_optimized_inductor_fused_grouped_experts(
     cfg: GroupedExperts.Config,
 ) -> GroupedExperts.Config:
     if type(cfg) is not GroupedExperts.Config:

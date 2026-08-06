@@ -11,7 +11,7 @@ import torch
 from piper1b.swiglu.combined_swiglu import (
     combined_silu_and_mul_op,
     CombinedSwiGLUFusedGroupedExperts,
-    piper_optimized_fused_grouped_experts,
+    piper_optimized_triton_fused_grouped_experts,
 )
 from torchtitan.models.common.moe import GroupedExperts
 
@@ -20,7 +20,7 @@ class CombinedSwiGLUConfigTests(unittest.TestCase):
     def test_override_builds_local_fused_grouped_experts(self) -> None:
         config = GroupedExperts.Config(dim=16, hidden_dim=32, num_experts=4)
 
-        replacement = piper_optimized_fused_grouped_experts(config)
+        replacement = piper_optimized_triton_fused_grouped_experts(config)
         module = replacement.build()
 
         self.assertIsInstance(
