@@ -20,7 +20,12 @@ from benchmarks.runner import (
     validate_arm,
     write_manifest,
 )
-from benchmarks.runtime import CpuPinning, resolve_cpu_pinning
+from benchmarks.runtime import (
+    CpuPinning,
+    RuntimePaths,
+    resolve_cpu_pinning,
+    runtime_environment,
+)
 from benchmarks.metrics import stable_tps, training_metrics
 from benchmarks.scenarios import (
     PIPER_1B_LM_HEAD,
@@ -258,6 +263,18 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--compile.enable", command)
         self.assertIn("--profiler.enable_profiling", command)
 
+    def test_compile_mode_never_reaches_the_torchtitan_command(self) -> None:
+        command = command_for_arm(
+            PIPER_1B_ROPE.workload,
+            PIPER_1B_ROPE.arm("baseline"),
+            Path("/out/baseline"),
+            [],
+        )
+        self.assertNotIn("--compile-mode", command)
+        self.assertNotIn("--compile.mode", command)
+        self.assertFalse(any("BENCH_COMPILE_MODE" in token for token in command))
+        self.assertEqual(command[-2:], ["--dump-folder", "/out/baseline"])
+
     def test_each_arm_gets_its_own_dump_folder(self) -> None:
         for scenario in (
             PIPER_1B_ROPE,
@@ -270,6 +287,28 @@ class CommandTests(unittest.TestCase):
                     scenario.workload, arm, Path("/out") / arm.name, []
                 )
                 self.assertEqual(command[-1], f"/out/{arm.name}")
+
+
+class RuntimeEnvironmentTests(unittest.TestCase):
+    def _environment(self, host: dict[str, str], **kwargs) -> dict[str, str]:
+        paths = RuntimePaths.resolve(environment={})
+        return runtime_environment(paths, "3", environment=host, **kwargs)
+
+    def test_compile_mode_reaches_the_training_process(self) -> None:
+        environment = self._environment(
+            {"PATH": "/bin"}, compile_mode="max-autotune"
+        )
+        self.assertEqual(environment["BENCH_COMPILE_MODE"], "max-autotune")
+
+    def test_default_compile_mode_is_exported_explicitly(self) -> None:
+        environment = self._environment({"PATH": "/bin"})
+        self.assertEqual(environment["BENCH_COMPILE_MODE"], "default")
+
+    def test_inherited_compile_mode_cannot_leak_in(self) -> None:
+        environment = self._environment(
+            {"PATH": "/bin", "BENCH_COMPILE_MODE": "reduce-overhead"}
+        )
+        self.assertEqual(environment["BENCH_COMPILE_MODE"], "default")
 
 
 class CpuPinningTests(unittest.TestCase):
@@ -342,10 +381,19 @@ class ManifestTests(unittest.TestCase):
             }
             metadata = {"requested_gpu": "3", "nvidia_smi": "3, RTX A6000, uuid, 550"}
             write_manifest(
-                out_dir, scenario, selected, commands, "rtx-a6000", metadata, extra_args
+                out_dir,
+                scenario,
+                selected,
+                commands,
+                "rtx-a6000",
+                metadata,
+                extra_args,
+                "max-autotune",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
+        self.assertEqual(manifest["schema_version"], 6)
+        self.assertEqual(manifest["compile_mode"], "max-autotune")
         self.assertEqual(manifest["scenario"], "piper1b_swiglu")
         self.assertEqual(manifest["hardware"], "rtx-a6000")
         self.assertEqual(manifest["hardware_metadata"], metadata)
@@ -395,6 +443,104 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, PIPER_1B_SWIGLU.workload)
 
+    def _rope_baseline_fixture(self, root: Path, *, cudagraphs: bool) -> Path:
+        for iteration in ("iteration_20", "iteration_40"):
+            trace = root / "profiling" / "traces" / iteration / "rank0_trace.json.gz"
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            with gzip.open(trace, "wt") as trace_file:
+                trace_file.write("cudaLaunchKernel\n")
+                if cudagraphs:
+                    trace_file.write("cudaGraphLaunch\n")
+        return root / "baseline.log"
+
+    def test_non_default_compile_mode_must_appear_in_the_log(self) -> None:
+        arm = PIPER_1B_ROPE.arm("baseline")
+        mode = "max-autotune-no-cudagraphs"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=False)
+
+            log.write_text(
+                f"[CompileMode] {mode}: coordinate_descent_tuning=True "
+                "max_autotune=True\nTraining completed\n"
+            )
+            validate_arm(
+                arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+            )
+
+            log.write_text("Training completed\n")
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+                )
+
+            log.write_text(
+                "[CompileMode] max-autotune: max_autotune=True\n"
+                "Training completed\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+                )
+
+    def test_default_run_rejects_an_applied_compile_mode(self) -> None:
+        arm = PIPER_1B_ROPE.arm("baseline")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=False)
+
+            log.write_text("Training completed\n")
+            validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
+
+            log.write_text(
+                "[CompileMode] reduce-overhead: triton.cudagraphs=True\n"
+                "Training completed\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "default-mode run"):
+                validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
+
+    def test_cudagraph_modes_require_a_graph_launch_in_the_traces(self) -> None:
+        arm = PIPER_1B_ROPE.arm("baseline")
+        applied = "[CompileMode] reduce-overhead: triton.cudagraphs=True\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=False)
+            log.write_text(applied + "Training completed\n")
+            with self.assertRaisesRegex(RuntimeError, "cudaGraphLaunch"):
+                validate_arm(
+                    arm,
+                    root,
+                    log,
+                    PIPER_1B_ROPE.workload,
+                    compile_mode="reduce-overhead",
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=True)
+            log.write_text(applied + "Training completed\n")
+            validate_arm(
+                arm,
+                root,
+                log,
+                PIPER_1B_ROPE.workload,
+                compile_mode="reduce-overhead",
+            )
+
+    def test_autotune_without_cudagraphs_needs_no_graph_launch(self) -> None:
+        arm = PIPER_1B_ROPE.arm("baseline")
+        mode = "max-autotune-no-cudagraphs"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=False)
+            log.write_text(
+                f"[CompileMode] {mode}: coordinate_descent_tuning=True "
+                "max_autotune=True\nTraining completed\n"
+            )
+            validate_arm(
+                arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+            )
+
 
 class TrainingMetricsTests(unittest.TestCase):
     def test_stable_tps_excludes_compile_and_profiler_steps(self) -> None:
@@ -423,6 +569,55 @@ class TrainingMetricsTests(unittest.TestCase):
         )
 
 
+def _write_block_traces(arm_dir: Path) -> None:
+    """Write two profiler windows with the region structure the runner expects."""
+    for iteration in (20, 40):
+        trace = (
+            arm_dir / f"profiling/traces/iteration_{iteration}/rank0_trace.json.gz"
+        )
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        trace_events = []
+        slot = 0
+        for graph, phase in (("backward", "backward"), ("forward", "forward")):
+            graph_name = f"## Call CompiledFxGraph {graph} ##"
+            for _ in range(80):
+                start = slot * 1000
+                slot += 1
+                if phase == "backward":
+                    trace_events.append(
+                        {
+                            "ph": "X",
+                            "cat": "cpu_op",
+                            "name": "CompiledFunctionBackward",
+                            "tid": 1,
+                            "ts": start,
+                            "dur": 900,
+                        }
+                    )
+                trace_events.extend(
+                    (
+                        {
+                            "ph": "X",
+                            "cat": "user_annotation",
+                            "name": graph_name,
+                            "tid": 1,
+                            "ts": start + 10,
+                            "dur": 800,
+                        },
+                        {
+                            "ph": "X",
+                            "cat": "gpu_user_annotation",
+                            "name": graph_name,
+                            "tid": 100,
+                            "ts": start + 20,
+                            "dur": 100,
+                        },
+                    )
+                )
+        with gzip.open(trace, "wt") as trace_file:
+            json.dump({"traceEvents": trace_events}, trace_file)
+
+
 class ResumeTests(unittest.TestCase):
     def test_resume_skips_valid_arm_and_retries_incomplete_arm(self) -> None:
         metadata = {
@@ -435,59 +630,8 @@ class ResumeTests(unittest.TestCase):
         events = []
 
         def fake_process(command, **kwargs):
-            import gzip as gzip_module
-
             kwargs["stdout"].write("Training completed\n")
-            arm_dir = Path(command[-1])
-            for iteration in (20, 40):
-                trace = (
-                    arm_dir
-                    / f"profiling/traces/iteration_{iteration}/rank0_trace.json.gz"
-                )
-                trace.parent.mkdir(parents=True, exist_ok=True)
-                trace_events = []
-                slot = 0
-                for graph, phase in (
-                    ("backward", "backward"),
-                    ("forward", "forward"),
-                ):
-                    graph_name = f"## Call CompiledFxGraph {graph} ##"
-                    for _ in range(80):
-                        start = slot * 1000
-                        slot += 1
-                        if phase == "backward":
-                            trace_events.append(
-                                {
-                                    "ph": "X",
-                                    "cat": "cpu_op",
-                                    "name": "CompiledFunctionBackward",
-                                    "tid": 1,
-                                    "ts": start,
-                                    "dur": 900,
-                                }
-                            )
-                        trace_events.extend(
-                            (
-                                {
-                                    "ph": "X",
-                                    "cat": "user_annotation",
-                                    "name": graph_name,
-                                    "tid": 1,
-                                    "ts": start + 10,
-                                    "dur": 800,
-                                },
-                                {
-                                    "ph": "X",
-                                    "cat": "gpu_user_annotation",
-                                    "name": graph_name,
-                                    "tid": 100,
-                                    "ts": start + 20,
-                                    "dur": 100,
-                                },
-                            )
-                        )
-                with gzip_module.open(trace, "wt") as trace_file:
-                    json.dump({"traceEvents": trace_events}, trace_file)
+            _write_block_traces(Path(command[-1]))
             return SimpleNamespace(returncode=0)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
@@ -586,6 +730,79 @@ class ResumeTests(unittest.TestCase):
                     process_runner=fake_process,
                     environment=environment,
                 )
+
+            conflicting_mode = RunRequest(
+                gpu="0",
+                scenario_name=None,
+                arm_name="baseline",
+                resume_dir=out_dir,
+                compile_mode="reduce-overhead",
+            )
+            with self.assertRaisesRegex(ValueError, "compile_mode"):
+                execute_run(
+                    conflicting_mode,
+                    process_runner=fake_process,
+                    environment=environment,
+                )
+
+    def test_resume_rehydrates_the_recorded_compile_mode(self) -> None:
+        metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+        }
+        mode = "max-autotune-no-cudagraphs"
+
+        def fake_process(command, **kwargs):
+            kwargs["stdout"].write(
+                f"[CompileMode] {mode}: coordinate_descent_tuning=True "
+                "max_autotune=True\nTraining completed\n"
+            )
+            _write_block_traces(Path(command[-1]))
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.runner.hardware_metadata",
+            return_value=("test-gpu", metadata),
+        ), mock.patch(
+            "benchmarks.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            out_dir = Path(temporary) / "run"
+            environment = {"PATH": os.environ["PATH"]}
+            execute_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name="piper1b_rope",
+                    arm_name="baseline",
+                    out_dir=out_dir,
+                    compile_mode=mode,
+                ),
+                process_runner=fake_process,
+                environment=environment,
+            )
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["compile_mode"], mode)
+
+            (out_dir / "baseline.log").write_text("interrupted\n")
+            retry_process = mock.Mock(side_effect=fake_process)
+            execute_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name=None,
+                    arm_name="baseline",
+                    resume_dir=out_dir,
+                ),
+                process_runner=retry_process,
+                environment=environment,
+            )
+            retry_environment = retry_process.call_args.kwargs["env"]
+            self.assertEqual(retry_environment["BENCH_COMPILE_MODE"], mode)
+            self.assertIn(
+                "Training completed", (out_dir / "baseline.log").read_text()
+            )
 
 
 if __name__ == "__main__":

@@ -190,14 +190,20 @@ def runtime_environment(
     paths: RuntimePaths,
     gpu: str,
     *,
+    compile_mode: str = "default",
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Construct the isolated single-GPU TorchTitan environment."""
+    """Construct the isolated single-GPU TorchTitan environment.
+
+    ``BENCH_COMPILE_MODE`` is set unconditionally, including for the default
+    mode, so a value exported in the operator's shell cannot leak into a run.
+    """
     result = dict(environment or os.environ)
     pythonpath = result.get("PYTHONPATH")
     result.update(
         {
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+            "BENCH_COMPILE_MODE": compile_mode,
             "CUDA_VISIBLE_DEVICES": gpu,
             "PYTHONPATH": f"{paths.bench_dir}{':' + pythonpath if pythonpath else ''}",
             "PATH": f"{Path(sys.executable).parent}:{result['PATH']}",

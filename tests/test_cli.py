@@ -40,8 +40,60 @@ class CliTests(unittest.TestCase):
             "BATCH",
             "BENCHMARK_CACHE_ROOT",
             "BENCH_COMPILER_ENV",
+            "COMPILE_MODE",
         ):
             self.assertIn(envvar, result.output)
+
+    def test_compile_mode_reaches_the_request(self) -> None:
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(
+                cli, ["run", "2", "--compile-mode", "max-autotune"]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_args.args[0].compile_mode, "max-autotune")
+
+    def test_compile_mode_defaults_to_unrequested(self) -> None:
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(cli, ["run", "2"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(execute.call_args.args[0].compile_mode)
+
+    def test_compile_mode_applies_to_every_swept_scenario(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli._evaluate"):
+                result = self.runner.invoke(
+                    cli,
+                    [
+                        "run-all",
+                        "0",
+                        "--all-scenarios",
+                        "--compile-mode",
+                        "reduce-overhead",
+                    ],
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        modes = {call.args[0].compile_mode for call in execute.call_args_list}
+        self.assertEqual(modes, {"reduce-overhead"})
+
+    def test_unknown_compile_mode_is_rejected(self) -> None:
+        result = self.runner.invoke(cli, ["run", "2", "--compile-mode", "turbo"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Invalid value", result.output)
 
     def test_run_preserves_torchtitan_passthrough_arguments(self) -> None:
         completed = SimpleNamespace(

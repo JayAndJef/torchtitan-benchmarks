@@ -15,8 +15,18 @@ from benchmarks.profile_regions import pooled_window_metrics
 from benchmarks.scenarios import Arm, Region, Scenario, Workload
 
 
-MANIFEST_SCHEMA_VERSION = 5
+MANIFEST_SCHEMA_VERSION = 6
 STATE_SCHEMA_VERSION = 1
+
+# torch.compile modes selectable per run. Their inductor option sets are
+# resolved in the training process by piper1b.compile_mode.
+COMPILE_MODES = (
+    "default",
+    "reduce-overhead",
+    "max-autotune-no-cudagraphs",
+    "max-autotune",
+)
+CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
 
 
 def trace_files(arm_dir: Path) -> list[Path]:
@@ -44,6 +54,7 @@ def validate_arm(
     workload: Workload,
     *,
     regions: tuple[Region, ...] = (),
+    compile_mode: str = "default",
 ) -> None:
     """Reject partial or wrongly configured runs before analysis."""
     if not log_path.is_file():
@@ -51,6 +62,17 @@ def validate_arm(
     log = log_path.read_text(errors="replace")
     if "Training completed" not in log:
         raise RuntimeError(f"{arm.name}: training did not complete; see {log_path}")
+    if compile_mode == "default":
+        if "[CompileMode]" in log:
+            raise RuntimeError(
+                f"{arm.name}: training applied a compile mode in a default-mode "
+                f"run; see {log_path}"
+            )
+    elif f"[CompileMode] {compile_mode}:" not in log:
+        raise RuntimeError(
+            f"{arm.name}: compile mode {compile_mode!r} did not apply; "
+            f"see {log_path}"
+        )
     if arm.expected_override_count:
         override_count = len(re.findall(r"\[Override\]", log))
         if override_count != arm.expected_override_count:
@@ -80,6 +102,13 @@ def validate_arm(
             raise RuntimeError(
                 f"{arm.name}: marker kernel {marker!r} absent from profiler traces"
             )
+    if compile_mode in CUDAGRAPH_COMPILE_MODES and not any(
+        _trace_contains(path, "cudaGraphLaunch") for path in traces
+    ):
+        raise RuntimeError(
+            f"{arm.name}: compile mode {compile_mode!r} enables CUDA graphs but "
+            f"no cudaGraphLaunch appears in the profiler traces under {arm_dir}"
+        )
     if regions:
         try:
             pooled_window_metrics(traces, regions)
@@ -96,6 +125,7 @@ def manifest_data(
     hardware: str,
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
+    compile_mode: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -109,6 +139,7 @@ def manifest_data(
         "selected_arms": [arm.name for arm in selected_arms],
         "commands": commands,
         "extra_torchtitan_args": list(extra_args),
+        "compile_mode": compile_mode,
     }
 
 
@@ -126,11 +157,18 @@ def write_manifest(
     hardware: str,
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
+    compile_mode: str,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
         manifest_data(
-            scenario, selected_arms, commands, hardware, metadata, extra_args
+            scenario,
+            selected_arms,
+            commands,
+            hardware,
+            metadata,
+            extra_args,
+            compile_mode,
         ),
     )
 

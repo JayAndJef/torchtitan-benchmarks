@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import click
 
-from benchmarks.artifacts import record_evaluation_status
+from benchmarks.artifacts import COMPILE_MODES, record_evaluation_status
 from benchmarks.kernel_runner import KernelRunRequest, execute_kernel_run
 from benchmarks.kernels import KERNEL_SCENARIOS
 from benchmarks.metrics import evaluate_run, write_results
@@ -59,6 +59,16 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             envvar="BENCH_COMPILER_ENV",
             show_envvar=True,
             help="Shell script that enables the host compiler for CUDA extensions.",
+        ),
+        click.option(
+            "--compile-mode",
+            type=click.Choice(COMPILE_MODES),
+            envvar="COMPILE_MODE",
+            show_envvar=True,
+            help=(
+                "torch.compile mode applied to every arm in the run "
+                "[default: default]. Results are only comparable within one mode."
+            ),
         ),
     ]
     for option in reversed(options):

@@ -48,6 +48,9 @@ class RunRequest:
     timestamp: str | None = None
     cache_root: Path | None = None
     compiler_env: Path | None = None
+    # None means "not requested": a resume then inherits the recorded mode,
+    # while an explicit value is checked against the manifest.
+    compile_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +137,7 @@ def _resume_mismatches(
     hardware: str,
     metadata: dict[str, str],
     extra_args: tuple[str, ...],
+    compile_mode: str,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -141,6 +145,7 @@ def _resume_mismatches(
         "selected_arms": [arm.name for arm in arms],
         "hardware": hardware,
         "extra_torchtitan_args": list(extra_args),
+        "compile_mode": compile_mode,
     }
     mismatches = [
         key for key, value in expected.items() if manifest.get(key) != value
@@ -203,6 +208,7 @@ def _resolve_run(
     dict[str, str],
     Path,
     dict[str, list[str]],
+    str,
     bool,
 ]:
     paths = RuntimePaths.resolve(
@@ -239,6 +245,11 @@ def _resolve_run(
             if request.extra_args is None
             else request.extra_args
         )
+        compile_mode = (
+            str(existing_manifest.get("compile_mode", "default"))
+            if request.compile_mode is None
+            else request.compile_mode
+        )
     else:
         workload = workload_with_overrides(
             scenario,
@@ -248,6 +259,7 @@ def _resolve_run(
             environment=environment,
         )
         extra_args = request.extra_args or ()
+        compile_mode = request.compile_mode or "default"
     scenario = replace(scenario, workload=workload)
     arms = (scenario.arm(request.arm_name),) if request.arm_name else scenario.arms
 
@@ -274,13 +286,24 @@ def _resolve_run(
             hardware,
             metadata,
             extra_args,
+            compile_mode,
         )
         if mismatches:
             raise ValueError(
                 "resume request does not match the existing manifest: "
                 + ", ".join(mismatches)
             )
-    return paths, scenario, arms, hardware, metadata, out_dir, commands, resumed
+    return (
+        paths,
+        scenario,
+        arms,
+        hardware,
+        metadata,
+        out_dir,
+        commands,
+        compile_mode,
+        resumed,
+    )
 
 
 def execute_run(
@@ -300,6 +323,7 @@ def execute_run(
         metadata,
         out_dir,
         commands,
+        compile_mode,
         resumed,
     ) = _resolve_run(request, host_environment)
 
@@ -316,6 +340,7 @@ def execute_run(
             hardware,
             metadata,
             request.extra_args or (),
+            compile_mode,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -333,10 +358,14 @@ def execute_run(
         "summary",
         f"arms: {' '.join(arm.name for arm in arms)}",
     )
+    _emit(event_handler, "summary", f"compile mode: {compile_mode}")
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
-        paths, request.gpu, environment=host_environment
+        paths,
+        request.gpu,
+        compile_mode=compile_mode,
+        environment=host_environment,
     )
     for arm in arms:
         arm_dir = out_dir / arm.name
@@ -349,6 +378,7 @@ def execute_run(
                     log_path,
                     scenario.workload,
                     regions=scenario.regions,
+                    compile_mode=compile_mode,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -408,6 +438,7 @@ def execute_run(
                 log_path,
                 scenario.workload,
                 regions=scenario.regions,
+                compile_mode=compile_mode,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(
