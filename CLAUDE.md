@@ -93,6 +93,45 @@ Shared options, with env equivalents:
 | `--batch` | `BATCH` | workload value (4) |
 | `--cache-root` | `BENCHMARK_CACHE_ROOT` | `$TMPDIR/torchtitan-benchmarks` |
 | `--compiler-env` | `BENCH_COMPILER_ENV` | `/opt/rh/gcc-toolset-13/enable` if present |
+| `--compile-mode` | `COMPILE_MODE` | `default` |
+
+### Compile modes
+
+`--compile-mode` picks the `torch.compile` mode for the whole run -- every arm
+in it, any scenario. E2e only; `kernel-bench` has no such flag and always
+compiles at the default mode.
+
+| mode | `torch._inductor.config` it sets |
+|---|---|
+| `default` | nothing |
+| `reduce-overhead` | `triton.cudagraphs=True` |
+| `max-autotune-no-cudagraphs` | `max_autotune=True`, `coordinate_descent_tuning=True` |
+| `max-autotune` | both of the above |
+
+TorchTitan's `apply_compile` calls `transformer_block.compile(backend=...,
+fullgraph=True)` with no `mode=`, and its `CompileConfig` has no mode field, so
+the mode cannot be passed on the command line. Instead the runner exports
+`BENCH_COMPILE_MODE` and `piper1b/compile_mode.py` applies
+`list_mode_options(mode)` to the global Inductor config when
+`piper1b.config_registry` is imported -- which torchtitan does while resolving
+`--module piper1b`, before overrides, model construction, and the first
+lowering. It logs one line, `[CompileMode] <mode>: <key=value ...>`, which
+validation requires (rules 8 and 9 below). FlexAttention builds its own
+compiled callable with explicit options that pin `triton.cudagraphs` off; the
+global config does not reach it, which is intended.
+
+**Numbers are only comparable within one `compile_mode`.** Cite it alongside
+`torch_version` and `torchtitan_git_rev`; the manifest records it and
+`--resume` refuses to mix modes.
+
+Expect friction on the two cudagraph modes. Compile is regional (per
+`TransformerBlock`) and `fully_shard` wraps those same blocks afterwards even
+at `NGPU=1`, so cudagraph trees may decline to capture -- in which case rule 9
+fails the arm -- or capture and break the region annotations, which fails rule
+7. Both outcomes are results, not bugs to work around. Note also that
+`cudaGraphLaunch` is not counted as a kernel launch by `gpu_time`, so a
+cudagraph arm reports a much smaller `launch_count` and evaluation may warn
+about launch-latency spread.
 
 ### The 40-step floor
 
@@ -135,7 +174,7 @@ model structure; the RoPE and SwiGLU scenarios do not.
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 5: workload, regions, arms, commands, hardware_metadata
+  manifest.json     # schema 6: workload, regions, arms, commands, compile_mode, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 3: throughput, memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -145,7 +184,8 @@ out/<timestamp>/<scenario>/<hardware>/
 
 `manifest.json` `hardware_metadata` records `requested_gpu`, `nvidia_smi`,
 `cpu_pinning`, `torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev`.
-Always cite `torchtitan_git_rev` and `torch_version` when reporting numbers.
+Always cite `torchtitan_git_rev`, `torch_version`, and `compile_mode` when
+reporting numbers.
 
 ### CPU pinning
 
@@ -172,9 +212,15 @@ are not comparable; `--resume` refuses to mix them.
 7. `pooled_window_metrics` structural failure -- a declared region did not match
    exactly one same-phase compiled graph with the expected invocation count.
    This means Inductor repartitioned the graph; the region mapping is invalid.
+8. The run's compile mode did not take: a non-default mode with no
+   `[CompileMode] <mode>:` line in the log, or a `[CompileMode]` line in a
+   `default` run (an inherited `BENCH_COMPILE_MODE` leaking in).
+9. `cudaGraphLaunch` absent from every trace under `reduce-overhead` or
+   `max-autotune` -- cudagraph trees declined to capture, so the arm is not
+   measuring the mode it claims.
 
-Rule 4 and rule 7 are the ones that catch silent wrongness. Never work around
-them by relaxing the check.
+Rules 4, 7, 8, and 9 are the ones that catch silent wrongness. Never work
+around them by relaxing the check.
 
 ### Resume
 
@@ -182,8 +228,10 @@ them by relaxing the check.
 skips those that already pass, archives partial artifacts under `attempts/`,
 and re-runs the rest. It aborts if any of these changed since the manifest was
 written: scenario, workload, selected arms, hardware label, extra TorchTitan
-args, `nvidia_smi`, `cpu_pinning`, `torchtitan_git_rev`, `benchmarks_git_rev`.
-A different GPU or a different commit will not resume -- that is intentional.
+args, `compile_mode`, `nvidia_smi`, `cpu_pinning`, `torchtitan_git_rev`,
+`benchmarks_git_rev`. A different GPU or a different commit will not resume --
+that is intentional. Omitting `--compile-mode` on a resume inherits the
+recorded mode; passing a different one is refused.
 
 ### Evaluation
 
@@ -438,9 +486,10 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Check `nvidia-smi` for a free GPU before starting. Runs are single-GPU and a
   shared GPU invalidates timings.
 - Use at least 40 steps. The runner enforces this; do not try to route around it.
-- Numbers are only comparable within one `torch_version` and one
-  `torchtitan_git_rev`. Both are in every manifest -- check them before
-  comparing against an older run in `out/`.
+- Numbers are only comparable within one `torch_version`, one
+  `torchtitan_git_rev`, and one `compile_mode`. All three are in every
+  manifest -- check them before comparing against an older run in `out/`
+  (manifests written before schema 6 predate the flag and are `default`).
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
