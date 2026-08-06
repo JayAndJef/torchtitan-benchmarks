@@ -108,30 +108,32 @@ compiles at the default mode.
 | `max-autotune-no-cudagraphs` | `max_autotune=True`, `coordinate_descent_tuning=True` |
 | `max-autotune` | both of the above |
 
-TorchTitan's `apply_compile` calls `transformer_block.compile(backend=...,
-fullgraph=True)` with no `mode=`, and its `CompileConfig` has no mode field, so
-the mode cannot be passed on the command line. Instead the runner exports
-`BENCH_COMPILE_MODE` and `piper1b/compile_mode.py` applies
-`list_mode_options(mode)` to the global Inductor config when
-`piper1b.config_registry` is imported -- which torchtitan does while resolving
-`--module piper1b`, before overrides, model construction, and the first
-lowering. It logs one line, `[CompileMode] <mode>: <key=value ...>`, which
-validation requires (rules 8 and 9 below). FlexAttention builds its own
-compiled callable with explicit options that pin `triton.cudagraphs` off; the
-global config does not reach it, which is intended.
+The runner passes the mode through as `--compile.mode <mode>`, which the
+TorchTitan fork forwards to each block's `torch.compile` (`CompileConfig.mode`
+in `config/configs.py`, applied in `distributed/compile.py`). Per-block scope
+is the whole point: a global `torch._inductor.config` mutation would also
+reach every other `torch.compile` in the process, and one of them --
+`attention._compiled_create_block_mask` -- returns a BlockMask that is built
+once per step and read by all 16 blocks. Capturing that hands the model
+tensors a later replay overwrites, and training dies with "accessing tensor
+output of CUDAGraphs that has been overwritten". Do not reintroduce a global.
+
+`apply_compile` logs `Compiling each TransformerBlock with torch.compile
+(mode=<mode>)`, and validation requires the line to name the requested mode
+(rules 8 and 9 below), so a mode that silently failed to apply cannot be
+reported as a measurement of that mode.
 
 **Numbers are only comparable within one `compile_mode`.** Cite it alongside
 `torch_version` and `torchtitan_git_rev`; the manifest records it and
 `--resume` refuses to mix modes.
 
-Expect friction on the two cudagraph modes. Compile is regional (per
-`TransformerBlock`) and `fully_shard` wraps those same blocks afterwards even
-at `NGPU=1`, so cudagraph trees may decline to capture -- in which case rule 9
-fails the arm -- or capture and break the region annotations, which fails rule
-7. Both outcomes are results, not bugs to work around. Note also that
-`cudaGraphLaunch` is not counted as a kernel launch by `gpu_time`, so a
-cudagraph arm reports a much smaller `launch_count` and evaluation may warn
-about launch-latency spread.
+Expect friction on the two cudagraph modes: `fully_shard` wraps the compiled
+blocks even at `NGPU=1`, so cudagraph trees may decline to capture -- in which
+case rule 9 fails the arm -- or capture and break the region annotations,
+which fails rule 7. Both outcomes are results, not bugs to work around. Note
+also that `cudaGraphLaunch` is not counted as a kernel launch by `gpu_time`,
+so a cudagraph arm reports a much smaller `launch_count` and evaluation may
+warn about launch-latency spread.
 
 ### The 40-step floor
 
@@ -212,9 +214,9 @@ are not comparable; `--resume` refuses to mix them.
 7. `pooled_window_metrics` structural failure -- a declared region did not match
    exactly one same-phase compiled graph with the expected invocation count.
    This means Inductor repartitioned the graph; the region mapping is invalid.
-8. The run's compile mode did not take: a non-default mode with no
-   `[CompileMode] <mode>:` line in the log, or a `[CompileMode]` line in a
-   `default` run (an inherited `BENCH_COMPILE_MODE` leaking in).
+8. The log's `Compiling each TransformerBlock with torch.compile (mode=...)`
+   line names a mode other than the requested one, or is missing entirely
+   (an unpatched submodule, or compilation that never ran).
 9. `cudaGraphLaunch` absent from every trace under `reduce-overhead` or
    `max-autotune` -- cudagraph trees declined to capture, so the arm is not
    measuring the mode it claims.
@@ -446,6 +448,16 @@ are unmodified except for import rewrites -- if you touch
 `piper1b/lm_head/te_*.py`, that test is supposed to fail.
 
 ## Bumping the TorchTitan submodule
+
+The submodule is our fork (`JayAndJef/torchtitan`, with `pytorch/torchtitan` as
+`upstream`) and carries benchmark-required commits that upstream does not have.
+Rebasing onto upstream must preserve them:
+
+- `Generalize loss-owned LM head integration` -- the `LossWithLMHead` protocol
+  `piper1b_lm_head`'s `fused_linear_ce` arm needs.
+- `CompileConfig.mode` plus its use in `apply_compile` -- what `--compile-mode`
+  rides on, including the `(mode=...)` suffix on the "Compiling each
+  TransformerBlock" log line that `validate_arm` matches.
 
 `config_registry.py` imports private Qwen3 helpers. After any bump, verify all
 of these still exist with unchanged behavior:

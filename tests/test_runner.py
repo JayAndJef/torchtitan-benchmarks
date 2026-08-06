@@ -20,12 +20,7 @@ from benchmarks.runner import (
     validate_arm,
     write_manifest,
 )
-from benchmarks.runtime import (
-    CpuPinning,
-    RuntimePaths,
-    resolve_cpu_pinning,
-    runtime_environment,
-)
+from benchmarks.runtime import CpuPinning, resolve_cpu_pinning
 from benchmarks.metrics import stable_tps, training_metrics
 from benchmarks.scenarios import (
     PIPER_1B_LM_HEAD,
@@ -263,17 +258,28 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--compile.enable", command)
         self.assertIn("--profiler.enable_profiling", command)
 
-    def test_compile_mode_never_reaches_the_torchtitan_command(self) -> None:
+    def test_compile_mode_reaches_torchtitan_as_a_config_argument(self) -> None:
+        command = command_for_arm(
+            PIPER_1B_ROPE.workload,
+            PIPER_1B_ROPE.arm("baseline"),
+            Path("/out/baseline"),
+            [],
+            "max-autotune",
+        )
+        self.assertEqual(
+            command[command.index("--compile.mode") + 1], "max-autotune"
+        )
+        self.assertEqual(command[-2:], ["--dump-folder", "/out/baseline"])
+
+    def test_default_compile_mode_leaves_the_command_untouched(self) -> None:
         command = command_for_arm(
             PIPER_1B_ROPE.workload,
             PIPER_1B_ROPE.arm("baseline"),
             Path("/out/baseline"),
             [],
         )
-        self.assertNotIn("--compile-mode", command)
         self.assertNotIn("--compile.mode", command)
-        self.assertFalse(any("BENCH_COMPILE_MODE" in token for token in command))
-        self.assertEqual(command[-2:], ["--dump-folder", "/out/baseline"])
+        self.assertIn("--compile.enable", command)
 
     def test_each_arm_gets_its_own_dump_folder(self) -> None:
         for scenario in (
@@ -287,28 +293,6 @@ class CommandTests(unittest.TestCase):
                     scenario.workload, arm, Path("/out") / arm.name, []
                 )
                 self.assertEqual(command[-1], f"/out/{arm.name}")
-
-
-class RuntimeEnvironmentTests(unittest.TestCase):
-    def _environment(self, host: dict[str, str], **kwargs) -> dict[str, str]:
-        paths = RuntimePaths.resolve(environment={})
-        return runtime_environment(paths, "3", environment=host, **kwargs)
-
-    def test_compile_mode_reaches_the_training_process(self) -> None:
-        environment = self._environment(
-            {"PATH": "/bin"}, compile_mode="max-autotune"
-        )
-        self.assertEqual(environment["BENCH_COMPILE_MODE"], "max-autotune")
-
-    def test_default_compile_mode_is_exported_explicitly(self) -> None:
-        environment = self._environment({"PATH": "/bin"})
-        self.assertEqual(environment["BENCH_COMPILE_MODE"], "default")
-
-    def test_inherited_compile_mode_cannot_leak_in(self) -> None:
-        environment = self._environment(
-            {"PATH": "/bin", "BENCH_COMPILE_MODE": "reduce-overhead"}
-        )
-        self.assertEqual(environment["BENCH_COMPILE_MODE"], "default")
 
 
 class CpuPinningTests(unittest.TestCase):
@@ -411,6 +395,14 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(fused_command[-2], "--dump-folder")
 
 
+def _compiled_line(mode: str) -> str:
+    """The apply_compile log line validate_arm matches, as torchtitan emits it."""
+    return (
+        "[titan] - root - INFO - Compiling each TransformerBlock with "
+        f"torch.compile (mode={mode})\n"
+    )
+
+
 class ValidationTests(unittest.TestCase):
     def test_validation_requires_completion_overrides_and_trace_windows(self) -> None:
         arm = PIPER_1B_SWIGLU.arm("piper_optimized_triton")
@@ -428,16 +420,17 @@ class ValidationTests(unittest.TestCase):
                 "model_spec.model.layers.0.moe ...\n"
             )
             log = root / "piper_optimized.log"
-            log.write_text("Training completed\n" + applied * 16)
+            completed = _compiled_line("default") + "Training completed\n"
+            log.write_text(completed + applied * 16)
             self.assertEqual(len(trace_files(root)), 2)
             validate_arm(arm, root, log, PIPER_1B_SWIGLU.workload)
 
-            log.write_text("Training completed\n" + applied * 15)
+            log.write_text(completed + applied * 15)
             with self.assertRaisesRegex(RuntimeError, "expected 16 override"):
                 validate_arm(arm, root, log, PIPER_1B_SWIGLU.workload)
 
             log.write_text(
-                "Training completed\n"
+                completed
                 + "[Override] torchtitan.overrides.other.thing: fqn ...\n" * 16
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
@@ -453,17 +446,14 @@ class ValidationTests(unittest.TestCase):
                     trace_file.write("cudaGraphLaunch\n")
         return root / "baseline.log"
 
-    def test_non_default_compile_mode_must_appear_in_the_log(self) -> None:
+    def test_the_applied_mode_must_match_the_requested_one(self) -> None:
         arm = PIPER_1B_ROPE.arm("baseline")
         mode = "max-autotune-no-cudagraphs"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
 
-            log.write_text(
-                f"[CompileMode] {mode}: coordinate_descent_tuning=True "
-                "max_autotune=True\nTraining completed\n"
-            )
+            log.write_text(_compiled_line(mode) + "Training completed\n")
             validate_arm(
                 arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
             )
@@ -474,34 +464,30 @@ class ValidationTests(unittest.TestCase):
                     arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
                 )
 
-            log.write_text(
-                "[CompileMode] max-autotune: max_autotune=True\n"
-                "Training completed\n"
-            )
+            log.write_text(_compiled_line("max-autotune") + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
                     arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
                 )
 
-    def test_default_run_rejects_an_applied_compile_mode(self) -> None:
+    def test_default_run_requires_the_default_mode_line(self) -> None:
         arm = PIPER_1B_ROPE.arm("baseline")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
 
-            log.write_text("Training completed\n")
+            log.write_text(_compiled_line("default") + "Training completed\n")
             validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
 
             log.write_text(
-                "[CompileMode] reduce-overhead: triton.cudagraphs=True\n"
-                "Training completed\n"
+                _compiled_line("reduce-overhead") + "Training completed\n"
             )
-            with self.assertRaisesRegex(RuntimeError, "default-mode run"):
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
 
     def test_cudagraph_modes_require_a_graph_launch_in_the_traces(self) -> None:
         arm = PIPER_1B_ROPE.arm("baseline")
-        applied = "[CompileMode] reduce-overhead: triton.cudagraphs=True\n"
+        applied = _compiled_line("reduce-overhead")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
@@ -533,10 +519,7 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
-            log.write_text(
-                f"[CompileMode] {mode}: coordinate_descent_tuning=True "
-                "max_autotune=True\nTraining completed\n"
-            )
+            log.write_text(_compiled_line(mode) + "Training completed\n")
             validate_arm(
                 arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
             )
@@ -630,7 +613,9 @@ class ResumeTests(unittest.TestCase):
         events = []
 
         def fake_process(command, **kwargs):
-            kwargs["stdout"].write("Training completed\n")
+            kwargs["stdout"].write(
+                _compiled_line("default") + "Training completed\n"
+            )
             _write_block_traces(Path(command[-1]))
             return SimpleNamespace(returncode=0)
 
@@ -756,10 +741,7 @@ class ResumeTests(unittest.TestCase):
         mode = "max-autotune-no-cudagraphs"
 
         def fake_process(command, **kwargs):
-            kwargs["stdout"].write(
-                f"[CompileMode] {mode}: coordinate_descent_tuning=True "
-                "max_autotune=True\nTraining completed\n"
-            )
+            kwargs["stdout"].write(_compiled_line(mode) + "Training completed\n")
             _write_block_traces(Path(command[-1]))
             return SimpleNamespace(returncode=0)
 
@@ -798,8 +780,10 @@ class ResumeTests(unittest.TestCase):
                 process_runner=retry_process,
                 environment=environment,
             )
-            retry_environment = retry_process.call_args.kwargs["env"]
-            self.assertEqual(retry_environment["BENCH_COMPILE_MODE"], mode)
+            retry_command = retry_process.call_args.args[0]
+            self.assertEqual(
+                retry_command[retry_command.index("--compile.mode") + 1], mode
+            )
             self.assertIn(
                 "Training completed", (out_dir / "baseline.log").read_text()
             )

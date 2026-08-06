@@ -41,19 +41,11 @@ from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
-from piper1b.compile_mode import apply_compile_mode_from_env
 from piper1b.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
     PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
 )
-
-
-# torchtitan imports this module while resolving --module piper1b, before
-# config parsing, overrides, model construction, and the first Inductor
-# lowering. That makes it the one seam where a torch.compile mode can be
-# applied globally without patching the submodule.
-apply_compile_mode_from_env()
 
 
 def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:

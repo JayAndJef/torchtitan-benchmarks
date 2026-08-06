@@ -274,7 +274,9 @@ def _resolve_run(
     )
     commands = {
         arm.name: list(pinning.prefix)
-        + command_for_arm(scenario.workload, arm, out_dir / arm.name, extra_args)
+        + command_for_arm(
+            scenario.workload, arm, out_dir / arm.name, extra_args, compile_mode
+        )
         for arm in arms
     }
 
@@ -362,10 +364,7 @@ def execute_run(
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
-        paths,
-        request.gpu,
-        compile_mode=compile_mode,
-        environment=host_environment,
+        paths, request.gpu, environment=host_environment
     )
     for arm in arms:
         arm_dir = out_dir / arm.name

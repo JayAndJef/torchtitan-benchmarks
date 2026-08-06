@@ -62,13 +62,8 @@ def validate_arm(
     log = log_path.read_text(errors="replace")
     if "Training completed" not in log:
         raise RuntimeError(f"{arm.name}: training did not complete; see {log_path}")
-    if compile_mode == "default":
-        if "[CompileMode]" in log:
-            raise RuntimeError(
-                f"{arm.name}: training applied a compile mode in a default-mode "
-                f"run; see {log_path}"
-            )
-    elif f"[CompileMode] {compile_mode}:" not in log:
+    # TorchTitan's apply_compile reports the mode it applied to the blocks.
+    if f"with torch.compile (mode={compile_mode})" not in log:
         raise RuntimeError(
             f"{arm.name}: compile mode {compile_mode!r} did not apply; "
             f"see {log_path}"

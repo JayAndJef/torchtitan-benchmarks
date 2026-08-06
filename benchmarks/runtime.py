@@ -113,6 +113,7 @@ def command_for_arm(
     arm: Arm,
     arm_dir: Path,
     extra_args: list[str] | tuple[str, ...],
+    compile_mode: str = "default",
 ) -> list[str]:
     """Build the TorchTitan command shared by all scenarios."""
     args = [
@@ -136,6 +137,8 @@ def command_for_arm(
         "--profiler.profiler_warmup",
         str(workload.profiler_warmup),
     ]
+    if compile_mode != "default":
+        args.extend(("--compile.mode", compile_mode))
     if workload.seed is not None:
         args.extend(("--debug.seed", str(workload.seed)))
     if arm.override_imports:
@@ -190,20 +193,14 @@ def runtime_environment(
     paths: RuntimePaths,
     gpu: str,
     *,
-    compile_mode: str = "default",
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Construct the isolated single-GPU TorchTitan environment.
-
-    ``BENCH_COMPILE_MODE`` is set unconditionally, including for the default
-    mode, so a value exported in the operator's shell cannot leak into a run.
-    """
+    """Construct the isolated single-GPU TorchTitan environment."""
     result = dict(environment or os.environ)
     pythonpath = result.get("PYTHONPATH")
     result.update(
         {
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-            "BENCH_COMPILE_MODE": compile_mode,
             "CUDA_VISIBLE_DEVICES": gpu,
             "PYTHONPATH": f"{paths.bench_dir}{':' + pythonpath if pythonpath else ''}",
             "PATH": f"{Path(sys.executable).parent}:{result['PATH']}",
