@@ -57,6 +57,22 @@ class RegistryTests(unittest.TestCase):
                 self.assertEqual(module, "benchmarks.kernel_arms")
                 self.assertTrue(function.isidentifier(), reference)
 
+    def test_only_raw_kernels_and_floors_stay_eager(self) -> None:
+        eager = {
+            (scenario.name, arm.name)
+            for scenario in KERNEL_SCENARIOS.values()
+            for arm in scenario.arms
+            if not arm.compiled
+        }
+        self.assertEqual(
+            eager,
+            {
+                ("rope", "copy_floor"),
+                ("swiglu", "titan_triton"),
+                ("swiglu", "piper_optimized_triton"),
+            },
+        )
+
     def test_only_te_requires_gcc_toolset(self) -> None:
         self.assertTrue(kernel_scenario_by_name("rope").requires_gcc_toolset)
         for name in ("swiglu", "qkv", "lm_head"):

@@ -74,6 +74,17 @@ def _reset_grads(*tensors: torch.Tensor | nn.Module) -> None:
             item.grad = None
 
 
+def _compile_module(module: nn.Module) -> nn.Module:
+    """Compile a module-scope arm the way production runs it.
+
+    Eager isolation races custom ops against materialization costs Inductor
+    deletes, which inverts verdicts (the swiglu combined layout wins eager
+    and loses compiled). fullgraph turns a graph break into a build failure
+    instead of silently timing partially-eager code.
+    """
+    return torch.compile(module, fullgraph=True)
+
+
 def _assert_kernel_marker(closure, marker: str, arm: str) -> None:
     """Refuse to time an arm whose fast path silently fell back.
 
@@ -213,8 +224,7 @@ def build_rope_baseline(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
         dim=spec.head_dim, max_seq_len=spec.max_seq_len, theta=spec.theta
     ).build()
     module.init_states(buffer_device=inputs.q.device)
-    # The overrides expose fused backward kernels; stock has none, so its
-    # backward is what autograd generates from the same forward.
+    module = _compile_module(module)
     q_leaf = inputs.q.clone().requires_grad_()
     k_leaf = inputs.k.clone().requires_grad_()
     retained = module(q_leaf, k_leaf, inputs.positions)
@@ -252,22 +262,33 @@ def build_rope_helion(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
         dim=spec.head_dim, max_seq_len=spec.max_seq_len, theta=spec.theta
     ).build()
     module.init_states(buffer_device=inputs.q.device)
-    backward_op = torch.ops.torchtitan.helion_cossin_rope_bwd
+    module = _compile_module(module)
+    q_leaf = inputs.q.clone().requires_grad_()
+    k_leaf = inputs.k.clone().requires_grad_()
+    retained = module(q_leaf, k_leaf, inputs.positions)
 
     def forward():
         return module(inputs.q, inputs.k, inputs.positions)
 
-    def backward():
-        return backward_op(inputs.gq, inputs.gk, module.cache, inputs.positions)
+    def backward() -> None:
+        q_leaf.grad = None
+        k_leaf.grad = None
+        torch.autograd.backward(
+            retained, (inputs.gq, inputs.gk), retain_graph=True
+        )
 
+    forward()  # compile the no-grad variant before profiling it
     _assert_kernel_marker(forward, HELION_MARKER, "helion")
 
     def correctness_outputs() -> dict[str, torch.Tensor]:
         q_out, k_out = module(inputs.q, inputs.k, inputs.positions)
-        dq, dk = backward_op(
-            inputs.gq, inputs.gk, module.cache, inputs.positions
-        )
-        return {"q_out": q_out, "k_out": k_out, "dq": dq, "dk": dk}
+        backward()
+        return {
+            "q_out": q_out,
+            "k_out": k_out,
+            "dq": q_leaf.grad,
+            "dk": k_leaf.grad,
+        }
 
     return BuiltArm(
         name="helion",
@@ -284,24 +305,33 @@ def build_rope_te(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
         dim=spec.head_dim, max_seq_len=spec.max_seq_len, theta=spec.theta
     ).build()
     module.init_states(buffer_device=inputs.q.device)
-    backward_op = torch.ops.torchtitan_benchmarks.te_rope_bwd
+    module = _compile_module(module)
+    q_leaf = inputs.q.clone().requires_grad_()
+    k_leaf = inputs.k.clone().requires_grad_()
+    retained = module(q_leaf, k_leaf, inputs.positions)
 
     def forward():
         return module(inputs.q, inputs.k, inputs.positions)
 
-    def backward():
-        return backward_op(
-            inputs.gq, inputs.gk, module.te_angles, inputs.positions
+    def backward() -> None:
+        q_leaf.grad = None
+        k_leaf.grad = None
+        torch.autograd.backward(
+            retained, (inputs.gq, inputs.gk), retain_graph=True
         )
 
+    forward()  # compile the no-grad variant before profiling it
     _assert_kernel_marker(forward, TE_MARKER, "te")
 
     def correctness_outputs() -> dict[str, torch.Tensor]:
         q_out, k_out = module(inputs.q, inputs.k, inputs.positions)
-        dq, dk = backward_op(
-            inputs.gq, inputs.gk, module.te_angles, inputs.positions
-        )
-        return {"q_out": q_out, "k_out": k_out, "dq": dq, "dk": dk}
+        backward()
+        return {
+            "q_out": q_out,
+            "k_out": k_out,
+            "dq": q_leaf.grad,
+            "dk": k_leaf.grad,
+        }
 
     return BuiltArm(
         name="te",
@@ -436,7 +466,7 @@ def _build_swiglu_module(config_cls, spec: Piper1BSpec, inputs: SwigluInputs):
     module.to(inputs.x.device)
     module.load_state_dict(inputs.stock_state)
     module.to(torch.bfloat16)
-    return module
+    return _compile_module(module)
 
 
 def build_swiglu_baseline(
@@ -626,7 +656,7 @@ def _finalize_qkv(module: nn.Module, inputs: QkvInputs) -> nn.Module:
     module.to(inputs.x.device)
     module.load_state_dict(inputs.weight_state)
     module.to(torch.bfloat16)
-    return module
+    return _compile_module(module)
 
 
 def build_qkv_baseline(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:

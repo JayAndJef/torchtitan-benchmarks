@@ -251,6 +251,15 @@ whose `correctness_outputs` returns named tensors for the gates.
 
 ### Method
 
+- Module-scope arms (all rope modules, the three swiglu layer arms, both
+  qkv arms) run under `torch.compile(fullgraph=True)`, because that is what
+  they face end-to-end: eager isolation races custom ops against
+  materialization costs Inductor deletes, which inverts verdicts (the
+  swiglu combined layout wins eager, loses compiled). The raw Triton kernel
+  arms and `copy_floor` stay eager on purpose -- they answer the
+  kernel-vs-kernel question. lm_head losses are built with the production
+  `CompileConfig(components=["loss"])`. `KernelArm.compiled` records the
+  treatment in the manifest.
 - Arms are timed **round-robin**: one cycle runs every arm once between
   adjacent entries of a preallocated CUDA event matrix, with a single
   synchronize at the end. Drift hits all arms equally, so the per-cycle

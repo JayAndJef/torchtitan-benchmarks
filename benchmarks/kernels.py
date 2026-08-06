@@ -122,6 +122,8 @@ class KernelArm:
     whose per-mode closures are the timed operations. ``compare_to`` names
     the opponent arm for ratio and significance rows (None means the
     scenario baseline); comparisons only happen between arms sharing a mode.
+    ``compiled`` records that the builder runs the arm under torch.compile,
+    as production does; raw-kernel arms and floors stay eager on purpose.
     """
 
     name: str
@@ -132,6 +134,7 @@ class KernelArm:
     correctness: tuple[CorrectnessCheck, ...] = ()
     requires_gcc_toolset: bool = False
     is_floor: bool = False
+    compiled: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,9 +178,10 @@ ROPE = KernelScenario(
         ),
         KernelArm(
             name="baseline",
-            description="TorchTitan CosSinRoPE, eager (backward via autograd)",
+            description="TorchTitan CosSinRoPE (backward via autograd)",
             builder="benchmarks.kernel_arms:build_rope_baseline",
             modes=("forward", "backward"),
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="fp64_ulp",
@@ -198,6 +202,7 @@ ROPE = KernelScenario(
             description="TorchTitan HelionCosSinRoPE kernel",
             builder="benchmarks.kernel_arms:build_rope_helion",
             modes=("forward", "backward"),
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="fp64_ulp",
@@ -219,6 +224,7 @@ ROPE = KernelScenario(
             builder="benchmarks.kernel_arms:build_rope_te",
             modes=("forward", "backward"),
             requires_gcc_toolset=True,
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="fp64_ulp",
@@ -257,12 +263,14 @@ SWIGLU = KernelScenario(
             description="stock GroupedExperts layer: separate w1/w3 GEMMs, unfused activation",
             builder="benchmarks.kernel_arms:build_swiglu_baseline",
             modes=MODES,
+            compiled=True,
         ),
         KernelArm(
             name="titan_fused",
             description="TorchTitan FusedGroupedExperts layer: fused w13, stride-2 activation views",
             builder="benchmarks.kernel_arms:build_swiglu_titan_fused",
             modes=MODES,
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
@@ -277,6 +285,7 @@ SWIGLU = KernelScenario(
             description="Piper layer: titan_fused with a combined [R,2F] activation layout",
             builder="benchmarks.kernel_arms:build_swiglu_piper_optimized",
             modes=MODES,
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
@@ -327,6 +336,7 @@ QKV = KernelScenario(
             description="TorchTitan QKVLinear: separate Q and KV GEMMs",
             builder="benchmarks.kernel_arms:build_qkv_baseline",
             modes=MODES,
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
@@ -341,6 +351,7 @@ QKV = KernelScenario(
             description="TorchTitan FusedQKVLinear: one wqkv GEMM plus split",
             builder="benchmarks.kernel_arms:build_qkv_fused_qkv",
             modes=MODES,
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
@@ -378,12 +389,14 @@ LM_HEAD = KernelScenario(
             description="F.linear then TorchTitan CrossEntropyLoss (compiled)",
             builder="benchmarks.kernel_arms:build_lm_head_baseline",
             modes=("forward_backward",),
+            compiled=True,
         ),
         KernelArm(
             name="fused_linear_ce",
             description="F.linear_cross_entropy via FusedLinearCrossEntropyLoss",
             builder="benchmarks.kernel_arms:build_lm_head_fused_linear_ce",
             modes=("forward_backward",),
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
@@ -404,6 +417,7 @@ LM_HEAD = KernelScenario(
             description="Full logits then vendored TE Triton cross entropy",
             builder="benchmarks.kernel_arms:build_lm_head_te_fused_ce",
             modes=("forward_backward",),
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
@@ -424,6 +438,7 @@ LM_HEAD = KernelScenario(
             description="Full logits then Piper-optimized TE-derived CE",
             builder="benchmarks.kernel_arms:build_lm_head_piper_optimized_te_ce",
             modes=("forward_backward",),
+            compiled=True,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
