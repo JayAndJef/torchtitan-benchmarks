@@ -275,6 +275,12 @@ whose `correctness_outputs` returns named tensors for the gates.
   inferential for that run (unlike the e2e span diagnostics).
 - Verified not to distort: interleaved and isolated timings of the same
   kernels agree within 0.7%.
+- The event-timed medians are **wall time**: host dispatch and host-idle
+  gaps included. For small kernels this dominates -- the rope arms are
+  90%+ dispatch (device work ~11-13 us inside 131-286 us walls). Dispatch
+  cost is real on this host-bound workload, but kernel-speed claims need
+  profiler-summed device time or `--burst` amortization, not the wall
+  median.
 - Python's garbage collector is paused during the timed region. A collection
   starves the launch queue and lands as idle time inside whichever arm's
   interval is open; pausing it cut the swiglu module sd from ~63 us to
