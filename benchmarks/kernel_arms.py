@@ -208,7 +208,7 @@ def build_rope_copy_floor(
     )
 
 
-def build_rope_stock(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
+def build_rope_baseline(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
     module = CosSinRoPE.Config(
         dim=spec.head_dim, max_seq_len=spec.max_seq_len, theta=spec.theta
     ).build()
@@ -240,7 +240,7 @@ def build_rope_stock(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
         }
 
     return BuiltArm(
-        name="stock",
+        name="baseline",
         calls={"forward": forward, "backward": backward},
         correctness_outputs=correctness_outputs,
         bytes_moved=inputs.qk_bytes,
@@ -439,36 +439,36 @@ def _build_swiglu_module(config_cls, spec: Piper1BSpec, inputs: SwigluInputs):
     return module
 
 
-def build_swiglu_stock_module(
+def build_swiglu_baseline(
     spec: Piper1BSpec, inputs: SwigluInputs
 ) -> BuiltArm:
     module = _build_swiglu_module(GroupedExperts, spec, inputs)
     return _swiglu_module_arm(
-        "stock_module", module, inputs, _stock_weight_grads
+        "baseline", module, inputs, _stock_weight_grads
     )
 
 
-def build_swiglu_fused_module(
+def build_swiglu_titan_fused(
     spec: Piper1BSpec, inputs: SwigluInputs
 ) -> BuiltArm:
     module = _build_swiglu_module(FusedGroupedExperts, spec, inputs)
     return _swiglu_module_arm(
-        "fused_module", module, inputs, _fused_weight_grads
+        "titan_fused", module, inputs, _fused_weight_grads
     )
 
 
-def build_swiglu_combined_module(
+def build_swiglu_piper_optimized(
     spec: Piper1BSpec, inputs: SwigluInputs
 ) -> BuiltArm:
     module = _build_swiglu_module(
         CombinedSwiGLUFusedGroupedExperts, spec, inputs
     )
     return _swiglu_module_arm(
-        "combined_module", module, inputs, _fused_weight_grads
+        "piper_optimized", module, inputs, _fused_weight_grads
     )
 
 
-def build_swiglu_stock_kernel(
+def build_swiglu_titan_triton(
     spec: Piper1BSpec, inputs: SwigluInputs
 ) -> BuiltArm:
     rows = inputs.gate_up.shape[0]
@@ -491,13 +491,13 @@ def build_swiglu_stock_kernel(
         return {"fwd_out": forward(), "grad_gate_up": grad_gate_up}
 
     return BuiltArm(
-        name="stock_kernel",
+        name="titan_triton",
         calls={"forward": forward, "backward": backward},
         correctness_outputs=correctness_outputs,
     )
 
 
-def build_swiglu_combined_kernel(
+def build_swiglu_piper_optimized_triton(
     spec: Piper1BSpec, inputs: SwigluInputs
 ) -> BuiltArm:
     def forward():
@@ -514,7 +514,7 @@ def build_swiglu_combined_kernel(
         return {"fwd_out": forward(), "grad_gate_up": backward()}
 
     return BuiltArm(
-        name="combined_kernel",
+        name="piper_optimized_triton",
         calls={"forward": forward, "backward": backward},
         correctness_outputs=correctness_outputs,
     )
@@ -629,7 +629,7 @@ def _finalize_qkv(module: nn.Module, inputs: QkvInputs) -> nn.Module:
     return module
 
 
-def build_qkv_unfused(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
+def build_qkv_baseline(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
     module = QKVLinear.Config(
         head_dim=spec.head_dim,
         wq=Linear.Config(
@@ -639,10 +639,10 @@ def build_qkv_unfused(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
             in_features=spec.dim, out_features=spec.n_kv_heads * spec.head_dim
         ),
     ).build()
-    return _qkv_arm("unfused", _finalize_qkv(module, inputs), inputs)
+    return _qkv_arm("baseline", _finalize_qkv(module, inputs), inputs)
 
 
-def build_qkv_fused(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
+def build_qkv_fused_qkv(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
     fused_out = (spec.n_heads + 2 * spec.n_kv_heads) * spec.head_dim
     module = FusedQKVLinear.Config(
         head_dim=spec.head_dim,
@@ -650,7 +650,7 @@ def build_qkv_fused(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
         n_kv_heads=spec.n_kv_heads,
         wqkv=Linear.Config(in_features=spec.dim, out_features=fused_out),
     ).build()
-    return _qkv_arm("fused", _finalize_qkv(module, inputs), inputs)
+    return _qkv_arm("fused_qkv", _finalize_qkv(module, inputs), inputs)
 
 
 # --- lm_head ----------------------------------------------------------------

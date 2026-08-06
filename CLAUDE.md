@@ -99,6 +99,10 @@ trace validation and region pooling. Do not lower `--steps` to save time.
 
 ### Scenarios and arms
 
+Arm names match the kernel scenarios wherever the same implementation is
+measured, so `piper1b_swiglu/piper_optimized` and `swiglu/piper_optimized`
+are the same code at two scopes.
+
 All four share `PIPER_1B_REGIONS`: `forward_block` and `backward_block`, each
 80 invocations per window (16 layers x 5 active steps).
 
@@ -108,7 +112,7 @@ All four share `PIPER_1B_REGIONS`: `forward_block` and `backward_block`, each
 | | `helion` | override `torchtitan.overrides.helion_rope.helion_cos_sin_rope` |
 | | `te` | override `piper1b.rope.te_rope_override.te_rope`, needs gcc-13 |
 | `piper1b_swiglu` | `baseline` | stock `GroupedExperts` |
-| | `fused_grouped_experts` | override `piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts` |
+| | `piper_optimized` | override `piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts` |
 | `piper1b_qkv` | `baseline` | config `qwen3_piper_1b_unfused_qkv` |
 | | `fused_qkv` | config `qwen3_piper_1b` |
 | `piper1b_lm_head` | `baseline` | config `qwen3_piper_1b_full_logits` |
@@ -234,9 +238,9 @@ e2e shell cannot leak settings into a kernel run.
 
 | scenario | arms | modes | notes |
 |---|---|---|---|
-| `rope` | `copy_floor`, `stock`*, `helion`, `te` | fwd, bwd | `te` needs gcc-13; GB/s and x-floor reported |
-| `swiglu` | `stock_module`*, `fused_module`, `combined_module`, `stock_kernel`, `combined_kernel` | fwd, bwd, fwd+bwd (modules) | `combined_kernel` faces `stock_kernel`, not the module baseline |
-| `qkv` | `unfused`*, `fused` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
+| `rope` | `copy_floor`, `baseline`*, `helion`, `te` | fwd, bwd | `te` needs gcc-13; GB/s and x-floor reported |
+| `swiglu` | `baseline`*, `titan_fused`, `piper_optimized` (layers); `titan_triton`, `piper_optimized_triton` (kernels) | fwd, bwd, fwd+bwd (layers) | two scopes: whole expert layer vs the SwiGLU Triton kernel alone. `piper_optimized_triton` faces `titan_triton`, not the layer baseline |
+| `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
 | `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
 
 `*` = scenario baseline. `benchmarks/kernels.py` is the registry: add an arm

@@ -31,8 +31,8 @@ def sample_result() -> KernelScenarioResult:
         warmup=1,
         seed=0,
         arms={
-            "stock_kernel": ArmResult(
-                name="stock_kernel",
+            "titan_triton": ArmResult(
+                name="titan_triton",
                 modes={
                     "forward": ModeResult(
                         summary=summarize(samples),
@@ -45,8 +45,8 @@ def sample_result() -> KernelScenarioResult:
         },
         comparisons=[
             {
-                "arm": "stock_kernel",
-                "opponent": "combined_kernel",
+                "arm": "titan_triton",
+                "opponent": "piper_optimized_triton",
                 "mode": "forward",
                 "median_ratio": 1.05,
                 "welch_p": 0.5,
@@ -57,8 +57,8 @@ def sample_result() -> KernelScenarioResult:
         ],
         correctness=[
             CorrectnessResult(
-                arm="combined_kernel",
-                reference="stock_kernel",
+                arm="piper_optimized_triton",
+                reference="titan_triton",
                 kind="bitwise",
                 output="fwd_out",
                 metric="equal",
@@ -88,12 +88,12 @@ class KernelResultsTests(unittest.TestCase):
         self.assertEqual(raw["kind"], "kernel")
         # Non-finite floats must be nulled for strict JSON.
         self.assertIsNone(
-            raw["arms"]["stock_kernel"]["modes"]["forward"]["derived"]["gbps"]
+            raw["arms"]["titan_triton"]["modes"]["forward"]["derived"]["gbps"]
         )
         self.assertEqual(loaded.scenario, result.scenario)
         self.assertEqual(
-            loaded.arms["stock_kernel"].modes["forward"].samples_us,
-            result.arms["stock_kernel"].modes["forward"].samples_us,
+            loaded.arms["titan_triton"].modes["forward"].samples_us,
+            result.arms["titan_triton"].modes["forward"].samples_us,
         )
         self.assertEqual(loaded.correctness, result.correctness)
         self.assertEqual(loaded.warnings, result.warnings)

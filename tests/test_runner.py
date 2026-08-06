@@ -150,9 +150,9 @@ class ScenarioTests(unittest.TestCase):
     def test_piper_swiglu_uses_only_grouped_experts_override(self) -> None:
         scenario = scenario_by_name("piper1b_swiglu")
         self.assertEqual(
-            [arm.name for arm in scenario.arms], ["baseline", "fused_grouped_experts"]
+            [arm.name for arm in scenario.arms], ["baseline", "piper_optimized"]
         )
-        fused = scenario.arm("fused_grouped_experts")
+        fused = scenario.arm("piper_optimized")
         self.assertEqual(
             fused.override_imports,
             (PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
@@ -221,7 +221,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(baseline[baseline.index("--debug.seed") + 1], "42")
 
     def test_command_adds_only_the_arm_override_and_dump_folder(self) -> None:
-        arm = PIPER_1B_SWIGLU.arm("fused_grouped_experts")
+        arm = PIPER_1B_SWIGLU.arm("piper_optimized")
         command = command_for_arm(
             PIPER_1B_SWIGLU.workload, arm, Path("/out/fused"), ["--debug.seed", "42"]
         )
@@ -317,7 +317,7 @@ class CpuPinningTests(unittest.TestCase):
 class ManifestTests(unittest.TestCase):
     def test_manifest_records_run_configuration(self) -> None:
         scenario = scenario_by_name("piper1b_swiglu")
-        selected = (scenario.arm("fused_grouped_experts"),)
+        selected = (scenario.arm("piper_optimized"),)
         extra_args = ["--debug.seed", "42"]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
@@ -338,13 +338,13 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["hardware_metadata"], metadata)
         self.assertEqual(manifest["workload"]["local_batch_size"], 4)
         self.assertEqual(manifest["workload"]["seq_len"], 1024)
-        self.assertEqual(manifest["selected_arms"], ["fused_grouped_experts"])
+        self.assertEqual(manifest["selected_arms"], ["piper_optimized"])
         self.assertEqual(
             [region["name"] for region in manifest["regions"]],
             ["backward_block", "forward_block"],
         )
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
-        fused_command = manifest["commands"]["fused_grouped_experts"]
+        fused_command = manifest["commands"]["piper_optimized"]
         self.assertIn(PIPER_OPTIMIZED_SWIGLU_OVERRIDE, fused_command)
         self.assertIn("--debug.seed", fused_command)
         self.assertEqual(fused_command[-2], "--dump-folder")
@@ -352,7 +352,7 @@ class ManifestTests(unittest.TestCase):
 
 class ValidationTests(unittest.TestCase):
     def test_validation_requires_completion_overrides_and_trace_windows(self) -> None:
-        arm = PIPER_1B_SWIGLU.arm("fused_grouped_experts")
+        arm = PIPER_1B_SWIGLU.arm("piper_optimized")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for iteration in ("iteration_20", "iteration_40"):
@@ -366,7 +366,7 @@ class ValidationTests(unittest.TestCase):
                 f"[Override] {PIPER_OPTIMIZED_SWIGLU_OVERRIDE}: "
                 "model_spec.model.layers.0.moe ...\n"
             )
-            log = root / "fused_grouped_experts.log"
+            log = root / "piper_optimized.log"
             log.write_text("Training completed\n" + applied * 16)
             self.assertEqual(len(trace_files(root)), 2)
             validate_arm(arm, root, log, PIPER_1B_SWIGLU.workload)

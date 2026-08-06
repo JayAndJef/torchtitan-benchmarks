@@ -139,13 +139,13 @@ PIPER_1B_ROPE = Scenario(
 
 PIPER_1B_SWIGLU = Scenario(
     name="piper1b_swiglu",
-    description="Stock MoE SwiGLU versus fused grouped-experts SwiGLU on piper-1B.",
+    description="Stock MoE SwiGLU versus the Piper-optimized grouped experts on piper-1B.",
     workload=PIPER_1B_WORKLOAD,
     regions=PIPER_1B_REGIONS,
     arms=(
         Arm(name="baseline"),
         Arm(
-            name="fused_grouped_experts",
+            name="piper_optimized",
             override_imports=(
                 "piper1b.swiglu.combined_swiglu.piper_optimized_fused_grouped_experts",
             ),

@@ -164,7 +164,7 @@ ROPE = KernelScenario(
     description="Stock CosSinRoPE vs Helion and TE RoPE kernels, BSHD bf16.",
     inputs_builder="benchmarks.kernel_arms:rope_inputs",
     reference_builder="benchmarks.kernel_arms:rope_reference",
-    baseline_arm="stock",
+    baseline_arm="baseline",
     arms=(
         KernelArm(
             name="copy_floor",
@@ -174,9 +174,9 @@ ROPE = KernelScenario(
             is_floor=True,
         ),
         KernelArm(
-            name="stock",
+            name="baseline",
             description="TorchTitan CosSinRoPE, eager (backward via autograd)",
-            builder="benchmarks.kernel_arms:build_rope_stock",
+            builder="benchmarks.kernel_arms:build_rope_baseline",
             modes=("forward", "backward"),
             correctness=(
                 CorrectnessCheck(
@@ -247,66 +247,66 @@ ROPE = KernelScenario(
 
 SWIGLU = KernelScenario(
     name="swiglu",
-    description="Grouped-expert SwiGLU: stock vs fused vs combined layout.",
+    description="Grouped-expert SwiGLU, at layer and Triton-kernel scope.",
     inputs_builder="benchmarks.kernel_arms:swiglu_inputs",
     reference_builder=None,
-    baseline_arm="stock_module",
+    baseline_arm="baseline",
     arms=(
         KernelArm(
-            name="stock_module",
-            description="TorchTitan GroupedExperts (separate w1/w3 GEMMs)",
-            builder="benchmarks.kernel_arms:build_swiglu_stock_module",
+            name="baseline",
+            description="stock GroupedExperts layer: separate w1/w3 GEMMs, unfused activation",
+            builder="benchmarks.kernel_arms:build_swiglu_baseline",
             modes=MODES,
         ),
         KernelArm(
-            name="fused_module",
-            description="TorchTitan FusedGroupedExperts (fused w13, stride-2 views)",
-            builder="benchmarks.kernel_arms:build_swiglu_fused_module",
+            name="titan_fused",
+            description="TorchTitan FusedGroupedExperts layer: fused w13, stride-2 activation views",
+            builder="benchmarks.kernel_arms:build_swiglu_titan_fused",
             modes=MODES,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
-                    reference="stock_module",
+                    reference="baseline",
                     outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
                     max_rel_l2=2e-2,
                 ),
             ),
         ),
         KernelArm(
-            name="combined_module",
-            description="Piper combined-[R,2F]-layout fused grouped experts",
-            builder="benchmarks.kernel_arms:build_swiglu_combined_module",
+            name="piper_optimized",
+            description="Piper layer: titan_fused with a combined [R,2F] activation layout",
+            builder="benchmarks.kernel_arms:build_swiglu_piper_optimized",
             modes=MODES,
             correctness=(
                 CorrectnessCheck(
                     kind="tolerance",
-                    reference="stock_module",
+                    reference="baseline",
                     outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
                     max_rel_l2=2e-2,
                 ),
                 CorrectnessCheck(
                     kind="bitwise",
-                    reference="fused_module",
+                    reference="titan_fused",
                     outputs=("out", "x_grad"),
                 ),
             ),
         ),
         KernelArm(
-            name="stock_kernel",
-            description="TorchTitan silu_and_mul Triton kernels on stride-2 views",
-            builder="benchmarks.kernel_arms:build_swiglu_stock_kernel",
+            name="titan_triton",
+            description="TorchTitan SwiGLU Triton kernel alone (stride-2 gate/up views)",
+            builder="benchmarks.kernel_arms:build_swiglu_titan_triton",
             modes=("forward", "backward"),
         ),
         KernelArm(
-            name="combined_kernel",
-            description="Piper combined-layout silu_and_mul Triton kernels",
-            builder="benchmarks.kernel_arms:build_swiglu_combined_kernel",
+            name="piper_optimized_triton",
+            description="Piper SwiGLU Triton kernel alone (combined [R,2F] layout)",
+            builder="benchmarks.kernel_arms:build_swiglu_piper_optimized_triton",
             modes=("forward", "backward"),
-            compare_to="stock_kernel",
+            compare_to="titan_triton",
             correctness=(
                 CorrectnessCheck(
                     kind="bitwise",
-                    reference="stock_kernel",
+                    reference="titan_triton",
                     outputs=("fwd_out", "grad_gate_up"),
                 ),
             ),
@@ -317,15 +317,15 @@ SWIGLU = KernelScenario(
 
 QKV = KernelScenario(
     name="qkv",
-    description="QKV projection: three separate GEMMs vs one fused GEMM.",
+    description="QKV projection: separate Q/KV GEMMs vs one fused GEMM.",
     inputs_builder="benchmarks.kernel_arms:qkv_inputs",
     reference_builder="benchmarks.kernel_arms:qkv_reference",
-    baseline_arm="unfused",
+    baseline_arm="baseline",
     arms=(
         KernelArm(
-            name="unfused",
-            description="TorchTitan QKVLinear (wq + wkv GEMMs)",
-            builder="benchmarks.kernel_arms:build_qkv_unfused",
+            name="baseline",
+            description="TorchTitan QKVLinear: separate Q and KV GEMMs",
+            builder="benchmarks.kernel_arms:build_qkv_baseline",
             modes=MODES,
             correctness=(
                 CorrectnessCheck(
@@ -337,9 +337,9 @@ QKV = KernelScenario(
             ),
         ),
         KernelArm(
-            name="fused",
-            description="TorchTitan FusedQKVLinear (single wqkv GEMM + split)",
-            builder="benchmarks.kernel_arms:build_qkv_fused",
+            name="fused_qkv",
+            description="TorchTitan FusedQKVLinear: one wqkv GEMM plus split",
+            builder="benchmarks.kernel_arms:build_qkv_fused_qkv",
             modes=MODES,
             correctness=(
                 CorrectnessCheck(
@@ -350,13 +350,13 @@ QKV = KernelScenario(
                 ),
                 CorrectnessCheck(
                     kind="tolerance",
-                    reference="unfused",
+                    reference="baseline",
                     outputs=("q_out", "k_out", "v_out", "x_grad"),
                     max_rel_l2=2e-2,
                 ),
                 CorrectnessCheck(
                     kind="bitwise",
-                    reference="unfused",
+                    reference="baseline",
                     outputs=("q_out", "k_out", "v_out"),
                     informational=True,
                 ),
