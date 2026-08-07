@@ -1,3 +1,6 @@
 [submodule "third_party/torchtitan"]
 	path = third_party/torchtitan
 	url = https://github.com/JayAndJef/torchtitan.git
+[submodule "third_party/Megatron-LM"]
+	path = third_party/Megatron-LM
+	url = https://github.com/NVIDIA/Megatron-LM.git
