@@ -248,6 +248,80 @@ PIPER_1B_LM_HEAD = Scenario(
 )
 
 
+PIPER_1B_MEGATRON_WORKLOAD = replace(
+    PIPER_1B_WORKLOAD,
+    config="qwen3_piper_1b_pretokenized",
+    seed=42,
+)
+
+_PIPER_OPTIMIZED_SWIGLU_INDUCTOR = (
+    "piper1b.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts"
+)
+
+# The engine comparison: Megatron-LM is the baseline, the other arms are the
+# best-improved TorchTitan configurations from the compile/ac matrix, all on
+# a bit-identical pre-tokenized data stream. No per-block regions: region
+# pooling rides on Inductor's compiled-graph annotations, which an eager
+# Megatron arm honestly does not have — total GPU kernel time, tokens/s,
+# launch latency, and peak memory are the cross-engine metrics (per-block
+# detail for the titan arms lives in the four scenarios above). ac mode is
+# pinned to "none": Megatron-at-its-best does no recompute and its recompute
+# options are not parity with titan's per-op SAC.
+PIPER_1B_MEGATRON = Scenario(
+    name="piper1b_megatron",
+    description=(
+        "Megatron-LM (TransformerEngine) versus the best-improved TorchTitan "
+        "configurations on identical data; single GPU, plain bf16, no AC."
+    ),
+    workload=PIPER_1B_MEGATRON_WORKLOAD,
+    regions=(),
+    supported_ac_modes=("none",),
+    arms=(
+        Arm(
+            name="baseline",
+            description=(
+                "Megatron-LM + TE: bare GPTModel, THD packed attention, no "
+                "recompute. --ac never affects this arm; under cuda-graph "
+                "mode it uses Megatron's native whole-iteration graphs"
+            ),
+            launcher="megatron",
+            validation="megatron",
+            trace_kernel_markers=("cudnn_generated_fort_native_sdpa",),
+        ),
+        Arm(
+            name="titan_stock",
+            description=(
+                "TorchTitan qwen3_piper_1b (fused qkv, stock kernels) on the "
+                "pre-tokenized replay stream — the engine-gap bridge arm"
+            ),
+        ),
+        Arm(
+            name="titan_swiglu",
+            description=(
+                "stock + piper_optimized_inductor fused-w13 grouped experts, "
+                "via config override"
+            ),
+            override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
+            expected_override_count=16,
+        ),
+        Arm(
+            name="titan_lm_head",
+            description="stock + the piper_optimized_te_ce loss",
+            config="qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+            trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
+        ),
+        Arm(
+            name="titan_swiglu_lm_head",
+            description="both improvements combined",
+            config="qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+            override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
+            expected_override_count=16,
+            trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
+        ),
+    ),
+)
+
+
 SCENARIOS = {
     scenario.name: scenario
     for scenario in (
@@ -255,6 +329,7 @@ SCENARIOS = {
         PIPER_1B_SWIGLU,
         PIPER_1B_QKV,
         PIPER_1B_LM_HEAD,
+        PIPER_1B_MEGATRON,
     )
 }
 

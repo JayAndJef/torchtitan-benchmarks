@@ -403,6 +403,68 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(command[-1], f"/out/{arm.name}")
 
 
+class MegatronScenarioTests(unittest.TestCase):
+    def test_scenario_registration(self) -> None:
+        scenario = scenario_by_name("piper1b_megatron")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            [
+                "baseline",
+                "titan_stock",
+                "titan_swiglu",
+                "titan_lm_head",
+                "titan_swiglu_lm_head",
+            ],
+        )
+        baseline = scenario.arm("baseline")
+        self.assertEqual(baseline.launcher, "megatron")
+        self.assertEqual(baseline.validation, "megatron")
+        self.assertIn("--ac never affects this arm", baseline.description)
+        self.assertEqual(scenario.supported_ac_modes, ("none",))
+        self.assertEqual(scenario.regions, ())
+        self.assertEqual(scenario.workload.seed, 42)
+        for arm in scenario.arms[1:]:
+            self.assertEqual(arm.launcher, "torchtitan")
+
+    def test_pretokenized_config_twins_build(self) -> None:
+        import piper1b.config_registry as registry
+        from piper1b.lm_head.losses import PiperOptimizedCrossEntropyLoss
+        from piper1b.pretokenized_data import PretokenizedReplayDataLoader
+
+        scenario = scenario_by_name("piper1b_megatron")
+        config_names = {
+            arm.config or scenario.workload.config for arm in scenario.arms[1:]
+        }
+        for name in sorted(config_names):
+            config = getattr(registry, name)()
+            self.assertIsInstance(
+                config.dataloader, PretokenizedReplayDataLoader.Config, name
+            )
+            self.assertEqual(config.dataloader.replay_steps, 40, name)
+        te_ce = registry.qwen3_piper_1b_piper_optimized_te_ce_pretokenized()
+        self.assertIsInstance(te_ce.loss, PiperOptimizedCrossEntropyLoss.Config)
+
+    def test_every_arm_command_builds_at_ac_none(self) -> None:
+        scenario = scenario_by_name("piper1b_megatron")
+        for arm in scenario.arms:
+            command = command_for_arm(
+                scenario.workload,
+                arm,
+                Path("/out") / arm.name,
+                [],
+                "cuda-graph",
+                "none",
+            )
+            self.assertTrue(command, arm.name)
+
+    def test_run_refuses_sac_for_the_megatron_scenario(self) -> None:
+        request = RunRequest(
+            gpu="0", scenario_name="piper1b_megatron", ac_mode="sac"
+        )
+        with self.assertRaisesRegex(ValueError, "does not support ac mode"):
+            execute_run(request, environment={"PATH": os.environ["PATH"]})
+
+
 class CpuPinningTests(unittest.TestCase):
     def _sysfs(self, root: Path, device: str, node: str) -> Path:
         node_dir = root / "bus/pci/devices" / device

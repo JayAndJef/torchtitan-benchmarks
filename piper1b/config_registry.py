@@ -46,6 +46,7 @@ from piper1b.lm_head.losses import (
     TECrossEntropyLoss,
 )
 from piper1b.parallelize import parallelize_piper1b
+from piper1b.pretokenized_data import PretokenizedReplayDataLoader
 
 
 def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
@@ -139,6 +140,29 @@ def qwen3_piper_1b_piper_optimized_te_ce() -> Trainer.Config:
         fuse_qkv=True,
         loss_kind="piper_optimized_te_ce",
     )
+
+
+def qwen3_piper_1b_pretokenized() -> Trainer.Config:
+    """Stock model on the pre-tokenized replay stream (piper1b_megatron)."""
+    return _with_pretokenized_replay(qwen3_piper_1b())
+
+
+def qwen3_piper_1b_piper_optimized_te_ce_pretokenized() -> Trainer.Config:
+    """Piper-optimized TE CE loss on the pre-tokenized replay stream."""
+    return _with_pretokenized_replay(qwen3_piper_1b_piper_optimized_te_ce())
+
+
+def _with_pretokenized_replay(config: Trainer.Config) -> Trainer.Config:
+    """Swap the dataloader for the replay variant used by the megatron
+    comparison: same c4_test pipeline, materialized at startup so measured
+    steps carry ~zero data-host cost (matching the Megatron driver).
+    replay_steps is pinned to the scenario's 40 steps; running with more
+    steps fails loudly instead of silently reusing data."""
+    config.dataloader = PretokenizedReplayDataLoader.Config(
+        dataset="c4_test",
+        replay_steps=40,
+    )
+    return config
 
 
 def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:

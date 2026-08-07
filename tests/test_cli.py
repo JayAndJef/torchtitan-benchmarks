@@ -150,6 +150,13 @@ class CliTests(unittest.TestCase):
         evaluate.assert_called_once_with(out_dir, (), None)
 
     def test_all_scenarios_runs_each_scenario_under_one_timestamp(self) -> None:
+        # At the default ac mode (sac), scenarios that only support ac=none
+        # (piper1b_megatron) are skipped with a message rather than run.
+        supported_at_sac = [
+            name
+            for name, scenario in SCENARIOS.items()
+            if "sac" in scenario.supported_ac_modes
+        ]
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
@@ -159,10 +166,25 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         requests = [call.args[0] for call in execute.call_args_list]
         self.assertEqual(
-            [request.scenario_name for request in requests], list(SCENARIOS)
+            [request.scenario_name for request in requests], supported_at_sac
         )
+        self.assertNotIn("piper1b_megatron", supported_at_sac)
+        self.assertIn("skipped: does not support ac mode 'sac'", result.output)
         self.assertEqual(len({request.timestamp for request in requests}), 1)
         self.assertIsNotNone(requests[0].timestamp)
+
+    def test_all_scenarios_at_ac_none_includes_the_megatron_scenario(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli._evaluate"):
+                result = self.runner.invoke(
+                    cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        names = [call.args[0].scenario_name for call in execute.call_args_list]
+        self.assertEqual(names, list(SCENARIOS))
 
     def test_all_scenarios_stops_at_the_first_failing_scenario(self) -> None:
         with mock.patch(
