@@ -127,13 +127,15 @@ reported as a measurement of that mode.
 `torch_version` and `torchtitan_git_rev`; the manifest records it and
 `--resume` refuses to mix modes.
 
-Expect friction on the two cudagraph modes: `fully_shard` wraps the compiled
-blocks even at `NGPU=1`, so cudagraph trees may decline to capture -- in which
-case rule 9 fails the arm -- or capture and break the region annotations,
-which fails rule 7. Both outcomes are results, not bugs to work around. Note
-also that `cudaGraphLaunch` is not counted as a kernel launch by `gpu_time`,
-so a cudagraph arm reports a much smaller `launch_count` and evaluation may
-warn about launch-latency spread.
+The two cudagraph modes capture cleanly: blocks are plain bf16 modules with
+no FSDP wrapper (see the execution-model note below), so captures are
+one-time (32 recordings at warmup, 16 forward + 16 backward) and steady
+state is 32 graph replays per step. Rules 7 and 9 remain the arbiters --
+if either fails on a cudagraph run, something real regressed (historically:
+an input mutation blocking forward capture, or drifting static-input
+addresses forcing per-step re-capture). Note that `cudaGraphLaunch` is not
+counted as a kernel launch by `gpu_time`, so a cudagraph arm reports a much
+smaller `launch_count` and evaluation may warn about launch-latency spread.
 
 ### The 40-step floor
 
