@@ -13,7 +13,12 @@ Precision is plain bf16: params_dtype bf16 plus a blanket .bfloat16() after
 construction (torch-norm/TE-norm params otherwise materialize fp32), no
 autocast, no fp32 masters. gradient_accumulation_fusion stays off so a bare
 backward populates normal .grad (the fused path requires apex main_grad
-buffers).
+buffers) -- the one performance default we knowingly decline.
+
+Every other fusion megatron's own training entrypoint would enable is
+enabled here explicitly. Building TransformerConfig directly bypasses
+megatron/training/arguments.py, where those defaults actually live, so the
+dataclass defaults are the wrong baseline; see the fusion block below.
 """
 
 from __future__ import annotations
@@ -85,6 +90,26 @@ def build_model(
         moe_token_dispatcher_type="allgather",
         moe_grouped_gemm=True,
         apply_rope_fusion=True,
+        # TransformerConfig's dataclass defaults are NOT megatron's defaults:
+        # the ones a real run gets are set in the argparse layer we bypass by
+        # constructing the config directly. --no-bias-swiglu-fusion and
+        # --no-bias-dropout-fusion are both action="store_false" (so argparse
+        # defaults them True) and argument_utils.py forwards the swiglu one as
+        # bias_activation_fusion. Leaving them at the dataclass False ran the
+        # unfused chunk/silu/mul/copy path in moe/experts.py and cost 11.9 GPU
+        # ms/step -- an accidental handicap, not a property of the engine.
+        bias_activation_fusion=True,
+        bias_dropout_fusion=True,
+        # Opt-in in megatron, but shipped in NVIDIA's own Qwen3 example
+        # configs, and both are parity-safe pure kernel fusions (measured:
+        # loss trajectories match the unfused run to ~1e-3).
+        # 'native' is megatron's own jit_fuser CE, NOT the TE cross entropy
+        # our te_ce arms use -- megatron hard-refuses fusion_impl='te' in
+        # arguments.py ("disabled due to stability issues"), so native is
+        # megatron-at-its-best here.
+        cross_entropy_loss_fusion=True,
+        cross_entropy_fusion_impl="native",
+        moe_permute_fusion=True,
         bf16=True,
         params_dtype=torch.bfloat16,
         pipeline_dtype=torch.bfloat16,

@@ -286,7 +286,16 @@ PIPER_1B_MEGATRON = Scenario(
             ),
             launcher="megatron",
             validation="megatron",
-            trace_kernel_markers=("cudnn_generated_fort_native_sdpa",),
+            # cuDNN fused attention (a silent TE fallback to unfused
+            # attention), megatron's fused SwiGLU+probs kernel, and TE's
+            # fused MoE permute. The SwiGLU marker exists because the arm
+            # once ran the unfused chunk/silu/mul path for a whole report:
+            # it passed every other rule while costing 11.9 GPU ms/step.
+            trace_kernel_markers=(
+                "cudnn_generated_fort_native_sdpa",
+                "_mul_silu_split",
+                "_permute_kernel",
+            ),
         ),
         Arm(
             name="titan_stock",

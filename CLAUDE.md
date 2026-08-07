@@ -545,6 +545,19 @@ Faithfulness guarantees, all verified:
 - **Same precision**: plain bf16 params/grads/optimizer states, no fp32
   masters, no autocast, no fp8. No recompute ever (`--ac` never affects
   this arm).
+- **Megatron at its own best**: every fusion megatron's training entrypoint
+  would enable is enabled explicitly. This matters because building
+  `TransformerConfig` directly bypasses `megatron/training/arguments.py`,
+  where those defaults actually live -- the dataclass defaults are `False`
+  where argparse defaults them `True` (`--no-bias-swiglu-fusion` is
+  `action="store_false"`, forwarded as `bias_activation_fusion`). Running
+  the dataclass defaults once cost 11.9 GPU ms/step of unfused SwiGLU and
+  produced a bogus engine verdict. `train.py` now asserts the fusion state
+  and logs `Megatron fusions: ...`, and the arm pins `_mul_silu_split` /
+  `_permute_kernel` as trace markers. `gradient_accumulation_fusion` is the
+  one performance default deliberately declined (its fused wgrad path needs
+  apex-style `main_grad` buffers we have no DDP wrapper to provide); its
+  cost is unmeasured.
 - **No distributed machinery**: single-rank process group + megatron init
   only; no Megatron DDP wrapper, no MegatronOptimizer.
 

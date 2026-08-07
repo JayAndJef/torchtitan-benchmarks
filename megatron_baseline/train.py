@@ -35,6 +35,7 @@ os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 # The log-line contract with benchmarks/artifacts.py's megatron validation
 # profile and benchmarks/metrics.py's STEP_METRICS regex. Keep in sync.
 MODE_LINE = "Megatron-LM training loop (mode={mode}, cuda_graph_impl={impl})"
+FUSION_LINE = "Megatron fusions: {state}"
 
 # Megatron's per-layer partial-capture recipe for MoE models: the router and
 # dispatch preprocessing are graphed (MoETransformerLayer's partial mode);
@@ -185,6 +186,29 @@ def main(argv: list[str] | None = None) -> None:
             parameter.main_grad = torch.zeros_like(parameter)
     num_params = sum(parameter.numel() for parameter in model.parameters())
     print(f"Model qwen3 piper_1B (megatron) size: {num_params:,} total parameters")
+
+    # Megatron's real defaults live in its argparse layer, which building
+    # TransformerConfig directly bypasses; running the dataclass defaults once
+    # cost 11.9 GPU ms/step of unfused SwiGLU. Assert rather than trust, and
+    # log the state so a regression is visible in the arm log.
+    fusions = {
+        name: getattr(model.config, name)
+        for name in (
+            "bias_activation_fusion",
+            "bias_dropout_fusion",
+            "cross_entropy_loss_fusion",
+            "moe_permute_fusion",
+            "apply_rope_fusion",
+        )
+    }
+    missing = sorted(name for name, on in fusions.items() if not on)
+    if missing:
+        raise RuntimeError(
+            "megatron fusions unexpectedly disabled: "
+            + ", ".join(missing)
+            + " -- see megatron_baseline/model.py"
+        )
+    print(FUSION_LINE.format(state=" ".join(f"{k}={v}" for k, v in fusions.items())))
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
