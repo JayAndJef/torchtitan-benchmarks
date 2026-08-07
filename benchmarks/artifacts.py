@@ -15,11 +15,18 @@ from benchmarks.profile_regions import pooled_window_metrics
 from benchmarks.scenarios import Arm, Region, Scenario, Workload
 
 
-MANIFEST_SCHEMA_VERSION = 6
+MANIFEST_SCHEMA_VERSION = 7
 STATE_SCHEMA_VERSION = 1
 
-# torch.compile modes selectable per run. Their inductor option sets are
-# resolved in the training process by piper1b.compile_mode.
+# How the training process executes the model. Constant since schema 7:
+# plain bf16 params on one GPU, no FSDP wrapper, no fp32 masters
+# (piper1b.parallelize). Recorded so a manifest self-describes without a
+# git-rev lookup; earlier schemas ran under FSDP2 mixed precision.
+EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
+
+# torch.compile modes selectable per run. The runner forwards the mode as
+# --compile.mode, which the TorchTitan fork applies to each block's
+# torch.compile.
 COMPILE_MODES = (
     "default",
     "reduce-overhead",
@@ -135,6 +142,7 @@ def manifest_data(
         "commands": commands,
         "extra_torchtitan_args": list(extra_args),
         "compile_mode": compile_mode,
+        "execution_model": EXECUTION_MODEL,
     }
 
 

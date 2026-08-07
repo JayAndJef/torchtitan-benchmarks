@@ -36,7 +36,6 @@ from torchtitan.models.qwen3 import (
     _qwen3_norm,
     Qwen3Model,
 )
-from torchtitan.models.qwen3.parallelize import parallelize_qwen3
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
@@ -46,6 +45,7 @@ from piper1b.lm_head.losses import (
     PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
 )
+from piper1b.parallelize import parallelize_piper1b
 
 
 def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
@@ -146,7 +146,7 @@ def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
         name="qwen3",
         flavor="piper_1B",
         model=_piper_1b_model(fuse_qkv=fuse_qkv),
-        parallelize_fn=parallelize_qwen3,
+        parallelize_fn=parallelize_piper1b,
         pipelining_fn=pipeline_llm,
         # No register_moe_load_balancing_hook: load_balance_coeff is None
         # (matching piper), so there is no expert-bias state to update.
@@ -183,6 +183,10 @@ def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
             local_batch_size=4,
             seq_len=1024,
             steps=40,
+            # Plain bf16 params/grads/optimizer states, matching piper. No
+            # FSDP means no mixed-precision engine, so this is the only bf16
+            # mechanism; parallelize_piper1b enforces it.
+            dtype="bfloat16",
         ),
         checkpoint=CheckpointManager.Config(
             interval=500,

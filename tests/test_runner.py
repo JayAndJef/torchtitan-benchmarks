@@ -48,7 +48,9 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     LossWithLMHead,
 )
-from torchtitan.config import CompileConfig
+from piper1b.parallelize import parallelize_piper1b
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.distributed import ParallelDims
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
@@ -204,6 +206,52 @@ class ScenarioTests(unittest.TestCase):
             self.assertEqual(
                 [(r.name, r.phase, r.invocations_per_window) for r in scenario.regions],
                 [("backward_block", "backward", 80), ("forward_block", "forward", 80)],
+            )
+
+
+class ParallelizeTests(unittest.TestCase):
+    def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
+        for factory in (
+            qwen3_piper_1b,
+            qwen3_piper_1b_unfused_qkv,
+            qwen3_piper_1b_full_logits,
+            qwen3_piper_1b_fused_linear_ce,
+            qwen3_piper_1b_te_fused_ce,
+            qwen3_piper_1b_piper_optimized_te_ce,
+        ):
+            with self.subTest(config=factory.__name__):
+                config = factory()
+                self.assertIs(
+                    config.model_spec.parallelize_fn, parallelize_piper1b
+                )
+                self.assertEqual(config.training.dtype, "bfloat16")
+
+    def test_parallelize_rejects_multi_gpu_and_non_bf16(self) -> None:
+        # Both guards fire before the model is touched, so dummies suffice.
+        common = dict(
+            model=object(),
+            parallelism=None,
+            compile_config=None,
+            ac_config=None,
+            dump_folder="",
+        )
+        multi_gpu = ParallelDims(
+            dp_replicate=1, dp_shard=2, cp=1, tp=1, pp=1, ep=1, world_size=2
+        )
+        with self.assertRaisesRegex(RuntimeError, "single-GPU only"):
+            parallelize_piper1b(
+                parallel_dims=multi_gpu,
+                training=TrainingConfig(dtype="bfloat16"),
+                **common,
+            )
+        single_gpu = ParallelDims(
+            dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
+        )
+        with self.assertRaisesRegex(ValueError, "bfloat16"):
+            parallelize_piper1b(
+                parallel_dims=single_gpu,
+                training=TrainingConfig(dtype="float32"),
+                **common,
             )
 
 
@@ -376,8 +424,11 @@ class ManifestTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 6)
+        self.assertEqual(manifest["schema_version"], 7)
         self.assertEqual(manifest["compile_mode"], "max-autotune")
+        self.assertEqual(
+            manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
+        )
         self.assertEqual(manifest["scenario"], "piper1b_swiglu")
         self.assertEqual(manifest["hardware"], "rtx-a6000")
         self.assertEqual(manifest["hardware_metadata"], metadata)

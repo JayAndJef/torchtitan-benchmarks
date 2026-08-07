@@ -176,7 +176,7 @@ model structure; the RoPE and SwiGLU scenarios do not.
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 6: workload, regions, arms, commands, compile_mode, hardware_metadata
+  manifest.json     # schema 7: workload, regions, arms, commands, compile_mode, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 3: throughput, memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -426,6 +426,20 @@ weight tying. Trains on `c4_test` (tokenizer vocab 2020) against the full
 151936-row embedding, so **losses are not comparable to real Qwen3 training** --
 they are a convergence sanity check only.
 
+**Execution model: single GPU, plain bf16, no FSDP.** The ModelSpec's
+`parallelize_fn` is `piper1b/parallelize.py:parallelize_piper1b`, which
+delegates to the fork's `parallelize_qwen3` with `skip_dp=True` (AC and
+per-block compile applied, FSDP skipped) and hard-errors at `world_size > 1`
+or any `training.dtype` other than `bfloat16`. `training.dtype="bfloat16"`
+puts params, grads, and optimizer states in bf16 with no fp32 masters --
+matching piper's own execution and the treatment kernel-bench already gives
+its modules. This is the only bf16 mechanism in the run (there is no
+autocast and no mixed-precision wrapper), which is why the wrapper enforces
+it: the TE RoPE arm requires bf16 activations, and an fp32 swiglu baseline
+would pass every validation rule while measuring the wrong thing. Manifests
+record `execution_model`; runs from schema <= 6 used FSDP2 mixed precision
+and are not comparable.
+
 An arm changes behavior one of two ways:
 
 - **A different registered config** (`arm.config`). Used when the difference is
@@ -458,6 +472,19 @@ Rebasing onto upstream must preserve them:
 - `CompileConfig.mode` plus its use in `apply_compile` -- what `--compile-mode`
   rides on, including the `(mode=...)` suffix on the "Compiling each
   TransformerBlock" log line that `validate_arm` matches.
+- `Skip expert-usage accumulation when load balancing is off` (the
+  `load_balance_coeff is not None` gate around `tokens_per_expert_E.add_`
+  in `models/common/moe.py`) -- without it the in-place input mutation makes
+  Inductor refuse to capture every forward block graph under the cudagraph
+  compile modes.
+
+`piper1b/parallelize.py` additionally relies on `parallelize_qwen3`'s
+`skip_dp` kwarg and its ordering guarantee: AC, then `apply_compile` (which
+emits the `(mode=...)` log line), then the early return *before* mesh
+resolution and `apply_fsdp_to_decoder`. Note also that this fork applies no
+autocast at world size 1 -- `training.mixed_precision_param` is consumed
+only by `apply_fsdp_to_decoder` -- so `training.dtype` is the whole dtype
+story; if a future bump adds single-device autocast, revisit it.
 
 `config_registry.py` imports private Qwen3 helpers. After any bump, verify all
 of these still exist with unchanged behavior:
@@ -502,6 +529,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   `torchtitan_git_rev`, and one `compile_mode`. All three are in every
   manifest -- check them before comparing against an older run in `out/`
   (manifests written before schema 6 predate the flag and are `default`).
+  Manifests before schema 7 predate the FSDP removal (they ran under FSDP2
+  mixed precision with fp32 masters) and are not comparable to schema-7
+  runs at all -- different init RNG, different optimizer numerics.
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
