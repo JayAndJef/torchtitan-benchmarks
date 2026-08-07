@@ -14,8 +14,20 @@ dependencies = [
     "ninja>=1.13.0",
 ]
 
+[dependency-groups]
+# Transformer Engine for the Megatron baseline arm (megatron_baseline/).
+# core-cu13 is a prebuilt wheel; the torch binding compiles at install
+# against the pinned torch nightly, hence no-build-isolation below.
+megatron = [
+    "transformer-engine[pytorch,core-cu13]==2.17.1",
+    "setuptools>=75",
+    "wheel",
+]
+
 [tool.uv]
 package = false
+default-groups = ["megatron"]
+no-build-isolation-package = ["transformer-engine-torch"]
 
 [[tool.uv.index]]
 name = "pytorch-nightly-cu130"
