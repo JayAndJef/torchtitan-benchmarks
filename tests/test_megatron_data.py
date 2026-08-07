@@ -25,24 +25,7 @@ from megatron_baseline.data import (
 from megatron_baseline.train import lr_lambda_for
 
 
-def _hf_cache_writable() -> bool:
-    cache = os.environ.get("HF_DATASETS_CACHE") or os.path.join(
-        os.path.expanduser("~"), ".cache", "huggingface", "datasets"
-    )
-    probe = Path(cache)
-    try:
-        probe.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryFile(dir=probe):
-            return True
-    except OSError:
-        return False
-
-
 class PackingParityTests(unittest.TestCase):
-    @unittest.skipUnless(
-        _hf_cache_writable(),
-        "HF datasets cache is not writable; export HF_DATASETS_CACHE",
-    )
     def test_streams_are_bitwise_identical(self) -> None:
         from megatron_baseline.data import materialize_titan_samples
         from piper1b.pretokenized_data import PretokenizedReplayDataset
@@ -50,9 +33,18 @@ class PackingParityTests(unittest.TestCase):
         from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
 
         num_samples = 12
-        megatron_side = materialize_titan_samples(
-            seq_len=1024, num_samples=num_samples
-        )
+        try:
+            megatron_side = materialize_titan_samples(
+                seq_len=1024, num_samples=num_samples
+            )
+        except PermissionError as error:
+            # The resolved HF datasets cache (possibly a shared read-only
+            # tree with root-owned subdirs) rejects the builder lock; only
+            # the real load attempt can detect this reliably.
+            self.skipTest(
+                f"HF datasets cache is not writable ({error}); "
+                "export HF_DATASETS_CACHE"
+            )
         tokenizer = HuggingFaceTokenizer(tokenizer_path=str(TOKENIZER_PATH))
         inner = HuggingFaceTextDataset(
             dataset_name="c4_test",
