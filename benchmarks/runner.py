@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from benchmarks.artifacts import (
+    AC_MODES,
+    COMPILE_MODES,
     archive_incomplete_arm,
     initial_run_state,
     load_manifest,
@@ -51,6 +53,7 @@ class RunRequest:
     # None means "not requested": a resume then inherits the recorded mode,
     # while an explicit value is checked against the manifest.
     compile_mode: str | None = None
+    ac_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,7 @@ def _resume_mismatches(
     metadata: dict[str, str],
     extra_args: tuple[str, ...],
     compile_mode: str,
+    ac_mode: str,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -146,6 +150,7 @@ def _resume_mismatches(
         "hardware": hardware,
         "extra_torchtitan_args": list(extra_args),
         "compile_mode": compile_mode,
+        "ac_mode": ac_mode,
     }
     mismatches = [
         key for key, value in expected.items() if manifest.get(key) != value
@@ -209,6 +214,7 @@ def _resolve_run(
     Path,
     dict[str, list[str]],
     str,
+    str,
     bool,
 ]:
     paths = RuntimePaths.resolve(
@@ -250,6 +256,12 @@ def _resolve_run(
             if request.compile_mode is None
             else request.compile_mode
         )
+        # Schema <= 7 manifests imply the historical SAC treatment.
+        ac_mode = (
+            str(existing_manifest.get("ac_mode", "sac"))
+            if request.ac_mode is None
+            else request.ac_mode
+        )
     else:
         workload = workload_with_overrides(
             scenario,
@@ -260,7 +272,23 @@ def _resolve_run(
         )
         extra_args = request.extra_args or ()
         compile_mode = request.compile_mode or "default"
+        ac_mode = request.ac_mode or "sac"
+    if compile_mode not in COMPILE_MODES:
+        raise ValueError(
+            f"unknown compile mode {compile_mode!r} (schema <= 7 manifests "
+            f"recorded torch-level names; those runs cannot be resumed here). "
+            f"Available: {', '.join(COMPILE_MODES)}"
+        )
+    if ac_mode not in AC_MODES:
+        raise ValueError(
+            f"unknown ac mode {ac_mode!r}. Available: {', '.join(AC_MODES)}"
+        )
     scenario = replace(scenario, workload=workload)
+    if ac_mode not in scenario.supported_ac_modes:
+        raise ValueError(
+            f"scenario {scenario.name!r} does not support ac mode {ac_mode!r} "
+            f"(supported: {', '.join(scenario.supported_ac_modes)})"
+        )
     arms = (scenario.arm(request.arm_name),) if request.arm_name else scenario.arms
 
     requested_hardware = request.hardware
@@ -275,7 +303,12 @@ def _resolve_run(
     commands = {
         arm.name: list(pinning.prefix)
         + command_for_arm(
-            scenario.workload, arm, out_dir / arm.name, extra_args, compile_mode
+            scenario.workload,
+            arm,
+            out_dir / arm.name,
+            extra_args,
+            compile_mode,
+            ac_mode,
         )
         for arm in arms
     }
@@ -289,6 +322,7 @@ def _resolve_run(
             metadata,
             extra_args,
             compile_mode,
+            ac_mode,
         )
         if mismatches:
             raise ValueError(
@@ -304,6 +338,7 @@ def _resolve_run(
         out_dir,
         commands,
         compile_mode,
+        ac_mode,
         resumed,
     )
 
@@ -326,6 +361,7 @@ def execute_run(
         out_dir,
         commands,
         compile_mode,
+        ac_mode,
         resumed,
     ) = _resolve_run(request, host_environment)
 
@@ -343,6 +379,7 @@ def execute_run(
             metadata,
             request.extra_args or (),
             compile_mode,
+            ac_mode,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -361,6 +398,7 @@ def execute_run(
         f"arms: {' '.join(arm.name for arm in arms)}",
     )
     _emit(event_handler, "summary", f"compile mode: {compile_mode}")
+    _emit(event_handler, "summary", f"ac mode: {ac_mode}")
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
@@ -378,6 +416,7 @@ def execute_run(
                     scenario.workload,
                     regions=scenario.regions,
                     compile_mode=compile_mode,
+                    ac_mode=ac_mode,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -438,6 +477,7 @@ def execute_run(
                 scenario.workload,
                 regions=scenario.regions,
                 compile_mode=compile_mode,
+                ac_mode=ac_mode,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

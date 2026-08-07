@@ -306,16 +306,16 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--compile.enable", command)
         self.assertIn("--profiler.enable_profiling", command)
 
-    def test_compile_mode_reaches_torchtitan_as_a_config_argument(self) -> None:
+    def test_compile_mode_reaches_torchtitan_as_the_torch_level_name(self) -> None:
         command = command_for_arm(
             PIPER_1B_ROPE.workload,
             PIPER_1B_ROPE.arm("baseline"),
             Path("/out/baseline"),
             [],
-            "max-autotune",
+            "cuda-graph",
         )
         self.assertEqual(
-            command[command.index("--compile.mode") + 1], "max-autotune"
+            command[command.index("--compile.mode") + 1], "reduce-overhead"
         )
         self.assertEqual(command[-2:], ["--dump-folder", "/out/baseline"])
 
@@ -328,6 +328,29 @@ class CommandTests(unittest.TestCase):
         )
         self.assertNotIn("--compile.mode", command)
         self.assertIn("--compile.enable", command)
+
+    def test_ac_none_adds_the_subcommand_token_last(self) -> None:
+        command = command_for_arm(
+            PIPER_1B_ROPE.workload,
+            PIPER_1B_ROPE.arm("baseline"),
+            Path("/out/baseline"),
+            [],
+            "default",
+            "none",
+        )
+        # tyro attributes flags after a subcommand token to that subcommand,
+        # so the token must trail everything, including --dump-folder.
+        self.assertEqual(command[-1], "activation-checkpoint:none")
+        self.assertEqual(command[-3:-1], ["--dump-folder", "/out/baseline"])
+
+    def test_ac_sac_leaves_the_command_untouched(self) -> None:
+        command = command_for_arm(
+            PIPER_1B_ROPE.workload,
+            PIPER_1B_ROPE.arm("baseline"),
+            Path("/out/baseline"),
+            [],
+        )
+        self.assertNotIn("activation-checkpoint:none", command)
 
     def test_each_arm_gets_its_own_dump_folder(self) -> None:
         for scenario in (
@@ -420,12 +443,14 @@ class ManifestTests(unittest.TestCase):
                 "rtx-a6000",
                 metadata,
                 extra_args,
-                "max-autotune",
+                "cuda-graph",
+                "none",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 7)
-        self.assertEqual(manifest["compile_mode"], "max-autotune")
+        self.assertEqual(manifest["schema_version"], 8)
+        self.assertEqual(manifest["compile_mode"], "cuda-graph")
+        self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(
             manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
         )
@@ -446,12 +471,25 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(fused_command[-2], "--dump-folder")
 
 
-def _compiled_line(mode: str) -> str:
-    """The apply_compile log line validate_arm matches, as torchtitan emits it."""
+def _compiled_line(torch_mode: str) -> str:
+    """The apply_compile log line validate_arm matches, as torchtitan emits it.
+
+    Takes the torch-level mode name ("default"/"reduce-overhead"), which is
+    what reaches the log; the harness-level "cuda-graph" maps onto
+    "reduce-overhead".
+    """
     return (
         "[titan] - root - INFO - Compiling each TransformerBlock with "
-        f"torch.compile (mode={mode})\n"
+        f"torch.compile (mode={torch_mode})\n"
     )
+
+
+# The SelectiveAC application line validate_arm requires under ac mode "sac"
+# and rejects under "none".
+_SAC_LINE = (
+    "[titan] - root - INFO - Applied SelectiveAC activation checkpointing "
+    "to the model\n"
+)
 
 
 class ValidationTests(unittest.TestCase):
@@ -471,7 +509,7 @@ class ValidationTests(unittest.TestCase):
                 "model_spec.model.layers.0.moe ...\n"
             )
             log = root / "piper_optimized.log"
-            completed = _compiled_line("default") + "Training completed\n"
+            completed = _compiled_line("default") + _SAC_LINE + "Training completed\n"
             log.write_text(completed + applied * 16)
             self.assertEqual(len(trace_files(root)), 2)
             validate_arm(arm, root, log, PIPER_1B_SWIGLU.workload)
@@ -499,26 +537,31 @@ class ValidationTests(unittest.TestCase):
 
     def test_the_applied_mode_must_match_the_requested_one(self) -> None:
         arm = PIPER_1B_ROPE.arm("baseline")
-        mode = "max-autotune-no-cudagraphs"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            log = self._rope_baseline_fixture(root, cudagraphs=False)
+            log = self._rope_baseline_fixture(root, cudagraphs=True)
 
-            log.write_text(_compiled_line(mode) + "Training completed\n")
+            # cuda-graph is delivered to torch.compile as reduce-overhead, so
+            # that is the name the log must carry.
+            log.write_text(
+                _compiled_line("reduce-overhead") + _SAC_LINE + "Training completed\n"
+            )
             validate_arm(
-                arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+                arm, root, log, PIPER_1B_ROPE.workload, compile_mode="cuda-graph"
             )
 
-            log.write_text("Training completed\n")
+            log.write_text(_SAC_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode="cuda-graph"
                 )
 
-            log.write_text(_compiled_line("max-autotune") + "Training completed\n")
+            log.write_text(
+                _compiled_line("default") + _SAC_LINE + "Training completed\n"
+            )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode="cuda-graph"
                 )
 
     def test_default_run_requires_the_default_mode_line(self) -> None:
@@ -527,18 +570,20 @@ class ValidationTests(unittest.TestCase):
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
 
-            log.write_text(_compiled_line("default") + "Training completed\n")
+            log.write_text(
+                _compiled_line("default") + _SAC_LINE + "Training completed\n"
+            )
             validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
 
             log.write_text(
-                _compiled_line("reduce-overhead") + "Training completed\n"
+                _compiled_line("reduce-overhead") + _SAC_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
 
-    def test_cudagraph_modes_require_a_graph_launch_in_the_traces(self) -> None:
+    def test_cudagraph_mode_requires_a_graph_launch_in_the_traces(self) -> None:
         arm = PIPER_1B_ROPE.arm("baseline")
-        applied = _compiled_line("reduce-overhead")
+        applied = _compiled_line("reduce-overhead") + _SAC_LINE
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
@@ -549,7 +594,7 @@ class ValidationTests(unittest.TestCase):
                     root,
                     log,
                     PIPER_1B_ROPE.workload,
-                    compile_mode="reduce-overhead",
+                    compile_mode="cuda-graph",
                 )
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -561,18 +606,33 @@ class ValidationTests(unittest.TestCase):
                 root,
                 log,
                 PIPER_1B_ROPE.workload,
-                compile_mode="reduce-overhead",
+                compile_mode="cuda-graph",
             )
 
-    def test_autotune_without_cudagraphs_needs_no_graph_launch(self) -> None:
+    def test_ac_mode_must_match_the_applied_treatment(self) -> None:
         arm = PIPER_1B_ROPE.arm("baseline")
-        mode = "max-autotune-no-cudagraphs"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
-            log.write_text(_compiled_line(mode) + "Training completed\n")
+
+            # sac requested, SelectiveAC absent: the run measured no-AC.
+            log.write_text(_compiled_line("default") + "Training completed\n")
+            with self.assertRaisesRegex(RuntimeError, "ac mode 'sac'"):
+                validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
+
+            # none requested, SelectiveAC applied: the run measured SAC.
+            log.write_text(
+                _compiled_line("default") + _SAC_LINE + "Training completed\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "ac mode 'none'"):
+                validate_arm(
+                    arm, root, log, PIPER_1B_ROPE.workload, ac_mode="none"
+                )
+
+            # none requested, SelectiveAC absent: valid.
+            log.write_text(_compiled_line("default") + "Training completed\n")
             validate_arm(
-                arm, root, log, PIPER_1B_ROPE.workload, compile_mode=mode
+                arm, root, log, PIPER_1B_ROPE.workload, ac_mode="none"
             )
 
 
@@ -603,7 +663,7 @@ class TrainingMetricsTests(unittest.TestCase):
         )
 
 
-def _write_block_traces(arm_dir: Path) -> None:
+def _write_block_traces(arm_dir: Path, *, cudagraphs: bool = False) -> None:
     """Write two profiler windows with the region structure the runner expects."""
     for iteration in (20, 40):
         trace = (
@@ -648,6 +708,17 @@ def _write_block_traces(arm_dir: Path) -> None:
                         },
                     )
                 )
+        if cudagraphs:
+            trace_events.append(
+                {
+                    "ph": "X",
+                    "cat": "cuda_runtime",
+                    "name": "cudaGraphLaunch",
+                    "tid": 1,
+                    "ts": 0,
+                    "dur": 5,
+                }
+            )
         with gzip.open(trace, "wt") as trace_file:
             json.dump({"traceEvents": trace_events}, trace_file)
 
@@ -665,7 +736,7 @@ class ResumeTests(unittest.TestCase):
 
         def fake_process(command, **kwargs):
             kwargs["stdout"].write(
-                _compiled_line("default") + "Training completed\n"
+                _compiled_line("default") + _SAC_LINE + "Training completed\n"
             )
             _write_block_traces(Path(command[-1]))
             return SimpleNamespace(returncode=0)
@@ -772,11 +843,25 @@ class ResumeTests(unittest.TestCase):
                 scenario_name=None,
                 arm_name="baseline",
                 resume_dir=out_dir,
-                compile_mode="reduce-overhead",
+                compile_mode="cuda-graph",
             )
             with self.assertRaisesRegex(ValueError, "compile_mode"):
                 execute_run(
                     conflicting_mode,
+                    process_runner=fake_process,
+                    environment=environment,
+                )
+
+            conflicting_ac = RunRequest(
+                gpu="0",
+                scenario_name=None,
+                arm_name="baseline",
+                resume_dir=out_dir,
+                ac_mode="none",
+            )
+            with self.assertRaisesRegex(ValueError, "ac_mode"):
+                execute_run(
+                    conflicting_ac,
                     process_runner=fake_process,
                     environment=environment,
                 )
@@ -789,11 +874,13 @@ class ResumeTests(unittest.TestCase):
             "torchtitan_git_rev": "titan-rev",
             "benchmarks_git_rev": "bench-rev",
         }
-        mode = "max-autotune-no-cudagraphs"
+        mode = "cuda-graph"
 
         def fake_process(command, **kwargs):
-            kwargs["stdout"].write(_compiled_line(mode) + "Training completed\n")
-            _write_block_traces(Path(command[-1]))
+            kwargs["stdout"].write(
+                _compiled_line("reduce-overhead") + _SAC_LINE + "Training completed\n"
+            )
+            _write_block_traces(Path(command[-1]), cudagraphs=True)
             return SimpleNamespace(returncode=0)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
@@ -833,7 +920,8 @@ class ResumeTests(unittest.TestCase):
             )
             retry_command = retry_process.call_args.args[0]
             self.assertEqual(
-                retry_command[retry_command.index("--compile.mode") + 1], mode
+                retry_command[retry_command.index("--compile.mode") + 1],
+                "reduce-overhead",
             )
             self.assertIn(
                 "Training completed", (out_dir / "baseline.log").read_text()

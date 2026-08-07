@@ -15,7 +15,7 @@ from benchmarks.profile_regions import pooled_window_metrics
 from benchmarks.scenarios import Arm, Region, Scenario, Workload
 
 
-MANIFEST_SCHEMA_VERSION = 7
+MANIFEST_SCHEMA_VERSION = 8
 STATE_SCHEMA_VERSION = 1
 
 # How the training process executes the model. Constant since schema 7:
@@ -24,16 +24,23 @@ STATE_SCHEMA_VERSION = 1
 # git-rev lookup; earlier schemas ran under FSDP2 mixed precision.
 EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
 
-# torch.compile modes selectable per run. The runner forwards the mode as
-# --compile.mode, which the TorchTitan fork applies to each block's
-# torch.compile.
-COMPILE_MODES = (
-    "default",
-    "reduce-overhead",
-    "max-autotune-no-cudagraphs",
-    "max-autotune",
-)
-CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
+# Engine-neutral compile modes selectable per run. "cuda-graph" replaced the
+# torch-level name "reduce-overhead" in schema 8; TORCH_COMPILE_MODE maps it
+# back to the --compile.mode value the TorchTitan fork applies per block.
+# The two max-autotune modes were removed in schema 8 after the full matrix
+# showed them to be GPU-time regressions at these shapes (see
+# reports/20260807-mode-matrix-plain-bf16.md); schema <= 7 manifests may
+# still record them and the old reduce-overhead name.
+COMPILE_MODES = ("default", "cuda-graph")
+TORCH_COMPILE_MODE = {"default": "default", "cuda-graph": "reduce-overhead"}
+CUDAGRAPH_COMPILE_MODES = frozenset({"cuda-graph"})
+
+# Activation checkpointing modes selectable per run (schema 8). "sac" is
+# TorchTitan's per-op SelectiveAC (the historical treatment, implied by
+# schema <= 7 manifests); "none" disables checkpointing entirely, delivered
+# to TorchTitan as the tyro subcommand token "activation-checkpoint:none".
+AC_MODES = ("sac", "none")
+_SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
 
 
 def trace_files(arm_dir: Path) -> list[Path]:
@@ -62,6 +69,7 @@ def validate_arm(
     *,
     regions: tuple[Region, ...] = (),
     compile_mode: str = "default",
+    ac_mode: str = "sac",
 ) -> None:
     """Reject partial or wrongly configured runs before analysis."""
     if not log_path.is_file():
@@ -69,11 +77,25 @@ def validate_arm(
     log = log_path.read_text(errors="replace")
     if "Training completed" not in log:
         raise RuntimeError(f"{arm.name}: training did not complete; see {log_path}")
-    # TorchTitan's apply_compile reports the mode it applied to the blocks.
-    if f"with torch.compile (mode={compile_mode})" not in log:
+    # TorchTitan's apply_compile reports the (torch-level) mode it applied.
+    torch_mode = TORCH_COMPILE_MODE[compile_mode]
+    if f"with torch.compile (mode={torch_mode})" not in log:
         raise RuntimeError(
             f"{arm.name}: compile mode {compile_mode!r} did not apply; "
             f"see {log_path}"
+        )
+    # The AC policy logs its application; its presence must match the
+    # requested mode or the run measured the wrong recompute treatment.
+    sac_applied = _SAC_APPLIED_LINE in log
+    if ac_mode == "sac" and not sac_applied:
+        raise RuntimeError(
+            f"{arm.name}: ac mode 'sac' requested but SelectiveAC was not "
+            f"applied; see {log_path}"
+        )
+    if ac_mode == "none" and sac_applied:
+        raise RuntimeError(
+            f"{arm.name}: ac mode 'none' requested but SelectiveAC was "
+            f"applied; see {log_path}"
         )
     if arm.expected_override_count:
         override_count = len(re.findall(r"\[Override\]", log))
@@ -128,6 +150,7 @@ def manifest_data(
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
+    ac_mode: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -142,6 +165,7 @@ def manifest_data(
         "commands": commands,
         "extra_torchtitan_args": list(extra_args),
         "compile_mode": compile_mode,
+        "ac_mode": ac_mode,
         "execution_model": EXECUTION_MODEL,
     }
 
@@ -161,6 +185,7 @@ def write_manifest(
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
+    ac_mode: str,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -172,6 +197,7 @@ def write_manifest(
             metadata,
             extra_args,
             compile_mode,
+            ac_mode,
         ),
     )
 

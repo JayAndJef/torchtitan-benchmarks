@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.runner import RunRequest, execute_run
 from benchmarks.runtime import CpuPinning
-from tests.test_runner import _compiled_line
+from tests.test_runner import _SAC_LINE, _compiled_line
 
 
 class RunCompletionTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class RunCompletionTests(unittest.TestCase):
 
         def malformed_process(command, **kwargs):
             kwargs["stdout"].write(
-                _compiled_line("default") + "Training completed\n"
+                _compiled_line("default") + _SAC_LINE + "Training completed\n"
             )
             arm_dir = Path(command[-1])
             for iteration in (20, 40):

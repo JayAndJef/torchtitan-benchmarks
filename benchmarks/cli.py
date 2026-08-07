@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import click
 
-from benchmarks.artifacts import COMPILE_MODES, record_evaluation_status
+from benchmarks.artifacts import AC_MODES, COMPILE_MODES, record_evaluation_status
 from benchmarks.kernel_runner import KernelRunRequest, execute_kernel_run
 from benchmarks.kernels import KERNEL_SCENARIOS
 from benchmarks.metrics import evaluate_run, write_results
@@ -66,8 +66,21 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             envvar="COMPILE_MODE",
             show_envvar=True,
             help=(
-                "torch.compile mode applied to every arm in the run "
-                "[default: default]. Results are only comparable within one mode."
+                "Compile mode applied to every arm in the run [default: "
+                "default]. cuda-graph maps to torch.compile reduce-overhead "
+                "for TorchTitan arms. Results are only comparable within one "
+                "mode."
+            ),
+        ),
+        click.option(
+            "--ac",
+            "ac_mode",
+            type=click.Choice(AC_MODES),
+            envvar="AC_MODE",
+            show_envvar=True,
+            help=(
+                "Activation checkpointing applied to every arm in the run "
+                "[default: sac]. Results are only comparable within one mode."
             ),
         ),
     ]
@@ -227,7 +240,15 @@ def run_all_command(
 
     # One stamp for the sweep so every scenario lands under out/<stamp>/.
     timestamp = run_timestamp()
-    for name in SCENARIOS:
+    ac_mode = options.get("ac_mode") or "sac"
+    for name, scenario in SCENARIOS.items():
+        if ac_mode not in scenario.supported_ac_modes:
+            click.echo(
+                f"\n===== scenario: {name} ====="
+                f"\nskipped: does not support ac mode {ac_mode!r} "
+                f"(supported: {', '.join(scenario.supported_ac_modes)})"
+            )
+            continue
         click.echo(f"\n===== scenario: {name} =====")
         scenario_options: dict[str, Any] = {**options, "scenario": name}
         _run_and_evaluate(

@@ -53,10 +53,11 @@ class CliTests(unittest.TestCase):
             "benchmarks.cli.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
-                cli, ["run", "2", "--compile-mode", "max-autotune"]
+                cli, ["run", "2", "--compile-mode", "cuda-graph", "--ac", "none"]
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].compile_mode, "max-autotune")
+        self.assertEqual(execute.call_args.args[0].compile_mode, "cuda-graph")
+        self.assertEqual(execute.call_args.args[0].ac_mode, "none")
 
     def test_compile_mode_defaults_to_unrequested(self) -> None:
         completed = SimpleNamespace(
@@ -69,6 +70,7 @@ class CliTests(unittest.TestCase):
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIsNone(execute.call_args.args[0].compile_mode)
+        self.assertIsNone(execute.call_args.args[0].ac_mode)
 
     def test_compile_mode_applies_to_every_swept_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -83,12 +85,16 @@ class CliTests(unittest.TestCase):
                         "0",
                         "--all-scenarios",
                         "--compile-mode",
-                        "reduce-overhead",
+                        "cuda-graph",
+                        "--ac",
+                        "none",
                     ],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         modes = {call.args[0].compile_mode for call in execute.call_args_list}
-        self.assertEqual(modes, {"reduce-overhead"})
+        self.assertEqual(modes, {"cuda-graph"})
+        ac_modes = {call.args[0].ac_mode for call in execute.call_args_list}
+        self.assertEqual(ac_modes, {"none"})
 
     def test_unknown_compile_mode_is_rejected(self) -> None:
         result = self.runner.invoke(cli, ["run", "2", "--compile-mode", "turbo"])

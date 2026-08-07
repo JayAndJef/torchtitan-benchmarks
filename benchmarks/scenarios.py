@@ -64,13 +64,20 @@ class Region:
 
 @dataclass(frozen=True)
 class Scenario:
-    """A reproducible workload and its comparable implementation arms."""
+    """A reproducible workload and its comparable implementation arms.
+
+    ``supported_ac_modes`` restricts the global ``--ac`` axis: a scenario
+    whose arms cannot honor a mode (e.g. an engine with no SAC-parity
+    recompute) lists only the modes it supports; ``run-all --all-scenarios``
+    skips unsupported combinations and a direct request errors.
+    """
 
     name: str
     description: str
     workload: Workload
     arms: tuple[Arm, ...]
     regions: tuple[Region, ...] = ()
+    supported_ac_modes: tuple[str, ...] = ("sac", "none")
 
     def arm(self, name: str) -> Arm:
         for arm in self.arms:

@@ -114,8 +114,12 @@ def command_for_arm(
     arm_dir: Path,
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str = "default",
+    ac_mode: str = "sac",
 ) -> list[str]:
     """Build the TorchTitan command shared by all scenarios."""
+    # Local import: artifacts imports scenarios only, so no cycle.
+    from benchmarks.artifacts import TORCH_COMPILE_MODE
+
     args = [
         "./run_train.sh",
         "--module",
@@ -138,12 +142,19 @@ def command_for_arm(
         str(workload.profiler_warmup),
     ]
     if compile_mode != "default":
-        args.extend(("--compile.mode", compile_mode))
+        args.extend(("--compile.mode", TORCH_COMPILE_MODE[compile_mode]))
     if workload.seed is not None:
         args.extend(("--debug.seed", str(workload.seed)))
     if arm.override_imports:
         args.extend(("--override.imports", ",".join(arm.override_imports)))
-    return args + list(extra_args) + ["--dump-folder", str(arm_dir)]
+    args = args + list(extra_args) + ["--dump-folder", str(arm_dir)]
+    if ac_mode == "none":
+        # tyro subcommand token selecting activation_checkpoint=None; the
+        # flag-style spelling does not exist for subcommand unions, and tyro
+        # attributes any flags after the token to the (fieldless) subcommand,
+        # so the token must come last.
+        args.append("activation-checkpoint:none")
+    return args
 
 
 def run_text(command: list[str], *, cwd: Path | None = None) -> str:
