@@ -21,11 +21,21 @@ One environment, owned by this repo. There is no `TITAN_DIR` and no
 
 ```bash
 git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
-uv sync                      # creates .venv, installs pinned torch + submodule
+./sync.sh                    # two-pass uv sync; builds the TE torch binding
 ```
 
+- `./sync.sh` wraps `uv sync`: `transformer-engine[pytorch,core-cu13]` (a
+  default dependency group, needed by the Megatron arm) compiles its torch
+  binding without build isolation against the pinned nightly, and the wrapper
+  provides the venv's bundled NVIDIA headers plus the gcc-13 toolset. A plain
+  `uv sync` works only after the TE wheel is already in uv's cache.
 - TorchTitan is a git submodule at `third_party/torchtitan`, installed editable.
   `benchmarks/runtime.py:18` hardcodes it as `TITAN_DIR`.
+- Megatron-LM is a git submodule at `third_party/Megatron-LM` (pinned
+  `59b72fa57`, core 0.20.0). It is **not** pip-installed (its pyproject wants
+  python >= 3.12); `megatron_baseline/location.py` puts it on `sys.path` in
+  the driver process only. `MEGATRON_DIR` overrides the location for
+  development checkouts; the manifest records the resolved rev.
 - Every command runs under `.venv/bin/python`. `run_bench.sh` execs it directly;
   `runtime.py` derives the training subprocess interpreter from `sys.executable`,
   so the CLI and training always share one environment.
@@ -49,9 +59,13 @@ uv sync                      # creates .venv, installs pinned torch + submodule
 | `piper1b/rope/` | TE RoPE override + `te_rope_standalone.cu` |
 | `piper1b/swiglu/` | Combined-SwiGLU Triton kernels and override |
 | `piper1b/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
+| `piper1b/pretokenized_data.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
+| `megatron_baseline/` | Everything Megatron: location/provenance, Qwen3-1B GPTModel builder, THD data, training driver |
 | `analysis/` | Two argv-driven trace diagnostics (`analyze.py`, `per_block.py`) |
+| `tools/` | `megatron_parity_check.py`: GPU logit-parity gate between the engines |
 | `tests/` | CPU + GPU unit tests |
-| `third_party/torchtitan/` | Pinned submodule |
+| `third_party/torchtitan/` | Pinned submodule (our fork) |
+| `third_party/Megatron-LM/` | Pinned submodule (upstream NVIDIA, sys.path only) |
 | `out/` | Run outputs (gitignored) |
 | `reports/` | Local investigation notes (gitignored). Put conclusions here, not in docs. |
 
@@ -94,48 +108,72 @@ Shared options, with env equivalents:
 | `--cache-root` | `BENCHMARK_CACHE_ROOT` | `$TMPDIR/torchtitan-benchmarks` |
 | `--compiler-env` | `BENCH_COMPILER_ENV` | `/opt/rh/gcc-toolset-13/enable` if present |
 | `--compile-mode` | `COMPILE_MODE` | `default` |
+| `--ac` | `AC_MODE` | `sac` |
 
 ### Compile modes
 
-`--compile-mode` picks the `torch.compile` mode for the whole run -- every arm
+`--compile-mode` picks the compile treatment for the whole run -- every arm
 in it, any scenario. E2e only; `kernel-bench` has no such flag and always
-compiles at the default mode.
+compiles at the default mode. Since manifest schema 8 the axis is
+engine-neutral and has exactly two values:
 
-| mode | `torch._inductor.config` it sets |
-|---|---|
-| `default` | nothing |
-| `reduce-overhead` | `triton.cudagraphs=True` |
-| `max-autotune-no-cudagraphs` | `max_autotune=True`, `coordinate_descent_tuning=True` |
-| `max-autotune` | both of the above |
+| mode | TorchTitan arms get | megatron arm gets |
+|---|---|---|
+| `default` | per-block `torch.compile`, mode default | eager TE modules |
+| `cuda-graph` | per-block `torch.compile(mode="reduce-overhead")` | Megatron's local per-layer partial graphs |
 
-The runner passes the mode through as `--compile.mode <mode>`, which the
-TorchTitan fork forwards to each block's `torch.compile` (`CompileConfig.mode`
-in `config/configs.py`, applied in `distributed/compile.py`). Per-block scope
-is the whole point: a global `torch._inductor.config` mutation would also
-reach every other `torch.compile` in the process, and one of them --
-`attention._compiled_create_block_mask` -- returns a BlockMask that is built
-once per step and read by all 16 blocks. Capturing that hands the model
-tensors a later replay overwrites, and training dies with "accessing tensor
-output of CUDAGraphs that has been overwritten". Do not reintroduce a global.
+`cuda-graph` is the renamed `reduce-overhead` (schema <= 7 manifests record
+the torch-level name); the two max-autotune modes were **removed** after the
+full matrix showed them to be GPU-time regressions at these shapes
+(`reports/20260807-mode-matrix-plain-bf16.md`). `TORCH_COMPILE_MODE` in
+`benchmarks/artifacts.py` maps the harness name to the `--compile.mode`
+value delivered to the fork, which applies it to each block's
+`torch.compile` (`CompileConfig.mode`, applied in `distributed/compile.py`).
+Per-block scope is the whole point: a global `torch._inductor.config`
+mutation would also reach every other `torch.compile` in the process, and
+one of them -- `attention._compiled_create_block_mask` -- returns a
+BlockMask that is built once per step and read by all 16 blocks. Capturing
+that hands the model tensors a later replay overwrites, and training dies
+with "accessing tensor output of CUDAGraphs that has been overwritten". Do
+not reintroduce a global.
 
 `apply_compile` logs `Compiling each TransformerBlock with torch.compile
-(mode=<mode>)`, and validation requires the line to name the requested mode
-(rules 8 and 9 below), so a mode that silently failed to apply cannot be
-reported as a measurement of that mode.
+(mode=<torch-level mode>)`, and validation requires the line to name the
+requested mode (rules 8 and 9 below), so a mode that silently failed to
+apply cannot be reported as a measurement of that mode. The megatron arm
+logs its own `Megatron-LM training loop (mode=...)` line, matched by its
+validation profile.
 
-**Numbers are only comparable within one `compile_mode`.** Cite it alongside
-`torch_version` and `torchtitan_git_rev`; the manifest records it and
-`--resume` refuses to mix modes.
+Under `cuda-graph`, titan blocks capture cleanly: plain bf16 modules with no
+FSDP wrapper (see the execution-model note below), one-time captures (32
+recordings at warmup, 16 forward + 16 backward), steady state 32 graph
+replays per step. Rules 7 and 9 remain the arbiters -- if either fails on a
+cudagraph run, something real regressed (historically: an input mutation
+blocking forward capture, or drifting static-input addresses forcing
+per-step re-capture). Note that `cudaGraphLaunch` is not counted as a kernel
+launch by `gpu_time`, so a cudagraph arm reports a much smaller
+`launch_count` and evaluation may warn about launch-latency spread.
 
-The two cudagraph modes capture cleanly: blocks are plain bf16 modules with
-no FSDP wrapper (see the execution-model note below), so captures are
-one-time (32 recordings at warmup, 16 forward + 16 backward) and steady
-state is 32 graph replays per step. Rules 7 and 9 remain the arbiters --
-if either fails on a cudagraph run, something real regressed (historically:
-an input mutation blocking forward capture, or drifting static-input
-addresses forcing per-step re-capture). Note that `cudaGraphLaunch` is not
-counted as a kernel launch by `gpu_time`, so a cudagraph arm reports a much
-smaller `launch_count` and evaluation may warn about launch-latency spread.
+### AC modes
+
+`--ac` picks the activation-checkpointing treatment for the whole run:
+`sac` (TorchTitan's per-op SelectiveAC -- the historical treatment, implied
+by schema <= 7 manifests) or `none` (checkpointing disabled, delivered as
+the trailing tyro subcommand token `activation-checkpoint:none`). Validation
+requires the `Applied SelectiveAC` log line to match the requested mode.
+Scenarios may restrict the axis via `Scenario.supported_ac_modes`:
+`piper1b_megatron` supports only `none` (Megatron's recompute options are
+not parity with per-op SAC, and the megatron arm itself always runs without
+recompute -- `--ac` never affects it). `run-all --all-scenarios` skips
+unsupported scenario x ac combinations; a direct `--scenario` request
+errors.
+
+**Numbers are only comparable within one `compile_mode` and one `ac_mode`.**
+Cite both alongside `torch_version` and `torchtitan_git_rev`; the manifest
+records them and `--resume` refuses to mix either. Measured across the full
+2x2 matrix: `--ac none` cuts titan GPU kernel time ~15% (SAC's recompute is
+pure GPU cost at these sizes) for ~2.5 GiB more peak memory -- see
+`reports/20260807/compile-ac-matrix.md`.
 
 ### The 40-step floor
 
@@ -153,8 +191,12 @@ measured, so `piper1b_swiglu/piper_optimized_triton` and
 in both registries carries a one-line `description`; `./run_bench.sh
 scenarios` prints them and manifests record them.
 
-All four share `PIPER_1B_REGIONS`: `forward_block` and `backward_block`, each
-80 invocations per window (16 layers x 5 active steps).
+The four titan scenarios share `PIPER_1B_REGIONS`: `forward_block` and
+`backward_block`, each 80 invocations per window (16 layers x 5 active
+steps). `piper1b_megatron` declares no regions (region pooling rides on
+Inductor's compiled-graph annotations, which the eager megatron arm honestly
+lacks) -- its cross-engine metrics are total GPU kernel time, tokens/s,
+launch latency, and peak memory.
 
 | scenario | arm | mechanism |
 |---|---|---|
@@ -170,15 +212,25 @@ All four share `PIPER_1B_REGIONS`: `forward_block` and `backward_block`, each
 | | `fused_linear_ce` | config `qwen3_piper_1b_fused_linear_ce` |
 | | `te_fused_ce` | config `qwen3_piper_1b_te_fused_ce` |
 | | `piper_optimized_te_ce` | config `qwen3_piper_1b_piper_optimized_te_ce` |
+| `piper1b_megatron` | `baseline` | `launcher="megatron"`: Megatron-LM + TE bare GPTModel (see the Megatron section) |
+| | `titan_stock` | config `qwen3_piper_1b_pretokenized` (fused qkv, stock kernels) |
+| | `titan_swiglu` | pretokenized config + the `piper_optimized_inductor` swiglu override |
+| | `titan_lm_head` | config `qwen3_piper_1b_piper_optimized_te_ce_pretokenized` |
+| | `titan_swiglu_lm_head` | te_ce pretokenized config + the swiglu override |
 
-`piper1b_qkv` and `piper1b_lm_head` set `seed=42` because their arms differ in
-model structure; the RoPE and SwiGLU scenarios do not.
+`piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
+because their arms differ in model structure; the RoPE and SwiGLU scenarios
+do not. The megatron scenario's `_pretokenized` configs swap the dataloader
+for `piper1b/pretokenized_data.py`'s replay loader (all 40 steps of c4_test
+batches materialized at init, ~zero per-step data-host cost, matching the
+megatron driver's treatment; `replay_steps` is pinned to 40 and exceeding it
+fails loudly, so do not override `--steps` in that scenario).
 
 ### Output layout
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 7: workload, regions, arms, commands, compile_mode, execution_model, hardware_metadata
+  manifest.json     # schema 8: workload, regions, arms, commands, compile_mode, ac_mode, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 3: throughput, memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -187,9 +239,10 @@ out/<timestamp>/<scenario>/<hardware>/
 ```
 
 `manifest.json` `hardware_metadata` records `requested_gpu`, `nvidia_smi`,
-`cpu_pinning`, `torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev`.
-Always cite `torchtitan_git_rev`, `torch_version`, and `compile_mode` when
-reporting numbers.
+`cpu_pinning`, `torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev`,
+`megatron_git_rev`, `te_version`. Always cite `torchtitan_git_rev`,
+`torch_version`, `compile_mode`, and `ac_mode` when reporting numbers --
+plus `megatron_git_rev` and `te_version` for the megatron scenario.
 
 ### CPU pinning
 
@@ -205,26 +258,35 @@ are not comparable; `--resume` refuses to mix them.
 
 `validate_arm` (`benchmarks/artifacts.py`) fails an arm on any of:
 
-1. Missing `<arm>.log`, or log lacking `Training completed`.
+1. Missing `<arm>.log`, or log lacking the profile's completion marker
+   (`Training completed` for both engines).
 2. `[Override]` line count != `arm.expected_override_count` (16 for override
    arms: one per transformer block).
 3. A declared `override_imports` entry with no matching `[Override] <path>:` line.
-4. Log contains `falling back to the PyTorch` -- an optimized kernel silently
-   degraded. This fails the arm regardless of anything else.
+4. A profile `failure_marker` phrase in the log (`falling back to the
+   PyTorch` for titan arms -- an optimized kernel silently degraded). This
+   fails the arm regardless of anything else.
 5. Fewer than `min_trace_windows` trace files.
-6. A declared `trace_kernel_markers` string absent from every trace.
+6. A declared `trace_kernel_markers` string absent from every trace (the
+   megatron arm pins the cuDNN fused-attention kernel name here, guarding a
+   silent TE fallback to unfused attention).
 7. `pooled_window_metrics` structural failure -- a declared region did not match
    exactly one same-phase compiled graph with the expected invocation count.
    This means Inductor repartitioned the graph; the region mapping is invalid.
-8. The log's `Compiling each TransformerBlock with torch.compile (mode=...)`
-   line names a mode other than the requested one, or is missing entirely
-   (an unpatched submodule, or compilation that never ran).
-9. `cudaGraphLaunch` absent from every trace under `reduce-overhead` or
-   `max-autotune` -- cudagraph trees declined to capture, so the arm is not
-   measuring the mode it claims.
+8. The engine's mode line names a mode other than the requested one, or is
+   missing entirely: `Compiling each TransformerBlock with torch.compile
+   (mode=<torch-level name>)` for titan arms, `Megatron-LM training loop
+   (mode=...)` for the megatron arm.
+9. `cudaGraphLaunch` absent from every trace under `cuda-graph` -- graphs
+   declined to capture (either engine), so the arm is not measuring the
+   mode it claims.
+10. The `Applied SelectiveAC` line's presence contradicts the requested
+    `--ac` mode (titan arms only).
 
-Rules 4, 7, 8, and 9 are the ones that catch silent wrongness. Never work
-around them by relaxing the check.
+Engine differences live in the `ValidationProfile` registry
+(`VALIDATION_PROFILES`), selected by `Arm.validation`; rules 2/3/5/6/9 are
+shared. Rules 4, 7, 8, 9, and 10 are the ones that catch silent wrongness.
+Never work around them by relaxing the check.
 
 ### Resume
 
@@ -232,10 +294,12 @@ around them by relaxing the check.
 skips those that already pass, archives partial artifacts under `attempts/`,
 and re-runs the rest. It aborts if any of these changed since the manifest was
 written: scenario, workload, selected arms, hardware label, extra TorchTitan
-args, `compile_mode`, `nvidia_smi`, `cpu_pinning`, `torchtitan_git_rev`,
-`benchmarks_git_rev`. A different GPU or a different commit will not resume --
-that is intentional. Omitting `--compile-mode` on a resume inherits the
-recorded mode; passing a different one is refused.
+args, `compile_mode`, `ac_mode`, `nvidia_smi`, `cpu_pinning`,
+`torchtitan_git_rev`, `benchmarks_git_rev`, `megatron_git_rev`. A different
+GPU or a different commit will not resume -- that is intentional. Omitting
+`--compile-mode` or `--ac` on a resume inherits the recorded value; passing
+a different one is refused. Schema <= 7 manifests cannot be resumed by this
+code (they record pre-rename mode names and imply `ac=sac`).
 
 ### Evaluation
 
@@ -451,6 +515,57 @@ An arm changes behavior one of two ways:
   `[Override] <module>.<function>: <fqn> <Old> -> <New>`, which is exactly what
   `validate_arm` counts.
 
+## The Megatron baseline arm
+
+`piper1b_megatron`'s `baseline` arm trains the same Qwen3-1B model with
+Megatron-LM + TransformerEngine instead of TorchTitan. All Megatron
+knowledge lives in `megatron_baseline/`; the harness connects only through
+`Arm(launcher="megatron", validation="megatron")` and
+`megatron_baseline.location` for provenance. The runner launches
+`python -m megatron_baseline.train` with the workload sizes, seed, profiler
+schedule, and compile mode; the driver replicates the titan treatment
+itself (fused AdamW on every param, titan's LR lambda, pre-clip-norm
+logging, sum/valid-tokens loss, gc handling, identical torch.profiler
+schedule and trace layout, titan-shaped step log lines).
+
+Faithfulness guarantees, all verified:
+
+- **Same model**: bare megatron-core `GPTModel` with the TE layer spec,
+  exactly 1,066,241,024 bf16 params. `tools/megatron_parity_check.py`
+  transfers titan weights into the megatron layout and matches logits at
+  bf16-level rel_l2 (~6e-3) on a real batch -- run it after touching
+  `megatron_baseline/model.py` or bumping either submodule.
+- **Same data and masking**: `megatron_baseline/data.py` drains torchtitan's
+  own c4_test dataset class (bit-identical stream to the titan arms'
+  replay loader; tested) and packs each batch's rows into TE THD form with
+  `cu_seqlens` at the `positions == 0` document boundaries, reproducing
+  titan's block-diagonal causal flex mask. cu_seqlens are padded to a
+  constant length and `max_seqlen` pinned to seq_len in both modes (static
+  shapes for graph capture without changing the computation).
+- **Same precision**: plain bf16 params/grads/optimizer states, no fp32
+  masters, no autocast, no fp8. No recompute ever (`--ac` never affects
+  this arm).
+- **No distributed machinery**: single-rank process group + megatron init
+  only; no Megatron DDP wrapper, no MegatronOptimizer.
+
+Environment notes: TE's native tuned RMSNorm kernels fail to launch on this
+box's cuda-compat stack, so `configure_te_environment` routes norms through
+TE's cuDNN backend (`NVTE_NORM_*_USE_CUDNN=1`) -- keep it in any process
+that imports TE here. Without apex, megatron's standalone norms are torch
+RMSNorm (its own spec fallback); the qkv-input norm fuses into the TE
+linear.
+
+Under `--compile-mode cuda-graph` the arm uses Megatron's per-layer partial
+capture (`MoETransformerLayer`, `cuda_graph_modules=("moe_router",
+"moe_preprocess")`): 64 graph replays/step, with attention and expert GEMMs
+eager -- whole-iteration capture is impossible for dynamic MoE (the token
+dispatcher D2H-copies `tokens_per_expert`, which capture forbids), and this
+rev's local impl has no attention scope for MoE layers. **Megatron's graph
+coverage is therefore far thinner than titan's whole-block graphs; say so
+next to any cuda-graph-mode comparison.** Graphed-module weight grads land
+in manually attached `main_grad` buffers, merged into `.grad` before
+clipping each step.
+
 ## Tests
 
 ```bash
@@ -528,12 +643,16 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   shared GPU invalidates timings.
 - Use at least 40 steps. The runner enforces this; do not try to route around it.
 - Numbers are only comparable within one `torch_version`, one
-  `torchtitan_git_rev`, and one `compile_mode`. All three are in every
-  manifest -- check them before comparing against an older run in `out/`
-  (manifests written before schema 6 predate the flag and are `default`).
-  Manifests before schema 7 predate the FSDP removal (they ran under FSDP2
-  mixed precision with fp32 masters) and are not comparable to schema-7
-  runs at all -- different init RNG, different optimizer numerics.
+  `torchtitan_git_rev`, one `compile_mode`, and one `ac_mode` (plus one
+  `megatron_git_rev`/`te_version` for the megatron scenario). All are in
+  every manifest -- check them before comparing against an older run in
+  `out/` (manifests written before schema 6 predate the compile-mode flag
+  and are `default`; before schema 8 they record the old torch-level mode
+  names -- `reduce-overhead` data is comparable to `cuda-graph` for titan
+  arms -- and imply `ac=sac`). Manifests before schema 7 predate the FSDP
+  removal (they ran under FSDP2 mixed precision with fp32 masters) and are
+  not comparable to schema-7+ runs at all -- different init RNG, different
+  optimizer numerics.
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
