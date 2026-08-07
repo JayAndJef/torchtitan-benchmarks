@@ -27,9 +27,28 @@ import socket
 import time
 from pathlib import Path
 
+# Same allocator configuration titan's run_train.sh exports; must be set
+# before torch initializes CUDA. Variable THD document counts otherwise
+# fragment the caching allocator and step time degrades over the run.
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
 # The log-line contract with benchmarks/artifacts.py's megatron validation
 # profile and benchmarks/metrics.py's STEP_METRICS regex. Keep in sync.
 MODE_LINE = "Megatron-LM training loop (mode={mode}, cuda_graph_impl={impl})"
+
+# Megatron's per-layer partial-capture recipe for MoE models: the router and
+# dispatch preprocessing are graphed (MoETransformerLayer's partial mode);
+# expert GEMMs stay eager because their shapes are routing-dependent, and at
+# this rev the local impl has no attention-scope branch for MoE layers, so
+# attention stays eager too. Whole-iteration capture is architecturally
+# impossible here -- the token dispatcher must D2H-copy tokens_per_expert
+# for the grouped GEMM's host-side splits, which capture forbids (verified:
+# capture aborts on that copy). Net: 64 graph launches/step (16 layers x
+# router+preprocess x fwd+bwd) with attention/experts eager -- far thinner
+# coverage than titan's whole-block graphs; documented wherever graph-mode
+# numbers appear.
+CUDA_GRAPH_IMPL = "local"
+CUDA_GRAPH_MODULES = ("moe_router", "moe_preprocess")
 TRAINING_COMPLETED = "Training completed"
 
 # TorchTitan's flops estimate for this model, reused so tflops/mfu are
@@ -79,13 +98,20 @@ def _free_port() -> int:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     graphs = args.mode == "cuda-graph"
-    impl = "full_iteration" if graphs else "none"
+    impl = (
+        f"{CUDA_GRAPH_IMPL}:{'+'.join(CUDA_GRAPH_MODULES)}" if graphs else "none"
+    )
     print(MODE_LINE.format(mode=args.mode, impl=impl), flush=True)
 
-    from megatron_baseline.location import add_megatron_to_path, megatron_git_rev
+    from megatron_baseline.location import (
+        add_megatron_to_path,
+        configure_te_environment,
+        megatron_git_rev,
+    )
 
     megatron_path = add_megatron_to_path()
     print(f"Megatron-LM at {megatron_path} rev {megatron_git_rev()}", flush=True)
+    configure_te_environment()
 
     import torch
     import transformer_engine
@@ -105,7 +131,11 @@ def main(argv: list[str] | None = None) -> None:
     torch.manual_seed(args.seed)
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
-    model_parallel_cuda_manual_seed(args.seed, use_cudagraphable_rng=graphs)
+    # Graph mode needs TE's RNG tracker (TE attention asserts on the tracker
+    # type inside captured graphs); default mode keeps the stock tracker.
+    model_parallel_cuda_manual_seed(
+        args.seed, te_rng_tracker=graphs, use_cudagraphable_rng=graphs
+    )
 
     from megatron_baseline.data import materialize_titan_samples, thd_batches
     from megatron_baseline.model import build_model
@@ -144,8 +174,15 @@ def main(argv: list[str] | None = None) -> None:
 
     model = build_model(
         seq_len=args.seq_len,
-        cuda_graph_impl="full_iteration" if graphs else None,
+        cuda_graph_impl=CUDA_GRAPH_IMPL if graphs else None,
+        cuda_graph_modules=CUDA_GRAPH_MODULES if graphs else (),
     )
+    if graphs:
+        # The captured backward accumulates graphed-module weight grads into
+        # param.main_grad (megatron.core cuda_graphs), which mcore DDP would
+        # normally provide. Bare-model equivalent: persistent bf16 buffers.
+        for parameter in model.parameters():
+            parameter.main_grad = torch.zeros_like(parameter)
     num_params = sum(parameter.numel() for parameter in model.parameters())
     print(f"Model qwen3 piper_1B (megatron) size: {num_params:,} total parameters")
 
@@ -190,13 +227,6 @@ def main(argv: list[str] | None = None) -> None:
         return token_losses, loss_func
 
     forward_backward_func = get_forward_backward_func()
-    if graphs:
-        from megatron.core.full_cuda_graph import FullCudaGraphWrapper
-
-        forward_backward_func = FullCudaGraphWrapper(
-            forward_backward_func,
-            cuda_graph_warmup_steps=model.config.cuda_graph_warmup_steps,
-        )
 
     def run_step(step_index: int) -> float:
         losses = forward_backward_func(
@@ -253,12 +283,25 @@ def main(argv: list[str] | None = None) -> None:
         last_time = time.perf_counter()
         for step in range(1, args.steps + 1):
             loss = run_step(step - 1)
+            merged = []
+            if graphs:
+                # Post-capture, graphed modules deliver weight grads via
+                # main_grad and leave .grad unset (eager warmup steps still
+                # use .grad). Point .grad at main_grad for those so clipping
+                # and the optimizer see every gradient.
+                for parameter in parameters:
+                    if parameter.grad is None:
+                        parameter.grad = parameter.main_grad
+                        merged.append(parameter)
             grad_norm = clip_gradients()
             optimizer.step()
             scheduler.step()
-            # Graph replays accumulate into the captured .grad buffers, so
-            # they must be zeroed in place rather than freed.
-            optimizer.zero_grad(set_to_none=not graphs)
+            optimizer.zero_grad(set_to_none=True)
+            for parameter in merged:
+                # zero_grad dropped the .grad reference; the captured graph
+                # keeps accumulating into main_grad, which must be zeroed in
+                # place for the next replay.
+                parameter.main_grad.zero_()
 
             now = time.perf_counter()
             tps = round(args.batch * args.seq_len / (now - last_time))

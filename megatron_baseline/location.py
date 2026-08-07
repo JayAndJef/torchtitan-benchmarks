@@ -44,6 +44,20 @@ def add_megatron_to_path() -> Path:
     return path
 
 
+def configure_te_environment() -> None:
+    """Environment TE needs on this stack, set before importing it.
+
+    The box runs torch cu13 wheels over a 12.8 driver via the cuda-compat
+    shim, and the system ldconfig serves libcudart.so.12: TE's native
+    "tuned" RMSNorm kernels fail to launch (CUDA invalid argument) in that
+    mix, while its cuDNN-backed norm path works. Route norms through cuDNN
+    and pin the cuDNN frontend to the cu13 runtime torch already loaded.
+    """
+    os.environ.setdefault("NVTE_NORM_FWD_USE_CUDNN", "1")
+    os.environ.setdefault("NVTE_NORM_BWD_USE_CUDNN", "1")
+    os.environ.setdefault("CUDNN_FRONTEND_CUDART_LIB_NAME", "libcudart.so.13")
+
+
 def megatron_git_rev() -> str:
     """Provenance helper; never raises and never imports megatron."""
     try:

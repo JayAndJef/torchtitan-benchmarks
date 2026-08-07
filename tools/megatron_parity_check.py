@@ -79,12 +79,22 @@ def transfer_weights(titan, megatron) -> None:
     for layer in range(16):
         titan_prefix = f"layers.{layer}"
         mega_prefix = f"decoder.layers.{layer}"
-        # Titan packs wqkv as (n_kv_heads, [q_per_group..., k, v], head_dim,
-        # dim) flattened -- exactly megatron's grouped qkv interleave.
-        put(
-            f"{mega_prefix}.self_attention.linear_qkv.weight",
-            state[f"{titan_prefix}.attention.wqkv.weight"],
-        )
+        # Titan's fused module exposes unfused-style wq/wk/wv in its state
+        # dict (the merge hook re-packs on load). Assemble megatron's grouped
+        # interleave (n_kv_heads, [q_per_group..., k, v], head_dim, dim)
+        # explicitly -- the same concatenation titan's fused init uses.
+        wq = state[f"{titan_prefix}.attention.qkv_linear.wq.weight"]
+        wk = state[f"{titan_prefix}.attention.qkv_linear.wk.weight"]
+        wv = state[f"{titan_prefix}.attention.qkv_linear.wv.weight"]
+        grouped = torch.cat(
+            [
+                wq.view(8, 2, 64, 1024),
+                wk.view(8, 1, 64, 1024),
+                wv.view(8, 1, 64, 1024),
+            ],
+            dim=1,
+        ).reshape(2048, 1024)
+        put(f"{mega_prefix}.self_attention.linear_qkv.weight", grouped)
         put(
             f"{mega_prefix}.self_attention.linear_qkv.layer_norm_weight",
             state[f"{titan_prefix}.attention_norm.weight"],
@@ -109,9 +119,9 @@ def transfer_weights(titan, megatron) -> None:
             f"{mega_prefix}.mlp.router.weight",
             state[f"{titan_prefix}.moe.router.gate.weight"],
         )
-        w1 = state[f"{titan_prefix}.moe.routed_experts.w1_EFD"]
-        w2 = state[f"{titan_prefix}.moe.routed_experts.w2_EDF"]
-        w3 = state[f"{titan_prefix}.moe.routed_experts.w3_EFD"]
+        w1 = state[f"{titan_prefix}.moe.routed_experts.inner_experts.w1_EFD"]
+        w2 = state[f"{titan_prefix}.moe.routed_experts.inner_experts.w2_EDF"]
+        w3 = state[f"{titan_prefix}.moe.routed_experts.inner_experts.w3_EFD"]
         for expert in range(4):
             # megatron gated fc1 rows: [gate (titan w1); up (titan w3)].
             put(
@@ -130,9 +140,13 @@ def main() -> None:
     torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
     torch.cuda.set_device(0)
 
-    from megatron_baseline.location import add_megatron_to_path
+    from megatron_baseline.location import (
+        add_megatron_to_path,
+        configure_te_environment,
+    )
 
     add_megatron_to_path()
+    configure_te_environment()
     from megatron.core import parallel_state
     from megatron.core.packed_seq_params import PackedSeqParams
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed

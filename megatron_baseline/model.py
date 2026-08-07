@@ -48,6 +48,9 @@ def build_model(
         extra["cuda_graph_impl"] = cuda_graph_impl
         if cuda_graph_modules:
             extra["cuda_graph_modules"] = list(cuda_graph_modules)
+        # TE's attention asserts on the RNG tracker type inside captured
+        # graphs; its own tracker is the supported one.
+        extra["use_te_rng_tracker"] = True
 
     config = TransformerConfig(
         num_layers=16,
@@ -93,6 +96,16 @@ def build_model(
         moe_grouped_gemm=True,
         qk_layernorm=True,
     )
+    if cuda_graph_impl == "local":
+        # The stock GPT specs build plain TransformerLayer, whose local-impl
+        # manager can only capture the WHOLE layer forward -- impossible for
+        # dynamic MoE (the dispatcher D2H-copies tokens_per_expert). Partial
+        # capture (router + preprocess graphed, expert dispatch and attention
+        # eager at this rev) lives in MoETransformerLayer, selected the same
+        # way megatron's own modelopt/hybrid specs do.
+        from megatron.core.transformer.transformer_layer import MoETransformerLayer
+
+        spec.module = MoETransformerLayer
     model = GPTModel(
         config=config,
         transformer_layer_spec=spec,
