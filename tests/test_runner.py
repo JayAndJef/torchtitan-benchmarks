@@ -23,6 +23,7 @@ from benchmarks.runner import (
 from benchmarks.runtime import CpuPinning, resolve_cpu_pinning
 from benchmarks.metrics import stable_tps, training_metrics
 from benchmarks.scenarios import (
+    Arm,
     PIPER_1B_LM_HEAD,
     PIPER_1B_QKV,
     PIPER_1B_ROPE,
@@ -30,6 +31,7 @@ from benchmarks.scenarios import (
     PIPER_1B_WORKLOAD,
     scenario_by_name,
 )
+from dataclasses import replace
 from piper1b.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_full_logits,
@@ -352,6 +354,41 @@ class CommandTests(unittest.TestCase):
         )
         self.assertNotIn("activation-checkpoint:none", command)
 
+    def test_megatron_launcher_builds_the_driver_command(self) -> None:
+        workload = replace(PIPER_1B_ROPE.workload, seed=42)
+        arm = Arm(name="baseline", description="megatron", launcher="megatron")
+        command = command_for_arm(
+            workload, arm, Path("/out/baseline"), [], "cuda-graph", "none"
+        )
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1:3], ["-m", "megatron_baseline.train"])
+        self.assertEqual(command[command.index("--mode") + 1], "cuda-graph")
+        self.assertEqual(command[command.index("--seed") + 1], "42")
+        self.assertEqual(command[command.index("--seq-len") + 1], "1024")
+        self.assertEqual(command[-1], "/out/baseline")
+
+    def test_megatron_launcher_refuses_unsupported_requests(self) -> None:
+        workload = replace(PIPER_1B_ROPE.workload, seed=42)
+        arm = Arm(name="baseline", description="megatron", launcher="megatron")
+        with self.assertRaisesRegex(ValueError, "passthrough"):
+            command_for_arm(
+                workload, arm, Path("/out"), ["--debug.seed", "7"], "default", "none"
+            )
+        with self.assertRaisesRegex(ValueError, "without recompute"):
+            command_for_arm(workload, arm, Path("/out"), [], "default", "sac")
+        unseeded = Arm(name="baseline", description="megatron", launcher="megatron")
+        with self.assertRaisesRegex(ValueError, "seeded"):
+            command_for_arm(
+                PIPER_1B_ROPE.workload, unseeded, Path("/out"), [], "default", "none"
+            )
+        with self.assertRaisesRegex(ValueError, "unknown launcher"):
+            command_for_arm(
+                workload,
+                Arm(name="x", description="x", launcher="colossalai"),
+                Path("/out"),
+                [],
+            )
+
     def test_each_arm_gets_its_own_dump_folder(self) -> None:
         for scenario in (
             PIPER_1B_ROPE,
@@ -608,6 +645,73 @@ class ValidationTests(unittest.TestCase):
                 PIPER_1B_ROPE.workload,
                 compile_mode="cuda-graph",
             )
+
+    def test_megatron_validation_profile(self) -> None:
+        arm = Arm(
+            name="baseline",
+            description="megatron",
+            launcher="megatron",
+            validation="megatron",
+        )
+        mode_line = (
+            "Megatron-LM training loop (mode=cuda-graph, "
+            "cuda_graph_impl=full_iteration)\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=True)
+
+            # No torch.compile line, no SelectiveAC line: still valid, and
+            # rule 9's cudaGraphLaunch requirement applies to megatron too.
+            log.write_text(mode_line + "Training completed\n")
+            validate_arm(
+                arm,
+                root,
+                log,
+                PIPER_1B_ROPE.workload,
+                compile_mode="cuda-graph",
+                ac_mode="none",
+            )
+
+            # The driver's mode line must name the requested mode.
+            log.write_text(
+                "Megatron-LM training loop (mode=default, cuda_graph_impl=none)\n"
+                + "Training completed\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    arm,
+                    root,
+                    log,
+                    PIPER_1B_ROPE.workload,
+                    compile_mode="cuda-graph",
+                    ac_mode="none",
+                )
+
+        # And the graph launch requirement still bites.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=False)
+            log.write_text(mode_line + "Training completed\n")
+            with self.assertRaisesRegex(RuntimeError, "cudaGraphLaunch"):
+                validate_arm(
+                    arm,
+                    root,
+                    log,
+                    PIPER_1B_ROPE.workload,
+                    compile_mode="cuda-graph",
+                    ac_mode="none",
+                )
+
+    def test_megatron_mode_line_matches_the_driver_constant(self) -> None:
+        # The validation profile and the driver define the contract in two
+        # places; this pins them together without importing megatron.
+        from benchmarks.artifacts import VALIDATION_PROFILES
+        from megatron_baseline.train import MODE_LINE
+
+        for mode in ("default", "cuda-graph"):
+            rendered = MODE_LINE.format(mode=mode, impl="anything")
+            self.assertIn(VALIDATION_PROFILES["megatron"].mode_line(mode), rendered)
 
     def test_ac_mode_must_match_the_applied_treatment(self) -> None:
         arm = PIPER_1B_ROPE.arm("baseline")

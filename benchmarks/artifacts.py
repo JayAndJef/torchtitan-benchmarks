@@ -7,9 +7,9 @@ import gzip
 import json
 import re
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from benchmarks.profile_regions import pooled_window_metrics
 from benchmarks.scenarios import Arm, Region, Scenario, Workload
@@ -43,6 +43,48 @@ AC_MODES = ("sac", "none")
 _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
 
 
+@dataclass(frozen=True)
+class ValidationProfile:
+    """Engine-specific pieces of validate_arm, selected by Arm.validation.
+
+    The engine-neutral rules (trace-window count, kernel markers,
+    cudaGraphLaunch under cuda-graph mode, override counting when declared)
+    are shared; these fields carry what differs: the completion marker, the
+    log line that proves the requested mode actually applied, the phrases
+    that mean a silent fallback, and whether the SelectiveAC line and the
+    compiled-region structure are expected at all.
+    """
+
+    completion_marker: str
+    mode_line: Callable[[str], str]
+    failure_markers: tuple[str, ...]
+    check_ac_line: bool
+    check_regions: bool
+
+
+VALIDATION_PROFILES = {
+    "torchtitan": ValidationProfile(
+        completion_marker="Training completed",
+        # apply_compile logs the torch-level mode name.
+        mode_line=lambda mode: (
+            f"with torch.compile (mode={TORCH_COMPILE_MODE[mode]})"
+        ),
+        failure_markers=("falling back to the PyTorch",),
+        check_ac_line=True,
+        check_regions=True,
+    ),
+    "megatron": ValidationProfile(
+        completion_marker="Training completed",
+        # megatron_baseline.train.MODE_LINE; the trailing comma pins the
+        # mode token without pinning which graph implementation ran.
+        mode_line=lambda mode: f"Megatron-LM training loop (mode={mode},",
+        failure_markers=(),
+        check_ac_line=False,
+        check_regions=False,
+    ),
+}
+
+
 def trace_files(arm_dir: Path) -> list[Path]:
     return sorted(arm_dir.glob("profiling/traces*/iteration_*/rank0_trace.json.gz"))
 
@@ -72,31 +114,32 @@ def validate_arm(
     ac_mode: str = "sac",
 ) -> None:
     """Reject partial or wrongly configured runs before analysis."""
+    profile = VALIDATION_PROFILES[arm.validation]
     if not log_path.is_file():
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     log = log_path.read_text(errors="replace")
-    if "Training completed" not in log:
+    if profile.completion_marker not in log:
         raise RuntimeError(f"{arm.name}: training did not complete; see {log_path}")
-    # TorchTitan's apply_compile reports the (torch-level) mode it applied.
-    torch_mode = TORCH_COMPILE_MODE[compile_mode]
-    if f"with torch.compile (mode={torch_mode})" not in log:
+    # The engine reports which mode it actually applied.
+    if profile.mode_line(compile_mode) not in log:
         raise RuntimeError(
             f"{arm.name}: compile mode {compile_mode!r} did not apply; "
             f"see {log_path}"
         )
-    # The AC policy logs its application; its presence must match the
-    # requested mode or the run measured the wrong recompute treatment.
-    sac_applied = _SAC_APPLIED_LINE in log
-    if ac_mode == "sac" and not sac_applied:
-        raise RuntimeError(
-            f"{arm.name}: ac mode 'sac' requested but SelectiveAC was not "
-            f"applied; see {log_path}"
-        )
-    if ac_mode == "none" and sac_applied:
-        raise RuntimeError(
-            f"{arm.name}: ac mode 'none' requested but SelectiveAC was "
-            f"applied; see {log_path}"
-        )
+    if profile.check_ac_line:
+        # The AC policy logs its application; its presence must match the
+        # requested mode or the run measured the wrong recompute treatment.
+        sac_applied = _SAC_APPLIED_LINE in log
+        if ac_mode == "sac" and not sac_applied:
+            raise RuntimeError(
+                f"{arm.name}: ac mode 'sac' requested but SelectiveAC was not "
+                f"applied; see {log_path}"
+            )
+        if ac_mode == "none" and sac_applied:
+            raise RuntimeError(
+                f"{arm.name}: ac mode 'none' requested but SelectiveAC was "
+                f"applied; see {log_path}"
+            )
     if arm.expected_override_count:
         override_count = len(re.findall(r"\[Override\]", log))
         if override_count != arm.expected_override_count:
@@ -111,8 +154,12 @@ def validate_arm(
                     f"{arm.name}: override {override_import!r} did not apply; "
                     f"see {log_path}"
                 )
-    if "falling back to the PyTorch" in log:
-        raise RuntimeError(f"{arm.name}: override fell back to PyTorch; see {log_path}")
+    for marker in profile.failure_markers:
+        if marker in log:
+            raise RuntimeError(
+                f"{arm.name}: silent fallback marker {marker!r} found in the "
+                f"log; see {log_path}"
+            )
 
     traces = trace_files(arm_dir)
     if len(traces) < workload.min_trace_windows:
@@ -133,7 +180,7 @@ def validate_arm(
             f"{arm.name}: compile mode {compile_mode!r} enables CUDA graphs but "
             f"no cudaGraphLaunch appears in the profiler traces under {arm_dir}"
         )
-    if regions:
+    if regions and profile.check_regions:
         try:
             pooled_window_metrics(traces, regions)
         except ValueError as error:

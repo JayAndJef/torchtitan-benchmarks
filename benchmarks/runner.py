@@ -161,6 +161,7 @@ def _resume_mismatches(
         "cpu_pinning",
         "torchtitan_git_rev",
         "benchmarks_git_rev",
+        "megatron_git_rev",
     ):
         if existing_metadata.get(key) != metadata.get(key):
             mismatches.append(f"hardware_metadata.{key}")

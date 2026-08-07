@@ -116,7 +116,13 @@ def command_for_arm(
     compile_mode: str = "default",
     ac_mode: str = "sac",
 ) -> list[str]:
-    """Build the TorchTitan command shared by all scenarios."""
+    """Build the training command for one arm, dispatching on its launcher."""
+    if arm.launcher == "megatron":
+        return _megatron_command(
+            workload, arm, arm_dir, extra_args, compile_mode, ac_mode
+        )
+    if arm.launcher != "torchtitan":
+        raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
     # Local import: artifacts imports scenarios only, so no cycle.
     from benchmarks.artifacts import TORCH_COMPILE_MODE
 
@@ -157,6 +163,76 @@ def command_for_arm(
     return args
 
 
+def _megatron_command(
+    workload: Workload,
+    arm: Arm,
+    arm_dir: Path,
+    extra_args: list[str] | tuple[str, ...],
+    compile_mode: str,
+    ac_mode: str,
+) -> list[str]:
+    """Launch command for the Megatron baseline driver.
+
+    The driver replicates the titan workload treatment itself; the only
+    parameters that cross the seam are the workload sizes, the seed, the
+    profiler schedule, and the compile mode (mapped to Megatron's native
+    CUDA-graph mechanism by the driver).
+    """
+    if extra_args:
+        raise ValueError(
+            f"{arm.name}: TorchTitan passthrough arguments cannot apply to a "
+            f"megatron arm: {list(extra_args)}"
+        )
+    if ac_mode != "none":
+        raise ValueError(
+            f"{arm.name}: the megatron arm always runs without recompute; "
+            f"ac mode {ac_mode!r} has no Megatron parity (use --ac none)"
+        )
+    if workload.seed is None:
+        raise ValueError(
+            f"{arm.name}: megatron arms require a seeded workload"
+        )
+    return [
+        sys.executable,
+        "-m",
+        "megatron_baseline.train",
+        "--seq-len",
+        str(workload.seq_len),
+        "--steps",
+        str(workload.steps),
+        "--batch",
+        str(workload.local_batch_size),
+        "--seed",
+        str(workload.seed),
+        "--profile-freq",
+        str(workload.profile_freq),
+        "--profiler-warmup",
+        str(workload.profiler_warmup),
+        "--profiler-active",
+        str(workload.profiler_active),
+        "--mode",
+        compile_mode,
+        str(arm_dir),
+    ]
+
+
+def _megatron_git_rev() -> str:
+    try:
+        from megatron_baseline.location import megatron_git_rev
+    except ImportError as error:
+        return f"unavailable: {error}"
+    return megatron_git_rev()
+
+
+def _te_version() -> str:
+    import importlib.metadata
+
+    try:
+        return importlib.metadata.version("transformer-engine")
+    except importlib.metadata.PackageNotFoundError:
+        return "unavailable: transformer-engine not installed"
+
+
 def run_text(command: list[str], *, cwd: Path | None = None) -> str:
     """Run a metadata command, returning a diagnostic instead of failing."""
     try:
@@ -192,6 +268,11 @@ def hardware_metadata(
         "benchmarks_git_rev": run_text(
             ["git", "rev-parse", "HEAD"], cwd=paths.bench_dir
         ).strip(),
+        # Megatron provenance is recorded (and resume-gated) for every run:
+        # location.py never imports megatron, so this stays cheap even for
+        # pure-titan scenarios.
+        "megatron_git_rev": _megatron_git_rev(),
+        "te_version": _te_version(),
     }
     if hardware_label != "auto":
         return hardware_label, metadata

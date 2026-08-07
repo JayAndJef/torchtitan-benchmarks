@@ -291,7 +291,12 @@ def load_run(
             f"(schema {manifest.get('schema_version')}); assuming piper-1B regions"
         )
         manifest_regions = []
-    regions = tuple(Region(**region) for region in manifest_regions) or PIPER_1B_REGIONS
+    regions = tuple(Region(**region) for region in manifest_regions)
+    if not regions and int(manifest.get("schema_version") or 0) < 8:
+        # Pre-schema-8 manifests never declared empty regions on purpose;
+        # from schema 8 on, an empty list is an honest declaration (the
+        # megatron scenario) and must not be second-guessed.
+        regions = PIPER_1B_REGIONS
     arms = list(
         arms_override
         or manifest.get("selected_arms")

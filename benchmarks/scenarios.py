@@ -42,6 +42,11 @@ class Arm:
     expected_override_count: int = 0
     trace_kernel_markers: tuple[str, ...] = ()
     requires_gcc_toolset: bool = False
+    # Which engine the runner launches and which validation profile applies.
+    # Plain strings (registry keys in benchmarks.runtime / benchmarks.artifacts)
+    # so asdict(arm) stays JSON-serializable for the manifest.
+    launcher: str = "torchtitan"
+    validation: str = "torchtitan"
 
 
 @dataclass(frozen=True)
