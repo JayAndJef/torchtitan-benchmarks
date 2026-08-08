@@ -227,11 +227,28 @@ are declining to set.
 | | `fused_linear_ce` | config `qwen3_piper_1b_fused_linear_ce` |
 | | `te_fused_ce` | config `qwen3_piper_1b_te_fused_ce` |
 | | `piper_optimized_te_ce` | config `qwen3_piper_1b_piper_optimized_te_ce` |
+| `piper1b_attention` | `baseline` | `FlexAttention` (Inductor Triton template) |
+| | `flash_attention_3` | config `qwen3_piper_1b_varlen`; needs the `flash3` group |
+| | `te_attention` | varlen config + override `piper1b.attention.te_attention.te_attention` |
 | `piper1b_megatron` | `baseline` | `launcher="megatron"`: Megatron-LM + TE bare GPTModel (see the Megatron section) |
 | | `titan_stock` | config `qwen3_piper_1b_pretokenized` (fused qkv, stock kernels) |
 | | `titan_swiglu` | pretokenized config + the `piper_optimized_inductor` swiglu override |
 | | `titan_lm_head` | config `qwen3_piper_1b_piper_optimized_te_ce_pretokenized` |
 | | `titan_swiglu_lm_head` | te_ce pretokenized config + the swiglu override |
+
+`piper1b_attention` swaps only the inner attention, so it needs no `seed=42`
+(the backend does not change parameter structure). Its `te_attention` arm
+reaches TE through `TEAttention`, a `VarlenAttention` subclass: the decoder
+hands `VarlenMetadata` (cu_seqlens) to any inner attention whose config is a
+`VarlenAttention.Config`, which is exactly the THD metadata TE needs. Two
+things make that subclassing load-bearing -- the empty nested `Config` is
+mandatory (without it `TEAttention.Config` *is* `VarlenAttention.Config` and
+would silently build a `VarlenAttention`), and `__init__` must be overridden
+because `VarlenAttention.__init__` force-activates FA3, which this arm must
+not depend on. The `flash_attention_3` arm pins `FlashAttnFwdSm90` /
+`FlashAttnBwdSm90` as trace markers because FA3 degrades to FA2 rather than
+failing: seeing `pytorch_flash::` names instead would mean the arm measured
+FA2 under an FA3 label.
 
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios

@@ -331,6 +331,40 @@ PIPER_1B_MEGATRON = Scenario(
 )
 
 
+PIPER_1B_ATTENTION = Scenario(
+    name="piper1b_attention",
+    description=(
+        "Inner-attention backends on piper-1B: FlexAttention versus "
+        "FlashAttention-3 varlen and TransformerEngine fused attention."
+    ),
+    workload=PIPER_1B_WORKLOAD,
+    regions=PIPER_1B_REGIONS,
+    arms=(
+        Arm(
+            name="baseline",
+            description="TorchTitan FlexAttention: an Inductor Triton template over a block-diagonal causal BlockMask (qwen3_piper_1b config)",
+        ),
+        Arm(
+            name="flash_attention_3",
+            description="FlashAttention-3 varlen over packed documents (qwen3_piper_1b_varlen config); needs the flash3 dependency group",
+            config="qwen3_piper_1b_varlen",
+            # FA3 degrades to FA2 rather than failing when it declines to
+            # register, so pin its own kernel name: seeing pytorch_flash::
+            # instead would mean the arm measured FA2 under an FA3 label.
+            trace_kernel_markers=("FlashAttnFwdSm90", "FlashAttnBwdSm90"),
+        ),
+        Arm(
+            name="te_attention",
+            description="TransformerEngine fused attention in THD form -- the same cuDNN kernels the megatron arm runs (varlen config plus the TEAttention override)",
+            config="qwen3_piper_1b_varlen",
+            override_imports=("piper1b.attention.te_attention.te_attention",),
+            expected_override_count=16,
+            trace_kernel_markers=("cudnn_generated_fort_native_sdpa",),
+        ),
+    ),
+)
+
+
 SCENARIOS = {
     scenario.name: scenario
     for scenario in (
@@ -338,6 +372,7 @@ SCENARIOS = {
         PIPER_1B_SWIGLU,
         PIPER_1B_QKV,
         PIPER_1B_LM_HEAD,
+        PIPER_1B_ATTENTION,
         PIPER_1B_MEGATRON,
     )
 }
