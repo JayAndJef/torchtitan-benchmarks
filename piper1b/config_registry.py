@@ -153,11 +153,14 @@ def qwen3_piper_1b_te_fused_ce() -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_piper_optimized_te_ce() -> Trainer.Config:
+def qwen3_piper_1b_piper_optimized_te_ce(
+    *, attn_backend: str = "flex"
+) -> Trainer.Config:
     """Full-token lm_head followed by Piper-optimized TE-derived CE."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="piper_optimized_te_ce",
+        attn_backend=attn_backend,
     )
 
 
@@ -169,6 +172,23 @@ def qwen3_piper_1b_pretokenized() -> Trainer.Config:
 def qwen3_piper_1b_piper_optimized_te_ce_pretokenized() -> Trainer.Config:
     """Piper-optimized TE CE loss on the pre-tokenized replay stream."""
     return _with_pretokenized_replay(qwen3_piper_1b_piper_optimized_te_ce())
+
+
+def qwen3_piper_1b_varlen_pretokenized() -> Trainer.Config:
+    """Varlen inner attention on the pre-tokenized replay stream.
+
+    The base for BOTH attention arms of piper1b_megatron: the FA3 arm uses it
+    as-is, and the TE arm layers the TEAttention override on top (that override
+    targets VarlenAttention.Config, so the base must already be varlen).
+    """
+    return _with_pretokenized_replay(qwen3_piper_1b_varlen())
+
+
+def qwen3_piper_1b_piper_optimized_te_ce_varlen_pretokenized() -> Trainer.Config:
+    """Piper-optimized TE CE plus varlen attention, pre-tokenized stream."""
+    return _with_pretokenized_replay(
+        qwen3_piper_1b_piper_optimized_te_ce(attn_backend="varlen")
+    )
 
 
 def _with_pretokenized_replay(config: Trainer.Config) -> Trainer.Config:
