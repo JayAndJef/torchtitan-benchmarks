@@ -127,6 +127,28 @@ class ClassificationTest(unittest.TestCase):
             "attn_projection_gemm",
         )
 
+    def test_every_attention_backend_lands_in_attention_core(self):
+        """A backend the classifier does not know reads as 0.0 attention.
+
+        This actually happened: FlashAttention-3's CUTLASS kernels fell into
+        other_elementwise, so the FA3 arm reported attention_core = 0.000 and
+        looked like it did no attention at all.
+        """
+        cases = [
+            "triton_tem_fused_flex_attention_0",
+            "void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90<...>>>",
+            "void cutlass::device_kernel<flash::FlashAttnBwdPreprocess<...>>",
+            "void flash::prepare_varlen_num_blocks_kernel<1, true>(...)",
+            "void pytorch_flash::flash_fwd_kernel<...>",
+            "cudnn_generated_fort_native_sdpa_sm90_flash_kernel",
+        ]
+        for kernel in cases:
+            with self.subTest(kernel=kernel[:40]):
+                self.assertEqual(
+                    classify_titan(kernel, ("aten::foo",), None, SHAPES),
+                    "attention_core",
+                )
+
     def test_lm_head_wins_over_the_router_rule(self):
         dims = [[49152, 1024], [1024, 151936]]
         self.assertEqual(

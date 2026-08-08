@@ -237,18 +237,22 @@ are declining to set.
 | | `titan_swiglu_lm_head` | te_ce pretokenized config + the swiglu override |
 
 `piper1b_attention` swaps only the inner attention, so it needs no `seed=42`
-(the backend does not change parameter structure). Its `te_attention` arm
-reaches TE through `TEAttention`, a `VarlenAttention` subclass: the decoder
-hands `VarlenMetadata` (cu_seqlens) to any inner attention whose config is a
-`VarlenAttention.Config`, which is exactly the THD metadata TE needs. Two
-things make that subclassing load-bearing -- the empty nested `Config` is
-mandatory (without it `TEAttention.Config` *is* `VarlenAttention.Config` and
-would silently build a `VarlenAttention`), and `__init__` must be overridden
-because `VarlenAttention.__init__` force-activates FA3, which this arm must
-not depend on. The `flash_attention_3` arm pins `FlashAttnFwdSm90` /
-`FlashAttnBwdSm90` as trace markers because FA3 degrades to FA2 rather than
-failing: seeing `pytorch_flash::` names instead would mean the arm measured
-FA2 under an FA3 label.
+(the backend does not change parameter structure). Its `flash_attention_3`
+arm pins `FlashAttnFwdSm90` / `FlashAttnBwdSm90` as trace markers because FA3
+degrades to FA2 rather than failing: seeing `pytorch_flash::` names instead
+would mean the arm measured FA2 under an FA3 label.
+
+**There is deliberately no TE attention arm here, and there cannot be one.**
+TransformerEngine wraps `DotProductAttention.forward` in
+`torch.compiler.disable` itself (`transformer_engine/pytorch/jit.py`), so
+Dynamo refuses to inline it: any titan arm calling TE attention dies with
+"Skip inlining `torch.compiler.disable()`d function" the moment
+`apply_compile` wraps the block containing it. This is upstream NVIDIA's
+choice, not a gap in our integration, and it is why megatron runs TE eagerly.
+Getting a titan+TE arm would mean excluding that block from compilation,
+which changes the treatment and makes the arm incomparable to the others.
+TE attention is still measured head-to-head in the `attention` kernel
+scenario, where each arm carries its own compile treatment.
 
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios

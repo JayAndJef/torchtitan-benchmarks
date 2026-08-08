@@ -335,7 +335,7 @@ PIPER_1B_ATTENTION = Scenario(
     name="piper1b_attention",
     description=(
         "Inner-attention backends on piper-1B: FlexAttention versus "
-        "FlashAttention-3 varlen and TransformerEngine fused attention."
+        "FlashAttention-3 varlen. TE cannot be an arm here -- see CLAUDE.md."
     ),
     workload=PIPER_1B_WORKLOAD,
     regions=PIPER_1B_REGIONS,
@@ -352,14 +352,6 @@ PIPER_1B_ATTENTION = Scenario(
             # register, so pin its own kernel name: seeing pytorch_flash::
             # instead would mean the arm measured FA2 under an FA3 label.
             trace_kernel_markers=("FlashAttnFwdSm90", "FlashAttnBwdSm90"),
-        ),
-        Arm(
-            name="te_attention",
-            description="TransformerEngine fused attention in THD form -- the same cuDNN kernels the megatron arm runs (varlen config plus the TEAttention override)",
-            config="qwen3_piper_1b_varlen",
-            override_imports=("piper1b.attention.te_attention.te_attention",),
-            expected_override_count=16,
-            trace_kernel_markers=("cudnn_generated_fort_native_sdpa",),
         ),
     ),
 )

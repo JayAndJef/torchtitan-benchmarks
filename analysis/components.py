@@ -358,7 +358,18 @@ def classify_titan(kernel: str, frames: tuple[str, ...], dims, shapes) -> str:
             # "[4," instead would also match a leading batch of 4.
             return "moe_routing_permute"
         return "attn_projection_gemm"
-    if "flex_attention" in kernel:
+    if (
+        "flex_attention" in kernel
+        # FlashAttention-3 (CUTLASS sm90) and torch's bundled FA2. Without
+        # these the FA3 arm reports attention_core = 0.000 and dumps its
+        # attention kernels into other_elementwise.
+        or "FlashAttn" in kernel
+        or "flash::" in kernel
+        or "pytorch_flash" in kernel
+        # TE fused attention, when a titan arm overrides to it.
+        or "cudnn_generated_fort_native_sdpa" in kernel
+        or "fmha" in kernel
+    ):
         return "attention_core"
     if "silu" in lowered:
         return "swiglu_activation"
