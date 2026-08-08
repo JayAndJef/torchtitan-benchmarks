@@ -403,7 +403,7 @@ e2e shell cannot leak settings into a kernel run.
 | `swiglu` | `baseline`*, `piper_optimized_triton`, `piper_optimized_inductor` | fwd, bwd, fwd+bwd | whole expert layer only; both Piper arms fuse the w13 GEMM and differ in the activation (custom Triton op vs plain ops left to Inductor) |
 | `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
 | `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
-| `attention` | `baseline`*, `te_attention` | fwd, fwd+bwd | inner attention only, packed-document causal masking; `te_attention` is **eager on purpose** (see below) |
+| `attention` | `baseline`*, `flash_attention_3` | fwd, fwd+bwd | inner attention only, packed-document causal masking; FA3 needs the `flash3` group |
 
 The `attention` scenario measures **inner attention only** -- the level at
 which the implementations are substitutable, and the level that keeps it from
@@ -414,16 +414,21 @@ both built once in the inputs builder -- `create_varlen_metadata_for_document`
 contains a device-to-host sync and `create_block_mask` is itself a compiled
 call, so neither may run inside a timed closure.
 
-Two asymmetries are deliberate and recorded rather than hidden:
+One asymmetry is deliberate and recorded rather than hidden: **`baseline` is
+not wrapped in `torch.compile`.** `FlexAttention` already holds a class-level
+compile of `flex_attention`, so wrapping it again risks a double compile or a
+graph break around its spmd context. Both arms are therefore compiled, just by
+different mechanisms, and `KernelArm.compiled` records it.
 
-- **`te_attention` runs eager while `baseline` runs compiled.** That is how
-  each faces production: the megatron e2e arm runs TE eagerly, and titan
-  compiles its blocks. `KernelArm.compiled` records it and a registry test
-  asserts the eager set stays exactly `{rope/copy_floor,
-  attention/te_attention}`.
-- **`baseline` is not wrapped in `torch.compile`.** `FlexAttention` already
-  holds a class-level compile of `flex_attention`; wrapping it again risks a
-  double compile or a graph break around its spmd context.
+**There is no TE arm in either attention scenario.** Two independent blockers,
+both verified: TE and the FA3 varlen path cannot share a process (the cuDNN
+soname collision above), which rules TE out of the single-process h2h; and
+TE wraps `DotProductAttention.forward` in `torch.compiler.disable`
+(`transformer_engine/pytorch/jit.py`), which the fork's
+`fullgraph=True` per-block compile (`distributed/compile.py:58`) refuses,
+ruling it out of e2e. The second is not absolute -- with graph breaks allowed
+TE would run, splitting each block into ~3 graphs -- but that is a different
+compile treatment from the baseline and so not a like-for-like arm.
 
 The fp64 reference is computed **per (row, kv group)**. A one-shot
 `[B, n_heads, L, L]` fp64 score tensor is 8.6 GiB at batch 4 / seq 4096 and

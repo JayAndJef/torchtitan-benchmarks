@@ -622,12 +622,12 @@ def build_qkv_fused_qkv(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
 
 # --- attention --------------------------------------------------------------
 
-# Captured by profiling, never guessed: TE picks its backend at runtime and
-# can silently fall back to an unfused path.
-TE_ATTENTION_MARKER = "cudnn_generated_fort_native_sdpa"
+# Captured by profiling, never guessed. FA3 degrades to FA2 rather than
+# failing when it declines to register, so the marker is what separates a real
+# FA3 measurement from an FA2 one wearing its label; the FA2 kernel names are
+# recorded as the failure signature.
 FLEX_ATTENTION_MARKER = "flex_attention"
-# The FA2 kernels torch's varlen path uses. If a FlashAttention-3 arm is added,
-# seeing these means FA3 declined to register -- a failure, not a success.
+FA3_MARKER = "FlashAttnFwdSm90"
 FA2_MARKERS = ("pytorch_flash::flash_fwd", "flash_bwd_dq_dk_dv_loop")
 
 
@@ -852,45 +852,44 @@ def build_attention_baseline(
     return _attention_arm("baseline", inputs, call)
 
 
-def build_attention_te(spec: Piper1BSpec, inputs: AttentionInputs) -> BuiltArm:
-    # Imported inside the builder: TE needs its environment configured before
-    # import, and the rope arms' precedent is to keep TE out of module scope.
-    from megatron_baseline.location import configure_te_environment
+def build_attention_flash3(
+    spec: Piper1BSpec, inputs: AttentionInputs
+) -> BuiltArm:
+    """FlashAttention-3 varlen over the packed (THD) sequences.
 
-    configure_te_environment()
-    from transformer_engine.pytorch import DotProductAttention
+    VarlenAttention's constructor activates FA3, so building this arm at all
+    requires the flash3 dependency group; without it torch's registry raises
+    ModuleNotFoundError rather than silently falling back.
+    """
+    from torchtitan.models.common.attention import (
+        VarlenAttention,
+        VarlenMetadata,
+    )
 
-    batch, seq = spec.batch, spec.seq_len
-    tokens = batch * seq
-    module = DotProductAttention(
-        num_attention_heads=spec.n_heads,
-        kv_channels=spec.head_dim,
-        num_gqa_groups=spec.n_kv_heads,
-        attention_dropout=0.0,
-        qkv_format="thd",
-        # THD packing requires a padding mask type; "causal" alone is rejected.
-        attn_mask_type="padding_causal",
-        softmax_scale=inputs.scale,
-    ).cuda()
+    module = VarlenAttention.Config().build()
+    enable_gqa = spec.n_heads > spec.n_kv_heads
+    metadata = VarlenMetadata(
+        cu_seq_q=inputs.cu_seqlens,
+        cu_seq_k=inputs.cu_seqlens,
+        max_q=spec.seq_len,
+        max_k=spec.seq_len,
+    )
 
     def call(q, k, v):
-        out = module(
-            q.reshape(tokens, spec.n_heads, spec.head_dim),
-            k.reshape(tokens, spec.n_kv_heads, spec.head_dim),
-            v.reshape(tokens, spec.n_kv_heads, spec.head_dim),
-            cu_seqlens_q=inputs.cu_seqlens,
-            cu_seqlens_kv=inputs.cu_seqlens,
-            max_seqlen_q=seq,
-            max_seqlen_kv=seq,
+        return module(
+            q, k, v,
+            attention_masks=metadata,
+            scale=inputs.scale,
+            enable_gqa=enable_gqa,
         )
-        return out.view(batch, seq, spec.n_heads, spec.head_dim)
 
+    call(*[t_.clone().requires_grad_() for t_ in (inputs.q, inputs.k, inputs.v)])
     _assert_kernel_marker(
         lambda: call(inputs.q, inputs.k, inputs.v),
-        TE_ATTENTION_MARKER,
-        "te_attention",
+        FA3_MARKER,
+        "flash_attention_3",
     )
-    return _attention_arm("te_attention", inputs, call)
+    return _attention_arm("flash_attention_3", inputs, call)
 
 
 # --- lm_head ----------------------------------------------------------------

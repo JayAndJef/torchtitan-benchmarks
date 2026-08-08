@@ -455,7 +455,7 @@ ATTENTION = KernelScenario(
     name="attention",
     description=(
         "Inner attention at Piper-1B shapes with packed-document causal "
-        "masking: FlexAttention vs TransformerEngine fused attention."
+        "masking: FlexAttention vs FlashAttention-3 varlen."
     ),
     inputs_builder="benchmarks.kernel_arms:attention_inputs",
     reference_builder="benchmarks.kernel_arms:attention_reference",
@@ -473,17 +473,15 @@ ATTENTION = KernelScenario(
             correctness=(ATTENTION_GATE,),
         ),
         KernelArm(
-            name="te_attention",
+            name="flash_attention_3",
             description=(
-                "transformer_engine.pytorch.DotProductAttention in THD form "
-                "with cu_seqlens -- the same cuDNN fused-attention kernels "
-                "the megatron e2e arm runs. Deliberately EAGER while the "
-                "baseline is compiled: that is how each faces production "
-                "(megatron runs TE eager; titan compiles its blocks)."
+                "FlashAttention-3 varlen (CUTLASS sm90) over the same packed "
+                "documents, via torch.nn.attention.varlen; requires the "
+                "flash3 dependency group"
             ),
-            builder="benchmarks.kernel_arms:build_attention_te",
+            builder="benchmarks.kernel_arms:build_attention_flash3",
             modes=("forward", "forward_backward"),
-            compiled=False,
+            compiled=True,
             correctness=(
                 ATTENTION_GATE,
                 CorrectnessCheck(
