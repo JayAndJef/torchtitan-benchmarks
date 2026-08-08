@@ -414,6 +414,9 @@ class MegatronScenarioTests(unittest.TestCase):
                 "titan_swiglu",
                 "titan_lm_head",
                 "titan_swiglu_lm_head",
+                "titan_attention",
+                "titan_attention_lm_head",
+                "titan_swiglu_lm_head_attention",
             ],
         )
         baseline = scenario.arm("baseline")

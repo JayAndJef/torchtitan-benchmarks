@@ -327,6 +327,32 @@ PIPER_1B_MEGATRON = Scenario(
             expected_override_count=16,
             trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
         ),
+        Arm(
+            name="titan_attention",
+            description="FlashAttention-3 varlen instead of FlexAttention, stock elsewhere",
+            config="qwen3_piper_1b_varlen_pretokenized",
+            trace_kernel_markers=("FlashAttnFwdSm90", "FlashAttnBwdSm90"),
+        ),
+        Arm(
+            name="titan_attention_lm_head",
+            description="FlashAttention-3 plus the Piper-optimized TE cross entropy",
+            config="qwen3_piper_1b_piper_optimized_te_ce_varlen_pretokenized",
+            trace_kernel_markers=(
+                "FlashAttnFwdSm90",
+                "piper_optimized_cross_entropy_kernel",
+            ),
+        ),
+        Arm(
+            name="titan_swiglu_lm_head_attention",
+            description="all three improvements combined: swiglu, lm_head and FlashAttention-3",
+            config="qwen3_piper_1b_piper_optimized_te_ce_varlen_pretokenized",
+            override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
+            expected_override_count=16,
+            trace_kernel_markers=(
+                "FlashAttnFwdSm90",
+                "piper_optimized_cross_entropy_kernel",
+            ),
+        ),
     ),
 )
 
