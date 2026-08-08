@@ -866,7 +866,8 @@ def build_attention_flash3(
         VarlenMetadata,
     )
 
-    module = VarlenAttention.Config().build()
+    # Compiled: the baseline is too, via FlexAttention's class-level compile.
+    module = _compile_module(VarlenAttention.Config().build())
     enable_gqa = spec.n_heads > spec.n_kv_heads
     metadata = VarlenMetadata(
         cu_seq_q=inputs.cu_seqlens,
