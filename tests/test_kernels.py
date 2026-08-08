@@ -21,7 +21,8 @@ from benchmarks.kernel_stats import kernel_comparison
 class RegistryTests(unittest.TestCase):
     def test_expected_scenarios_and_baselines(self) -> None:
         self.assertEqual(
-            list(KERNEL_SCENARIOS), ["rope", "swiglu", "qkv", "lm_head"]
+            list(KERNEL_SCENARIOS),
+            ["rope", "swiglu", "qkv", "lm_head", "attention"],
         )
         for scenario in KERNEL_SCENARIOS.values():
             self.assertIn(
@@ -58,13 +59,22 @@ class RegistryTests(unittest.TestCase):
                 self.assertTrue(function.isidentifier(), reference)
 
     def test_only_raw_kernels_and_floors_stay_eager(self) -> None:
+        """Eager arms are deliberate, and each one needs a reason.
+
+        ``rope/copy_floor`` is a bandwidth floor, not an implementation.
+        ``attention/te_attention`` is eager because that is how the megatron
+        e2e arm runs TE, so eager-vs-compiled here mirrors how each engine
+        actually faces the kernel rather than handicapping one of them.
+        """
         eager = {
             (scenario.name, arm.name)
             for scenario in KERNEL_SCENARIOS.values()
             for arm in scenario.arms
             if not arm.compiled
         }
-        self.assertEqual(eager, {("rope", "copy_floor")})
+        self.assertEqual(
+            eager, {("rope", "copy_floor"), ("attention", "te_attention")}
+        )
 
     def test_every_arm_has_a_description(self) -> None:
         from benchmarks.scenarios import SCENARIOS

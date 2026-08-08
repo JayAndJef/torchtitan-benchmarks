@@ -61,7 +61,7 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
 | `piper1b/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
 | `piper1b/pretokenized_data.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
 | `megatron_baseline/` | Everything Megatron: location/provenance, Qwen3-1B GPTModel builder, THD data, training driver |
-| `analysis/` | Two argv-driven trace diagnostics (`analyze.py`, `per_block.py`) |
+| `analysis/` | Three argv-driven trace diagnostics (`analyze.py`, `per_block.py`, `components.py`) |
 | `tools/` | `megatron_parity_check.py`: GPU logit-parity gate between the engines |
 | `tests/` | CPU + GPU unit tests |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
@@ -119,7 +119,7 @@ engine-neutral and has exactly two values:
 
 | mode | TorchTitan arms get | megatron arm gets |
 |---|---|---|
-| `default` | per-block `torch.compile`, mode default | eager TE modules |
+| `default` | per-block `torch.compile`, mode default | TE modules uncompiled and uncaptured (its `@jit_fuser` regions still compile) |
 | `cuda-graph` | per-block `torch.compile(mode="reduce-overhead")` | Megatron's local per-layer partial graphs |
 
 `cuda-graph` is the renamed `reduce-overhead` (schema <= 7 manifests record
@@ -194,9 +194,24 @@ scenarios` prints them and manifests record them.
 The four titan scenarios share `PIPER_1B_REGIONS`: `forward_block` and
 `backward_block`, each 80 invocations per window (16 layers x 5 active
 steps). `piper1b_megatron` declares no regions (region pooling rides on
-Inductor's compiled-graph annotations, which the eager megatron arm honestly
-lacks) -- its cross-engine metrics are total GPU kernel time, tokens/s,
-launch latency, and peak memory.
+Inductor's compiled-graph annotations around whole transformer blocks, which
+the megatron arm honestly lacks) -- its cross-engine metrics are total GPU
+kernel time, tokens/s, launch latency, and peak memory.
+
+**"Eager megatron" is shorthand, and it is imprecise.** Megatron-core sets
+`jit_fuser = torch.compile` on torch >= 2.2 (`megatron/core/jit.py:17-24`,
+enabled at import) and decorates 41 functions with it across 12 modules --
+cross-entropy, bias-swiglu, bias-dropout, the router, norms. Those regions go
+through Inductor in every run. What megatron does *not* do is compile whole
+transformer layers: there is no `torch_compile` knob in
+`transformer_config.py`, `model_parallel_config.py`, or
+`megatron/training/arguments.py`, and `TEDotProductAttention` and the other
+TE extension modules carry no compile at all. So the real axis is
+**selectively-compiled megatron vs whole-block-compiled titan**, which is an
+engine design difference -- NVIDIA's answer to whole-layer overhead is
+hand-written TE kernels plus CUDA graphs, which `--compile-mode cuda-graph`
+measures separately. Unlike the fusion defaults, there is no switch here we
+are declining to set.
 
 | scenario | arm | mechanism |
 |---|---|---|
@@ -343,11 +358,12 @@ even absent, once Inductor fuses the surrounding graph).
 
 | flag | default | meaning |
 |---|---|---|
-| `--scenario` (repeatable) | all four | subset of kernel scenarios |
+| `--scenario` (repeatable) | all five | subset of kernel scenarios |
 | `--n` | 200 | interleaved measurement cycles |
 | `--warmup` | 30 | warmup cycles per mode |
 | `--burst` | off | adds the 1/4/16/64 dispatch-cost diagnostic |
-| `--batch` / `--seq-len` | 4 / 1024 | `Piper1BSpec` overrides (seq <= 2048) |
+| `--batch` / `--seq-len` | 4 / 1024 | `Piper1BSpec` overrides (seq <= `max_seq_len`) |
+| `--max-seq-len` | 2048 | raises the seq ceiling; needed to sweep `attention` past 2048 |
 | `--seed` | 0 | input generator seed |
 | `--hardware` | `auto` | provenance label |
 | `--out` | `out/<ts>/kernels/<scenario>/<hardware>` | single `--scenario` only |
@@ -366,6 +382,33 @@ e2e shell cannot leak settings into a kernel run.
 | `swiglu` | `baseline`*, `piper_optimized_triton`, `piper_optimized_inductor` | fwd, bwd, fwd+bwd | whole expert layer only; both Piper arms fuse the w13 GEMM and differ in the activation (custom Triton op vs plain ops left to Inductor) |
 | `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
 | `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
+| `attention` | `baseline`*, `te_attention` | fwd, fwd+bwd | inner attention only, packed-document causal masking; `te_attention` is **eager on purpose** (see below) |
+
+The `attention` scenario measures **inner attention only** -- the level at
+which the implementations are substitutable, and the level that keeps it from
+re-measuring the projection work `qkv` already covers. Both arms consume the
+same q/k/v and the same synthetic packed-document boundaries, delivered in the
+two mask forms each backend needs (a flex `BlockMask` and THD `cu_seqlens`),
+both built once in the inputs builder -- `create_varlen_metadata_for_document`
+contains a device-to-host sync and `create_block_mask` is itself a compiled
+call, so neither may run inside a timed closure.
+
+Two asymmetries are deliberate and recorded rather than hidden:
+
+- **`te_attention` runs eager while `baseline` runs compiled.** That is how
+  each faces production: the megatron e2e arm runs TE eagerly, and titan
+  compiles its blocks. `KernelArm.compiled` records it and a registry test
+  asserts the eager set stays exactly `{rope/copy_floor,
+  attention/te_attention}`.
+- **`baseline` is not wrapped in `torch.compile`.** `FlexAttention` already
+  holds a class-level compile of `flex_attention`; wrapping it again risks a
+  double compile or a graph break around its spmd context.
+
+The fp64 reference is computed **per (row, kv group)**. A one-shot
+`[B, n_heads, L, L]` fp64 score tensor is 8.6 GiB at batch 4 / seq 4096 and
+69 GiB at batch 32, so the obvious implementation OOMs exactly at the shapes
+worth measuring. Gate the arms with `max_rel_l2` only: attention is a
+reduction, and CLAUDE.md's rule against max/ULP metrics on reductions applies.
 
 `*` = scenario baseline. `benchmarks/kernels.py` is the registry: add an arm
 by appending a `KernelArm` with a builder path, and a scenario by appending a
@@ -455,13 +498,58 @@ without re-measuring.
 |---|---|---|
 | `analysis/analyze.py` | Two-trace diff: device/host totals, per-kernel movers | 2 positional trace paths |
 | `analysis/per_block.py` | Per-compiled-region GPU time, paired by size rank | 2 positional trace paths |
+| `analysis/components.py` | Per-component GPU time (~12 classes), summed and overlap-corrected | 1..N arm dirs or traces, plus options |
 
-These take uncompressed Chrome traces, but runs write `.json.gz`. Decompress
-first:
+`analyze.py` and `per_block.py` take uncompressed Chrome traces, but runs write
+`.json.gz`. Decompress first:
 
 ```bash
 gunzip -c out/<...>/baseline/profiling/traces/iteration_40/rank0_trace.json.gz > /tmp/a.json
 ```
+
+`components.py` does **not** need that -- it reads `.json.gz` directly and
+takes whole arm directories, pooling every window the way the harness does:
+
+```bash
+./run_bench.sh  # (any run) then:
+D=out/<ts>/piper1b_megatron/<hw>
+.venv/bin/python analysis/components.py $D/baseline $D/titan_swiglu_lm_head \
+    [--by-phase] [--detail 10] [--json breakdown.json]
+```
+
+It splits each arm's kernel time into MoE expert GEMM, cross-entropy, lm_head
+GEMM, SwiGLU, attention core, norm, attention projection GEMM, MoE
+routing/permute, RoPE, optimizer, embedding, and other elementwise. Three
+properties make it trustworthy, and all three are asserted in
+`tests/test_components.py`:
+
+- **The classes partition the total.** The summed column equals that arm's
+  `results.json` `gpu_time.kernel_ms_per_step` exactly; a test re-derives it
+  from the traces for every arm of a real run.
+- **Classification is frame-first**, reading autograd/module frame names
+  before kernel names and shapes. Shape-first is a trap: megatron reports
+  `_GroupedLinearBackward`'s `Input Dims` as `[[98304,1024],[]]` with the
+  expert dims stripped, which misfiles 122.8 ms/step of MoE backward as a
+  projection GEMM. Note also that `_LayerNormLinear` frames contain *both*
+  norm and GEMM kernels, split by kernel name.
+- **Two independent attribution rules are cross-checked** (the nested `cpu_op`
+  stack on the launching thread, and the smallest-duration `cpu_op` sharing
+  the launch's `External id`). The printed agreement rate is 100% on real
+  traces; any drop means the attribution is suspect.
+
+Two reporting rules the tool enforces, both of which previously produced wrong
+published conclusions:
+
+- **Compare on the busy (interval-union) basis, not the summed one, whenever
+  the arms differ in stream count.** Megatron runs 5 CUDA streams to titan's
+  1, so summing overcounts it ~6.5% and *inverts the sign* of the MoE
+  expert-GEMM comparison. `share_of_gap` is computed on the busy basis for
+  this reason.
+- **A fused component is never printed as `0.0`.** Inductor folds titan's RoPE
+  into the qk-norm kernels, so RoPE renders as `<= 4.661 (fused: norm)` and
+  gets a `norm_rope_fused` row of its own, keeping `norm` comparable to
+  megatron's. `--merge-fused` (default) also emits an `attention_block` row
+  that is like-for-like across engines.
 
 ### CUDA extension builds
 

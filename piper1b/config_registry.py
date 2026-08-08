@@ -49,7 +49,9 @@ from piper1b.parallelize import parallelize_piper1b
 from piper1b.pretokenized_data import PretokenizedReplayDataLoader
 
 
-def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
+def _piper_1b_model(
+    *, fuse_qkv: bool, attn_backend: str = "flex"
+) -> Qwen3Model.Config:
     dim = 1024
     head_dim = 64
     n_layers = 16
@@ -64,7 +66,7 @@ def _piper_1b_model(*, fuse_qkv: bool) -> Qwen3Model.Config:
         moe_hidden_dim=3584,
         num_experts=4,
         top_k=2,
-        attn_backend="flex",
+        attn_backend=attn_backend,
         moe_comm_backend="standard",
         rope=CosSinRoPE.Config(
             dim=head_dim,
@@ -100,6 +102,23 @@ def qwen3_piper_1b() -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="full_logits",
+    )
+
+
+def qwen3_piper_1b_varlen() -> Trainer.Config:
+    """Piper-1B with FlashAttention-3 varlen instead of FlexAttention.
+
+    ``attn_backend="varlen"`` selects VarlenAttention, whose constructor
+    activates FA3 -- so this config requires the flash3 dependency group to be
+    installed and will raise ModuleNotFoundError without it. The masking is
+    equivalent, not merely similar: both backends receive the same packed
+    document boundaries, and their outputs agree with an fp64 reference to
+    ~2e-3 rel_l2 (measured).
+    """
+    return _piper_1b_trainer(
+        fuse_qkv=True,
+        loss_kind="full_logits",
+        attn_backend="varlen",
     )
 
 
@@ -165,11 +184,13 @@ def _with_pretokenized_replay(config: Trainer.Config) -> Trainer.Config:
     return config
 
 
-def _piper_1b_trainer(*, fuse_qkv: bool, loss_kind: str) -> Trainer.Config:
+def _piper_1b_trainer(
+    *, fuse_qkv: bool, loss_kind: str, attn_backend: str = "flex"
+) -> Trainer.Config:
     model_spec = ModelSpec(
         name="qwen3",
         flavor="piper_1B",
-        model=_piper_1b_model(fuse_qkv=fuse_qkv),
+        model=_piper_1b_model(fuse_qkv=fuse_qkv, attn_backend=attn_backend),
         parallelize_fn=parallelize_piper1b,
         pipelining_fn=pipeline_llm,
         # No register_moe_load_balancing_hook: load_balance_coeff is None

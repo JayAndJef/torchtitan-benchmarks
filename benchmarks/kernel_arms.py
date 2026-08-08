@@ -620,6 +620,279 @@ def build_qkv_fused_qkv(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
     return _qkv_arm("fused_qkv", _finalize_qkv(module, inputs), inputs)
 
 
+# --- attention --------------------------------------------------------------
+
+# Captured by profiling, never guessed: TE picks its backend at runtime and
+# can silently fall back to an unfused path.
+TE_ATTENTION_MARKER = "cudnn_generated_fort_native_sdpa"
+FLEX_ATTENTION_MARKER = "flex_attention"
+# The FA2 kernels torch's varlen path uses. If a FlashAttention-3 arm is added,
+# seeing these means FA3 declined to register -- a failure, not a success.
+FA2_MARKERS = ("pytorch_flash::flash_fwd", "flash_bwd_dq_dk_dv_loop")
+
+
+@dataclass
+class AttentionInputs:
+    q: torch.Tensor  # (B, L, n_heads, head_dim)
+    k: torch.Tensor  # (B, L, n_kv_heads, head_dim)
+    v: torch.Tensor
+    grad_out: torch.Tensor
+    positions: torch.Tensor  # (B, L) int32, resets to 0 at document starts
+    block_mask: object  # BlockMask for FlexAttention
+    cu_seqlens: torch.Tensor  # int32, packed document boundaries for THD
+    scale: float
+    num_documents: int
+
+
+def _packed_positions(
+    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+) -> torch.Tensor:
+    """Synthetic packed-document positions: reset to 0 at each document start.
+
+    A seeded mix of document lengths rather than one document per row, because
+    a single full-length document would make the block-diagonal mask dense and
+    hide exactly the sparsity these kernels exist to exploit. Every row starts
+    at 0, which both the flex document mask and cu_seqlens construction
+    require.
+    """
+    rows = []
+    low = max(1, spec.seq_len // 16)
+    high = max(low + 1, spec.seq_len // 2)
+    for _ in range(spec.batch):
+        positions, remaining = [], spec.seq_len
+        while remaining > 0:
+            length = int(
+                torch.randint(low, high, (1,), generator=generator).item()
+            )
+            length = min(length, remaining)
+            positions.extend(range(length))
+            remaining -= length
+        rows.append(positions)
+    return torch.tensor(rows, device=device, dtype=torch.int32)
+
+
+def attention_inputs(
+    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+) -> AttentionInputs:
+    from torch.nn.attention.flex_attention import and_masks
+    from torchtitan.models.common.attention import (
+        create_attention_mask,
+        create_varlen_metadata_for_document,
+        get_causal_mask_mod,
+        get_efficient_causal_mask_mod_for_packed_document,
+    )
+
+    batch, seq = spec.batch, spec.seq_len
+    q = _randn((batch, seq, spec.n_heads, spec.head_dim), device, generator)
+    k = _randn((batch, seq, spec.n_kv_heads, spec.head_dim), device, generator)
+    v = _randn((batch, seq, spec.n_kv_heads, spec.head_dim), device, generator)
+    grad_out = _randn_like(q, generator)
+
+    cpu_generator = torch.Generator(device="cpu").manual_seed(
+        int(generator.initial_seed()) & 0x7FFFFFFF
+    )
+    positions = _packed_positions(spec, device, cpu_generator)
+
+    # Both mask forms are built ONCE here, never inside a timed closure:
+    # create_varlen_metadata_for_document contains a .item() device-to-host
+    # sync, and create_block_mask is itself a compiled call.
+    block_mask = create_attention_mask(
+        and_masks(
+            get_causal_mask_mod(),
+            get_efficient_causal_mask_mod_for_packed_document(positions),
+        ),
+        batch,
+        None,
+        seq,
+        seq,
+        device=device,
+        BLOCK_SIZE=128,
+        separate_full_blocks=True,
+    )
+    varlen = create_varlen_metadata_for_document(positions)
+
+    return AttentionInputs(
+        q=q,
+        k=k,
+        v=v,
+        grad_out=grad_out,
+        positions=positions,
+        block_mask=block_mask,
+        cu_seqlens=varlen.cu_seq_q,
+        scale=spec.head_dim**-0.5,
+        num_documents=int((positions == 0).sum()),
+    )
+
+
+def attention_reference(
+    spec: Piper1BSpec, inputs: AttentionInputs
+) -> dict[str, torch.Tensor]:
+    """fp64 masked-softmax attention, computed per (row, kv group).
+
+    Chunked on purpose: the full [B, n_heads, L, L] fp64 score tensor is
+    8.6 GiB at batch 4 / seq 4096 and 69 GiB at batch 32, so a one-shot
+    reference would OOM exactly at the shapes worth measuring. Per chunk it
+    is [heads_per_kv, L, L], which stays a few hundred MiB.
+    """
+    batch, seq = spec.batch, spec.seq_len
+    heads_per_kv = spec.n_heads // spec.n_kv_heads
+    device = inputs.q.device
+
+    document = torch.cumsum((inputs.positions == 0).int(), dim=1) - 1
+    causal = torch.tril(torch.ones(seq, seq, device=device, dtype=torch.bool))
+
+    out = torch.empty_like(inputs.q, dtype=torch.float64)
+    dq = torch.empty_like(out)
+    dk = torch.zeros(
+        (batch, seq, spec.n_kv_heads, spec.head_dim),
+        device=device,
+        dtype=torch.float64,
+    )
+    dv = torch.zeros_like(dk)
+
+    for b in range(batch):
+        same_document = document[b][:, None] == document[b][None, :]
+        mask = same_document & causal
+        for group in range(spec.n_kv_heads):
+            lo, hi = group * heads_per_kv, (group + 1) * heads_per_kv
+            q_chunk = (
+                inputs.q[b, :, lo:hi].double().detach().transpose(0, 1).requires_grad_()
+            )
+            k_chunk = inputs.k[b, :, group].double().detach().requires_grad_()
+            v_chunk = inputs.v[b, :, group].double().detach().requires_grad_()
+
+            scores = (q_chunk @ k_chunk.transpose(-1, -2)) * inputs.scale
+            scores = scores.masked_fill(~mask[None, :, :], float("-inf"))
+            chunk = torch.softmax(scores, dim=-1) @ v_chunk
+
+            grad = inputs.grad_out[b, :, lo:hi].double().transpose(0, 1)
+            torch.autograd.backward(chunk, grad)
+
+            out[b, :, lo:hi] = chunk.detach().transpose(0, 1)
+            dq[b, :, lo:hi] = q_chunk.grad.transpose(0, 1)
+            dk[b, :, group] = k_chunk.grad
+            dv[b, :, group] = v_chunk.grad
+
+    return {"out": out, "dq": dq, "dk": dk, "dv": dv}
+
+
+def _attention_arm(name: str, inputs: AttentionInputs, call) -> BuiltArm:
+    """Forward and forward+backward only, with independent leaf sets.
+
+    There is no isolated ``backward`` mode here, for the same reason
+    ``lm_head`` has none: the retained-graph trick every other scenario uses
+    (run backward repeatedly with retain_graph=True) is incompatible with TE's
+    fused-attention autograd function, which consumes its saved-tensor context
+    on the first backward and then raises "ctx must have .tensor_objects".
+    Dropping the mode from BOTH arms keeps them comparable -- backward cost is
+    still recoverable as forward_backward minus forward.
+    """
+
+    def leaves():
+        return (
+            inputs.q.clone().requires_grad_(),
+            inputs.k.clone().requires_grad_(),
+            inputs.v.clone().requires_grad_(),
+        )
+
+    forward_leaves = leaves()
+    round_trip_leaves = leaves()
+    check_leaves = leaves()
+
+    def forward():
+        return call(*forward_leaves)
+
+    def forward_backward() -> None:
+        _reset_grads(*round_trip_leaves)
+        torch.autograd.backward(call(*round_trip_leaves), inputs.grad_out)
+
+    def correctness_outputs() -> dict[str, torch.Tensor]:
+        _reset_grads(*check_leaves)
+        out = call(*check_leaves)
+        torch.autograd.backward(out, inputs.grad_out)
+        return {
+            "out": out.detach(),
+            "dq": check_leaves[0].grad,
+            "dk": check_leaves[1].grad,
+            "dv": check_leaves[2].grad,
+        }
+
+    return BuiltArm(
+        name=name,
+        calls={"forward": forward, "forward_backward": forward_backward},
+        correctness_outputs=correctness_outputs,
+    )
+
+
+def build_attention_baseline(
+    spec: Piper1BSpec, inputs: AttentionInputs
+) -> BuiltArm:
+    from torchtitan.models.common.attention import FlexAttention
+
+    module = FlexAttention.Config().build()
+    enable_gqa = spec.n_heads > spec.n_kv_heads
+
+    def call(q, k, v):
+        # FlexAttention already holds a class-level torch.compile of
+        # flex_attention, so the module is NOT wrapped again here; wrapping it
+        # risks a double compile or a graph break around its spmd context.
+        return module(
+            q, k, v,
+            attention_masks=inputs.block_mask,
+            scale=inputs.scale,
+            enable_gqa=enable_gqa,
+        )
+
+    call(*[t.clone().requires_grad_() for t in (inputs.q, inputs.k, inputs.v)])
+    _assert_kernel_marker(
+        lambda: call(inputs.q, inputs.k, inputs.v),
+        FLEX_ATTENTION_MARKER,
+        "baseline",
+    )
+    return _attention_arm("baseline", inputs, call)
+
+
+def build_attention_te(spec: Piper1BSpec, inputs: AttentionInputs) -> BuiltArm:
+    # Imported inside the builder: TE needs its environment configured before
+    # import, and the rope arms' precedent is to keep TE out of module scope.
+    from megatron_baseline.location import configure_te_environment
+
+    configure_te_environment()
+    from transformer_engine.pytorch import DotProductAttention
+
+    batch, seq = spec.batch, spec.seq_len
+    tokens = batch * seq
+    module = DotProductAttention(
+        num_attention_heads=spec.n_heads,
+        kv_channels=spec.head_dim,
+        num_gqa_groups=spec.n_kv_heads,
+        attention_dropout=0.0,
+        qkv_format="thd",
+        # THD packing requires a padding mask type; "causal" alone is rejected.
+        attn_mask_type="padding_causal",
+        softmax_scale=inputs.scale,
+    ).cuda()
+
+    def call(q, k, v):
+        out = module(
+            q.reshape(tokens, spec.n_heads, spec.head_dim),
+            k.reshape(tokens, spec.n_kv_heads, spec.head_dim),
+            v.reshape(tokens, spec.n_kv_heads, spec.head_dim),
+            cu_seqlens_q=inputs.cu_seqlens,
+            cu_seqlens_kv=inputs.cu_seqlens,
+            max_seqlen_q=seq,
+            max_seqlen_kv=seq,
+        )
+        return out.view(batch, seq, spec.n_heads, spec.head_dim)
+
+    _assert_kernel_marker(
+        lambda: call(inputs.q, inputs.k, inputs.v),
+        TE_ATTENTION_MARKER,
+        "te_attention",
+    )
+    return _attention_arm("te_attention", inputs, call)
+
+
 # --- lm_head ----------------------------------------------------------------
 
 

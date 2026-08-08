@@ -52,6 +52,7 @@ class KernelRunRequest:
     burst: bool = False
     batch: int | None = None
     seq_len: int | None = None
+    max_seq_len: int | None = None
     seed: int = 0
     hardware: str = "auto"
     out_dir: Path | None = None
@@ -127,7 +128,11 @@ def execute_kernel_run(
         compiler_env=request.compiler_env,
         environment=host_environment,
     )
-    spec = spec_with_overrides(batch=request.batch, seq_len=request.seq_len)
+    spec = spec_with_overrides(
+        batch=request.batch,
+        seq_len=request.seq_len,
+        max_seq_len=request.max_seq_len,
+    )
     hardware, metadata = hardware_metadata(paths, request.gpu, request.hardware)
     pinning = resolve_cpu_pinning(request.gpu)
     metadata = {**metadata, "cpu_pinning": pinning.description}
@@ -187,6 +192,8 @@ def execute_kernel_run(
             command.extend(("--batch", str(request.batch)))
         if request.seq_len is not None:
             command.extend(("--seq-len", str(request.seq_len)))
+        if request.max_seq_len is not None:
+            command.extend(("--max-seq-len", str(request.max_seq_len)))
 
         atomic_write_json(
             out_dir / "manifest.json",

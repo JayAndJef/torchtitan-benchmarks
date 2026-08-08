@@ -277,6 +277,14 @@ def run_all_command(
 )
 @click.option("--batch", type=int, help="Override the Piper-1B batch size.")
 @click.option("--seq-len", type=int, help="Override the Piper-1B sequence length.")
+@click.option(
+    "--max-seq-len",
+    type=int,
+    help=(
+        "Raise the Piper-1B max_seq_len ceiling (default 2048); needed to "
+        "sweep attention past 2048. Also sizes the RoPE cos/sin tables."
+    ),
+)
 @click.option("--seed", default=0, show_default=True, help="Input seed.")
 @click.option(
     "--hardware",

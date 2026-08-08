@@ -65,9 +65,16 @@ class Piper1BSpec:
 
 
 def spec_with_overrides(
-    *, batch: int | None = None, seq_len: int | None = None
+    *,
+    batch: int | None = None,
+    seq_len: int | None = None,
+    max_seq_len: int | None = None,
 ) -> Piper1BSpec:
     spec = Piper1BSpec()
+    # max_seq_len first: validate() rejects seq_len > max_seq_len, and the
+    # attention sweep runs past the 2048 default.
+    if max_seq_len is not None:
+        spec = replace(spec, max_seq_len=int(max_seq_len))
     if batch is not None:
         spec = replace(spec, batch=int(batch))
     if seq_len is not None:
@@ -433,8 +440,68 @@ LM_HEAD = KernelScenario(
 )
 
 
+ATTENTION_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "dq", "dk", "dv"),
+    # Attention is a reduction, so max/ULP metrics report garbage wherever
+    # cancellation drives an output toward zero; rel_l2 is the only safe gate.
+    # Measured headroom: both implementations land at ~2e-3 against fp64.
+    max_rel_l2=2e-2,
+)
+
+
+ATTENTION = KernelScenario(
+    name="attention",
+    description=(
+        "Inner attention at Piper-1B shapes with packed-document causal "
+        "masking: FlexAttention vs TransformerEngine fused attention."
+    ),
+    inputs_builder="benchmarks.kernel_arms:attention_inputs",
+    reference_builder="benchmarks.kernel_arms:attention_reference",
+    baseline_arm="baseline",
+    arms=(
+        KernelArm(
+            name="baseline",
+            description=(
+                "TorchTitan FlexAttention: an Inductor-generated Triton "
+                "template driven by a block-diagonal causal BlockMask"
+            ),
+            builder="benchmarks.kernel_arms:build_attention_baseline",
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(ATTENTION_GATE,),
+        ),
+        KernelArm(
+            name="te_attention",
+            description=(
+                "transformer_engine.pytorch.DotProductAttention in THD form "
+                "with cu_seqlens -- the same cuDNN fused-attention kernels "
+                "the megatron e2e arm runs. Deliberately EAGER while the "
+                "baseline is compiled: that is how each faces production "
+                "(megatron runs TE eager; titan compiles its blocks)."
+            ),
+            builder="benchmarks.kernel_arms:build_attention_te",
+            modes=("forward", "forward_backward"),
+            compiled=False,
+            correctness=(
+                ATTENTION_GATE,
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="baseline",
+                    outputs=("out", "dq", "dk", "dv"),
+                    max_rel_l2=2e-2,
+                    informational=True,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 KERNEL_SCENARIOS = {
-    scenario.name: scenario for scenario in (ROPE, SWIGLU, QKV, LM_HEAD)
+    scenario.name: scenario
+    for scenario in (ROPE, SWIGLU, QKV, LM_HEAD, ATTENTION)
 }
 
 
@@ -480,5 +547,14 @@ def shape_summary(scenario_name: str, spec: Piper1BSpec) -> dict[str, object]:
             "hidden": [batch, seq, spec.dim],
             "weight": [spec.vocab_size, spec.dim],
             "tokens": batch * seq,
+        }
+    if scenario_name == "attention":
+        return {
+            "q": [batch, seq, spec.n_heads, spec.head_dim],
+            "k": [batch, seq, spec.n_kv_heads, spec.head_dim],
+            "v": [batch, seq, spec.n_kv_heads, spec.head_dim],
+            "positions": [batch, seq],
+            "packed_tokens": batch * seq,
+            "max_seq_len": spec.max_seq_len,
         }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

@@ -26,6 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--burst", action="store_true")
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=None)
+    parser.add_argument("--max-seq-len", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args(argv)
 
@@ -36,7 +37,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         scenario = kernel_scenario_by_name(args.scenario)
-        spec = spec_with_overrides(batch=args.batch, seq_len=args.seq_len)
+        spec = spec_with_overrides(
+            batch=args.batch,
+            seq_len=args.seq_len,
+            max_seq_len=args.max_seq_len,
+        )
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
