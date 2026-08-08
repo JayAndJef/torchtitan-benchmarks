@@ -23,11 +23,27 @@ megatron = [
     "setuptools>=75",
     "wheel",
 ]
+# FlashAttention-3 for the attention arms. FA3 is NOT on PyPI (the `flash-attn`
+# package there is FA2) and publishes no prebuilt wheel, so it is a source
+# build of CUTLASS sm90a kernels from the repo's hopper/ subdirectory --
+# roughly 40 minutes the first time, then served from uv's cache like TE.
+# The four nvidia packages must share ONE CUDA version: mixing nvcc 13.0 with
+# a 13.3 nvvm makes the frontend emit PTX ISA 9.3 that 13.0 ptxas rejects.
+flash3 = [
+    "flash-attn-3",
+    "nvidia-cuda-nvcc==13.0.88",
+    "nvidia-cuda-crt==13.0.88",
+    "nvidia-nvvm==13.0.88",
+    # Ships nv/target, which cuda_fp16.h includes and the cu13 wheel omits.
+    "nvidia-cuda-cccl==13.0.85",
+    "setuptools>=75",
+    "wheel",
+]
 
 [tool.uv]
 package = false
-default-groups = ["megatron"]
-no-build-isolation-package = ["transformer-engine-torch"]
+default-groups = ["megatron", "flash3"]
+no-build-isolation-package = ["transformer-engine-torch", "flash-attn-3"]
 
 [[tool.uv.index]]
 name = "pytorch-nightly-cu130"
@@ -39,3 +55,4 @@ explicit = true
 torch = { index = "pytorch-nightly-cu130" }
 triton = { index = "pytorch-nightly-cu130" }
 torchtitan = { path = "third_party/torchtitan", editable = true }
+flash-attn-3 = { git = "https://github.com/Dao-AILab/flash-attention.git", subdirectory = "hopper", rev = "69e1bcbe77c359c84b3a4589e92a7c076e33a202" }

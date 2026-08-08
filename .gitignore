@@ -1,7 +1,9 @@
 out/
 /reports/
 /.cuda-compat/
+/.fa3-build/
 __pycache__/
 *.pyc
 .venv/
 /.claude/
+/.cuda-home/
