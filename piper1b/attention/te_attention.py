@@ -32,6 +32,14 @@ import torch
 from torchtitan.config import derive, override
 from torchtitan.models.common.attention import VarlenAttention, VarlenMetadata
 
+from megatron_baseline.location import configure_te_environment
+
+# At import, never inside forward: this sets environment variables, and
+# os.environ.setdefault bottoms out in putenv, which Dynamo cannot trace. The
+# override module is imported during config construction, long before the
+# first compiled step.
+configure_te_environment()
+
 
 class TEAttention(VarlenAttention):
     """TransformerEngine fused attention over packed (THD) sequences."""
@@ -47,10 +55,11 @@ class TEAttention(VarlenAttention):
         self.window_size = config.window_size
         self._attention = None
 
+    # Head counts are only knowable from the forward tensors (the inner
+    # attention config carries none), so construction is lazy -- but it must
+    # stay out of the compiled graph, hence the dynamo escape hatch.
+    @torch._dynamo.disable
     def _build(self, num_heads: int, num_gqa_groups: int, head_dim: int, scale):
-        from megatron_baseline.location import configure_te_environment
-
-        configure_te_environment()
         from transformer_engine.pytorch import DotProductAttention
 
         return DotProductAttention(
