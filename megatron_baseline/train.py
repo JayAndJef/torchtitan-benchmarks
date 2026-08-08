@@ -201,6 +201,10 @@ def main(argv: list[str] | None = None) -> None:
             "apply_rope_fusion",
         )
     }
+    # Not a boolean: which CE implementation ran is the single largest lever
+    # in the loss path (te = TE's online-softmax kernel, native = megatron's
+    # fp32 multi-pass one), so it goes in the log next to the flags.
+    ce_impl = getattr(model.config, "cross_entropy_fusion_impl", "unknown")
     missing = sorted(name for name, on in fusions.items() if not on)
     if missing:
         raise RuntimeError(
@@ -208,7 +212,12 @@ def main(argv: list[str] | None = None) -> None:
             + ", ".join(missing)
             + " -- see megatron_baseline/model.py"
         )
-    print(FUSION_LINE.format(state=" ".join(f"{k}={v}" for k, v in fusions.items())))
+    print(
+        FUSION_LINE.format(
+            state=" ".join(f"{k}={v}" for k, v in fusions.items())
+            + f" cross_entropy_fusion_impl={ce_impl}"
+        )
+    )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

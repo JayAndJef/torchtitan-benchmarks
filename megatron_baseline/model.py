@@ -103,12 +103,30 @@ def build_model(
         # Opt-in in megatron, but shipped in NVIDIA's own Qwen3 example
         # configs, and both are parity-safe pure kernel fusions (measured:
         # loss trajectories match the unfused run to ~1e-3).
-        # 'native' is megatron's own jit_fuser CE, NOT the TE cross entropy
-        # our te_ce arms use -- megatron hard-refuses fusion_impl='te' in
-        # arguments.py ("disabled due to stability issues"), so native is
-        # megatron-at-its-best here.
         cross_entropy_loss_fusion=True,
-        cross_entropy_fusion_impl="native",
+        # 'te' routes the loss through transformer_engine.pytorch.
+        # parallel_cross_entropy -- the SAME implementation our te_fused_ce
+        # arm wraps (vendored at piper1b/lm_head/te_cross_entropy.py), and
+        # the one piper_optimized_te_ce further optimizes. Choosing it makes
+        # the loss path an apples-to-apples kernel comparison instead of an
+        # algorithm comparison.
+        #
+        # 'native' is megatron's own jit_fuser CE: it upcasts the whole
+        # [tokens, 151936] logits tensor to fp32 and makes ~6 full-tensor
+        # traversals (max, sub, exp, sum, div) whose fp32 softmax it also
+        # keeps resident for backward -- 88 GPU ms/step at batch 48 versus
+        # 14.9 for the online-softmax TE-family kernel, which streams the
+        # row in two bf16 passes and writes the gradient in place.
+        #
+        # NOTE: megatron's *training entrypoint* refuses this combination
+        # (arguments.py ~1630) citing known stability issues. The core config
+        # only warns (model_parallel_config.py ~536), and we construct the
+        # config directly, so we get it. That is a deliberate choice to
+        # measure megatron's fastest available loss path; it is NOT the
+        # configuration a stock `pretrain_gpt.py` user runs. Report numbers
+        # from this setting as "megatron with its fastest available CE", and
+        # flip back to "native" for "megatron as NVIDIA ships it".
+        cross_entropy_fusion_impl="te",
         moe_permute_fusion=True,
         bf16=True,
         params_dtype=torch.bfloat16,

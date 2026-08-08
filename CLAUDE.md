@@ -558,6 +558,22 @@ Faithfulness guarantees, all verified:
   one performance default deliberately declined (its fused wgrad path needs
   apex-style `main_grad` buffers we have no DDP wrapper to provide); its
   cost is unmeasured.
+- **Cross-entropy implementation is a reporting-sensitive choice.**
+  `cross_entropy_fusion_impl="te"` routes the loss through
+  `transformer_engine.pytorch.parallel_cross_entropy` -- the same
+  implementation the `te_fused_ce` titan arm wraps and that
+  `piper_optimized_te_ce` optimizes -- making the loss path a kernel
+  comparison rather than an algorithm comparison. Megatron's *training
+  entrypoint* refuses this combination (`arguments.py` ~1630, "known
+  stability issues"); the core config only warns (`model_parallel_config.py`
+  ~536) and we construct the config directly, so we get it. The alternative,
+  `"native"`, is megatron's own jit_fuser CE: it upcasts the full
+  `[tokens, 151936]` logits to fp32 and makes ~6 full-tensor traversals,
+  costing 88 GPU ms/step at batch 48 versus 14.9 for the TE-family kernel --
+  73% of the entire engine gap. **Always say which one a number came from**:
+  `"te"` = megatron's fastest available loss path, `"native"` = megatron as
+  NVIDIA ships it. The driver logs `cross_entropy_fusion_impl=` on the
+  `Megatron fusions:` line.
 - **No distributed machinery**: single-rank process group + megatron init
   only; no Megatron DDP wrapper, no MegatronOptimizer.
 
