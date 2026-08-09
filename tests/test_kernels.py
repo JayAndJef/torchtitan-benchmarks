@@ -42,6 +42,17 @@ class RegistryTests(unittest.TestCase):
                     else:
                         scenario.arm(check.reference)
 
+    def test_attention_arms(self) -> None:
+        scenario = KERNEL_SCENARIOS["attention"]
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            ["baseline", "flex_flash", "flash_attention_3"],
+        )
+        # No isolated backward: see _attention_arm's docstring.
+        for arm in scenario.arms:
+            self.assertEqual(arm.modes, ("forward", "forward_backward"))
+            self.assertTrue(arm.compiled, arm.name)
+
     def test_builder_paths_resolve_without_importing_torch(self) -> None:
         # Registry import must stay torch-free; the dotted paths just need
         # to be well-formed module:function references.

@@ -374,6 +374,10 @@ def classify_titan(kernel: str, frames: tuple[str, ...], dims, shapes) -> str:
         # these the FA3 arm reports attention_core = 0.000 and dumps its
         # attention kernels into other_elementwise.
         or "FlashAttn" in kernel
+        # FlashAttention-4 via flex's FLASH backend. Its CuTe manglings spell
+        # "FlashAttention" out, so the abbreviated FA3 marker above misses
+        # them; this substring also covers the bwd pre/postprocess kernels.
+        or "flash_attncute" in kernel
         or "flash::" in kernel
         or "pytorch_flash" in kernel
         # TE fused attention, when a titan arm overrides to it.

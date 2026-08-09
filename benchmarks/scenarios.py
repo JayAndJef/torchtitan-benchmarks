@@ -282,7 +282,8 @@ PIPER_1B_MEGATRON = Scenario(
             description=(
                 "Megatron-LM + TE: bare GPTModel, THD packed attention, no "
                 "recompute. --ac never affects this arm; under cuda-graph "
-                "mode it uses Megatron's native whole-iteration graphs"
+                "mode it uses Megatron's per-layer partial capture, which "
+                "covers far less of the step than titan's whole-block graphs"
             ),
             launcher="megatron",
             validation="megatron",
@@ -327,41 +328,23 @@ PIPER_1B_MEGATRON = Scenario(
             expected_override_count=16,
             trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
         ),
-        Arm(
-            name="titan_attention",
-            description="FlashAttention-3 varlen instead of FlexAttention, stock elsewhere",
-            config="qwen3_piper_1b_varlen_pretokenized",
-            trace_kernel_markers=("FlashAttnFwdSm90", "FlashAttnBwdSm90"),
-        ),
-        Arm(
-            name="titan_attention_lm_head",
-            description="FlashAttention-3 plus the Piper-optimized TE cross entropy",
-            config="qwen3_piper_1b_piper_optimized_te_ce_varlen_pretokenized",
-            trace_kernel_markers=(
-                "FlashAttnFwdSm90",
-                "piper_optimized_cross_entropy_kernel",
-            ),
-        ),
-        Arm(
-            name="titan_swiglu_lm_head_attention",
-            description="all three improvements combined: swiglu, lm_head and FlashAttention-3",
-            config="qwen3_piper_1b_piper_optimized_te_ce_varlen_pretokenized",
-            override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
-            expected_override_count=16,
-            trace_kernel_markers=(
-                "FlashAttnFwdSm90",
-                "piper_optimized_cross_entropy_kernel",
-            ),
-        ),
     ),
 )
+
+
+# Captured by profiling, never guessed: FA4's kernels are emitted by the CuTe
+# DSL at compile time and their names appear nowhere in the torch source. The
+# full symbols are long CUTLASS manglings; these two substrings are the stable
+# parts, and Postprocess/Preprocess deliberately do not match the bwd marker.
+_FA4_TRACE_MARKERS = ("FlashAttentionForwardSm90", "FlashAttentionBackwardSm90")
 
 
 PIPER_1B_ATTENTION = Scenario(
     name="piper1b_attention",
     description=(
         "Inner-attention backends on piper-1B: FlexAttention versus "
-        "FlashAttention-3 varlen. TE cannot be an arm here -- see CLAUDE.md."
+        "FlashAttention-3 varlen versus FlexAttention lowered to "
+        "FlashAttention-4. TE cannot be an arm here -- see CLAUDE.md."
     ),
     workload=PIPER_1B_WORKLOAD,
     regions=PIPER_1B_REGIONS,
@@ -378,6 +361,17 @@ PIPER_1B_ATTENTION = Scenario(
             # register, so pin its own kernel name: seeing pytorch_flash::
             # instead would mean the arm measured FA2 under an FA3 label.
             trace_kernel_markers=("FlashAttnFwdSm90", "FlashAttnBwdSm90"),
+        ),
+        Arm(
+            name="flex_flash",
+            description=(
+                "FlexAttention lowered to FlashAttention-4 CuTe DSL kernels "
+                "(qwen3_piper_1b_flex_flash config); same BlockMask as "
+                "baseline, so this pair isolates the kernel family. Needs the "
+                "fa4 group"
+            ),
+            config="qwen3_piper_1b_flex_flash",
+            trace_kernel_markers=_FA4_TRACE_MARKERS,
         ),
     ),
 )

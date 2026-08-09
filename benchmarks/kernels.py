@@ -455,7 +455,8 @@ ATTENTION = KernelScenario(
     name="attention",
     description=(
         "Inner attention at Piper-1B shapes with packed-document causal "
-        "masking: FlexAttention vs FlashAttention-3 varlen."
+        "masking: FlexAttention vs FlashAttention-3 varlen vs FlexAttention "
+        "lowered to FlashAttention-4."
     ),
     inputs_builder="benchmarks.kernel_arms:attention_inputs",
     reference_builder="benchmarks.kernel_arms:attention_reference",
@@ -468,6 +469,19 @@ ATTENTION = KernelScenario(
                 "template driven by a block-diagonal causal BlockMask"
             ),
             builder="benchmarks.kernel_arms:build_attention_baseline",
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(ATTENTION_GATE,),
+        ),
+        KernelArm(
+            name="flex_flash",
+            description=(
+                "The same FlexAttention module and mask lowered to "
+                "FlashAttention-4 CuTe DSL kernels instead of a Triton "
+                "template (BACKEND=FLASH, 256x128 blocks); requires the fa4 "
+                "dependency group"
+            ),
+            builder="benchmarks.kernel_arms:build_attention_flex_flash",
             modes=("forward", "forward_backward"),
             compiled=True,
             correctness=(ATTENTION_GATE,),

@@ -141,6 +141,13 @@ class ClassificationTest(unittest.TestCase):
             "void flash::prepare_varlen_num_blocks_kernel<1, true>(...)",
             "void pytorch_flash::flash_fwd_kernel<...>",
             "cudnn_generated_fort_native_sdpa_sm90_flash_kernel",
+            # FlashAttention-4, as emitted by flex's FLASH backend. Real
+            # symbols, truncated. Note these spell "FlashAttention" out, so
+            # the abbreviated FA3 marker above does not match them.
+            "kernel_cutlass_kernel_flash_attncuteflash_fwd_sm90FlashAttentionForwardSm90_object_at__tensor0000o2",
+            "kernel_cutlass_kernel_flash_attncuteflash_bwd_sm90FlashAttentionBackwardSm90_object_at__tensor0000o1",
+            "kernel_cutlass_kernel_flash_attncuteflash_bwd_preprocessFlashAttentionBackwardPreprocess_object_at_",
+            "kernel_cutlass_kernel_flash_attncuteflash_bwd_postprocessFlashAttentionBackwardPostprocess_object_a",
         ]
         for kernel in cases:
             with self.subTest(kernel=kernel[:40]):

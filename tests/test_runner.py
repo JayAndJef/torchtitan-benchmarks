@@ -403,6 +403,31 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(command[-1], f"/out/{arm.name}")
 
 
+class AttentionScenarioTests(unittest.TestCase):
+    def test_scenario_registration(self) -> None:
+        scenario = scenario_by_name("piper1b_attention")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            ["baseline", "flash_attention_3", "flex_flash"],
+        )
+        # Swapping the inner attention does not change parameter structure,
+        # so unlike qkv/lm_head this scenario needs no fixed seed.
+        self.assertIsNone(scenario.workload.seed)
+
+    def test_both_flash_arms_pin_their_own_kernel_names(self) -> None:
+        """The markers are the only proof an arm ran the backend it claims."""
+        scenario = scenario_by_name("piper1b_attention")
+        fa3 = scenario.arm("flash_attention_3").trace_kernel_markers
+        fa4 = scenario.arm("flex_flash").trace_kernel_markers
+        self.assertTrue(fa3 and fa4)
+        # FA4 spells "FlashAttention" out where FA3 abbreviates, so neither
+        # arm's markers can be satisfied by the other's kernels.
+        for marker in fa4:
+            self.assertFalse(any(marker in other for other in fa3), marker)
+        for marker in fa3:
+            self.assertFalse(any(marker in other for other in fa4), marker)
+
+
 class MegatronScenarioTests(unittest.TestCase):
     def test_scenario_registration(self) -> None:
         scenario = scenario_by_name("piper1b_megatron")
@@ -414,9 +439,6 @@ class MegatronScenarioTests(unittest.TestCase):
                 "titan_swiglu",
                 "titan_lm_head",
                 "titan_swiglu_lm_head",
-                "titan_attention",
-                "titan_attention_lm_head",
-                "titan_swiglu_lm_head_attention",
             ],
         )
         baseline = scenario.arm("baseline")

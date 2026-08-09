@@ -629,6 +629,14 @@ def build_qkv_fused_qkv(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
 FLEX_ATTENTION_MARKER = "flex_attention"
 FA3_MARKER = "FlashAttnFwdSm90"
 FA2_MARKERS = ("pytorch_flash::flash_fwd", "flash_bwd_dq_dk_dv_loop")
+# FA4 needs no failure signature: BACKEND="FLASH" raises when flash_attn.cute
+# is missing rather than degrading to Triton, so an arm that runs at all ran FA4.
+FA4_MARKER = "FlashAttentionForwardSm90"
+
+# The FLASH backend wants a coarser q block than flex's default 128. Torch does
+# not validate it -- the value is forwarded verbatim into FA4's block-sparse
+# tensors -- so a mismatch surfaces inside FA4, not as a torch-level error.
+FLEX_FLASH_BLOCK_SIZE = (256, 128)
 
 
 @dataclass
@@ -638,7 +646,8 @@ class AttentionInputs:
     v: torch.Tensor
     grad_out: torch.Tensor
     positions: torch.Tensor  # (B, L) int32, resets to 0 at document starts
-    block_mask: object  # BlockMask for FlexAttention
+    block_mask: object  # BlockMask at flex's default 128 block size
+    block_mask_flash: object  # the same mask at FLEX_FLASH_BLOCK_SIZE
     cu_seqlens: torch.Tensor  # int32, packed document boundaries for THD
     scale: float
     num_documents: int
@@ -696,19 +705,21 @@ def attention_inputs(
     # Both mask forms are built ONCE here, never inside a timed closure:
     # create_varlen_metadata_for_document contains a .item() device-to-host
     # sync, and create_block_mask is itself a compiled call.
-    block_mask = create_attention_mask(
-        and_masks(
-            get_causal_mask_mod(),
-            get_efficient_causal_mask_mod_for_packed_document(positions),
-        ),
-        batch,
-        None,
-        seq,
-        seq,
-        device=device,
-        BLOCK_SIZE=128,
-        separate_full_blocks=True,
-    )
+    def mask_at(block_size):
+        return create_attention_mask(
+            and_masks(
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            ),
+            batch,
+            None,
+            seq,
+            seq,
+            device=device,
+            BLOCK_SIZE=block_size,
+            separate_full_blocks=True,
+        )
+
     varlen = create_varlen_metadata_for_document(positions)
 
     return AttentionInputs(
@@ -717,7 +728,8 @@ def attention_inputs(
         v=v,
         grad_out=grad_out,
         positions=positions,
-        block_mask=block_mask,
+        block_mask=mask_at(128),
+        block_mask_flash=mask_at(FLEX_FLASH_BLOCK_SIZE),
         cu_seqlens=varlen.cu_seq_q,
         scale=spec.head_dim**-0.5,
         num_documents=int((positions == 0).sum()),
@@ -850,6 +862,42 @@ def build_attention_baseline(
         "baseline",
     )
     return _attention_arm("baseline", inputs, call)
+
+
+def build_attention_flex_flash(
+    spec: Piper1BSpec, inputs: AttentionInputs
+) -> BuiltArm:
+    """FlexAttention lowered to FlashAttention-4 instead of a Triton template.
+
+    Same module, same BlockMask semantics and same mask_mod as baseline -- only
+    the lowering differs -- so this pair isolates the kernel family, whereas
+    baseline vs flash_attention_3 also changes the masking mechanism.
+    """
+    from torchtitan.models.common.attention import FlexAttention
+
+    module = FlexAttention.Config(
+        block_size=FLEX_FLASH_BLOCK_SIZE,
+        kernel_options={"BACKEND": "FLASH"},
+    ).build()
+    enable_gqa = spec.n_heads > spec.n_kv_heads
+
+    def call(q, k, v):
+        # Not wrapped in _compile_module, matching baseline: the class holds
+        # its own compile of flex_attention.
+        return module(
+            q, k, v,
+            attention_masks=inputs.block_mask_flash,
+            scale=inputs.scale,
+            enable_gqa=enable_gqa,
+        )
+
+    call(*[t.clone().requires_grad_() for t in (inputs.q, inputs.k, inputs.v)])
+    _assert_kernel_marker(
+        lambda: call(inputs.q, inputs.k, inputs.v),
+        FA4_MARKER,
+        "flex_flash",
+    )
+    return _attention_arm("flex_flash", inputs, call)
 
 
 def build_attention_flash3(

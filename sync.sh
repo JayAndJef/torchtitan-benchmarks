@@ -6,11 +6,16 @@
 #   megatron  transformer-engine-torch (prebuilt core wheel, torch binding
 #             compiles at install)
 #   flash3    flash-attn-3, a full source build of CUTLASS sm90a kernels from
-#             the flash-attention repo's hopper/ subdirectory (~40 min the
-#             first time; uv caches the wheel afterwards)
+#             the flash-attention repo's hopper/ subdirectory (15-40 min).
+#             Being no-build-isolation it builds inside the project env, so
+#             any resolution change rebuilds it -- the cache only helps on a
+#             sync that changes nothing.
 #
 # The first pass installs torch and the header wheels; the second builds both.
 # Skip the long one with:  ./sync.sh --no-group flash3
+#
+# The third group, fa4 (flash-attn-4 + the CuTe DSL), needs none of this: FA4
+# generates its kernels at compile time and ships pure-Python wheels.
 set -euo pipefail
 cd "$(dirname "$0")"
 if [ -f /opt/rh/gcc-toolset-13/enable ]; then
