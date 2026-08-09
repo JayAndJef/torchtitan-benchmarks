@@ -149,6 +149,26 @@ class ClassificationTest(unittest.TestCase):
                     "attention_core",
                 )
 
+    def test_override_rope_kernels_are_not_filed_as_elementwise(self):
+        """The rope arms replace the fused stock path with their own kernel."""
+        for kernel in (
+            "_helion__rope_cos_sin_fwd",
+            "fused_rope_forward_positions_kernel",
+            "fused_rope_backward_positions_kernel",
+        ):
+            with self.subTest(kernel=kernel):
+                self.assertEqual(
+                    classify_titan(kernel, ("aten::foo",), None, SHAPES), "rope"
+                )
+
+    def test_fused_stock_rope_still_reports_as_a_bound(self):
+        self.assertEqual(
+            classify_titan(
+                "triton_poi_fused_rms_norm_neg_0", ("aten::foo",), None, SHAPES
+            ),
+            "norm_rope_fused",
+        )
+
     def test_lm_head_wins_over_the_router_rule(self):
         dims = [[49152, 1024], [1024, 151936]]
         self.assertEqual(

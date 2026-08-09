@@ -100,6 +100,16 @@ MERGED_ROWS = {
     "attention_block": ("attention_core", "rope", "norm", "norm_rope_fused")
 }
 
+# The rope scenario's override arms replace the fused stock path with a kernel
+# of their own. Same strings the arms pin as trace markers.
+ROPE_KERNELS = (
+    "_helion__rope_cos_sin_fwd",
+    "helion__rope_cos_sin",
+    "fused_rope_forward",
+    "fused_rope_backward",
+    "transformer_engine::fused_rope",
+)
+
 MEGATRON_SNIFF = (
     "_GroupedLinear",
     "FusedAttnFunc",
@@ -374,11 +384,11 @@ def classify_titan(kernel: str, frames: tuple[str, ...], dims, shapes) -> str:
     if "silu" in lowered:
         return "swiglu_activation"
     if "rms_norm" in kernel:
-        # Inductor fuses RoPE's rotate-half into the qk-norm kernel, so those
-        # kernels are norm+RoPE and RoPE is not separately measurable. Kept as
-        # its own class so `norm` stays comparable to megatron's norm (which
-        # excludes RoPE) and RoPE renders as a bound, never as a free 0.0.
+        # Stock RoPE has no kernel of its own: Inductor fuses it into qk-norm,
+        # so it is reported as a bound rather than a free 0.0.
         return "norm_rope_fused" if is_fused_norm_rope(kernel) else "norm"
+    if any(marker in kernel for marker in ROPE_KERNELS):
+        return "rope"
     if (
         any(
             marker in joined
