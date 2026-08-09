@@ -82,7 +82,28 @@ command -v flock >/dev/null || fail "flock is required (single-instance lock)"
 exec 9>"$ROOT/.lock"
 flock -n 9 || fail "another run_matrix.sh already holds $ROOT/.lock"
 
+SUPERVISOR_PID=$$
 SID=$(ps -o sid= -p $$ | tr -d ' ')
+ME=$(id -un)
+
+# Is this compute PID one of ours? By ANCESTRY, walking ppid up to the
+# supervisor -- NOT by session id. Session id was tried first and produced a
+# 100% false-positive rate: every training process this script launches
+# reports its own pid as its session id (torch elastic spawns workers with
+# start_new_session=True, and the megatron driver ends up detached too), so
+# every arm looked foreign and the first completed cell -- five arms, all
+# validated -- was thrown away as contaminated. Ancestry survives setsid,
+# because setsid changes the session but never the parent.
+is_ours() {
+    local pid="$1" hops=0
+    while [ -n "$pid" ] && [ "$pid" != "1" ] && [ "$pid" != "0" ] \
+          && [ "$hops" -lt 32 ]; do
+        [ "$pid" = "$SUPERVISOR_PID" ] && return 0
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        hops=$((hops + 1))
+    done
+    return 1
+}
 
 say "=== run_matrix.sh ==="
 say "repo:        $REPO"
@@ -94,7 +115,7 @@ say "passes:      $PASSES"
 say "idle gate:   <=${IDLE_MEM_MIB}MiB and load<=${IDLE_LOAD}, ${IDLE_SETTLE} consecutive samples ${IDLE_POLL}s apart"
 say "watchdog:    every ${WATCH_INTERVAL}s; contended above load ${CONTENDED_LOAD}"
 say "root:        $ROOT"
-say "session id:  $SID (foreign = any compute PID outside it)"
+say "supervisor:  pid $SUPERVISOR_PID (sid $SID, user $ME); foreign = any compute PID that is not a descendant"
 say "hf cache:    $HF_DATASETS_CACHE"
 
 # ------------------------------------------------------------- the cell list
@@ -173,7 +194,7 @@ wait_for_idle() {   # -> 0 idle, 1 timed out
 #   FOREIGN_MEM  GPU memory that no PID of ours accounts for
 watchdog() {
     local watch_file="$1"
-    local mem load pid used ours residual line
+    local mem load pid used ours residual mem_streak=0 noted=0
     while :; do
         mem=$(gpu_mem); load=$(load1)
         ours=0
@@ -182,21 +203,39 @@ watchdog() {
             used=$(echo "$used" | tr -d ' MiB')
             [ -z "$pid" ] && continue
             case "$used" in ''|*[!0-9]*) used=0 ;; esac
-            local sid
-            sid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ')
-            if [ -n "$sid" ] && [ "$sid" = "$SID" ]; then
+            if is_ours "$pid"; then
                 ours=$((ours + used))
-            else
-                echo "FOREIGN_PID pid=$pid sid=${sid:-unknown} mem=${used}MiB $(date -u +%T)" \
+            elif ps -o pid= -p "$pid" >/dev/null 2>&1; then
+                # Still alive and not a descendant of ours: genuinely foreign.
+                # A pid that has already exited is skipped rather than
+                # flagged -- it is usually one of our own arms shutting down,
+                # and FOREIGN_MEM below still catches anything real.
+                echo "FOREIGN_PID pid=$pid user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')" \
+                     "sid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ') mem=${used}MiB $(date -u +%T)" \
                     >>"$watch_file"
             fi
         done < <(nvidia-smi --id="$GPU" --query-compute-apps=pid,used_memory \
                  --format=csv,noheader 2>/dev/null)
+        if [ "$noted" -eq 0 ] && [ "$ours" -gt 0 ]; then
+            # INFO, not a flag: proves the attribution is working for this
+            # cell. Written to the sweep log, never to the watch file.
+            say "  watchdog: attributing ${ours}MiB on gpu${GPU} to our own arms"
+            noted=1
+        fi
         if [ "$mem" != "-1" ]; then
             residual=$((mem - ours))
-            [ "$residual" -gt "$IDLE_MEM_MIB" ] && \
-                echo "FOREIGN_MEM used=${mem}MiB ours=${ours}MiB residual=${residual}MiB $(date -u +%T)" \
-                    >>"$watch_file"
+            if [ "$residual" -gt "$IDLE_MEM_MIB" ]; then
+                # Two consecutive samples, because a single one also fires in
+                # the gap where one of our arms has exited but nvidia-smi has
+                # not yet dropped its allocation.
+                if [ "$mem_streak" -ge 1 ]; then
+                    echo "FOREIGN_MEM used=${mem}MiB ours=${ours}MiB residual=${residual}MiB $(date -u +%T)" \
+                        >>"$watch_file"
+                fi
+                mem_streak=$((mem_streak + 1))
+            else
+                mem_streak=0
+            fi
         fi
         [ "$load" -gt "$CONTENDED_LOAD" ] && \
             echo "CONTENDED load1=${load} (limit ${CONTENDED_LOAD}) $(date -u +%T)" \
