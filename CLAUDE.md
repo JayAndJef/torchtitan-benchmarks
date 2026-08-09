@@ -476,8 +476,57 @@ Requires `baseline` among the arms. Reports:
 - **peak memory** over all steps.
 - **GPU kernel time** -- per-step summed kernel/memcpy/memset durations from the
   traces (`gpu_time` in `results.json`): total, within declared regions, the
-  remainder, and the ratio vs baseline. This is the host-speed-immune metric;
-  **compare kernels with it**, not with tokens/s.
+  remainder, and the ratio vs baseline. It is the host-speed-immune metric,
+  so prefer it to tokens/s -- but it is **not autotuning-immune**, and on
+  arms that differ in one component it is not evidence. See the next
+  section before ranking anything with it.
+
+### Total kernel time cannot rank arms that differ in one component
+
+**On arms that differ in ONE component of the same model, total GPU kernel
+time is not evidence.** The arms share the rest of the model by
+construction, but Inductor can pick different configs for that shared code
+between arms, and the resulting drift routinely exceeds the effect under
+test. Rank such arms with `analysis/components.py` on the component that
+actually differs, and quote the total only as the arm's step cost.
+
+Measured three times on 2026-08-09, twice producing a published claim that
+had to be retracted:
+
+| case | total says | `components.py` says |
+|---|---|---|
+| `piper1b_attention` normal/sac/default, `flex_flash` | 0.9816 -- a 1.8% win | `attention_core` **1.17x worse**; the "win" was -1.11 ms/step of `moe_expert_gemm` in arms whose MoE code is identical |
+| `piper1b_attention` huge/none/default, `flash_attention_3` | 0.9645 -- a 3.5% win | `attention_core` **1.78x worse**; -11.14 ms/step across components that cannot differ against +1.64 ms of real attention |
+| the same normal cell run twice, byte-identical code, 1 h apart | 0.9816, then 1.0103 | a 2.9% swing straddling 1.0, i.e. the sign of the conclusion is not reproducible |
+
+Across all three, and across a 12x change in `dim`, `attention_core` gave
+the identical ordering every time: baseline < `flex_flash` (1.17-1.19x) <
+`flash_attention_3` (1.64-1.78x). **The totals agree with the components in
+three of four cells -- the metric is right most of the time, which is
+exactly what makes it dangerous.**
+
+**Cross-*engine* comparisons are the exception.** Megatron and TorchTitan
+share no code, so every component legitimately differs and the total is the
+right metric for `piper1b_megatron`'s `baseline` vs the titan arms.
+
+**Measured single-run noise floors**, so you know what a table can resolve:
+
+| cell | drift in components that cannot differ |
+|---|---|
+| normal (`piper1b_rope`, repeat runs) | ~0.6% (`helion` 0.9899 -> 0.9959 on byte-identical code) |
+| huge `piper1b_megatron` | 1.5% (4.0 ms/step of 265) |
+| huge `piper1b_attention` | 4.2% (11.1 ms/step of 268) |
+
+A consequence worth stating plainly: at the normal shape the `piper1b_rope`
+arms (`helion` 0.9899-0.9959, `te` 1.0065-1.0121) sit **inside** the floor
+and are indistinguishable from the baseline and from each other. Report them
+that way rather than ranking them.
+
+`components.py` works on `default`-mode cells only. Under `cuda-graph`,
+graph replay erases the per-op CPU frames it classifies on, so the whole
+captured block lands in `other_elementwise` -- while attribution health
+still prints 100% agreement, so the tool does **not** warn you. No
+per-component claim can be made about a cuda-graph cell.
 - **per-region span and kernel time** -- each declared region measured two ways:
   the annotation span (first kernel to last, includes host-idle gaps) and the
   summed kernel time inside it. Span distributions carry Welch's t-test,
