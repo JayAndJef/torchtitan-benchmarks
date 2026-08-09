@@ -33,9 +33,11 @@
 #   CELLS            "huge", "normal", or "all" (default all; huge runs first)
 #   IDLE_MEM_MIB     GPU memory below which the card counts as idle (2000)
 #   IDLE_LOAD        1-min loadavg below which the host counts as idle (60)
+#   IDLE_SETTLE      consecutive idle samples required before starting (3)
+#   IDLE_POLL        seconds between idle samples (20)
 #   CONTENDED_LOAD   1-min loadavg during a cell that means contention (150)
 #   WAIT_TIMEOUT     seconds to wait for idle before skipping a cell (43200)
-#   WATCH_INTERVAL   watchdog sample period in seconds (30)
+#   WATCH_INTERVAL   watchdog sample period in seconds (15)
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,9 +50,11 @@ STEPS="${STEPS:-80}"
 CELLS="${CELLS:-all}"
 IDLE_MEM_MIB="${IDLE_MEM_MIB:-2000}"
 IDLE_LOAD="${IDLE_LOAD:-60}"
+IDLE_SETTLE="${IDLE_SETTLE:-3}"
+IDLE_POLL="${IDLE_POLL:-20}"
 CONTENDED_LOAD="${CONTENDED_LOAD:-150}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-43200}"
-WATCH_INTERVAL="${WATCH_INTERVAL:-30}"
+WATCH_INTERVAL="${WATCH_INTERVAL:-15}"
 
 # A stable, writable datasets cache. The shared HF_HOME is owned by another
 # user and every arm dies on a builder.lock PermissionError without this.
@@ -87,6 +91,8 @@ say "gpu:         $GPU -> $(nvidia-smi --id="$GPU" --query-gpu=index,name,uuid,d
 say "numactl:     $(command -v numactl || echo 'NOT AVAILABLE (runs will be unpinned)')"
 say "steps:       $STEPS"
 say "passes:      $PASSES"
+say "idle gate:   <=${IDLE_MEM_MIB}MiB and load<=${IDLE_LOAD}, ${IDLE_SETTLE} consecutive samples ${IDLE_POLL}s apart"
+say "watchdog:    every ${WATCH_INTERVAL}s; contended above load ${CONTENDED_LOAD}"
 say "root:        $ROOT"
 say "session id:  $SID (foreign = any compute PID outside it)"
 say "hf cache:    $HF_DATASETS_CACHE"
@@ -132,18 +138,29 @@ gpu_mem() {
 }
 load1() { awk '{printf "%.0f", $1}' /proc/loadavg; }
 
+# Requires IDLE_SETTLE *consecutive* idle samples, not one. The neighbouring
+# job cycles: a single sample can land in a gap seconds before it returns,
+# and the first cell of the first attempt died exactly that way (idle at
+# 16:49:40, a foreign 93.8 GiB process at 16:50:08, OOM in the optimizer).
+# Sustained idle is a much better predictor than instantaneous idle.
 wait_for_idle() {   # -> 0 idle, 1 timed out
-    local waited=0 mem load
+    local waited=0 mem load streak=0
     while :; do
         mem=$(gpu_mem); load=$(load1)
         if [ "$mem" = "-1" ]; then
             say "  nvidia-smi query failed; proceeding (cannot distinguish busy)"
             return 0
         fi
-        [ "$mem" -le "$IDLE_MEM_MIB" ] && [ "$load" -le "$IDLE_LOAD" ] && return 0
-        [ $((waited % 300)) -eq 0 ] && \
-            say "  waiting for idle: gpu${GPU}=${mem}MiB load=${load}"
-        sleep 60; waited=$((waited + 60))
+        if [ "$mem" -le "$IDLE_MEM_MIB" ] && [ "$load" -le "$IDLE_LOAD" ]; then
+            streak=$((streak + 1))
+            [ "$streak" -ge "$IDLE_SETTLE" ] && return 0
+        else
+            [ "$streak" -gt 0 ] && say "  idle streak broken: gpu${GPU}=${mem}MiB load=${load}"
+            streak=0
+            [ $((waited % 300)) -lt "$IDLE_POLL" ] && \
+                say "  waiting for idle: gpu${GPU}=${mem}MiB load=${load}"
+        fi
+        sleep "$IDLE_POLL"; waited=$((waited + IDLE_POLL))
         if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then return 1; fi
     done
 }
