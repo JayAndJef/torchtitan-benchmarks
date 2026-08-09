@@ -7,7 +7,12 @@ from typing import Any, Callable
 
 import click
 
-from benchmarks.artifacts import AC_MODES, COMPILE_MODES, record_evaluation_status
+from benchmarks.artifacts import (
+    AC_MODES,
+    COMPILE_MODES,
+    MODEL_SIZES,
+    record_evaluation_status,
+)
 from benchmarks.kernel_runner import KernelRunRequest, execute_kernel_run
 from benchmarks.kernels import KERNEL_SCENARIOS
 from benchmarks.metrics import evaluate_run, write_results
@@ -81,6 +86,18 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             help=(
                 "Activation checkpointing applied to every arm in the run "
                 "[default: sac]. Results are only comparable within one mode."
+            ),
+        ),
+        click.option(
+            "--model-size",
+            "model_size",
+            type=click.Choice(MODEL_SIZES),
+            envvar="MODEL_SIZE",
+            show_envvar=True,
+            help=(
+                "Model shape applied to every arm in the run [default: "
+                "normal]. See piper1b/model_shape.py. Results are only "
+                "comparable within one size."
             ),
         ),
     ]

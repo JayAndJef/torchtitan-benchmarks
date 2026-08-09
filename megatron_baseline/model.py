@@ -1,13 +1,18 @@
 """Qwen3-1B (piper flavor) as a bare megatron-core GPTModel with the TE spec.
 
-Every knob mirrors the qwen3_piper_1b TorchTitan config (the parity contract
-in the scenario docs): dim 1024, 16 layers, 16 q / 8 kv heads, head_dim 64,
-RMSNorm eps 1e-6, no biases, SwiGLU; MoE on every layer with 4 experts,
-top-2, expert ffn 3584, softmax-then-topk with top-k renormalization
-(Qwen3 norm_topk_prob == megatron's post-softmax default), fp32 router math,
-no aux loss and no expert bias; per-head qk RMSNorm before RoPE; NeoX
-rotate-half RoPE with theta 1e6; vocab exactly 151936 (128 x 1187, so no
-padding change); untied embeddings.
+Every geometry knob is taken from ``piper1b.model_shape.PiperShape`` -- the
+same object ``piper1b/config_registry.py`` builds the TorchTitan twin from --
+so ``--model-size`` moves both engines together and neither can drift. At the
+default ``normal`` shape that is dim 1024, 16 layers, 16 q / 8 kv heads,
+head_dim 64, expert ffn 3584, vocab 151936.
+
+Everything else mirrors the qwen3_piper_1b TorchTitan config (the parity
+contract in the scenario docs): RMSNorm eps 1e-6, no biases, SwiGLU; MoE on
+every layer with 4 experts, top-2, softmax-then-topk with top-k
+renormalization (Qwen3 norm_topk_prob == megatron's post-softmax default),
+fp32 router math, no aux loss and no expert bias; per-head qk RMSNorm before
+RoPE; NeoX rotate-half RoPE with theta 1e6; vocab exactly 151936 (128 x 1187,
+so no padding change); untied embeddings.
 
 Precision is plain bf16: params_dtype bf16 plus a blanket .bfloat16() after
 construction (torch-norm/TE-norm params otherwise materialize fp32), no
@@ -23,15 +28,13 @@ dataclass defaults are the wrong baseline; see the fusion block below.
 
 from __future__ import annotations
 
-VOCAB_SIZE = 151936
-# TorchTitan's num_flops_per_token for this model; reused verbatim so both
-# engines report tflops/mfu on the same denominator.
-NUM_FLOPS_PER_TOKEN = 3_551_348_736
+from piper1b.model_shape import NORMAL, PiperShape
 
 
 def build_model(
     *,
     seq_len: int,
+    shape: PiperShape = NORMAL,
     cuda_graph_impl: str | None = None,
     cuda_graph_modules: tuple[str, ...] = (),
     use_cpu_initialization: bool = False,
@@ -58,14 +61,14 @@ def build_model(
         extra["use_te_rng_tracker"] = True
 
     config = TransformerConfig(
-        num_layers=16,
-        hidden_size=1024,
-        num_attention_heads=16,
-        num_query_groups=8,
-        kv_channels=64,
+        num_layers=shape.n_layers,
+        hidden_size=shape.dim,
+        num_attention_heads=shape.n_heads,
+        num_query_groups=shape.n_kv_heads,
+        kv_channels=shape.head_dim,
         # Required field; unused (every layer is MoE) but kept at the expert
         # width so nothing dense-sized is ever allocated from it.
-        ffn_hidden_size=3584,
+        ffn_hidden_size=shape.moe_hidden_dim,
         normalization="RMSNorm",
         layernorm_epsilon=1e-6,
         add_bias_linear=False,
@@ -75,10 +78,10 @@ def build_model(
         qk_layernorm=True,
         hidden_dropout=0.0,
         attention_dropout=0.0,
-        num_moe_experts=4,
+        num_moe_experts=shape.num_experts,
         moe_layer_freq=1,
-        moe_router_topk=2,
-        moe_ffn_hidden_size=3584,
+        moe_router_topk=shape.top_k,
+        moe_ffn_hidden_size=shape.moe_hidden_dim,
         moe_router_score_function="softmax",
         # Post-softmax top-k: top-k on logits then softmax over the selected
         # k, algebraically identical to Qwen3's softmax-then-topk-then-renorm.
@@ -134,8 +137,10 @@ def build_model(
         gradient_accumulation_fusion=False,
         **extra,
     )
+    # num_experts here is a *separate* argument from the config field above
+    # (it selects the MoE submodule spec); both must move with the shape.
     spec = get_gpt_layer_with_transformer_engine_spec(
-        num_experts=4,
+        num_experts=shape.num_experts,
         moe_grouped_gemm=True,
         qk_layernorm=True,
     )
@@ -152,13 +157,13 @@ def build_model(
     model = GPTModel(
         config=config,
         transformer_layer_spec=spec,
-        vocab_size=VOCAB_SIZE,
+        vocab_size=shape.vocab_size,
         max_sequence_length=seq_len,
         pre_process=True,
         post_process=True,
         share_embeddings_and_output_weights=False,
         position_embedding_type="rope",
-        rotary_base=1_000_000,
+        rotary_base=int(shape.rope_theta),
     )
     if not use_cpu_initialization:
         model.cuda()

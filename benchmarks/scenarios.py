@@ -7,10 +7,20 @@ need to duplicate the training harness.
 
 from dataclasses import dataclass, replace
 
+from piper1b.model_shape import NORMAL
+
 
 @dataclass(frozen=True)
 class Workload:
-    """Training settings shared by every arm in one scenario."""
+    """Training settings shared by every arm in one scenario.
+
+    ``replay_dataloader`` records that every TorchTitan arm of the scenario
+    uses ``piper1b.pretokenized_data``'s replay loader, whose materialized
+    sample count must track ``steps``; the runner then delivers
+    ``--dataloader.replay-steps`` alongside ``--training.steps``. Declared on
+    the workload rather than sniffed from the config name because
+    ``--model-size`` suffixes that name.
+    """
 
     module: str
     config: str
@@ -22,6 +32,7 @@ class Workload:
     profiler_active: int = 5
     min_trace_windows: int = 2
     seed: int | None = None
+    replay_dataloader: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,7 +50,10 @@ class Arm:
     description: str
     config: str | None = None
     override_imports: tuple[str, ...] = ()
-    expected_override_count: int = 0
+    # [Override] log lines expected per transformer block. validate_arm
+    # multiplies by the shape's layer count, so an arm stays correct at any
+    # --model-size (16 lines at normal, 1 at huge).
+    overrides_per_block: int = 0
     trace_kernel_markers: tuple[str, ...] = ()
     requires_gcc_toolset: bool = False
     # Which engine the runner launches and which validation profile applies.
@@ -114,15 +128,41 @@ PIPER_1B_LM_HEAD_WORKLOAD = replace(
     seed=42,
 )
 
-# Compiled-region layout of the piper-1B workload under --compile.enable:
-# each of the 16 transformer blocks emits one forward and one backward
-# CompiledFxGraph annotation per step, so a 5-step profiler window holds
-# 16 x 5 = 80 invocations of each — a count unique to the block graphs
-# (the embedding/loss-side partitions run 40 and 5 times and are not
-# reported).
-PIPER_1B_REGIONS = (
-    Region(name="backward_block", phase="backward", invocations_per_window=80),
-    Region(name="forward_block", phase="forward", invocations_per_window=80),
+def piper_block_regions(
+    *, n_layers: int, profiler_active: int
+) -> tuple[Region, ...]:
+    """Per-block compiled regions for a model of ``n_layers`` layers.
+
+    Each TransformerBlock emits one forward and one backward CompiledFxGraph
+    annotation per step, so a profiler window holds
+    ``n_layers * profiler_active`` invocations of each. That count is also
+    the identity: measured on a real 16-layer trace, the forward graphs run
+    {5, 80, 5} times per window and the backward graphs {5, 80}, so only a
+    multi-layer model produces a count unique to the block graphs. At one
+    layer the block graph would also run 5 times and
+    ``pooled_window_metrics`` could not tell it from the loss- and
+    embedding-side partitions -- which is why PiperShape.huge sets
+    ``supports_block_regions=False`` and the run declares no regions rather
+    than adding a tiebreak that would weaken validation rule 7.
+    """
+    invocations = n_layers * profiler_active
+    return (
+        Region(
+            name="backward_block",
+            phase="backward",
+            invocations_per_window=invocations,
+        ),
+        Region(
+            name="forward_block",
+            phase="forward",
+            invocations_per_window=invocations,
+        ),
+    )
+
+
+# The normal-size instantiation: 16 layers x 5 active steps = 80.
+PIPER_1B_REGIONS = piper_block_regions(
+    n_layers=NORMAL.n_layers, profiler_active=5
 )
 
 
@@ -142,14 +182,14 @@ PIPER_1B_ROPE = Scenario(
             override_imports=(
                 "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
             ),
-            expected_override_count=16,
+            overrides_per_block=1,
             trace_kernel_markers=("_helion__rope_cos_sin_fwd",),
         ),
         Arm(
             name="te",
             description="TransformerEngine CUDA RoPE (JIT-built, needs gcc-13), via config override",
             override_imports=("piper1b.rope.te_rope_override.te_rope",),
-            expected_override_count=16,
+            overrides_per_block=1,
             trace_kernel_markers=("fused_rope_forward_positions_kernel",),
             requires_gcc_toolset=True,
         ),
@@ -173,7 +213,7 @@ PIPER_1B_SWIGLU = Scenario(
             override_imports=(
                 "piper1b.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts",
             ),
-            expected_override_count=16,
+            overrides_per_block=1,
             trace_kernel_markers=(
                 "_combined_silu_and_mul_forward_kernel",
                 "_combined_silu_and_mul_backward_kernel",
@@ -185,7 +225,7 @@ PIPER_1B_SWIGLU = Scenario(
             override_imports=(
                 "piper1b.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts",
             ),
-            expected_override_count=16,
+            overrides_per_block=1,
             # No trace_kernel_markers: the activation is deliberately plain
             # ops with no distinctive kernel name; Inductor fuses it into
             # neighboring generated kernels. The [Override] count is the
@@ -252,6 +292,7 @@ PIPER_1B_MEGATRON_WORKLOAD = replace(
     PIPER_1B_WORKLOAD,
     config="qwen3_piper_1b_pretokenized",
     seed=42,
+    replay_dataloader=True,
 )
 
 _PIPER_OPTIMIZED_SWIGLU_INDUCTOR = (
@@ -312,7 +353,7 @@ PIPER_1B_MEGATRON = Scenario(
                 "via config override"
             ),
             override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
-            expected_override_count=16,
+            overrides_per_block=1,
         ),
         Arm(
             name="titan_lm_head",
@@ -325,7 +366,7 @@ PIPER_1B_MEGATRON = Scenario(
             description="both improvements combined",
             config="qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
             override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
-            expected_override_count=16,
+            overrides_per_block=1,
             trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
         ),
     ),

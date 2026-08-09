@@ -13,9 +13,10 @@ from typing import Any, Callable
 
 from benchmarks.profile_regions import pooled_window_metrics
 from benchmarks.scenarios import Arm, Region, Scenario, Workload
+from piper1b.model_shape import PIPER_SHAPES
 
 
-MANIFEST_SCHEMA_VERSION = 8
+MANIFEST_SCHEMA_VERSION = 9
 STATE_SCHEMA_VERSION = 1
 
 # How the training process executes the model. Constant since schema 7:
@@ -41,6 +42,11 @@ CUDAGRAPH_COMPILE_MODES = frozenset({"cuda-graph"})
 # to TorchTitan as the tyro subcommand token "activation-checkpoint:none".
 AC_MODES = ("sac", "none")
 _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
+
+# Model shapes selectable per run (schema 9), the third global run axis
+# alongside compile_mode and ac_mode. Numbers are only comparable within one
+# size; --resume refuses to mix them. Schema <= 8 manifests imply "normal".
+MODEL_SIZES = tuple(PIPER_SHAPES)
 
 
 @dataclass(frozen=True)
@@ -112,9 +118,11 @@ def validate_arm(
     regions: tuple[Region, ...] = (),
     compile_mode: str = "default",
     ac_mode: str = "sac",
+    model_size: str = "normal",
 ) -> None:
     """Reject partial or wrongly configured runs before analysis."""
     profile = VALIDATION_PROFILES[arm.validation]
+    shape = PIPER_SHAPES[model_size]
     if not log_path.is_file():
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     log = log_path.read_text(errors="replace")
@@ -140,11 +148,21 @@ def validate_arm(
                 f"{arm.name}: ac mode 'none' requested but SelectiveAC was "
                 f"applied; see {log_path}"
             )
-    if arm.expected_override_count:
+    # Both engines print this line; without the check a run whose --config
+    # or --model-size silently fell back to another shape would pass every
+    # other rule and be published under the wrong size.
+    size_marker = f"size: {shape.param_count:,} total parameters"
+    if size_marker not in log:
+        raise RuntimeError(
+            f"{arm.name}: model size {model_size!r} "
+            f"({shape.param_count:,} parameters) did not apply; see {log_path}"
+        )
+    if arm.overrides_per_block:
+        expected_overrides = arm.overrides_per_block * shape.n_layers
         override_count = len(re.findall(r"\[Override\]", log))
-        if override_count != arm.expected_override_count:
+        if override_count != expected_overrides:
             raise RuntimeError(
-                f"{arm.name}: expected {arm.expected_override_count} override "
+                f"{arm.name}: expected {expected_overrides} override "
                 "applications, "
                 f"found {override_count}; see {log_path}"
             )
@@ -198,7 +216,9 @@ def manifest_data(
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
     ac_mode: str,
+    model_size: str = "normal",
 ) -> dict[str, Any]:
+    shape = PIPER_SHAPES[model_size]
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "scenario": scenario.name,
@@ -213,6 +233,8 @@ def manifest_data(
         "extra_torchtitan_args": list(extra_args),
         "compile_mode": compile_mode,
         "ac_mode": ac_mode,
+        "model_size": model_size,
+        "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
         "execution_model": EXECUTION_MODEL,
     }
 
@@ -233,6 +255,7 @@ def write_manifest(
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
     ac_mode: str,
+    model_size: str = "normal",
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -245,6 +268,7 @@ def write_manifest(
             extra_args,
             compile_mode,
             ac_mode,
+            model_size,
         ),
     )
 

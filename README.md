@@ -84,6 +84,11 @@ one launches training, so the CLI and the training process cannot diverge.
 # Run one arm only.
 ./run_bench.sh run <gpu-index> --scenario piper1b_qkv --arm fused_qkv
 
+# Run at the huge model shape (1 layer, dim 12288; see piper1b/model_shape.py).
+# Results are only comparable within one --model-size.
+./run_bench.sh run-all <gpu-index> --scenario piper1b_megatron \
+    --ac none --compile-mode cuda-graph --model-size huge
+
 # Evaluate a completed run without training again.
 ./run_bench.sh evaluate out/<timestamp>/<scenario>/<hardware>
 

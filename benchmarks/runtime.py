@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Mapping
 
 from benchmarks.scenarios import Arm, Workload
+from piper1b.model_shape import resolve_config_name
 
 
 BENCH_DIR = Path(__file__).resolve().parent.parent
@@ -115,11 +116,17 @@ def command_for_arm(
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str = "default",
     ac_mode: str = "sac",
+    *,
+    model_size: str = "normal",
 ) -> list[str]:
-    """Build the training command for one arm, dispatching on its launcher."""
+    """Build the training command for one arm, dispatching on its launcher.
+
+    ``model_size`` is keyword-only: the five positional parameters are the
+    historical signature and callers pass them positionally.
+    """
     if arm.launcher == "megatron":
         return _megatron_command(
-            workload, arm, arm_dir, extra_args, compile_mode, ac_mode
+            workload, arm, arm_dir, extra_args, compile_mode, ac_mode, model_size
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
@@ -131,7 +138,7 @@ def command_for_arm(
         "--module",
         workload.module,
         "--config",
-        arm.config or workload.config,
+        resolve_config_name(arm.config or workload.config, model_size),
         "--training.seq-len",
         str(workload.seq_len),
         "--training.steps",
@@ -147,6 +154,10 @@ def command_for_arm(
         "--profiler.profiler_warmup",
         str(workload.profiler_warmup),
     ]
+    if workload.replay_dataloader:
+        # The replay loader materializes exactly this many steps of samples
+        # and hard-fails when the run asks for more, so it must track --steps.
+        args.extend(("--dataloader.replay-steps", str(workload.steps)))
     if compile_mode != "default":
         args.extend(("--compile.mode", TORCH_COMPILE_MODE[compile_mode]))
     if workload.seed is not None:
@@ -170,6 +181,7 @@ def _megatron_command(
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
     ac_mode: str,
+    model_size: str = "normal",
 ) -> list[str]:
     """Launch command for the Megatron baseline driver.
 
@@ -212,6 +224,8 @@ def _megatron_command(
         str(workload.profiler_active),
         "--mode",
         compile_mode,
+        "--model-size",
+        model_size,
         str(arm_dir),
     ]
 

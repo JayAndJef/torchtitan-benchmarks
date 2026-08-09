@@ -13,6 +13,7 @@ from typing import Callable, Mapping
 from benchmarks.artifacts import (
     AC_MODES,
     COMPILE_MODES,
+    MODEL_SIZES,
     archive_incomplete_arm,
     initial_run_state,
     load_manifest,
@@ -30,7 +31,14 @@ from benchmarks.runtime import (
     resolve_cpu_pinning,
     runtime_environment,
 )
-from benchmarks.scenarios import Arm, Scenario, Workload, scenario_by_name
+from benchmarks.scenarios import (
+    Arm,
+    Scenario,
+    Workload,
+    piper_block_regions,
+    scenario_by_name,
+)
+from piper1b.model_shape import PIPER_SHAPES
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,7 @@ class RunRequest:
     # while an explicit value is checked against the manifest.
     compile_mode: str | None = None
     ac_mode: str | None = None
+    model_size: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +151,7 @@ def _resume_mismatches(
     extra_args: tuple[str, ...],
     compile_mode: str,
     ac_mode: str,
+    model_size: str,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -155,6 +165,10 @@ def _resume_mismatches(
     mismatches = [
         key for key, value in expected.items() if manifest.get(key) != value
     ]
+    # Defaulted lookup rather than a generic entry: schema <= 8 output
+    # directories predate the axis and are still resumable as "normal".
+    if str(manifest.get("model_size", "normal")) != model_size:
+        mismatches.append("model_size")
     existing_metadata = manifest.get("hardware_metadata", {})
     for key in (
         "nvidia_smi",
@@ -216,6 +230,7 @@ def _resolve_run(
     dict[str, list[str]],
     str,
     str,
+    str,
     bool,
 ]:
     paths = RuntimePaths.resolve(
@@ -263,6 +278,12 @@ def _resolve_run(
             if request.ac_mode is None
             else request.ac_mode
         )
+        # Schema <= 8 manifests predate the model-size axis.
+        model_size = (
+            str(existing_manifest.get("model_size", "normal"))
+            if request.model_size is None
+            else request.model_size
+        )
     else:
         workload = workload_with_overrides(
             scenario,
@@ -274,6 +295,7 @@ def _resolve_run(
         extra_args = request.extra_args or ()
         compile_mode = request.compile_mode or "default"
         ac_mode = request.ac_mode or "sac"
+        model_size = request.model_size or "normal"
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
             f"unknown compile mode {compile_mode!r} (schema <= 7 manifests "
@@ -284,7 +306,28 @@ def _resolve_run(
         raise ValueError(
             f"unknown ac mode {ac_mode!r}. Available: {', '.join(AC_MODES)}"
         )
+    if model_size not in MODEL_SIZES:
+        raise ValueError(
+            f"unknown model size {model_size!r}. "
+            f"Available: {', '.join(MODEL_SIZES)}"
+        )
+    shape = PIPER_SHAPES[model_size]
     scenario = replace(scenario, workload=workload)
+    if scenario.regions:
+        # A regioned scenario declares the per-block regions of the model it
+        # actually runs; a shape whose block graph is not structurally
+        # identifiable declares none (see piper_block_regions).
+        scenario = replace(
+            scenario,
+            regions=(
+                piper_block_regions(
+                    n_layers=shape.n_layers,
+                    profiler_active=workload.profiler_active,
+                )
+                if shape.supports_block_regions
+                else ()
+            ),
+        )
     if ac_mode not in scenario.supported_ac_modes:
         raise ValueError(
             f"scenario {scenario.name!r} does not support ac mode {ac_mode!r} "
@@ -310,6 +353,7 @@ def _resolve_run(
             extra_args,
             compile_mode,
             ac_mode,
+            model_size=model_size,
         )
         for arm in arms
     }
@@ -324,6 +368,7 @@ def _resolve_run(
             extra_args,
             compile_mode,
             ac_mode,
+            model_size,
         )
         if mismatches:
             raise ValueError(
@@ -340,6 +385,7 @@ def _resolve_run(
         commands,
         compile_mode,
         ac_mode,
+        model_size,
         resumed,
     )
 
@@ -363,6 +409,7 @@ def execute_run(
         commands,
         compile_mode,
         ac_mode,
+        model_size,
         resumed,
     ) = _resolve_run(request, host_environment)
 
@@ -381,6 +428,7 @@ def execute_run(
             request.extra_args or (),
             compile_mode,
             ac_mode,
+            model_size,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -400,6 +448,7 @@ def execute_run(
     )
     _emit(event_handler, "summary", f"compile mode: {compile_mode}")
     _emit(event_handler, "summary", f"ac mode: {ac_mode}")
+    _emit(event_handler, "summary", f"model size: {model_size}")
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
@@ -418,6 +467,7 @@ def execute_run(
                     regions=scenario.regions,
                     compile_mode=compile_mode,
                     ac_mode=ac_mode,
+                    model_size=model_size,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -479,6 +529,7 @@ def execute_run(
                 regions=scenario.regions,
                 compile_mode=compile_mode,
                 ac_mode=ac_mode,
+                model_size=model_size,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

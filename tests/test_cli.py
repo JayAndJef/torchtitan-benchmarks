@@ -88,6 +88,8 @@ class CliTests(unittest.TestCase):
                         "cuda-graph",
                         "--ac",
                         "none",
+                        "--model-size",
+                        "huge",
                     ],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
@@ -95,6 +97,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(modes, {"cuda-graph"})
         ac_modes = {call.args[0].ac_mode for call in execute.call_args_list}
         self.assertEqual(ac_modes, {"none"})
+        # The third global axis must reach every swept scenario too.
+        sizes = {call.args[0].model_size for call in execute.call_args_list}
+        self.assertEqual(sizes, {"huge"})
+
+    def test_model_size_defaults_to_unrequested_and_rejects_unknowns(self) -> None:
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(cli, ["run", "2"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(execute.call_args.args[0].model_size)
+
+        rejected = self.runner.invoke(cli, ["run", "2", "--model-size", "enormous"])
+        self.assertNotEqual(rejected.exit_code, 0)
 
     def test_unknown_compile_mode_is_rejected(self) -> None:
         result = self.runner.invoke(cli, ["run", "2", "--compile-mode", "turbo"])

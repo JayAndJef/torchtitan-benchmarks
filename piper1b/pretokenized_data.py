@@ -9,7 +9,10 @@ engines see bit-identical token streams and identical per-step host work.
 
 Requesting more batches than were materialized is a hard error, not a wrap:
 silently reusing data would change the workload relative to the lazy loader.
-The scenario using this loader pins --training.steps accordingly.
+``replay_steps`` therefore tracks the run's step count: the config registry
+defaults it to the config's own ``training.steps`` and the benchmark runner
+delivers ``--dataloader.replay-steps`` next to ``--training.steps`` for every
+arm of a scenario whose workload sets ``replay_dataloader``.
 """
 
 from __future__ import annotations
@@ -58,7 +61,11 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
     @dataclass(kw_only=True, slots=True)
     class Config(HuggingFaceTextDataLoader.Config):
         replay_steps: int = 40
-        """Number of training steps' worth of samples to materialize."""
+        """Training steps' worth of samples to materialize.
+
+        Must be >= --training.steps or the run dies when the stream is
+        exhausted. The registry sets it from the config's own step count and
+        the runner overrides both together."""
 
     def __init__(
         self,

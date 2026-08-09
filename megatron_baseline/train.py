@@ -44,21 +44,21 @@ FUSION_LINE = "Megatron fusions: {state}"
 # attention stays eager too. Whole-iteration capture is architecturally
 # impossible here -- the token dispatcher must D2H-copy tokens_per_expert
 # for the grouped GEMM's host-side splits, which capture forbids (verified:
-# capture aborts on that copy). Net: 64 graph launches/step (16 layers x
-# router+preprocess x fwd+bwd) with attention/experts eager -- far thinner
-# coverage than titan's whole-block graphs; documented wherever graph-mode
-# numbers appear.
+# capture aborts on that copy). Net: n_layers x 2 modules x fwd+bwd graph
+# launches per step (64 at the normal 16-layer shape, 4 at the 1-layer huge
+# shape) with attention/experts eager -- far thinner coverage than titan's
+# whole-block graphs, and thinner still at one layer; documented wherever
+# graph-mode numbers appear.
 CUDA_GRAPH_IMPL = "local"
 CUDA_GRAPH_MODULES = ("moe_router", "moe_preprocess")
 TRAINING_COMPLETED = "Training completed"
 
-# TorchTitan's flops estimate for this model, reused so tflops/mfu are
-# computed on the same denominator by both engines (display only).
-NUM_FLOPS_PER_TOKEN = 3_551_348_736
 H100_CLASS_BF16_PEAK_FLOPS = 989e12
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    from piper1b.model_shape import PIPER_SHAPES
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seq-len", type=int, required=True)
     parser.add_argument("--steps", type=int, required=True)
@@ -68,6 +68,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profiler-warmup", type=int, required=True)
     parser.add_argument("--profiler-active", type=int, required=True)
     parser.add_argument("--mode", choices=("default", "cuda-graph"), required=True)
+    parser.add_argument(
+        "--model-size", choices=tuple(PIPER_SHAPES), default="normal"
+    )
     parser.add_argument("arm_dir", type=Path)
     return parser.parse_args(argv)
 
@@ -97,12 +100,22 @@ def _free_port() -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from piper1b.model_shape import PIPER_SHAPES
+
     args = parse_args(argv)
+    shape = PIPER_SHAPES[args.model_size]
+    num_flops_per_token = shape.num_flops_per_token(args.seq_len)
     graphs = args.mode == "cuda-graph"
     impl = (
         f"{CUDA_GRAPH_IMPL}:{'+'.join(CUDA_GRAPH_MODULES)}" if graphs else "none"
     )
     print(MODE_LINE.format(mode=args.mode, impl=impl), flush=True)
+    # The MFU/tflops denominator, printed so the report has an audit trail.
+    print(
+        f"num_flops_per_token: {num_flops_per_token:,} "
+        f"(shape={shape.name}, seq_len={args.seq_len})",
+        flush=True,
+    )
 
     from megatron_baseline.location import (
         add_megatron_to_path,
@@ -175,6 +188,7 @@ def main(argv: list[str] | None = None) -> None:
 
     model = build_model(
         seq_len=args.seq_len,
+        shape=shape,
         cuda_graph_impl=CUDA_GRAPH_IMPL if graphs else None,
         cuda_graph_modules=CUDA_GRAPH_MODULES if graphs else (),
     )
@@ -185,7 +199,19 @@ def main(argv: list[str] | None = None) -> None:
         for parameter in model.parameters():
             parameter.main_grad = torch.zeros_like(parameter)
     num_params = sum(parameter.numel() for parameter in model.parameters())
-    print(f"Model qwen3 piper_1B (megatron) size: {num_params:,} total parameters")
+    # The "size: N total parameters" substring is validate_arm's rule-11
+    # marker (both engines print it); keep the wording.
+    print(
+        f"Model qwen3 piper_1B/{shape.name} (megatron) "
+        f"size: {num_params:,} total parameters"
+    )
+    # A hard failure inside the process, not just a log-grep failure: a
+    # megatron shape that silently disagreed with piper1b.model_shape would
+    # otherwise be published as a comparison of two different models.
+    assert num_params == shape.param_count, (
+        f"megatron built {num_params:,} parameters but shape {shape.name!r} "
+        f"declares {shape.param_count:,}"
+    )
 
     # Megatron's real defaults live in its argparse layer, which building
     # TransformerConfig directly bypasses; running the dataclass defaults once
@@ -341,7 +367,7 @@ def main(argv: list[str] | None = None) -> None:
             last_time = now
             reserved = torch.cuda.max_memory_reserved()
             torch.cuda.reset_peak_memory_stats()
-            tflops = NUM_FLOPS_PER_TOKEN * tps / 1e12
+            tflops = num_flops_per_token * tps / 1e12
             mfu = 100 * tflops / (H100_CLASS_BF16_PEAK_FLOPS / 1e12)
             print(
                 f"step: {step:2}  loss: {loss:8.5f}  "

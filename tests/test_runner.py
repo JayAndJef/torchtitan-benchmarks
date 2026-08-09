@@ -35,10 +35,16 @@ from dataclasses import replace
 from piper1b.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_full_logits,
+    qwen3_piper_1b_full_logits_huge,
     qwen3_piper_1b_fused_linear_ce,
+    qwen3_piper_1b_fused_linear_ce_huge,
+    qwen3_piper_1b_huge,
     qwen3_piper_1b_piper_optimized_te_ce,
+    qwen3_piper_1b_piper_optimized_te_ce_huge,
     qwen3_piper_1b_te_fused_ce,
+    qwen3_piper_1b_te_fused_ce_huge,
     qwen3_piper_1b_unfused_qkv,
+    qwen3_piper_1b_unfused_qkv_huge,
 )
 from piper1b.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
@@ -50,6 +56,7 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     LossWithLMHead,
 )
+from piper1b.model_shape import HUGE, NORMAL, PIPER_SHAPES
 from piper1b.parallelize import parallelize_piper1b
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
@@ -162,7 +169,7 @@ class ScenarioTests(unittest.TestCase):
             fused.override_imports,
             (PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
         )
-        self.assertEqual(fused.expected_override_count, 16)
+        self.assertEqual(fused.overrides_per_block, 1)
         self.assertEqual(
             fused.trace_kernel_markers,
             (
@@ -178,7 +185,7 @@ class ScenarioTests(unittest.TestCase):
                 "piper_optimized_inductor_fused_grouped_experts",
             ),
         )
-        self.assertEqual(inductor.expected_override_count, 16)
+        self.assertEqual(inductor.overrides_per_block, 1)
         # Plain-ops activation has no distinctive kernel name by design;
         # the override count is the application check.
         self.assertEqual(inductor.trace_kernel_markers, ())
@@ -220,6 +227,12 @@ class ParallelizeTests(unittest.TestCase):
             qwen3_piper_1b_fused_linear_ce,
             qwen3_piper_1b_te_fused_ce,
             qwen3_piper_1b_piper_optimized_te_ce,
+            qwen3_piper_1b_huge,
+            qwen3_piper_1b_unfused_qkv_huge,
+            qwen3_piper_1b_full_logits_huge,
+            qwen3_piper_1b_fused_linear_ce_huge,
+            qwen3_piper_1b_te_fused_ce_huge,
+            qwen3_piper_1b_piper_optimized_te_ce_huge,
         ):
             with self.subTest(config=factory.__name__):
                 config = factory()
@@ -572,9 +585,11 @@ class ManifestTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 8)
+        self.assertEqual(manifest["schema_version"], 9)
         self.assertEqual(manifest["compile_mode"], "cuda-graph")
         self.assertEqual(manifest["ac_mode"], "none")
+        self.assertEqual(manifest["model_size"], "normal")
+        self.assertEqual(manifest["model_shape"], NORMAL.describe(seq_len=1024))
         self.assertEqual(
             manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
         )
@@ -615,6 +630,14 @@ _SAC_LINE = (
     "to the model\n"
 )
 
+# Validation rule 11's marker: both engines print the parameter count, and a
+# run whose --model-size silently failed to apply would otherwise pass every
+# other rule. Exported so tests/test_run_validation.py builds the same log.
+_SIZE_LINE = (
+    "[titan] - root - INFO - Model qwen3 piper_1B "
+    f"size: {PIPER_SHAPES['normal'].param_count:,} total parameters\n"
+)
+
 
 class ValidationTests(unittest.TestCase):
     def test_validation_requires_completion_overrides_and_trace_windows(self) -> None:
@@ -633,7 +656,7 @@ class ValidationTests(unittest.TestCase):
                 "model_spec.model.layers.0.moe ...\n"
             )
             log = root / "piper_optimized.log"
-            completed = _compiled_line("default") + _SAC_LINE + "Training completed\n"
+            completed = _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             log.write_text(completed + applied * 16)
             self.assertEqual(len(trace_files(root)), 2)
             validate_arm(arm, root, log, PIPER_1B_SWIGLU.workload)
@@ -668,20 +691,20 @@ class ValidationTests(unittest.TestCase):
             # cuda-graph is delivered to torch.compile as reduce-overhead, so
             # that is the name the log must carry.
             log.write_text(
-                _compiled_line("reduce-overhead") + _SAC_LINE + "Training completed\n"
+                _compiled_line("reduce-overhead") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             validate_arm(
                 arm, root, log, PIPER_1B_ROPE.workload, compile_mode="cuda-graph"
             )
 
-            log.write_text(_SAC_LINE + "Training completed\n")
+            log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
                     arm, root, log, PIPER_1B_ROPE.workload, compile_mode="cuda-graph"
                 )
 
             log.write_text(
-                _compiled_line("default") + _SAC_LINE + "Training completed\n"
+                _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
@@ -695,12 +718,12 @@ class ValidationTests(unittest.TestCase):
             log = self._rope_baseline_fixture(root, cudagraphs=False)
 
             log.write_text(
-                _compiled_line("default") + _SAC_LINE + "Training completed\n"
+                _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
 
             log.write_text(
-                _compiled_line("reduce-overhead") + _SAC_LINE + "Training completed\n"
+                _compiled_line("reduce-overhead") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
@@ -711,7 +734,7 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
-            log.write_text(applied + "Training completed\n")
+            log.write_text(applied + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "cudaGraphLaunch"):
                 validate_arm(
                     arm,
@@ -724,7 +747,7 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=True)
-            log.write_text(applied + "Training completed\n")
+            log.write_text(applied + _SIZE_LINE + "Training completed\n")
             validate_arm(
                 arm,
                 root,
@@ -750,7 +773,7 @@ class ValidationTests(unittest.TestCase):
 
             # No torch.compile line, no SelectiveAC line: still valid, and
             # rule 9's cudaGraphLaunch requirement applies to megatron too.
-            log.write_text(mode_line + "Training completed\n")
+            log.write_text(mode_line + _SIZE_LINE + "Training completed\n")
             validate_arm(
                 arm,
                 root,
@@ -763,7 +786,7 @@ class ValidationTests(unittest.TestCase):
             # The driver's mode line must name the requested mode.
             log.write_text(
                 "Megatron-LM training loop (mode=default, cuda_graph_impl=none)\n"
-                + "Training completed\n"
+                + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
@@ -779,7 +802,7 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
-            log.write_text(mode_line + "Training completed\n")
+            log.write_text(mode_line + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "cudaGraphLaunch"):
                 validate_arm(
                     arm,
@@ -807,13 +830,13 @@ class ValidationTests(unittest.TestCase):
             log = self._rope_baseline_fixture(root, cudagraphs=False)
 
             # sac requested, SelectiveAC absent: the run measured no-AC.
-            log.write_text(_compiled_line("default") + "Training completed\n")
+            log.write_text(_compiled_line("default") + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "ac mode 'sac'"):
                 validate_arm(arm, root, log, PIPER_1B_ROPE.workload)
 
             # none requested, SelectiveAC applied: the run measured SAC.
             log.write_text(
-                _compiled_line("default") + _SAC_LINE + "Training completed\n"
+                _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "ac mode 'none'"):
                 validate_arm(
@@ -821,7 +844,7 @@ class ValidationTests(unittest.TestCase):
                 )
 
             # none requested, SelectiveAC absent: valid.
-            log.write_text(_compiled_line("default") + "Training completed\n")
+            log.write_text(_compiled_line("default") + _SIZE_LINE + "Training completed\n")
             validate_arm(
                 arm, root, log, PIPER_1B_ROPE.workload, ac_mode="none"
             )
@@ -927,7 +950,7 @@ class ResumeTests(unittest.TestCase):
 
         def fake_process(command, **kwargs):
             kwargs["stdout"].write(
-                _compiled_line("default") + _SAC_LINE + "Training completed\n"
+                _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             _write_block_traces(Path(command[-1]))
             return SimpleNamespace(returncode=0)
@@ -1069,7 +1092,7 @@ class ResumeTests(unittest.TestCase):
 
         def fake_process(command, **kwargs):
             kwargs["stdout"].write(
-                _compiled_line("reduce-overhead") + _SAC_LINE + "Training completed\n"
+                _compiled_line("reduce-overhead") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             _write_block_traces(Path(command[-1]), cudagraphs=True)
             return SimpleNamespace(returncode=0)

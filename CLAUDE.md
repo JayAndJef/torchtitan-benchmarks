@@ -68,6 +68,7 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
 | path | contents |
 |---|---|
 | `benchmarks/` | Click CLI plus both systems: e2e (`scenarios/runner/metrics`) and kernel (`kernels/kernel_arms/kernel_bench/kernel_runner/kernel_worker/kernel_stats/kernel_results`) |
+| `piper1b/model_shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
 | `piper1b/config_registry.py` | The `--module piper1b` config port; all registered `--config` names |
 | `piper1b/rope/` | TE RoPE override + `te_rope_standalone.cu` |
 | `piper1b/swiglu/` | Combined-SwiGLU Triton kernels and override |
@@ -75,7 +76,7 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
 | `piper1b/pretokenized_data.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
 | `megatron_baseline/` | Everything Megatron: location/provenance, Qwen3-1B GPTModel builder, THD data, training driver |
 | `analysis/` | Three argv-driven trace diagnostics (`analyze.py`, `per_block.py`, `components.py`) |
-| `tools/` | `megatron_parity_check.py`: GPU logit-parity gate between the engines |
+| `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor) |
 | `tests/` | CPU + GPU unit tests |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
 | `third_party/Megatron-LM/` | Pinned submodule (upstream NVIDIA, sys.path only) |
@@ -123,6 +124,7 @@ Shared options, with env equivalents:
 | `--compiler-env` | `BENCH_COMPILER_ENV` | `/opt/rh/gcc-toolset-13/enable` if present |
 | `--compile-mode` | `COMPILE_MODE` | `default` |
 | `--ac` | `AC_MODE` | `sac` |
+| `--model-size` | `MODEL_SIZE` | `normal` |
 
 ### Compile modes
 
@@ -188,6 +190,88 @@ records them and `--resume` refuses to mix either. Measured across the full
 2x2 matrix: `--ac none` cuts titan GPU kernel time ~15% (SAC's recompute is
 pure GPU cost at these sizes) for ~2.5 GiB more peak memory -- see
 `reports/20260807/compile-ac-matrix.md`.
+
+### Model sizes
+
+`--model-size` is the **third global run axis**, exactly parallel to
+`--compile-mode` and `--ac`: one shape for every arm in the run, recorded in
+the manifest, gated by `--resume`, and a hard comparability boundary. The
+shapes live in `piper1b/model_shape.py` as frozen `PiperShape` dataclasses
+and are the single source of truth for *both* engines --
+`piper1b/config_registry.py` and `megatron_baseline/model.py` build from the
+same object, so a size cannot drift between them. That module imports
+nothing but `dataclasses`.
+
+| | `normal` | `huge` |
+|---|---|---|
+| dim | 1024 | 12288 |
+| n_layers | 16 | 1 |
+| n_heads / n_kv_heads | 16 / 8 | 192 / 96 |
+| head_dim | 64 | 64 |
+| MoE inter_dim (3.5x dim) | 3584 | 43008 |
+| experts / top_k | 4 / 2 | 4 / 2 |
+| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 |
+| param_count | 1,066,241,024 | 10,528,837,760 |
+| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 |
+| num_flops_per_token @1024 | 3,551,348,736 | 33,096,721,152 |
+| per-block regions | yes (80/80) | **no** |
+
+Everything except `dim` and `n_layers` is derived
+(`n_heads = dim/head_dim`, `n_kv_heads = n_heads/2`,
+`moe_hidden_dim = dim*7/2`), and the parameter/flops formulas mirror
+torchtitan's `get_moe_model_nparams_and_flops`. `tests/test_model_shape.py`
+pins the five normal-size numbers against what a real run logs; they were
+previously duplicated by hand in `megatron_baseline/`.
+
+**Config naming**: `<config>` at `normal`, `<config>_<size>` otherwise, so
+`--model-size huge` runs `qwen3_piper_1b_pretokenized_huge`. Every public
+config has an explicit `_huge` `def` (not a `globals()` loop -- explicit
+names stay greppable and carry a `__name__`), and a test asserts the closure
+over every (scenario, arm, size) triple.
+
+**Why huge is 1 layer at a large dim, and not 16 layers.** Embedding +
+lm_head are `2*V*D` parameters and one layer is `45*D^2`, so their ratio is
+`6753/D`. A 1-layer model at dim 1024 would be 87% embedding table and the
+cuda-graph comparison would be measuring the lm_head and the CE, not a
+transformer block. At dim 12288 the ratio inverts to 0.55x: the single layer
+is 64% of the parameters and the great majority of the FLOPs.
+
+**Why 12288 and not larger.** Megatron under `--compile-mode cuda-graph` is
+the binding constraint, because `megatron_baseline/train.py` allocates a bf16
+`main_grad` for *every* parameter under graph mode -- 10 B/param of state
+against titan's 8 (params 2 + grads 2 + fused-AdamW m,v 4). Measured on an
+idle H200 (139.81 GiB usable) with the megatron cuda-graph driver: dim 10240
+peaks at 92.8 GiB, 12288 at 120.1, 13312 at 136.6 (2.3% headroom -- rejected),
+14336 OOMs. The acceptance rule is <= 125 GiB. Full ladder including the OOM
+rungs: `reports/20260809/`.
+
+**The huge shape declares no regions, deliberately.** `PIPER_1B_REGIONS`
+identifies a block graph by its invocations per window
+(`n_layers * profiler_active`), and that count is the *identity*: measured
+on a real 16-layer trace the forward graphs run {5, 80, 5} times and the
+backward graphs {5, 80}, so 80 is unique to the block graphs. At one layer
+the block graph also runs 5 times, colliding with two forward and one
+backward partition, and `pooled_window_metrics` would raise "found 3". There
+is no invocation count that identifies a 1-layer block graph and adding a
+tiebreak would be relaxing validation rule 7 -- so `PiperShape.huge` sets
+`supports_block_regions=False` and `_resolve_run` writes `regions: []`,
+exactly as `piper1b_megatron` already does and for the same honest reason.
+Rule 7 therefore does not guard huge runs; rules 8, 9 and 11 do. Cross-mode
+metrics (total GPU kernel time, tokens/s, launch latency, peak memory) are
+unaffected.
+
+Rejected alternatives, for the record: a copy-pasted `_huge` scenario
+(duplicates arm definitions, cannot apply to other scenarios, and the size
+would not be a comparability boundary); an env var read inside
+`config_registry.py` (hidden global state -- the recorded command would no
+longer identify the model); overriding `--model-spec.model.dim` through tyro
+(the layer list is nested dataclasses with per-layer depth-scaled inits;
+there is no single field to move).
+
+**Out of scope**: `kernel-bench` has no `--model-size`;
+`benchmarks/kernels.py`'s `Piper1BSpec` keeps its own fixed shapes.
+`analysis/components.py` needs no change -- it keys only on `--vocab-size`
+and `--num-experts`, both unchanged by the huge shape.
 
 ### The 40-step floor
 
@@ -295,14 +379,16 @@ because their arms differ in model structure; the RoPE and SwiGLU scenarios
 do not. The megatron scenario's `_pretokenized` configs swap the dataloader
 for `piper1b/pretokenized_data.py`'s replay loader (all 40 steps of c4_test
 batches materialized at init, ~zero per-step data-host cost, matching the
-megatron driver's treatment; `replay_steps` is pinned to 40 and exceeding it
-fails loudly, so do not override `--steps` in that scenario).
+megatron driver's treatment). `replay_steps` must be >= `--training.steps`
+or the loader hard-fails at exhaustion, so it tracks the run: the workload
+sets `replay_dataloader=True` and `command_for_arm` delivers
+`--dataloader.replay-steps` next to `--training.steps`.
 
 ### Output layout
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 8: workload, regions, arms, commands, compile_mode, ac_mode, execution_model, hardware_metadata
+  manifest.json     # schema 9: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 3: throughput, memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -332,8 +418,8 @@ are not comparable; `--resume` refuses to mix them.
 
 1. Missing `<arm>.log`, or log lacking the profile's completion marker
    (`Training completed` for both engines).
-2. `[Override]` line count != `arm.expected_override_count` (16 for override
-   arms: one per transformer block).
+2. `[Override]` line count != `arm.overrides_per_block * shape.n_layers`
+   (16 at the normal size, 1 at huge: one per transformer block).
 3. A declared `override_imports` entry with no matching `[Override] <path>:` line.
 4. A profile `failure_marker` phrase in the log (`falling back to the
    PyTorch` for titan arms -- an optimized kernel silently degraded). This
@@ -354,11 +440,17 @@ are not comparable; `--resume` refuses to mix them.
    mode it claims.
 10. The `Applied SelectiveAC` line's presence contradicts the requested
     `--ac` mode (titan arms only).
+11. `size: <N> total parameters` for the requested shape's exact parameter
+    count is absent from the log. Both engines print it verbatim; without
+    this rule a run whose `--config` mapping or `--model-size` silently fell
+    back to another shape would pass every other rule and be published under
+    the wrong size. This is the only structural guard the huge shape has in
+    place of rule 7.
 
 Engine differences live in the `ValidationProfile` registry
-(`VALIDATION_PROFILES`), selected by `Arm.validation`; rules 2/3/5/6/9 are
-shared. Rules 4, 7, 8, 9, and 10 are the ones that catch silent wrongness.
-Never work around them by relaxing the check.
+(`VALIDATION_PROFILES`), selected by `Arm.validation`; rules 2/3/5/6/9/11
+are shared. Rules 4, 7, 8, 9, 10, and 11 are the ones that catch silent
+wrongness. Never work around them by relaxing the check.
 
 ### Resume
 
@@ -366,12 +458,14 @@ Never work around them by relaxing the check.
 skips those that already pass, archives partial artifacts under `attempts/`,
 and re-runs the rest. It aborts if any of these changed since the manifest was
 written: scenario, workload, selected arms, hardware label, extra TorchTitan
-args, `compile_mode`, `ac_mode`, `nvidia_smi`, `cpu_pinning`,
+args, `compile_mode`, `ac_mode`, `model_size`, `nvidia_smi`, `cpu_pinning`,
 `torchtitan_git_rev`, `benchmarks_git_rev`, `megatron_git_rev`. A different
 GPU or a different commit will not resume -- that is intentional. Omitting
-`--compile-mode` or `--ac` on a resume inherits the recorded value; passing
-a different one is refused. Schema <= 7 manifests cannot be resumed by this
-code (they record pre-rename mode names and imply `ac=sac`).
+`--compile-mode`, `--ac`, or `--model-size` on a resume inherits the
+recorded value; passing a different one is refused. Schema <= 8 manifests
+carry no `model_size` and resume as `normal`; schema <= 7 manifests cannot be
+resumed by this code at all (they record pre-rename mode names and imply
+`ac=sac`).
 
 ### Evaluation
 
@@ -694,11 +788,21 @@ schedule and trace layout, titan-shaped step log lines).
 
 Faithfulness guarantees, all verified:
 
-- **Same model**: bare megatron-core `GPTModel` with the TE layer spec,
-  exactly 1,066,241,024 bf16 params. `tools/megatron_parity_check.py`
-  transfers titan weights into the megatron layout and matches logits at
-  bf16-level rel_l2 (~6e-3) on a real batch -- run it after touching
-  `megatron_baseline/model.py` or bumping either submodule.
+- **Same model**: bare megatron-core `GPTModel` built from the same
+  `piper1b.model_shape.PiperShape` the TorchTitan config uses -- exactly
+  1,066,241,024 bf16 params at `normal`, 10,528,837,760 at `huge`.
+  `tools/megatron_parity_check.py [--model-size SIZE]` transfers titan
+  weights into the megatron layout and matches logits on a real batch -- run
+  it after touching `megatron_baseline/model.py` or bumping either
+  submodule. The gate is per-shape (`_PARITY_GATE`): 2e-2 at normal
+  (measured 5.5e-3), 5e-2 at huge (measured 2.03e-2). The wider huge gate is
+  bf16 accumulation, not slack, and it is evidenced rather than assumed --
+  `--fp32-reference` runs the same weights in fp32 and shows titan's own
+  bf16 output sits 3.25e-2 from it against megatron's 3.29e-2 (ratio 1.011),
+  i.e. the engines agree with each other better than either agrees with
+  fp32. The QKV grouped-interleave is proved separately and *bitwise* by
+  `_assert_qkv_roundtrip`, so a layout bug cannot hide inside a widened
+  gate. Never widen one without both.
 - **Same data and masking**: `megatron_baseline/data.py` drains torchtitan's
   own c4_test dataset class (bit-identical stream to the titan arms'
   replay loader; tested) and packs each batch's rows into TE THD form with
@@ -750,8 +854,9 @@ linear.
 
 Under `--compile-mode cuda-graph` the arm uses Megatron's per-layer partial
 capture (`MoETransformerLayer`, `cuda_graph_modules=("moe_router",
-"moe_preprocess")`): 64 graph replays/step, with attention and expert GEMMs
-eager -- whole-iteration capture is impossible for dynamic MoE (the token
+"moe_preprocess")`): `n_layers x 2 modules x fwd+bwd` graph replays/step (64
+at the normal shape, **4** at the 1-layer huge shape), with attention and
+expert GEMMs eager -- whole-iteration capture is impossible for dynamic MoE (the token
 dispatcher D2H-copies `tokens_per_expert`, which capture forbids), and this
 rev's local impl has no attention scope for MoE layers. **Megatron's graph
 coverage is therefore far thinner than titan's whole-block graphs; say so
@@ -804,6 +909,8 @@ of these still exist with unchanged behavior:
 - `torchtitan.config.override` (`override`, `derive`) and the `[Override]` log
   line format that `validate_arm` regexes
 - `CosSinRoPE` and `_maybe_check_max_pos` from `torchtitan.models.common.rope`
+- the trainer's `Model <name> <flavor> size: N total parameters` log line,
+  which validation rule 11 matches
 - `GroupedExperts` from `torchtitan.models.common.moe`
 
 The kernel scenarios additionally depend on:
@@ -836,8 +943,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   shared GPU invalidates timings.
 - Use at least 40 steps. The runner enforces this; do not try to route around it.
 - Numbers are only comparable within one `torch_version`, one
-  `torchtitan_git_rev`, one `compile_mode`, and one `ac_mode` (plus one
-  `megatron_git_rev`/`te_version` for the megatron scenario). All are in
+  `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
+  `ac_mode`, and one `model_size` (plus one `megatron_git_rev`/`te_version`
+  for the megatron scenario). All are in
   every manifest -- check them before comparing against an older run in
   `out/` (manifests written before schema 6 predate the compile-mode flag
   and are `default`; before schema 8 they record the old torch-level mode
@@ -850,3 +958,12 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
   and takes about two seconds.
+- On a shared box, drive multi-cell matrices with `tools/run_matrix.sh`
+  rather than a loop of `run-all`s. It refuses to start on a dirty tree
+  (`benchmarks_git_rev` would mislabel the run), holds a `flock`, waits for
+  a genuinely idle GPU before each cell, and runs a watchdog *during* each
+  cell that flags foreign compute PIDs (any session id but its own),
+  unaccounted GPU memory, and host-load spikes. A flagged cell is moved
+  aside and redone on the next pass, because a contaminated run still writes
+  a `results.json` and the bad numbers would otherwise be permanent. Never
+  report a cell it marked `CONTAMINATED`.
