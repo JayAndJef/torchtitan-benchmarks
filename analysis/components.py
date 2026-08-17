@@ -34,6 +34,12 @@ is generic (``aten::mm``). Shape-first classification is a known trap -- see
 Classes partition the total: every device event lands in exactly one, so the
 column sums to the harness number by construction.
 
+Classification health is reported separately from attribution health.  For a
+manifest-backed default-mode run, expected components that classify to zero
+produce a warning.  The largest kernels left in ``other_elementwise`` are
+always shown, because a partial miss can leave every component non-zero while
+still moving substantial work into the fallback bucket.
+
 Two bases are reported for every row:
 
 ``summed``  durations added up, identical to the harness definition.
@@ -87,6 +93,22 @@ CLASS_ORDER = (
     "optimizer",
     "embedding",
 )
+
+# Components whose absence from a full default-mode Piper training trace is a
+# classification warning.  lm_head_gemm is deliberately excluded because the
+# fused_linear_ce arm legitimately folds it into the loss.  RoPE is checked
+# separately: Titan may legitimately fuse it into norm.
+EXPECTED_NONZERO_COMPONENTS = (
+    "cross_entropy",
+    "attention_core",
+    "rope",
+)
+
+# Keep the fallback bucket visible even when every expected component is
+# non-zero.  A partial classification miss (as in TE CE backward) does not
+# produce a suspicious zero, so the expected-component check alone cannot
+# expose it.
+CLASSIFICATION_AUDIT_TOP = 3
 
 # Components that some engines cannot report separately because the compiler
 # fused them into a neighbour. Printing 0.0 for these reads as a win; printing
@@ -297,7 +319,10 @@ def classify_megatron(kernel: str, frames: tuple[str, ...], dims, shapes) -> str
     joined = " | ".join(frames)
     lowered = kernel.lower()
 
-    if "VocabParallelCrossEntropy" in joined:
+    if (
+        "VocabParallelCrossEntropy" in joined
+        or "CrossEntropyFunction" in joined
+    ):
         return "cross_entropy"
     if "LinearWithGradAccumulationAndAsyncCommunication" in joined:
         return "lm_head_gemm"
@@ -354,7 +379,21 @@ def classify_titan(kernel: str, frames: tuple[str, ...], dims, shapes) -> str:
     joined = " | ".join(frames)
     lowered = kernel.lower()
 
-    if "cross_entropy" in kernel or "cross_entropy" in joined:
+    # Frame-first catches the TE loss, including its generic-named backward
+    # elementwise/copy kernels.  Never match element_mul_kernel by name.
+    if (
+        "CrossEntropyFunction" in joined
+        or "CrossEntropyLoss" in joined
+        or "cross_entropy" in joined
+    ):
+        return "cross_entropy"
+    # A compiled stock CrossEntropyLoss retains only generic CompiledFunction
+    # frames.  Its Inductor kernels carry log_softmax and the full vocab axis;
+    # the MoE router is plain softmax over num_experts and cannot match this.
+    if "cross_entropy" in lowered or (
+        "log_softmax" in lowered
+        and _trailing_dim_is(dims, shapes.vocab_size)
+    ):
         return "cross_entropy"
     if "_grouped_mm" in joined or "grouped_gemm" in lowered:
         return "moe_expert_gemm"
@@ -487,6 +526,31 @@ class ArmComponents:
 
     def busy_us(self, component: str) -> float:
         return busy_union(self.intervals.get(component, []))
+
+    @property
+    def missing_expected_components(self) -> tuple[str, ...]:
+        """Expected full-step components that classified to exactly zero."""
+        missing: list[str] = []
+        for component in EXPECTED_NONZERO_COMPONENTS:
+            if self.summed_us.get(component, 0.0):
+                continue
+            if (
+                component == "rope"
+                and self.engine == "titan"
+                and self.fused_bound_us
+            ):
+                continue
+            missing.append(component)
+        return tuple(missing)
+
+    def largest_other_elementwise(
+        self, limit: int = CLASSIFICATION_AUDIT_TOP
+    ) -> list[tuple[str, float]]:
+        """Largest kernels left in the classifier's fallback component."""
+        return [
+            (kernel, self.ms_per_step(duration))
+            for kernel, duration in self.detail["other_elementwise"].most_common(limit)
+        ]
 
 
 def analyze_arm(paths: list[Path], label: str, shapes: ModelShapes) -> ArmComponents:
@@ -703,6 +767,38 @@ def render(arms: list[ArmComponents], meta: dict, merge_fused: bool, by_phase: b
                 f"<= {arm.ms_per_step(arm.fused_bound_us):.3f} ms/step"
             )
 
+    print()
+    print("===== classification audit =====")
+    expected_check = meta.get("compile_mode") == "default"
+    for arm in arms:
+        print(f"  -- {arm.label}")
+        if expected_check:
+            missing = arm.missing_expected_components
+            if missing:
+                print(
+                    "     WARNING: expected non-zero component(s) missing: "
+                    + ", ".join(missing)
+                )
+            else:
+                print("     expected non-zero components: present")
+        elif meta.get("compile_mode"):
+            print(
+                "     expected-zero check skipped: components are unsupported "
+                f"for compile_mode={meta['compile_mode']}"
+            )
+        else:
+            print(
+                "     expected-zero check skipped: arm-directory provenance "
+                "is unavailable"
+            )
+        largest_other = arm.largest_other_elementwise()
+        if largest_other:
+            print("     largest other_elementwise kernels (review fallback bucket):")
+            for kernel, value in largest_other:
+                print(f"       {value:8.3f}  {kernel}")
+        else:
+            print("     other_elementwise fallback bucket: empty")
+
     if by_phase:
         print()
         print("===== by phase (ms/step) =====")
@@ -734,8 +830,9 @@ def render_detail(arms: list[ArmComponents], top: int) -> None:
 
 
 def to_json(arms: list[ArmComponents], meta: dict) -> dict:
+    expected_check = meta.get("compile_mode") == "default"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "provenance": meta,
         "arms": [
             {
@@ -761,6 +858,18 @@ def to_json(arms: list[ArmComponents], meta: dict) -> dict:
                         else None
                     ),
                     "two_rule_compared": arm.rule_compared,
+                },
+                "classification_audit": {
+                    "expected_component_check_applied": expected_check,
+                    "missing_expected_components": (
+                        list(arm.missing_expected_components)
+                        if expected_check
+                        else None
+                    ),
+                    "largest_other_elementwise": [
+                        {"kernel": kernel, "ms_per_step": value}
+                        for kernel, value in arm.largest_other_elementwise()
+                    ],
                 },
                 "components": {
                     component: {

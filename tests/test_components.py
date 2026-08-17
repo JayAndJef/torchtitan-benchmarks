@@ -7,10 +7,12 @@ when the run is absent, because ``out/`` is gitignored.
 """
 
 import gzip
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -21,6 +23,8 @@ from analysis.components import (
     analyze_arm,
     classify_megatron,
     classify_titan,
+    render,
+    to_json,
 )
 
 
@@ -76,6 +80,105 @@ class TraceBuilder:
 
 
 class ClassificationTest(unittest.TestCase):
+    def test_megatron_te_cross_entropy_uses_the_autograd_frame(self):
+        cases = (
+            ("online_softmax_kernel", ("CrossEntropyFunction",)),
+            ("cross_entropy_kernel", ("CrossEntropyFunction",)),
+            (
+                "element_mul_kernel",
+                (
+                    "autograd::engine::evaluate_function: CrossEntropyFunctionBackward",
+                    "CrossEntropyFunctionBackward",
+                ),
+            ),
+        )
+        for kernel, frames in cases:
+            with self.subTest(kernel=kernel):
+                self.assertEqual(
+                    classify_megatron(kernel, frames, None, SHAPES),
+                    "cross_entropy",
+                )
+
+        # The kernel name is generic; only its semantic loss frame makes it CE.
+        self.assertEqual(
+            classify_megatron("element_mul_kernel", ("aten::mul",), None, SHAPES),
+            "other_elementwise",
+        )
+        self.assertEqual(
+            classify_megatron(
+                "native_ce_kernel", ("_VocabParallelCrossEntropy",), None, SHAPES
+            ),
+            "cross_entropy",
+        )
+
+    def test_titan_stock_and_te_cross_entropy_paths(self):
+        vocab_dims = [[4, 1024, 151936]]
+        stock = (
+            "triton_red_fused__log_softmax__to_copy_prepare_softmax_online_view_0",
+            "triton_red_fused__log_softmax__log_softmax_backward_data__to_copy_"
+            "arange_eq_expand_nll_loss_backward_scalar_tensor_view_0",
+        )
+        for kernel in stock:
+            with self.subTest(kernel=kernel[:50]):
+                self.assertEqual(
+                    classify_titan(
+                        kernel, ("CompiledFunction",), vocab_dims, SHAPES
+                    ),
+                    "cross_entropy",
+                )
+
+        for kernel in (
+            "element_mul_kernel",
+            "void at::native::vectorized_elementwise_kernel<8, copy_functor>",
+        ):
+            with self.subTest(kernel=kernel[:50]):
+                self.assertEqual(
+                    classify_titan(
+                        kernel, ("CrossEntropyFunctionBackward",), None, SHAPES
+                    ),
+                    "cross_entropy",
+                )
+
+        self.assertEqual(
+            classify_titan(
+                "void at::native::reduce_kernel<512, 1>",
+                ("torch_nn::_linear_cross_entropy_batch_chunked",),
+                None,
+                SHAPES,
+            ),
+            "cross_entropy",
+        )
+        self.assertEqual(
+            classify_titan(
+                "generic_loss_kernel", ("CrossEntropyLoss",), None, SHAPES
+            ),
+            "cross_entropy",
+        )
+
+        # Neither a generic mul nor the MoE router's plain softmax is CE.
+        self.assertEqual(
+            classify_titan("element_mul_kernel", ("aten::mul",), None, SHAPES),
+            "other_elementwise",
+        )
+        self.assertEqual(
+            classify_titan(
+                "triton_poi_fused__softmax__unsafe_view_prepare_softmax_online_9",
+                ("CompiledFunction",),
+                [[4, 1024, 4]],
+                SHAPES,
+            ),
+            "other_elementwise",
+        )
+        self.assertEqual(
+            classify_titan(
+                "triton_red_fused__log_softmax__to_copy_0",
+                ("CompiledFunction",),
+                [[4, 1024, 4]],
+                SHAPES,
+            ),
+            "other_elementwise",
+        )
+
     def test_frame_first_beats_shape_first_on_grouped_linear_backward(self):
         """The trap that misfiled 122.8 ms/step of MoE backward.
 
@@ -270,6 +373,35 @@ class AggregationTest(unittest.TestCase):
         # An orphan kernel still lands in a class: the partition is total.
         self.assertEqual(arm.summed_total_us, 110.0)
         self.assertEqual(arm.summed_us.get("optimizer"), 10.0)
+
+    def test_classification_audit_warns_and_surfaces_the_fallback(self):
+        builder = TraceBuilder()
+        builder.step()
+        builder.launch(("something::unknown",), "mystery_kernel", 7.0)
+        arm = self._arm(builder)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            render([arm], {"compile_mode": "default"}, False, False)
+        rendered = output.getvalue()
+        self.assertIn("WARNING: expected non-zero component(s) missing", rendered)
+        self.assertIn("cross_entropy", rendered)
+        self.assertIn("mystery_kernel", rendered)
+
+        payload = to_json([arm], {"compile_mode": "default"})
+        self.assertEqual(payload["schema_version"], 2)
+        audit = payload["arms"][0]["classification_audit"]
+        self.assertTrue(audit["expected_component_check_applied"])
+        self.assertIn("cross_entropy", audit["missing_expected_components"])
+        self.assertEqual(
+            audit["largest_other_elementwise"][0]["kernel"], "mystery_kernel"
+        )
+
+        skipped_output = io.StringIO()
+        with redirect_stdout(skipped_output):
+            render([arm], {"compile_mode": "cuda-graph"}, False, False)
+        self.assertNotIn("WARNING:", skipped_output.getvalue())
+        self.assertIn("expected-zero check skipped", skipped_output.getvalue())
 
 
 class ReproductionGateTest(unittest.TestCase):

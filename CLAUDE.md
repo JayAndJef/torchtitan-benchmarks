@@ -524,9 +524,10 @@ that way rather than ranking them.
 
 `components.py` works on `default`-mode cells only. Under `cuda-graph`,
 graph replay erases the per-op CPU frames it classifies on, so the whole
-captured block lands in `other_elementwise` -- while attribution health
-still prints 100% agreement, so the tool does **not** warn you. No
-per-component claim can be made about a cuda-graph cell.
+captured block lands in `other_elementwise`. Attribution health still prints
+100% agreement, but the classification audit explicitly skips its expected-zero
+check for this unsupported mode and shows the largest fallback-bucket kernels.
+No per-component claim can be made about a cuda-graph cell.
 - **per-region span and kernel time** -- each declared region measured two ways:
   the annotation span (first kernel to last, includes host-idle gaps) and the
   summed kernel time inside it. Span distributions carry Welch's t-test,
@@ -755,6 +756,13 @@ properties make it trustworthy, and all three are asserted in
   stack on the launching thread, and the smallest-duration `cpu_op` sharing
   the launch's `External id`). The printed agreement rate is 100% on real
   traces; any drop means the attribution is suspect.
+
+Classification has a separate audit because attribution agreement cannot prove
+that the component rules are complete. On manifest-backed `default`-mode runs,
+an expected-zero CE, attention, or RoPE component warns (Titan's norm-fused RoPE
+counts as present), and the largest `other_elementwise` kernels are always
+printed so partial misses remain visible. The expected-zero check is explicitly
+skipped under `cuda-graph`, where component attribution is unsupported.
 
 Two reporting rules the tool enforces, both of which previously produced wrong
 published conclusions:
