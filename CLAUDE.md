@@ -936,8 +936,10 @@ are unmodified except for import rewrites -- if you touch
 ## Bumping the TorchTitan submodule
 
 The submodule is our fork (`JayAndJef/torchtitan`, with `pytorch/torchtitan` as
-`upstream`) and carries benchmark-required commits that upstream does not have.
-Rebasing onto upstream must preserve them:
+`upstream`), pinned on the `bench/torchtitan-benchmarks` branch, which
+`.gitmodules` records. Pin that branch, not the fork's `main` -- `main` trails
+it and does not contain every commit below. The fork carries benchmark-required
+commits that upstream does not have; rebasing onto upstream must preserve them:
 
 - `Generalize loss-owned LM head integration` -- the `LossWithLMHead` protocol
   `piper1b_lm_head`'s `fused_linear_ce` arm needs.
@@ -949,6 +951,14 @@ Rebasing onto upstream must preserve them:
   in `models/common/moe.py`) -- without it the in-place input mutation makes
   Inductor refuse to capture every forward block graph under the cudagraph
   compile modes.
+- `Give varlen metadata static shapes across steps` (`models/common/
+  attention.py`) -- pads packed `cu_seqlens` to a fixed multiple with
+  trailing full-offset entries and pins `max_seqlen` to `seq_len`. The
+  document count varies per batch, so without it the varlen metadata changes
+  shape every step; under `--compile-mode cuda-graph` that moves the captured
+  inputs and forces a re-record, and the FA3 arms measured ~24 steps of
+  repeated re-recording on an H200 (throughput dipping to 3k tok/s) before
+  converging. It also removes a per-forward device-to-host sync.
 
 `piper1b/parallelize.py` additionally relies on `parallelize_qwen3`'s
 `skip_dp` kwarg and its ordering guarantee: AC, then `apply_compile` (which
