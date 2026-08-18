@@ -734,8 +734,13 @@ TEST_CENSUS = {
     "test_cli": 17,
     "test_kernel_cli": 14,
     "test_kernel_gpu_smoke": 4,
-    "test_kernel_results": 3,
-    "test_kernels": 19,
+    # 3 pre-bump, +1 for the assertion that the replicate boundaries
+    # survive the round trip -- they are the repetition unit the bootstrap
+    # CI is taken over, and a flat sample list cannot express them.
+    "test_kernel_results": 4,
+    # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
+    # bootstrap CI, the single-replicate case and reproducibility.
+    "test_kernels": 22,
     "test_lm_head_losses": 8,
     "test_megatron_data": 5,
     # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
@@ -752,7 +757,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 177
+TEST_CENSUS_TOTAL = 181
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

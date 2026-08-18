@@ -44,15 +44,21 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 
 # 2: the single flat shape record was replaced by model_size + model_shape
 # (the same describe() the e2e manifest records) plus the workload.
-KERNEL_MANIFEST_SCHEMA_VERSION = 2
+#
+# 3: n/warmup counted round-robin cycles and were replaced by the
+# burst-timing parameters, matching the results schema. This file is
+# write-only provenance -- no loader reads it -- so the bump is labelling.
+KERNEL_MANIFEST_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
 class KernelRunRequest:
     gpu: str
     scenario_names: tuple[str, ...]
-    n: int = 200
-    warmup: int = 30
+    replicates: int = 5
+    samples_per_replicate: int = 40
+    burst_k: int = 16
+    warmup_calls: int = 30
     burst: bool = False
     model_size: str = "normal"
     batch: int | None = None
@@ -101,8 +107,10 @@ def kernel_manifest_data(
         "shapes": shape_summary(scenario.name, shape, workload),
         "arms": [asdict(arm) for arm in scenario.arms],
         "baseline_arm": scenario.baseline_arm,
-        "n": request.n,
-        "warmup": request.warmup,
+        "replicates": request.replicates,
+        "samples_per_replicate": request.samples_per_replicate,
+        "burst_k": request.burst_k,
+        "warmup_calls": request.warmup_calls,
         "burst": request.burst,
         "seed": request.seed,
         "command": command,
@@ -205,10 +213,14 @@ def execute_kernel_run(
             str(out_dir),
             "--hardware",
             hardware,
-            "--n",
-            str(request.n),
-            "--warmup",
-            str(request.warmup),
+            "--replicates",
+            str(request.replicates),
+            "--samples-per-replicate",
+            str(request.samples_per_replicate),
+            "--burst-k",
+            str(request.burst_k),
+            "--warmup-calls",
+            str(request.warmup_calls),
             "--seed",
             str(request.seed),
             # Unconditional, unlike the overrides below: the run always has a

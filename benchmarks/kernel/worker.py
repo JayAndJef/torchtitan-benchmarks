@@ -21,8 +21,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--hardware", required=True)
-    parser.add_argument("--n", type=int, default=200)
-    parser.add_argument("--warmup", type=int, default=30)
+    parser.add_argument("--replicates", type=int, default=5)
+    parser.add_argument("--samples-per-replicate", type=int, default=40)
+    parser.add_argument("--burst-k", type=int, default=16)
+    parser.add_argument("--warmup-calls", type=int, default=30)
     parser.add_argument("--burst", action="store_true")
     parser.add_argument("--model-size", default="normal")
     parser.add_argument("--batch", type=int, default=None)
@@ -62,7 +64,12 @@ def main(argv: list[str] | None = None) -> int:
     from benchmarks.kernel.results.schema import write_kernel_results
 
     options = RunOptions(
-        n=args.n, warmup=args.warmup, burst=args.burst, seed=args.seed
+        replicates=args.replicates,
+        samples_per_replicate=args.samples_per_replicate,
+        burst_k=args.burst_k,
+        warmup_calls=args.warmup_calls,
+        burst=args.burst,
+        seed=args.seed,
     )
     try:
         result = run_kernel_scenario(

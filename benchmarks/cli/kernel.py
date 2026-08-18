@@ -57,9 +57,29 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
     type=click.Choice(list(KERNEL_SCENARIOS)),
     help="Kernel scenario subset; repeat per scenario. Default: all.",
 )
-@click.option("--n", default=200, show_default=True, help="Interleaved cycles.")
 @click.option(
-    "--warmup", default=30, show_default=True, help="Warmup cycles per mode."
+    "--replicates",
+    default=5,
+    show_default=True,
+    help="Sweeps of every arm; the repetition unit the CI is taken over.",
+)
+@click.option(
+    "--samples-per-replicate",
+    default=40,
+    show_default=True,
+    help="Timed bursts per arm per mode, within one replicate.",
+)
+@click.option(
+    "--burst-k",
+    default=16,
+    show_default=True,
+    help="Calls per timed burst. One value for every arm in the scenario.",
+)
+@click.option(
+    "--warmup-calls",
+    default=30,
+    show_default=True,
+    help="Untimed calls per arm per mode, before each replicate.",
 )
 @click.option(
     "--burst",

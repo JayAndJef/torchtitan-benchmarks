@@ -15,16 +15,38 @@ from benchmarks.artifacts.summaries import SampleSummary
 # 2: the single flat shape record was split into the model geometry
 # (model_size / model_shape) and the workload run through it, so schema-1
 # files carry no equivalent of either field and are rejected outright.
-KERNEL_RESULTS_SCHEMA_VERSION = 2
+#
+# 3: the measurand changed from a round-robin wall median to burst-amortized
+# per-call device time. ``n`` and ``warmup`` counted interleaved *cycles* and
+# were printed as such, so they are **replaced** by ``replicates`` /
+# ``samples_per_replicate`` / ``burst_k`` / ``warmup_calls`` rather than
+# reinterpreted -- a repurposed field would put a false statement in every
+# table generated from the file. ``ModeResult.samples_us`` becomes
+# ``replicates_us`` for the same reason: the replicate boundaries are the
+# repetition unit the statistics are computed over, and a flat list cannot
+# express them.
+KERNEL_RESULTS_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
 class ModeResult:
-    """One arm's timings for one mode; raw samples kept for re-analysis."""
+    """One arm's timings for one mode; raw samples kept for re-analysis.
+
+    ``replicates_us`` is replicate-major: one inner tuple per replicate, each
+    holding that replicate's burst-amortized per-call samples. ``summary``
+    describes the pooled samples.
+    """
 
     summary: SampleSummary
-    samples_us: tuple[float, ...]
+    replicates_us: tuple[tuple[float, ...], ...]
     derived: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def samples_us(self) -> tuple[float, ...]:
+        """The pooled samples, for callers that do not need the boundaries."""
+        return tuple(
+            value for replicate in self.replicates_us for value in replicate
+        )
 
 
 @dataclass(frozen=True)
@@ -32,7 +54,9 @@ class ArmResult:
     name: str
     modes: dict[str, ModeResult]
     peak_memory_gib: float | None = None
-    burst_us_per_call: dict[str, float] | None = None
+    # Keyed by mode, then by burst size. Schema 2 keyed by burst size alone,
+    # because the pass only ever ran on "forward".
+    burst_us_per_call: dict[str, dict[str, float]] | None = None
 
 
 @dataclass(frozen=True)
@@ -58,8 +82,10 @@ class KernelScenarioResult:
     model_shape: dict[str, Any]
     workload: dict[str, Any]
     shapes: dict[str, Any]
-    n: int
-    warmup: int
+    replicates: int
+    samples_per_replicate: int
+    burst_k: int
+    warmup_calls: int
     seed: int
     arms: dict[str, ArmResult]
     comparisons: list[dict[str, Any]]
@@ -79,15 +105,20 @@ class KernelScenarioResult:
             "model_shape": self.model_shape,
             "workload": self.workload,
             "shapes": self.shapes,
-            "n": self.n,
-            "warmup": self.warmup,
+            "replicates": self.replicates,
+            "samples_per_replicate": self.samples_per_replicate,
+            "burst_k": self.burst_k,
+            "warmup_calls": self.warmup_calls,
             "seed": self.seed,
             "arms": {
                 name: {
                     "modes": {
                         mode: {
                             "summary": asdict(result.summary),
-                            "samples_us": list(result.samples_us),
+                            "replicates_us": [
+                                list(replicate)
+                                for replicate in result.replicates_us
+                            ],
                             "derived": result.derived,
                         }
                         for mode, result in arm.modes.items()
@@ -120,7 +151,10 @@ class KernelScenarioResult:
                 modes={
                     mode: ModeResult(
                         summary=SampleSummary(**entry["summary"]),
-                        samples_us=tuple(entry["samples_us"]),
+                        replicates_us=tuple(
+                            tuple(replicate)
+                            for replicate in entry["replicates_us"]
+                        ),
                         derived=dict(entry.get("derived", {})),
                     )
                     for mode, entry in arm["modes"].items()
@@ -137,8 +171,10 @@ class KernelScenarioResult:
             model_shape=value["model_shape"],
             workload=value["workload"],
             shapes=value["shapes"],
-            n=value["n"],
-            warmup=value["warmup"],
+            replicates=value["replicates"],
+            samples_per_replicate=value["samples_per_replicate"],
+            burst_k=value["burst_k"],
+            warmup_calls=value["warmup_calls"],
             seed=value["seed"],
             arms=arms,
             comparisons=list(value["comparisons"]),

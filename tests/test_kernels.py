@@ -249,29 +249,70 @@ class BalancedRoutingInvariantTests(unittest.TestCase):
         # runs -- diagnoses the workload rather than the missing device.
 
 
+def _replicates(values: list[float], per_replicate: int) -> list[list[float]]:
+    """Split a flat sample list into equal replicates."""
+    return [
+        values[start : start + per_replicate]
+        for start in range(0, len(values), per_replicate)
+    ]
+
+
 class KernelComparisonTests(unittest.TestCase):
     def test_shifted_distributions_are_detected(self) -> None:
-        base = [100.0 + 0.1 * (i % 7) for i in range(50)]
-        arm = [110.0 + 0.1 * (i % 5) for i in range(50)]
+        base = _replicates([100.0 + 0.1 * (i % 7) for i in range(50)], 10)
+        arm = _replicates([110.0 + 0.1 * (i % 5) for i in range(50)], 10)
         row = kernel_comparison(base, arm)
         self.assertAlmostEqual(row["median_ratio"], 1.1, places=1)
         self.assertLess(row["welch_p"], 1e-6)
         self.assertLess(row["mwu_p"], 1e-6)
-        self.assertLess(row["wilcoxon_p"], 1e-6)
         self.assertGreater(row["cohens_d"], 2.0)
-        self.assertEqual(row["arm_faster_fraction"], 0.0)
+        self.assertAlmostEqual(row["ratio"], 1.1, places=1)
+        self.assertEqual(row["replicates"], 5)
+        # A consistent shift puts the whole interval above 1.0.
+        self.assertGreater(row["ratio_ci_low"], 1.0)
 
-    def test_identical_samples_guard_wilcoxon(self) -> None:
-        values = [100.0] * 20
-        row = kernel_comparison(values, list(values))
-        self.assertIsNone(row["wilcoxon_p"])
+    def test_wilcoxon_is_gone(self) -> None:
+        """It needed per-cycle pairing the round-robin provided.
+
+        At the replicate level it cannot work either: the exact two-sided
+        minimum p at n=5 is 0.0625, so it can never reject. Printing it would
+        imply a test that cannot produce a result.
+        """
+        row = kernel_comparison(_replicates([100.0] * 20, 4), _replicates([100.0] * 20, 4))
+        self.assertNotIn("wilcoxon_p", row)
+        self.assertNotIn("arm_faster_fraction", row)
+
+    def test_identical_samples_give_a_unit_ratio_and_a_degenerate_ci(self) -> None:
+        values = _replicates([100.0] * 20, 4)
+        row = kernel_comparison(values, [list(r) for r in values])
         self.assertAlmostEqual(row["median_ratio"], 1.0)
         self.assertEqual(row["cohens_d"], 0.0)
+        self.assertAlmostEqual(row["ratio"], 1.0)
+        self.assertAlmostEqual(row["ratio_ci_low"], 1.0)
+        self.assertAlmostEqual(row["ratio_ci_high"], 1.0)
+        self.assertAlmostEqual(row["replicate_ratio_spread"], 0.0)
+
+    def test_a_single_replicate_reports_no_interval(self) -> None:
+        """One replicate is a point estimate, and must not pretend otherwise."""
+        row = kernel_comparison([[10.0, 11.0]], [[20.0, 22.0]])
+        self.assertEqual(row["replicates"], 1)
+        self.assertAlmostEqual(row["ratio"], 2.0)
+        self.assertIsNone(row["ratio_ci_low"])
+        self.assertIsNone(row["ratio_ci_high"])
+
+    def test_the_bootstrap_is_reproducible_from_the_same_samples(self) -> None:
+        """A fixed seed, so a results file can be re-analyzed without drift."""
+        base = _replicates([100.0 + (i % 9) for i in range(45)], 9)
+        arm = _replicates([104.0 + (i % 5) for i in range(45)], 9)
+        first = kernel_comparison(base, arm)
+        second = kernel_comparison(base, arm)
+        self.assertEqual(first["ratio_ci_low"], second["ratio_ci_low"])
+        self.assertEqual(first["ratio_ci_high"], second["ratio_ci_high"])
 
     def test_pooled_sd_is_df_weighted(self) -> None:
         base = [10.0, 12.0, 14.0, 16.0]
         arm = [11.0, 13.0]
-        row = kernel_comparison(base, arm)
+        row = kernel_comparison([base], [arm])
         import statistics
 
         sd_base = statistics.stdev(base)

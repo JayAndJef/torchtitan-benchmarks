@@ -85,7 +85,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
 | `benchmarks/kernel/registry.py` | The five kernel scenarios themselves, declared with those types |
 | `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the subprocess it launches |
-| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (round-robin timing, memory and burst passes), `correctness.py` (the gates), `run.py` (orchestration) and `statistics.py` |
+| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration) and `statistics.py` |
 | `benchmarks/kernel/operations/` | Arm builders, one module per kernel family (`rope.py`, `swiglu.py`, `qkv.py`, `attention.py`, `lm_head.py`) plus `common.py` |
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`) and `reporting.py` |
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
@@ -645,8 +645,10 @@ even absent, once Inductor fuses the surrounding graph).
 | flag | default | meaning |
 |---|---|---|
 | `--scenario` (repeatable) | all five | subset of kernel scenarios |
-| `--n` | 200 | interleaved measurement cycles |
-| `--warmup` | 30 | warmup cycles per mode |
+| `--replicates` | 5 | sweeps of every arm; the unit the CI is taken over |
+| `--samples-per-replicate` | 40 | timed bursts per arm per mode, per replicate |
+| `--burst-k` | 16 | calls per timed burst; one value for every arm |
+| `--warmup-calls` | 30 | untimed calls per arm per mode, before each replicate |
 | `--burst` | off | adds the 1/4/16/64 dispatch-cost diagnostic |
 | `--model-size` | `normal` | shape from `PIPER_SHAPES`; single-valued, no sweep |
 | `--batch` / `--seq-len` | 4 / 1024 | `KernelWorkload` overrides (seq <= `max_seq_len`) |
@@ -763,26 +765,36 @@ own family module.
   `torch._functorch.config.donated_buffer = False`: retained-graph backward
   timing re-runs compiled backward graphs, which buffer donation forbids.
   This changes backward memory reuse, not the generated kernels.
-- Arms are timed **round-robin**: one cycle runs every arm once between
-  adjacent entries of a preallocated CUDA event matrix, with a single
-  synchronize at the end. Drift hits all arms equally, so the per-cycle
-  deltas are paired and the Welch/MWU/Wilcoxon/Cohen's d numbers **are**
-  inferential for that run (unlike the e2e span diagnostics).
-- Verified not to distort: interleaved and isolated timings of the same
-  kernels agree within 0.7%.
-- The event-timed medians are **wall time**: host dispatch and host-idle
-  gaps included. For small kernels this dominates -- the rope arms are
-  90%+ dispatch (device work ~11-13 us inside 131-286 us walls). Dispatch
-  cost is real on this host-bound workload, but kernel-speed claims need
-  profiler-summed device time or `--burst` amortization, not the wall
-  median.
+- The measurand is **burst-amortized per-call device time**: synchronize,
+  record a start event, launch `--burst-k` calls back to back, record an end
+  event, synchronize, divide by k. The former wall median is **gone**. On
+  this host-bound workload it was mostly host dispatch (the rope arms are
+  90%+ dispatch, device work ~11-13 us inside 131-286 us walls), which is
+  the harness rather than the kernel in an isolated benchmark.
+- **One `--burst-k` for every arm in a scenario.** A per-arm k makes arms
+  incomparable: a k=64 arm overlaps 64 launches with device work and a k=4
+  arm overlaps 4, and the residual bias runs in the same direction as the
+  effect under test. The schema records k.
+- The repetition unit is the **replicate**. One replicate sweeps every arm
+  once, in declaration order, and the sweep repeats, so drift that moves a
+  whole replicate cancels in the ratio. **The headline statistic is a
+  bootstrap CI on per-replicate log-ratios.** Welch, MWU and Cohen's d run
+  on the pooled samples and are within-run distribution diagnostics only --
+  consecutive bursts of one closure are correlated, so their independence
+  assumption is not met. **Wilcoxon was removed**: it needed the per-cycle
+  pairing the old round-robin provided, and at 5 replicates its exact
+  two-sided minimum p is 0.0625, so it can never reject.
 - Python's garbage collector is paused during the timed region. A collection
   starves the launch queue and lands as idle time inside whichever arm's
   interval is open; pausing it cut the swiglu module sd from ~63 us to
   ~1.4 us and removed every 2x outlier, medians unchanged.
-- The first cycle after the warmup synchronize is discarded (empty queue,
+- The first burst after the warmup synchronize is discarded (empty queue,
   systematically high).
-- No L2 flush: interleaving equalizes cache state across arms.
+- No L2 flush, and **no equalization is claimed**. The old text claimed
+  interleaving equalized cache state across arms; timing one arm at a time
+  makes that false, so it is withdrawn rather than carried. The known bias:
+  an arm whose working set fits in L2 benefits from bursting more than one
+  whose does not.
 - Backward is measured separately wherever the arm exposes a backward entry
   point; module arms retain the graph and re-run `torch.autograd.backward`,
   so only backward kernels are timed. `lm_head` is fwd+bwd only because

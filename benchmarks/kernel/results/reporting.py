@@ -6,6 +6,16 @@ from benchmarks.artifacts.summaries import _pvalue, _value
 from benchmarks.kernel.results.schema import KernelScenarioResult
 
 
+def _ratio_ci(row: dict | None) -> str:
+    """The bootstrap interval on per-replicate log-ratios, as ``[lo, hi]``."""
+    if not row:
+        return "-"
+    low, high = row.get("ratio_ci_low"), row.get("ratio_ci_high")
+    if low is None or high is None:
+        return "-"
+    return f"[{low:.4f},{high:.4f}]"
+
+
 def render_kernel_results(result: KernelScenarioResult) -> str:
     """Render one kernel scenario: per-mode timings and correctness gates."""
     shapes = "  ".join(
@@ -15,8 +25,9 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
         f"== kernel scenario: {result.scenario}   "
         f"model size: {result.model_size}   hardware: {result.hardware} ==",
         f"shapes: {shapes}",
-        f"n={result.n} interleaved cycles, warmup={result.warmup}, "
-        f"seed={result.seed}",
+        f"{result.replicates} replicates x {result.samples_per_replicate} "
+        f"samples, burst k={result.burst_k}, "
+        f"warmup={result.warmup_calls} calls, seed={result.seed}",
     ]
     lines.extend(f"WARNING: {warning}" for warning in result.warnings)
 
@@ -37,8 +48,8 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
                 f"{mode}:",
                 "  "
                 + f"{'arm':22s} {'median us':>10s} {'sd':>8s} {'vs':>18s} "
-                + f"{'ratio':>7s} {'GB/s':>8s} {'x floor':>8s} "
-                + f"{'Welch p':>9s} {'MWU p':>9s} {'Wilcoxon p':>11s} {'d':>6s}",
+                + f"{'ratio':>7s} {'95% CI':>17s} {'GB/s':>8s} "
+                + f"{'x floor':>8s} {'Welch p':>9s} {'MWU p':>9s} {'d':>6s}",
             ]
         )
         for name in arms:
@@ -51,11 +62,11 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
                 f"{mode_result.summary.standard_deviation_us:8.2f} "
                 f"{(row['opponent'] if row else '-'):>18s} "
                 f"{_value(row['median_ratio'] if row else None, 7, 4)} "
+                f"{_ratio_ci(row):>17s} "
                 f"{_value(derived.get('gbps'), 8, 1)} "
                 f"{_value(derived.get('x_floor'), 8, 2)} "
                 f"{_pvalue(row['welch_p'] if row else None, 9)} "
                 f"{_pvalue(row['mwu_p'] if row else None, 9)} "
-                f"{_pvalue(row['wilcoxon_p'] if row else None, 11)} "
                 f"{_value(row['cohens_d'] if row else None, 6, 2)}"
             )
 
@@ -75,21 +86,35 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
         if arm.burst_us_per_call
     }
     if bursts:
-        sizes = sorted(next(iter(bursts.values())), key=int)
-        lines.extend(
-            [
-                "",
-                "burst dispatch diagnostic (us per call, forward):",
-                "  " + f"{'arm':22s} " + " ".join(f"{size:>9s}" for size in sizes),
-            ]
+        modes_seen = sorted(
+            {mode for ladders in bursts.values() for mode in ladders}
         )
-        for name, values in bursts.items():
-            lines.append(
-                f"  {name:22s} "
-                + " ".join(f"{values[size]:9.2f}" for size in sizes)
+        for mode in modes_seen:
+            present = {
+                name: ladders[mode]
+                for name, ladders in bursts.items()
+                if ladders.get(mode)
+            }
+            if not present:
+                continue
+            sizes = sorted(next(iter(present.values())), key=int)
+            lines.extend(
+                [
+                    "",
+                    f"burst dispatch diagnostic (us per call, {mode}):",
+                    "  "
+                    + f"{'arm':22s} "
+                    + " ".join(f"{size:>9s}" for size in sizes),
+                ]
             )
+            for name, values in present.items():
+                lines.append(
+                    f"  {name:22s} "
+                    + " ".join(f"{values[size]:9.2f}" for size in sizes)
+                )
         lines.append(
-            "  Falling per-call time means single calls were dispatch-bound."
+            f"  Per-call time still falling at the top means burst k="
+            f"{result.burst_k} is too small for that arm."
         )
 
     lines.extend(["", "correctness:"])
@@ -114,9 +139,12 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
     lines.extend(
         [
             "",
-            "Arms are timed round-robin within each cycle, so drift affects all",
-            "arms equally and these p-values are inferential for this run. These",
-            "are isolated-kernel numbers on synthetic inputs; never present them",
+            "Each number is burst-amortized per-call device time, not a wall",
+            "median. The ratio is estimated once per replicate and",
+            "bootstrapped across replicates, so the CI is the statistic to",
+            "read; Welch, MWU and d describe the pooled sample distribution",
+            "only, and their independence assumption is not met. These are",
+            "isolated-kernel numbers on synthetic inputs; never present them",
             "as end-to-end training results.",
         ]
     )

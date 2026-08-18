@@ -190,9 +190,10 @@ the compiler fuses the graph around it.
 | `lm_head` | full logits vs fused linear-CE vs TE and Piper-optimized cross entropy |
 | `attention` | inner attention only: FlexAttention vs FlashAttention-3 varlen vs FlexAttention lowered to FlashAttention-4 |
 
-Arms are timed round-robin so drift affects them equally, correctness gates
-run before timing and fail the run loudly, and each scenario writes a
-manifest and results JSON (with raw per-cycle samples) under
+Each number is burst-amortized per-call device time, repeated over replicate
+sweeps so drift affects every arm equally. Correctness gates run before
+timing and fail the run loudly, and each scenario writes a manifest and
+results JSON (with the raw per-replicate samples) under
 `out/<timestamp>/kernels/`. `./run_bench.sh scenarios` lists every scenario
 and arm.
 

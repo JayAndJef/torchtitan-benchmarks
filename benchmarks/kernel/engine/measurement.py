@@ -3,29 +3,42 @@
 Three passes over ``BuiltArm.calls``, each answering a different question and
 each with its own reason to change:
 
-* ``interleaved_samples`` is the primary measurement -- one cycle runs every
-  arm that supports the mode once, between adjacent entries of a preallocated
-  CUDA event matrix, with a single synchronize after all cycles. Drift hits
-  every arm equally, so the per-cycle deltas are *paired* and the
-  Welch/MWU/Wilcoxon/Cohen's d numbers computed from them are inferential for
-  that run, unlike the e2e span diagnostics. Interleaved and isolated timings
-  of the same kernels agree within 0.7%.
-* ``memory_pass`` is the secondary metric, and is deliberately *not*
-  interleaved: peak allocation is a property of one arm's call in isolation,
-  so it runs each arm alone with the peak counter reset per iteration.
-* ``burst_pass`` is the ``--burst`` diagnostic, which separates kernel cost
-  from dispatch cost. It exists because the event-timed medians above are
-  wall time: on this host-bound workload the rope arms are 90%+ dispatch
-  (device work ~11-13 us inside 131-286 us walls), so a kernel-speed claim
-  needs this or profiler-summed device time, never the wall median.
+* ``burst_samples`` is the primary measurement. It times **one** arm in one
+  mode: synchronize, record a start event, launch ``k`` calls back to back,
+  record an end event, synchronize, divide by ``k``. Each sample is therefore
+  a burst-amortized per-call time, and the pass returns ``n`` of them.
+* ``memory_pass`` is the secondary metric. Peak allocation is a property of
+  one arm's call in isolation, so it runs the arm alone with the peak counter
+  reset per iteration.
+* ``burst_ladder`` is the ``--burst`` diagnostic. Where ``burst_samples``
+  fixes one ``k``, this sweeps 1/4/16/64 in one mode, so a reader can see how
+  much dispatch cost the chosen ``k`` amortized away.
+
+**Why the measurand is burst-amortized device time.** The previous primary
+pass timed one call per arm per cycle and reported the wall median, which on
+this host-bound workload is mostly host dispatch: the rope arms are 90%+
+dispatch, with device work of ~11-13 us inside 131-286 us walls. Dispatch
+cost is real end-to-end, but in an *isolated* benchmark it is the harness,
+not the kernel, and it swamped the quantity these scenarios exist to compare.
+A burst of ``k`` back-to-back calls is also what a component looks like
+inside a steady-state training step, where the same kernel runs on every
+layer of every iteration.
+
+**Why one ``k`` for every arm in a scenario.** A ``k`` chosen per arm makes
+arms incomparable -- a k=64 arm overlaps 64 launches with device work and a
+k=4 arm overlaps 4 -- and the residual bias runs in the same direction as the
+effect under test. ``k`` is scenario-wide, and the schema records it.
+
+**Known bias, stated rather than equalized.** The previous pass interleaved
+arms and claimed cache state was equalized across them. Timing one arm at a
+time makes that claim false, so it is withdrawn rather than carried: an arm
+whose working set fits in L2 benefits from bursting more than one whose does
+not. There is still no L2 flush.
 
 Split from ``run.py`` because these are the methodology, and the methodology
-is what a reviewer questions: the GC pause, the discarded first cycle, the
-absence of an L2 flush and the event-matrix layout are the properties that
-make the numbers mean anything, and they are hard to see inside a
-150-line orchestrator. ``memory_pass`` stays here rather than in a module of
-its own -- it is ten lines, has one caller, and is the same kind of thing as
-``burst_pass``: a device pass over a ``BuiltArm`` closure.
+is what a reviewer questions: the GC pause, the discarded first burst and the
+absence of an L2 flush are the properties that make the numbers mean
+anything, and they are hard to see inside an orchestrator.
 """
 
 from __future__ import annotations
@@ -59,37 +72,36 @@ def _gc_paused():
             gc.enable()
 
 
-def interleaved_samples(
-    arms: list[BuiltArm], mode: str, n: int, warmup: int
-) -> dict[str, list[float]]:
-    """Time all arms that support ``mode``, one cycle at a time."""
-    active = [arm for arm in arms if mode in arm.calls]
-    if not active:
-        return {}
-    for _ in range(warmup):
-        for arm in active:
-            arm.calls[mode]()
+def burst_samples(
+    arm: BuiltArm, mode: str, k: int, n: int, warmup_calls: int
+) -> list[float]:
+    """``n`` burst-amortized per-call microsecond samples for one arm+mode.
+
+    Returns an empty list when the arm does not declare ``mode``.
+    """
+    if mode not in arm.calls:
+        return []
+    if k < 1:
+        raise ValueError(f"burst k must be >= 1, got {k}")
+    call = arm.calls[mode]
+    for _ in range(warmup_calls):
+        call()
     torch.cuda.synchronize()
-    # One extra cycle absorbs the post-sync cold start: the queue is empty
-    # after the warmup synchronize, so the first cycle cannot overlap host
+    # One extra burst absorbs the post-sync cold start: the queue is empty
+    # after the warmup synchronize, so the first burst cannot overlap host
     # dispatch with device work and reads systematically high.
-    events = [
-        [torch.cuda.Event(enable_timing=True) for _ in range(len(active) + 1)]
-        for _ in range(n + 1)
-    ]
+    samples: list[float] = []
     with _gc_paused():
-        for row in events:
-            row[0].record()
-            for slot, arm in enumerate(active):
-                arm.calls[mode]()
-                row[slot + 1].record()
-        torch.cuda.synchronize()
-    return {
-        arm.name: [
-            row[slot].elapsed_time(row[slot + 1]) * 1e3 for row in events[1:]
-        ]
-        for slot, arm in enumerate(active)
-    }
+        for _ in range(n + 1):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(k):
+                call()
+            end.record()
+            torch.cuda.synchronize()
+            samples.append(start.elapsed_time(end) * 1e3 / k)
+    return samples[1:]
 
 
 def memory_pass(arm: BuiltArm, mode: str, iters: int) -> float:
@@ -104,15 +116,24 @@ def memory_pass(arm: BuiltArm, mode: str, iters: int) -> float:
     return peak
 
 
-def burst_pass(
-    arm: BuiltArm, bursts: tuple[int, ...], iters: int
+def burst_ladder(
+    arm: BuiltArm, mode: str, bursts: tuple[int, ...], iters: int
 ) -> dict[str, float]:
     """Median us per call at increasing back-to-back burst sizes.
 
-    Distinguishes kernel cost from dispatch cost: if per-call time collapses
-    as the burst grows, single-call timing was host-dispatch-bound.
+    Shows how much dispatch cost the primary pass's ``k`` amortized away: if
+    per-call time is still falling at the top of the ladder, ``k`` is too
+    small for this arm.
+
+    ``mode`` is a parameter rather than a hardcoded ``"forward"``. The old
+    version read ``arm.calls["forward"]`` directly, which made the diagnostic
+    unavailable to ``lm_head`` -- its arms declare ``forward_backward`` only,
+    because ``FusedLinearCrossEntropyLoss`` runs its backward inside
+    ``__call__``.
     """
-    call = arm.calls["forward"]
+    if mode not in arm.calls:
+        return {}
+    call = arm.calls[mode]
     result = {}
     with _gc_paused():
         for burst in bursts:

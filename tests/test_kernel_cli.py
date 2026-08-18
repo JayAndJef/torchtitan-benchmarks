@@ -63,9 +63,13 @@ class KernelCliTests(unittest.TestCase):
                     "7",
                     "--scenario",
                     "swiglu",
-                    "--n",
+                    "--replicates",
+                    "3",
+                    "--samples-per-replicate",
                     "20",
-                    "--warmup",
+                    "--burst-k",
+                    "8",
+                    "--warmup-calls",
                     "5",
                     "--burst",
                     "--model-size",
@@ -82,7 +86,16 @@ class KernelCliTests(unittest.TestCase):
         request = execute.call_args.args[0]
         self.assertEqual(request.gpu, "7")
         self.assertEqual(request.scenario_names, ("swiglu",))
-        self.assertEqual((request.n, request.warmup, request.seed), (20, 5, 3))
+        self.assertEqual(
+            (
+                request.replicates,
+                request.samples_per_replicate,
+                request.burst_k,
+                request.warmup_calls,
+                request.seed,
+            ),
+            (3, 20, 8, 5, 3),
+        )
         self.assertTrue(request.burst)
         self.assertEqual(request.model_size, "huge")
         self.assertEqual((request.batch, request.seq_len), (1, 512))
@@ -226,8 +239,10 @@ class KernelRunnerTests(unittest.TestCase):
                 KernelRunRequest(
                     gpu="7",
                     scenario_names=("swiglu",),
-                    n=5,
-                    warmup=2,
+                    replicates=5,
+                    samples_per_replicate=2,
+                    burst_k=8,
+                    warmup_calls=2,
                     out_dir=out_dir,
                 ),
                 process_runner=fake_process,
@@ -239,7 +254,9 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(command[:3], list(PINNING.prefix))
         self.assertIn("-m", command)
         self.assertEqual(command[command.index("-m") + 1], "benchmarks.kernel.worker")
-        self.assertEqual(command[command.index("--n") + 1], "5")
+        self.assertEqual(command[command.index("--replicates") + 1], "5")
+        self.assertEqual(command[command.index("--burst-k") + 1], "8")
+        self.assertEqual(command[command.index("--warmup-calls") + 1], "2")
         self.assertNotIn("--burst", command)
         # Forwarded unconditionally, unlike the optional overrides.
         self.assertEqual(command[command.index("--model-size") + 1], "normal")
@@ -248,7 +265,7 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(captured["env"]["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
 
         self.assertEqual(manifest["kind"], "kernel")
-        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["schema_version"], 3)
         self.assertEqual(manifest["scenario"], "swiglu")
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
         self.assertNotIn("spec", manifest)
@@ -257,7 +274,9 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["model_shape"]["n_layers"], 16)
         self.assertEqual(manifest["workload"], {"batch": 4, "seq_len": 1024})
         self.assertEqual(manifest["shapes"]["x"], [8192, 1024])
-        self.assertEqual(manifest["n"], 5)
+        self.assertEqual(manifest["replicates"], 5)
+        self.assertEqual(manifest["burst_k"], 8)
+        self.assertNotIn("n", manifest)
 
         self.assertEqual(len(outcomes), 1)
         self.assertFalse(outcomes[0].failed)
