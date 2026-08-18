@@ -95,6 +95,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.kernel.results.merge",
     "benchmarks.kernel.results.reporting",
     "benchmarks.models.piper_qwen3.shape",
+    # Behavioural configuration is data, and data the parent must be able to
+    # name, record in a manifest and diff without importing the ML stack --
+    # which is why the profile encodes its torch values as strings.
+    "benchmarks.models.piper_qwen3.mcore_profiles",
     "benchmarks.models.piper_qwen3.megatron_bootstrap",
     # The ``--module`` chain. TorchTitan resolves ``--module
     # benchmarks.models.piper_qwen3`` inside the *training* subprocess, which

@@ -759,6 +759,12 @@ TEST_CENSUS = {
     # _seeded_build's builder-vs-declaration gate.
     "test_kernels": 28,
     "test_lm_head_losses": 8,
+    # New with the mcore profile registry: 7 that pin the extraction against
+    # a frozen literal (including the cuda-graph branch the parity check
+    # never reaches), 7 that pin the validation -- above all that a
+    # dual-delivery field set on one side only is refused -- and 1 that the
+    # builder takes no default profile.
+    "test_mcore_profiles": 15,
     "test_megatron_data": 5,
     # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
     # the symmetric twin of the titan builders' one, added when the megatron
@@ -774,7 +780,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 207
+TEST_CENSUS_TOTAL = 222
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

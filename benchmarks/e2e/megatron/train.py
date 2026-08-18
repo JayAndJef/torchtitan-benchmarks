@@ -101,10 +101,16 @@ def _free_port() -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from benchmarks.models.piper_qwen3.mcore_profiles import BASE
     from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 
     args = parse_args(argv)
     shape = PIPER_SHAPES[args.model_size]
+    # The e2e megatron arm measures megatron at its own best, which is the
+    # base profile. A profile axis belongs to kernel-bench, where one arm per
+    # profile is the unit; an e2e run has one megatron arm and no such axis.
+    # Resolved here rather than taken from argv for that reason.
+    profile = BASE
     num_flops_per_token = shape.num_flops_per_token(args.seq_len)
     graphs = args.mode == "cuda-graph"
     impl = (
@@ -190,6 +196,7 @@ def main(argv: list[str] | None = None) -> None:
     model = build_model(
         seq_len=args.seq_len,
         shape=shape,
+        profile=profile,
         cuda_graph_impl=CUDA_GRAPH_IMPL if graphs else None,
         cuda_graph_modules=CUDA_GRAPH_MODULES if graphs else (),
     )

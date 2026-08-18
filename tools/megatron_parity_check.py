@@ -70,9 +70,13 @@ def build_titan_model(shape, dtype=torch.bfloat16):
 
 
 def build_megatron_model(shape):
+    from benchmarks.models.piper_qwen3.mcore_profiles import BASE
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
-    model = build_model(seq_len=1024, shape=shape)
+    # The parity contract is against the base profile: it is the one this
+    # tool's gate was measured on, and a variant would move the logits for a
+    # reason parity cannot distinguish from a layout bug.
+    model = build_model(seq_len=1024, shape=shape, profile=BASE)
     model.eval()
     return model
 
