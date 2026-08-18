@@ -101,7 +101,11 @@ def _free_port() -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
-    from benchmarks.models.piper_qwen3.mcore_profiles import BASE
+    from benchmarks.models.piper_qwen3.mcore_profiles import (
+        BASE,
+        FUSION_FIELDS,
+        declared_mismatches,
+    )
     from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 
     args = parse_args(argv)
@@ -226,31 +230,26 @@ def main(argv: list[str] | None = None) -> None:
     # TransformerConfig directly bypasses; running the dataclass defaults once
     # cost 11.9 GPU ms/step of unfused SwiGLU. Assert rather than trust, and
     # log the state so a regression is visible in the arm log.
+    #
+    # The check is against what the PROFILE declares, not against a fixed
+    # all-on list. Both directions are real failures now: a fusion declared on
+    # that came out off is the old dataclass-default handicap, and a fusion
+    # declared off that came out on is a delta that did not take -- which
+    # would publish the base implementation under the variant's name.
     fusions = {
-        name: getattr(model.config, name)
-        for name in (
-            "bias_activation_fusion",
-            "bias_dropout_fusion",
-            "cross_entropy_loss_fusion",
-            "moe_permute_fusion",
-            "apply_rope_fusion",
-        )
+        name: getattr(model.config, name, None) for name in FUSION_FIELDS
     }
-    # Not a boolean: which CE implementation ran is the single largest lever
-    # in the loss path (te = TE's online-softmax kernel, native = megatron's
-    # fp32 multi-pass one), so it goes in the log next to the flags.
-    ce_impl = getattr(model.config, "cross_entropy_fusion_impl", "unknown")
-    missing = sorted(name for name, on in fusions.items() if not on)
-    if missing:
+    wrong = declared_mismatches(profile, fusions)
+    if wrong:
         raise RuntimeError(
-            "megatron fusions unexpectedly disabled: "
-            + ", ".join(missing)
-            + " -- see benchmarks/models/piper_qwen3/megatron_model.py"
+            f"megatron profile {profile.name!r} did not take: "
+            + "; ".join(wrong)
+            + " -- see benchmarks/models/piper_qwen3/mcore_profiles.py"
         )
     print(
         FUSION_LINE.format(
-            state=" ".join(f"{k}={v}" for k, v in fusions.items())
-            + f" cross_entropy_fusion_impl={ce_impl}"
+            state=f"profile={profile.name} "
+            + " ".join(f"{k}={v}" for k, v in fusions.items())
         )
     )
 

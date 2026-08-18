@@ -21,8 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.models.piper_qwen3.mcore_profiles import (
     BASE,
+    FUSION_FIELDS,
     MCORE_PROFILES,
     McoreProfile,
+    declared_mismatches,
     derive,
     layer_spec_kwargs,
     profile_by_name,
@@ -304,6 +306,92 @@ class ProfileValidationTests(unittest.TestCase):
         # A copy, so a manifest writer cannot edit the registry.
         payload["config_overrides"]["bf16"] = False
         self.assertTrue(BASE.config_overrides["bf16"])
+
+
+class DeclaredStateTests(unittest.TestCase):
+    """What the megatron driver checks after it builds the config."""
+
+    def _built(self, **changes) -> dict:
+        built = {
+            name: BASE.config_overrides[name] for name in FUSION_FIELDS
+        }
+        built.update(changes)
+        return built
+
+    def test_a_matching_config_reports_nothing(self) -> None:
+        self.assertEqual(declared_mismatches(BASE, self._built()), [])
+
+    def test_a_fusion_that_came_out_off_is_reported(self) -> None:
+        """The original hazard, and the one that already cost a wrong verdict.
+
+        Building TransformerConfig directly bypasses megatron's argparse
+        layer, where its real defaults live, so an unset flag takes the
+        dataclass value. That ran the unfused chunk/silu/mul/copy path and
+        cost 11.9 GPU ms/step -- an accidental handicap reported as an engine
+        property.
+        """
+        wrong = declared_mismatches(
+            BASE, self._built(bias_activation_fusion=False)
+        )
+        self.assertEqual(len(wrong), 1)
+        self.assertIn("bias_activation_fusion", wrong[0])
+        self.assertIn("declares True", wrong[0])
+        self.assertIn("config has False", wrong[0])
+
+    def test_a_delta_that_did_not_take_is_reported(self) -> None:
+        """The new hazard, and the reason the check reads the declaration.
+
+        The old check asserted every fusion was on, so it could only ever
+        catch the first case -- and it would have rejected half the Part C
+        roster outright. A variant whose flag silently failed to apply now
+        fails the run instead of publishing the base implementation under the
+        variant's name.
+        """
+        no_permute = derive(
+            BASE,
+            name="no_permute_fusion",
+            description="the torch permute path instead of TE's fused one",
+            config_overrides={"moe_permute_fusion": False},
+        )
+        # The delta took: the config carries what the profile declares.
+        took = declared_mismatches(
+            no_permute, self._built(moe_permute_fusion=False)
+        )
+        self.assertEqual(took, [])
+        # The delta did not take: the config still holds the base value. The
+        # old all-on check called this state correct.
+        still_on = declared_mismatches(no_permute, self._built())
+        self.assertEqual(len(still_on), 1)
+        self.assertIn("declares False", still_on[0])
+
+    def test_the_cross_entropy_implementation_is_checked_not_just_logged(
+        self,
+    ) -> None:
+        """It is a string, not a boolean, and it is the largest loss lever.
+
+        'te' is TE's online-softmax kernel at 14.9 GPU ms/step; 'native' is
+        megatron's fp32 multi-pass one at 88. An all-boolean check could not
+        see the difference at all.
+        """
+        wrong = declared_mismatches(
+            BASE, self._built(cross_entropy_fusion_impl="native")
+        )
+        self.assertEqual(len(wrong), 1)
+        self.assertIn("'te'", wrong[0])
+        self.assertIn("'native'", wrong[0])
+
+    def test_every_checked_field_is_declared_by_the_base_profile(self) -> None:
+        """An undeclared field is skipped, so a typo would check nothing.
+
+        The failure mode is silence: the run passes, the log line prints, and
+        the flag it was supposed to guard is unguarded.
+        """
+        undeclared = [
+            name
+            for name in FUSION_FIELDS
+            if name not in BASE.config_overrides
+        ]
+        self.assertEqual(undeclared, [])
 
 
 class BuilderContractTests(unittest.TestCase):

@@ -50,6 +50,23 @@ DTYPE_FIELDS = ("params_dtype", "pipeline_dtype")
 # config. Both sides must agree, or the built module contradicts the label.
 DUAL_DELIVERY_FIELDS = ("moe_grouped_gemm", "qk_layernorm")
 
+# The fields a run reports and checks against what its profile declares.
+# Megatron's real defaults live in its argparse layer, which constructing
+# TransformerConfig directly bypasses, so a flag left unset silently takes the
+# dataclass value -- once costing 11.9 GPU ms/step of unfused SwiGLU. These
+# are the flags where that has bitten or would bite hardest.
+#
+# cross_entropy_fusion_impl is last and is not a boolean: which CE ran is the
+# single largest lever in the loss path, so it belongs in the same line.
+FUSION_FIELDS = (
+    "bias_activation_fusion",
+    "bias_dropout_fusion",
+    "cross_entropy_loss_fusion",
+    "moe_permute_fusion",
+    "apply_rope_fusion",
+    "cross_entropy_fusion_impl",
+)
+
 
 @dataclass(frozen=True)
 class McoreProfile:
@@ -244,6 +261,33 @@ def profile_by_name(name: str) -> McoreProfile:
             f"Unknown mcore profile {name!r}. Available: "
             + ", ".join(MCORE_PROFILES)
         ) from error
+
+
+def declared_mismatches(
+    profile: McoreProfile, built: dict[str, Any]
+) -> list[str]:
+    """Where a built config disagrees with what ``profile`` declares.
+
+    Lives here rather than in the megatron driver so it is torch-free and
+    testable on CPU: the driver's copy could only be exercised by a real
+    megatron run, which is the least convenient place to find a typo.
+
+    Both directions are failures. A flag declared on that came out off is the
+    dataclass-default handicap that once cost 11.9 GPU ms/step of unfused
+    SwiGLU. A flag declared off that came out on is a delta that did not take,
+    which publishes the base implementation under the variant's name.
+
+    Fields the profile does not declare are not checked -- it has nothing to
+    say about them -- which is why ``FUSION_FIELDS`` and the base profile must
+    agree. A test pins that.
+    """
+    return sorted(
+        f"{name}: profile declares {profile.config_overrides[name]!r}, "
+        f"config has {built.get(name)!r}"
+        for name in FUSION_FIELDS
+        if name in profile.config_overrides
+        and built.get(name) != profile.config_overrides[name]
+    )
 
 
 def geometry_config_kwargs(shape: PiperShape) -> dict[str, Any]:
