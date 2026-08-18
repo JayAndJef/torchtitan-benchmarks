@@ -1050,6 +1050,19 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
   and takes about two seconds.
+- **Commit in single, self-contained steps, as the work happens.** One commit
+  is one logical change that leaves the tree green on its own. Do not
+  accumulate a whole task in the working tree and land it as one commit --
+  a multi-file, multi-concern commit cannot be reviewed, bisected, or
+  partially reverted, and `benchmarks_git_rev` stops being a useful label
+  when a single rev spans several unrelated changes. Split by *concern*, not
+  by file count: a refactor whose parts are independently true is several
+  commits (e.g. the submodule/fork patch; the shape-registry data move; the
+  spec split; each schema bump; the removal of a retired tool), each with its
+  own tests passing. Run the suite before each one, not just at the end. If a
+  step only makes sense alongside the next, they are one commit -- but that
+  is the exception, not the default. Prefer landing a reviewed prefix of the
+  work over holding all of it back.
 - On a shared box, drive multi-cell matrices with `tools/run_matrix.sh`
   rather than a loop of `run-all`s. It refuses to start on a dirty tree
   (`benchmarks_git_rev` would mislabel the run), holds a `flock`, waits for
