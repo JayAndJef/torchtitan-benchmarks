@@ -24,7 +24,7 @@ from benchmarks.execution.environment import (
     add_compiler_environment,
     runtime_environment,
 )
-from benchmarks.execution.events import EventHandler, RunEvent
+from benchmarks.execution.events import EventHandler, _emit
 from benchmarks.execution.paths import BENCH_DIR, RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
 from benchmarks.kernel.registry import (
@@ -77,11 +77,6 @@ class KernelScenarioOutcome:
     @property
     def failed(self) -> bool:
         return self.correctness_failed or self.error is not None
-
-
-def _emit(handler: EventHandler | None, kind: str, message: str) -> None:
-    if handler is not None:
-        handler(RunEvent(kind=kind, message=message))
 
 
 def kernel_manifest_data(
