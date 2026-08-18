@@ -158,6 +158,12 @@ def worker_command(
         mode,
         "--fragment",
         str(fragment),
+        # Neither worker pass reads --replicates. The parent owns the sweep,
+        # and a timing worker measures the one replicate --replicate names.
+        # It is forwarded as provenance: the manifest publishes this argv as
+        # the record of the run, so each command states the whole request it
+        # came from, and the worker's own default of 5 never stands in for a
+        # count the operator chose.
         "--replicates",
         str(request.replicates),
         "--samples-per-replicate",
