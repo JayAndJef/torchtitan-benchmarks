@@ -31,14 +31,27 @@ the arm the timing pass measures. Values do not change timings (a GEMM costs
 what it costs), but a gate that ran against different weights than the
 measurement is a claim nobody can check.
 
-Nothing in this package imports ``benchmarks.kernel.operations`` or a model
-package. Arms arrive as already-resolved ``BuiltArm`` values through
-``resolve_symbol``, and the scenario declarations arrive as
-``benchmarks.kernel.schema`` types rather than through
-``benchmarks.kernel.registry``, so the engine's import graph stays
-independent of which kernel families exist and of everything they depend on
--- which is what lets each arm run in its own process at all.
+Nothing in this package imports ``benchmarks.kernel.operations``, a model
+*implementation*, or ``benchmarks.kernel.registry``. Arms arrive as
+already-resolved ``BuiltArm`` values through ``resolve_symbol``, and the
+scenario declarations arrive as ``benchmarks.kernel.schema`` types rather
+than through ``benchmarks.kernel.registry``, so the engine's import graph
+stays independent of which kernel families exist and of everything they
+depend on -- which is what lets each arm run in its own process at all.
 ``tests/test_import_boundaries.py`` asserts both edges are absent.
+
+The one first-party module under ``benchmarks.models`` the engine does reach
+is ``piper_qwen3.shape``, through ``benchmarks.kernel.schema``. It imports
+nothing but ``dataclasses``: it is the geometry registry both engines share,
+not a model package in the sense above.
+
+``benchmarks.kernel.results.merge`` is the other module this one deliberately
+does not import at module scope. The merge is parent-side, and it reaches
+numpy and scipy through ``engine.statistics``, so the single call into it --
+inside ``run_kernel_scenario``, which the runner never invokes -- is a
+deferred import. The two fragment-kind constants both sides need live in
+``benchmarks.kernel.schema`` for the same reason: naming them in the reader
+made the writer import it.
 
 Both passes re-assert the balanced-routing invariant that
 ``benchmarks.kernel.runner`` also checks, and do so before the CUDA check:
@@ -62,25 +75,25 @@ from benchmarks.kernel.engine.measurement import (
     burst_samples,
     memory_pass,
 )
-from benchmarks.kernel.results.merge import (
-    CORRECTNESS_FRAGMENT_KIND,
-    TIMING_FRAGMENT_KIND,
-    merge_kernel_fragments,
-)
 from benchmarks.kernel.results.schema import KernelScenarioResult
 from benchmarks.kernel.schema import (
+    CORRECTNESS_FRAGMENT_KIND,
     KernelArm,
     KernelScenario,
     KernelWorkload,
     MODES,
     routing_divides_evenly,
+    TIMING_FRAGMENT_KIND,
 )
 
 if TYPE_CHECKING:
-    # Annotation-only. The engine must not import a model package: arms reach
-    # it as already-resolved BuiltArm values via resolve_symbol, never as
-    # imports, which is what lets each arm run in its own process without the
-    # engine dragging in every model's dependencies.
+    # Annotation-only, and the guard is a habit rather than a saving here:
+    # benchmarks.kernel.schema imports this same module at run time, and it
+    # imports nothing but dataclasses. What the engine must never import is a
+    # model *implementation*. Arms reach it as already-resolved BuiltArm
+    # values via resolve_symbol, never as imports, which is what lets each arm
+    # run in its own process without the engine dragging in every model's
+    # dependencies.
     from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
@@ -315,7 +328,14 @@ def run_kernel_scenario(
     It builds every arm in one process, exactly as the correctness pass does,
     so it is valid only for a scenario whose arms can co-tenant. The runner
     never calls it.
+
+    The merge is imported here rather than at module scope. It is parent-side
+    work, and it reaches ``PiperShape``, numpy and scipy at its own module
+    scope; importing it above would put all three back into every timing
+    worker's graph, for a function no worker calls.
     """
+    from benchmarks.kernel.results.merge import merge_kernel_fragments
+
     correctness = run_correctness_pass(scenario, shape, workload, options)
     # Replicate-major, so drift is shared across arms rather than charged to
     # whichever arm was timed while it happened. Within one replicate the

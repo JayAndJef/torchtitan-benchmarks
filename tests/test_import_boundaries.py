@@ -692,6 +692,32 @@ class KernelEngineImportBoundaryTest(unittest.TestCase):
             + "\n  ".join(violations),
         )
 
+    def test_the_engine_does_not_import_its_own_results_merge(self):
+        """The producer must not import the consumer, and it costs to.
+
+        ``engine.run`` writes the fragments; ``results.merge`` reads them. The
+        merge is parent-side work: it reaches ``engine.statistics``, and
+        through it numpy and scipy. While the import sat at module scope every
+        timing worker paid for that stack to reach a function only the
+        in-process smoke path calls, and the two fragment-kind constants both
+        sides share were named in the reader rather than in the schema.
+        The deferred import inside ``run_kernel_scenario`` is the sanctioned
+        form, so this reads module scope alone.
+        """
+        violations = [
+            f"{path}:{lineno}: {imported}"
+            for path in engine_source_files()
+            for imported, lineno in module_scope_imports(path)
+            if targets(imported, "benchmarks.kernel.results.merge")
+        ]
+        self.assertEqual(
+            violations,
+            [],
+            "the kernel engine imports the merge at module scope; defer it "
+            "into run_kernel_scenario, its only caller:\n  "
+            + "\n  ".join(violations),
+        )
+
     def test_the_scenario_declarations_never_import_the_arm_builders(self):
         """The other end of the same edge, and the one a future change breaks.
 

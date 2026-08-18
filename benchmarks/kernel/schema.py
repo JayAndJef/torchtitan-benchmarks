@@ -42,6 +42,16 @@ from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 MODES = ("forward", "backward", "forward_backward")
 
+# The two fragment shapes a worker writes and the parent reads, named once.
+# They live here, in the declaration module both sides already import, rather
+# than beside the reader: the producer is
+# ``benchmarks.kernel.engine.run`` and the consumer is
+# ``benchmarks.kernel.results.merge``, so naming them in the consumer made
+# the producer import it -- and with it ``PiperShape``, numpy and scipy, in
+# every timing worker.
+CORRECTNESS_FRAGMENT_KIND = "kernel_correctness_fragment"
+TIMING_FRAGMENT_KIND = "kernel_timing_fragment"
+
 
 @dataclass(frozen=True)
 class KernelWorkload:

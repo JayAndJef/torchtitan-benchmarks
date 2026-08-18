@@ -62,19 +62,15 @@ from benchmarks.kernel.results.schema import (
     ModeResult,
 )
 from benchmarks.kernel.schema import (
+    CORRECTNESS_FRAGMENT_KIND,
     KernelScenario,
     KernelWorkload,
     MODES,
     shape_summary,
+    TIMING_FRAGMENT_KIND,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
-
-# The two fragment shapes, named once. The worker writes them through
-# ``benchmarks.kernel.engine.run``; this module reads them. A ``kind``
-# mismatch is a wiring bug, not a data condition, so it raises.
-CORRECTNESS_FRAGMENT_KIND = "kernel_correctness_fragment"
-TIMING_FRAGMENT_KIND = "kernel_timing_fragment"
 
 # How the numbers were produced. The rationale for each entry lives in
 # ``benchmarks.kernel.engine.measurement``'s docstring; recorded here because
@@ -95,6 +91,7 @@ KERNEL_MEASUREMENT_METHODOLOGY = {
 
 
 def _require_kind(fragment: dict[str, Any], expected: str) -> None:
+    """A kind mismatch is a wiring bug, not a data condition, so it raises."""
     kind = fragment.get("kind")
     if kind != expected:
         raise ValueError(

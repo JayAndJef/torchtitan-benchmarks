@@ -15,19 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.cli.main import cli
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.kernel.registry import KERNEL_SCENARIOS, kernel_scenario_by_name
-from benchmarks.kernel.results.merge import (
-    CORRECTNESS_FRAGMENT_KIND,
-    TIMING_FRAGMENT_KIND,
-)
 from benchmarks.kernel.runner import (
     KernelRunRequest,
     execute_kernel_run,
     resolve_arm_skips,
 )
 from benchmarks.kernel.schema import (
+    CORRECTNESS_FRAGMENT_KIND,
     CorrectnessCheck,
     KernelArm,
     KernelScenario,
+    TIMING_FRAGMENT_KIND,
 )
 from tests.test_kernel_results import sample_result
 
