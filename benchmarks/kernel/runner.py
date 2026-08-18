@@ -115,10 +115,16 @@ class KernelScenarioOutcome:
 
     @property
     def failed(self) -> bool:
+        # A ``failed`` arm in the results counts too, and it is not covered by
+        # ``failed_passes``: an arm whose workers all wrote a fragment and
+        # measured nothing in it never lost a pass. The scenario still
+        # published a short roster, so it still exits nonzero.
+        arms = self.result.arms.values() if self.result is not None else ()
         return (
             self.correctness_failed
             or self.error is not None
             or bool(self.failed_passes)
+            or any(arm.status == "failed" for arm in arms)
         )
 
 

@@ -19,6 +19,11 @@ crashed. ``merge_kernel_fragments`` raises instead. A *non-anchor* arm that
 is incomplete costs only itself: the arms that did measure are still
 reported.
 
+**An empty arm is a failed arm.** An arm may write every fragment it owes
+and still carry no samples in any mode. That is not an ``ok`` arm with a
+short table; it is an arm that measured nothing, so it takes ``failed`` and
+a warning, and an *anchor* in that state raises exactly as anchor loss does.
+
 **Every declared arm reaches the file, measured or not.** An arm carries
 ``status`` ``ok``, ``skipped`` or ``failed``, with the reason attached. An
 arm this host could not run (no C++20 compiler for the TE build) and an arm
@@ -162,8 +167,8 @@ def merge_kernel_fragments(
     """Build the scenario result from one correctness and N timing fragments.
 
     Raises ``ValueError`` when the anchor arm has no complete replicate set,
-    or when it was skipped: every comparison is a ratio against it, so there
-    is nothing coherent to write.
+    when it was skipped, or when every replicate it did write is empty: every
+    comparison is a ratio against it, so there is nothing coherent to write.
 
     ``timings_ran=False`` records a scenario whose gates failed, so no timing
     worker was ever launched. The file still carries the correctness rows --
@@ -217,6 +222,20 @@ def merge_kernel_fragments(
     samples = {
         name: _mode_samples(ordered) for name, ordered in complete.items()
     }
+    # An arm every replicate of which arrived empty ran and measured nothing.
+    # ``status`` is a dataclass default, so such an arm used to reach the file
+    # as "ok" with no modes under it -- and the reporter tabulates mode by
+    # mode, so it appeared in no table and in no unmeasured list either. It
+    # simply vanished. ``--samples-per-replicate 0`` reaches this state, and
+    # so does a declared mode the timing pass never times.
+    unmeasured = {name for name, modes in samples.items() if not modes}
+    if scenario.baseline_arm in unmeasured:
+        raise ValueError(
+            f"{scenario.name}: the anchor arm {scenario.baseline_arm!r} "
+            "produced no samples in any declared mode. Every comparison is a "
+            "ratio against it, so no results are written rather than a table "
+            "with no ratios in it."
+        )
     # Declared, not reported by the fragment: a floor is a property of the
     # arm the registry describes, and the x-floor column belongs to a reader
     # who has the registry and no GPU.
@@ -247,6 +266,13 @@ def merge_kernel_fragments(
                 )
             arm_results[name] = ArmResult(
                 name=name, modes={}, status=status, status_reason=reason
+            )
+            continue
+        if name in unmeasured:
+            message = "produced no samples in any declared mode"
+            warnings.append(f"{name}: {message}")
+            arm_results[name] = ArmResult(
+                name=name, modes={}, status="failed", status_reason=message
             )
             continue
         ordered = complete[name]

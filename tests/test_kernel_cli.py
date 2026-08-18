@@ -76,8 +76,14 @@ def correctness_fragment(scenario: str, passed: bool = True) -> dict:
     }
 
 
-def timing_fragment(scenario: str, arm: str, replicate: int) -> dict:
-    """A worker's output, shaped exactly as ``run_timing_pass`` writes it."""
+def timing_fragment(
+    scenario: str, arm: str, replicate: int, measured: bool = True
+) -> dict:
+    """A worker's output, shaped exactly as ``run_timing_pass`` writes it.
+
+    ``measured=False`` is the arm that ran and timed nothing: the worker
+    completed and wrote its fragment, and every mode in it is empty.
+    """
     declaration = kernel_scenario_by_name(scenario).arm(arm)
     return {
         "kind": TIMING_FRAGMENT_KIND,
@@ -89,7 +95,9 @@ def timing_fragment(scenario: str, arm: str, replicate: int) -> dict:
         "modes": {
             mode: [10.0 + replicate + index for index in range(3)]
             for mode in declaration.modes
-        },
+        }
+        if measured
+        else {},
         "bytes_moved": None,
         "peak_memory_gib": 1.5 if replicate == 0 else None,
         "burst_us_per_call": None,
@@ -103,6 +111,7 @@ def fragment_writer(
     correctness_exit: int | None = None,
     timing_exit: int = 0,
     skip_timing: tuple[tuple[str, str, int], ...] = (),
+    empty_arms: tuple[str, ...] = (),
 ):
     """A ``process_runner`` that plays the worker protocol.
 
@@ -115,6 +124,8 @@ def fragment_writer(
     fragment, which is the real worker's window: it writes the fragment first
     and computes the code afterwards, so a death in between reports one
     verdict in the code and the opposite one on disk.
+
+    ``empty_arms`` names arms whose workers all succeed and time nothing.
     """
     codes = correctness_code or {}
 
@@ -138,7 +149,11 @@ def fragment_writer(
             kwargs["stdout"].write(f"boom: {arm} r{replicate}\n")
             return SimpleNamespace(returncode=1)
         fragment.write_text(
-            json.dumps(timing_fragment(scenario, arm, replicate))
+            json.dumps(
+                timing_fragment(
+                    scenario, arm, replicate, measured=arm not in empty_arms
+                )
+            )
         )
         return SimpleNamespace(returncode=timing_exit)
 
@@ -773,6 +788,65 @@ class KernelRunnerTests(unittest.TestCase):
         # Reported, not silently absorbed: a partial roster exits nonzero.
         self.assertTrue(outcomes[0].failed)
         self.assertEqual(outcomes[0].failed_passes, (f"{lost} r0",))
+
+    def test_an_arm_that_measured_nothing_is_not_published_as_ok(self) -> None:
+        """Every replicate wrote a fragment, and every fragment was empty.
+
+        ``status`` is a dataclass default, so this arm used to reach the file
+        as ``ok`` with no modes under it -- and the reporter tabulates mode by
+        mode, so it appeared in no table and in no unmeasured list. It
+        vanished, and the scenario exited 0.
+        """
+        scenario = kernel_scenario_by_name("swiglu")
+        empty = scenario.arms[-1].name
+        fake_process = fragment_writer(empty_arms=(empty,))
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("swiglu",),
+                    replicates=2,
+                    out_dir=Path(temporary) / "kernels",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+            )
+        result = outcomes[0].result
+        self.assertEqual(result.arms[empty].status, "failed")
+        self.assertEqual(result.arms[empty].modes, {})
+        self.assertIn("no samples", result.arms[empty].status_reason)
+        self.assertEqual(result.arms[scenario.baseline_arm].status, "ok")
+        self.assertTrue(
+            any(empty in warning for warning in result.warnings), result.warnings
+        )
+        self.assertTrue(outcomes[0].failed)
+
+    def test_an_empty_anchor_writes_no_results(self) -> None:
+        """The same failure one level up. Every comparison is a ratio against
+        the anchor, so an anchor that measured nothing has no table."""
+        anchor = kernel_scenario_by_name("swiglu").baseline_arm
+        fake_process = fragment_writer(empty_arms=(anchor,))
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            out_dir = Path(temporary) / "kernels"
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("swiglu",),
+                    replicates=2,
+                    out_dir=out_dir,
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+            )
+            self.assertFalse((out_dir / "results.json").exists())
+        self.assertTrue(outcomes[0].failed)
+        self.assertIsNone(outcomes[0].result)
+        self.assertIn("anchor arm", outcomes[0].error)
+        self.assertIn("no samples", outcomes[0].error)
 
     def test_replicate_boundaries_survive_the_merge(self) -> None:
         """The merge orders fragments by replicate index, not by arrival."""
