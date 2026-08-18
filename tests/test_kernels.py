@@ -71,6 +71,30 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown arm"):
             replace(scenario, comparisons=(("fused_qkv", "nope"),))
 
+    def test_a_declared_mode_must_be_one_the_timing_pass_runs(self) -> None:
+        """The declaration is authoritative, so it has to be legal itself.
+
+        ``_seeded_build`` asks only that the builder and the declaration
+        agree. An arm declaring ``fwd`` with a builder supplying a ``fwd``
+        closure passes that gate, and then ``run_timing_pass`` -- which
+        iterates ``MODES`` -- times it in no mode at all. A non-floor arm
+        raises later in ``_heaviest_mode``; a floor skips the memory pass and
+        reaches the merge silently, with nothing in it.
+        """
+        scenario = kernel_scenario_by_name("qkv")
+        with self.assertRaisesRegex(ValueError, "unknown mode"):
+            replace(
+                scenario,
+                arms=tuple(
+                    replace(arm, modes=("fwd",)) for arm in scenario.arms
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "declares no modes"):
+            replace(
+                scenario,
+                arms=tuple(replace(arm, modes=()) for arm in scenario.arms),
+            )
+
     def test_attention_arms(self) -> None:
         scenario = KERNEL_SCENARIOS["attention"]
         self.assertEqual(

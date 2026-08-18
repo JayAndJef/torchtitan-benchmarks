@@ -743,8 +743,9 @@ TEST_CENSUS = {
     # CI is taken over, and a flat sample list cannot express them.
     "test_kernel_results": 5,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
-    # bootstrap CI, the single-replicate case and reproducibility.
-    "test_kernels": 26,
+    # bootstrap CI, the single-replicate case and reproducibility. +1 for the
+    # scenario's rejection of a mode name MODES does not hold.
+    "test_kernels": 27,
     "test_lm_head_losses": 8,
     "test_megatron_data": 5,
     # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
@@ -761,7 +762,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 196
+TEST_CENSUS_TOTAL = 197
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

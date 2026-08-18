@@ -180,7 +180,10 @@ class KernelArm:
     instead of letting the builder decide silently. A mode the registry does
     not declare would otherwise be timed and published under a label nothing
     describes, and a floor known only to its builder cannot be read by the
-    parent that computes the x-floor column.
+    parent that computes the x-floor column. ``KernelScenario`` checks the
+    other half at import: a declared mode must be one ``MODES`` holds, and
+    the tuple must not be empty, or the timing pass runs nothing for the arm
+    however well the builder agrees with it.
     """
 
     name: str
@@ -228,6 +231,27 @@ class KernelScenario:
         for arm_name, opponent in self.comparisons or ():
             self.arm(arm_name)
             self.arm(opponent)
+        # And a mistyped mode with it. ``_seeded_build`` makes the declaration
+        # authoritative over the builder, but it only asks the two to agree:
+        # an arm declaring "fwd" and a builder supplying a "fwd" closure pass
+        # it, and then ``run_timing_pass`` -- which iterates ``MODES`` --
+        # never times the arm. A non-floor arm raises later in
+        # ``_heaviest_mode``; a floor skips the memory pass and says nothing
+        # at all, and reaches the merge with no samples. An empty tuple is the
+        # same failure spelled differently.
+        for arm in self.arms:
+            if not arm.modes:
+                raise ValueError(
+                    f"{self.name}/{arm.name} declares no modes; an arm the "
+                    "timing pass cannot time measures nothing"
+                )
+            unknown = [mode for mode in arm.modes if mode not in MODES]
+            if unknown:
+                raise ValueError(
+                    f"{self.name}/{arm.name} declares unknown mode(s) "
+                    f"{', '.join(sorted(unknown))}; expected one of "
+                    f"{', '.join(MODES)}"
+                )
 
     def arm(self, name: str) -> KernelArm:
         for arm in self.arms:
