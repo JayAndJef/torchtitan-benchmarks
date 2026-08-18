@@ -33,10 +33,8 @@ def _has_gcc_13() -> bool:
 class KernelScenarioSmokeTests(unittest.TestCase):
     def _run(self, name: str) -> None:
         from benchmarks.kernel.engine.run import RunOptions, run_kernel_scenario
-        from benchmarks.kernel.registry import (
-            kernel_scenario_by_name,
-            resolve_shape_and_workload,
-        )
+        from benchmarks.kernel.registry import kernel_scenario_by_name
+        from benchmarks.kernel.schema import resolve_shape_and_workload
 
         scenario = kernel_scenario_by_name(name)
         shape, workload = resolve_shape_and_workload(batch=1)

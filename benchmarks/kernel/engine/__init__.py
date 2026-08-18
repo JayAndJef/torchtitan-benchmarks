@@ -1,1 +1,1 @@
-"""The round-robin measurement engine and its paired statistics."""
+"""The measurement engine: the arm contract, timing, correctness gates, statistics."""

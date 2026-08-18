@@ -1,1 +1,1 @@
-"""Arm builders: the torch code each kernel scenario actually times."""
+"""Arm builders, one module per kernel family: the torch code each scenario times."""

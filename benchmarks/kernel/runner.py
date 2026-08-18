@@ -27,17 +27,17 @@ from benchmarks.execution.environment import (
 from benchmarks.execution.events import EventHandler, _emit
 from benchmarks.execution.paths import BENCH_DIR, RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
-from benchmarks.kernel.registry import (
-    KernelScenario,
-    KernelWorkload,
-    kernel_scenario_by_name,
-    resolve_shape_and_workload,
-    routing_divides_evenly,
-    shape_summary,
-)
+from benchmarks.kernel.registry import kernel_scenario_by_name
 from benchmarks.kernel.results.schema import (
     KernelScenarioResult,
     load_kernel_results,
+)
+from benchmarks.kernel.schema import (
+    KernelScenario,
+    KernelWorkload,
+    resolve_shape_and_workload,
+    routing_divides_evenly,
+    shape_summary,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 

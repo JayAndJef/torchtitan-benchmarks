@@ -85,6 +85,7 @@ PARENT_SIDE_MODULES = (
     "benchmarks.execution.provenance",
     "benchmarks.kernel.registry",
     "benchmarks.kernel.runner",
+    "benchmarks.kernel.schema",
     "benchmarks.kernel.worker",
     "benchmarks.kernel.engine.statistics",
     "benchmarks.kernel.results.schema",
@@ -114,7 +115,15 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.components.rope.te_rope_override",
     "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron.data",
-    "benchmarks.kernel.operations.arms",
+    "benchmarks.kernel.operations.attention",
+    "benchmarks.kernel.operations.common",
+    "benchmarks.kernel.operations.lm_head",
+    "benchmarks.kernel.operations.qkv",
+    "benchmarks.kernel.operations.rope",
+    "benchmarks.kernel.operations.swiglu",
+    "benchmarks.kernel.engine.arm",
+    "benchmarks.kernel.engine.correctness",
+    "benchmarks.kernel.engine.measurement",
     "benchmarks.kernel.engine.run",
 )
 
@@ -490,7 +499,185 @@ class ClassificationCompletenessTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 3. Canonical import roots
+# 3. The kernel engine measures what it is handed, and imports nothing else
+# --------------------------------------------------------------------------
+
+# The parent/worker split above is about *when* an import is paid for. This
+# one is about *what* the measurement engine is allowed to know, and it is a
+# different axis: every module named here is worker-side and pays for torch
+# regardless.
+#
+# ``benchmarks.kernel.engine`` builds arms from dotted "module:function"
+# strings resolved by ``resolve_symbol`` inside the worker, so an operations
+# module imports the engine and never the reverse. It takes the scenario
+# *types* from ``benchmarks.kernel.schema`` rather than the five scenario
+# *instances* from ``benchmarks.kernel.registry``, which is the edge that
+# keeps the first property true: colocating a scenario constant with its
+# family's builders is a natural-looking change, and with an engine ->
+# registry edge in place it would silently produce engine ->
+# registry -> operations.<family> -> torchtitan, i.e. importing the engine
+# would import every kernel family and every model dependency behind them.
+#
+# The reason to care is not tidiness. Per-arm process isolation -- running
+# each arm in its own interpreter so a build failure or a CUDA context leak in
+# one cannot affect another -- requires that the supervising engine be
+# importable without any arm's dependencies. Today FA3 and TransformerEngine
+# cannot share a process at all (a cuDNN soname collision, see CLAUDE.md), so
+# this is a live constraint rather than a hypothetical one.
+ENGINE_DIRECTORY = "benchmarks/kernel/engine/"
+ENGINE_FORBIDDEN_IMPORTS = (
+    "benchmarks.kernel.operations",
+    "benchmarks.kernel.registry",
+)
+
+# The declaration side of the same edge: neither the types nor the five
+# scenarios may reach the builders they name, which is what makes the builder
+# paths strings in the first place.
+DECLARATION_MODULES = ("benchmarks.kernel.schema", "benchmarks.kernel.registry")
+
+
+def engine_source_files() -> tuple[str, ...]:
+    return tuple(
+        path
+        for path in tracked_python_files()
+        if path.startswith(ENGINE_DIRECTORY)
+    )
+
+
+def all_imports(path: str) -> tuple[tuple[str, int], ...]:
+    """Every absolute dotted name imported by ``path``, at any scope.
+
+    Unlike ``module_scope_imports`` this descends into function bodies,
+    because a deferred import is still an import: the engine deferring
+    ``benchmarks.kernel.operations.rope`` into a function would keep the
+    module cheap to import and still couple the two packages.
+    """
+    tree = ast.parse((REPO_ROOT / path).read_text(), filename=path)
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.extend((alias.name, node.lineno) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            found.append((node.module, node.lineno))
+    return tuple(found)
+
+
+def _type_checking_guarded_lines(path: str) -> frozenset[int]:
+    """Line numbers of imports inside an ``if TYPE_CHECKING:`` block."""
+    tree = ast.parse((REPO_ROOT / path).read_text(), filename=path)
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        name = (
+            test.id
+            if isinstance(test, ast.Name)
+            else test.attr
+            if isinstance(test, ast.Attribute)
+            else None
+        )
+        if name != "TYPE_CHECKING":
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                guarded.add(child.lineno)
+    return frozenset(guarded)
+
+
+class KernelEngineImportBoundaryTest(unittest.TestCase):
+    """The engine's import graph is independent of the arms it measures."""
+
+    def test_the_engine_has_source_files_to_check(self):
+        """Negative control: a renamed package would make the rest vacuous."""
+        self.assertTrue(
+            engine_source_files(),
+            f"no tracked sources under {ENGINE_DIRECTORY}; the assertions "
+            "below would pass by sweeping nothing",
+        )
+
+    def test_the_engine_imports_neither_the_arms_nor_the_scenario_data(self):
+        """At any scope -- a deferred import couples the packages just as much."""
+        violations = []
+        for path in engine_source_files():
+            for imported, lineno in all_imports(path):
+                for forbidden in ENGINE_FORBIDDEN_IMPORTS:
+                    if targets(imported, forbidden):
+                        violations.append(f"{path}:{lineno}: {imported}")
+        self.assertEqual(
+            violations,
+            [],
+            "the kernel engine must reach arms only as resolved BuiltArm "
+            "values and scenarios only as benchmarks.kernel.schema types:\n  "
+            + "\n  ".join(violations),
+        )
+
+    def test_the_engine_takes_its_declaration_types_from_the_schema(self):
+        """The positive half: the types it does not import from the registry
+        it imports from somewhere, and that somewhere is the schema."""
+        importers = [
+            path
+            for path in engine_source_files()
+            if any(
+                targets(imported, "benchmarks.kernel.schema")
+                for imported, _ in all_imports(path)
+            )
+        ]
+        self.assertTrue(
+            importers,
+            "no module under benchmarks/kernel/engine/ imports "
+            "benchmarks.kernel.schema; if the types moved, this boundary is "
+            "no longer being asserted",
+        )
+
+    def test_the_engine_reaches_a_model_package_only_under_type_checking(self):
+        """``PiperShape`` is an annotation, and must stay one.
+
+        The engine never constructs or inspects a shape -- it forwards the one
+        it is given to ``shape_summary`` and reads ``.name``/``.describe()``
+        off it -- so the only reason it names the type is the signature of
+        ``run_kernel_scenario``. A runtime import here would put a model
+        package in the engine's graph for a type hint.
+        """
+        violations = []
+        for path in engine_source_files():
+            guarded = _type_checking_guarded_lines(path)
+            for imported, lineno in all_imports(path):
+                if targets(imported, "benchmarks.models") and lineno not in guarded:
+                    violations.append(f"{path}:{lineno}: {imported}")
+        self.assertEqual(
+            violations,
+            [],
+            "benchmarks.models imported outside an if TYPE_CHECKING: block:\n  "
+            + "\n  ".join(violations),
+        )
+
+    def test_the_scenario_declarations_never_import_the_arm_builders(self):
+        """The other end of the same edge, and the one a future change breaks.
+
+        Builder paths are strings precisely so that declaring an arm costs
+        nothing at import time. Moving ``ROPE`` next to
+        ``operations/rope.py`` -- or, equivalently, importing a builder here
+        to reference it directly -- reverses that and reconnects the engine to
+        every kernel family through the registry.
+        """
+        violations = []
+        for module in DECLARATION_MODULES:
+            path = source_path(module)
+            for imported, lineno in all_imports(path):
+                if targets(imported, "benchmarks.kernel.operations"):
+                    violations.append(f"{path}:{lineno}: {imported}")
+        self.assertEqual(
+            violations,
+            [],
+            "a kernel scenario declaration imports an arm builder; builder "
+            "paths are resolved by dotted string inside the worker:\n  "
+            + "\n  ".join(violations),
+        )
+
+
+# --------------------------------------------------------------------------
+# 4. Canonical import roots
 # --------------------------------------------------------------------------
 
 
@@ -527,7 +714,7 @@ class CanonicalImportRootsTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 4. The ``benchmarks`` name-shadowing hazard
+# 5. The ``benchmarks`` name-shadowing hazard
 # --------------------------------------------------------------------------
 
 
@@ -614,7 +801,7 @@ class BenchmarksNameShadowingTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 5. ``benchmarks.kernel.worker`` stays cheap to import
+# 6. ``benchmarks.kernel.worker`` stays cheap to import
 # --------------------------------------------------------------------------
 
 

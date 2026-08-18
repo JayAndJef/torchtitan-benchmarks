@@ -1,41 +1,62 @@
-"""Measurement engine for kernel-isolation benchmarks.
+"""Running one kernel scenario end to end, inside the pinned GPU worker.
 
-Runs inside the pinned GPU worker. Arms are timed round-robin: every cycle
-runs each arm's closure once between adjacent entries of a preallocated CUDA
-event matrix, with a single device synchronize after all cycles, so clock
-and thermal drift hit every arm equally and per-cycle deltas are paired.
-Correctness gates run before any timing.
+The orchestrator, and the only module in ``benchmarks.kernel.engine`` that
+knows the order of operations: resolve the scenario's dotted builder paths,
+seed the device, build every arm, gate them on correctness *before* any
+timing (``engine.correctness``), time them round-robin
+(``engine.measurement``), derive the per-arm columns, pair each arm against
+its opponent (``engine.statistics``) and assemble the ``KernelScenarioResult``
+that the worker writes. The methodology itself lives in the two modules it
+calls; what is here is sequencing and bookkeeping.
+
+Nothing in this package imports ``benchmarks.kernel.operations`` or a model
+package. Arms arrive as already-resolved ``BuiltArm`` values through
+``resolve_symbol``, and the scenario declarations arrive as
+``benchmarks.kernel.schema`` types rather than through
+``benchmarks.kernel.registry``, so the engine's import graph stays
+independent of which kernel families happen to exist and of everything they
+depend on -- which is what will let a later change run each arm in its own
+process. ``tests/test_import_boundaries.py`` asserts both edges are absent.
+
+``run_kernel_scenario`` re-asserts the balanced-routing invariant that
+``benchmarks.kernel.runner`` also checks, and does so before the CUDA check:
+the runner's loud skip is the friendly path, not the guard, and a direct
+caller (``python -m benchmarks.kernel.worker``, the GPU smoke test) must not
+be able to measure an expert split that does not cover the rows it built.
 """
 
 from __future__ import annotations
 
-import contextlib
-import gc
 import importlib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from statistics import median
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from benchmarks.artifacts.summaries import summarize
+from benchmarks.kernel.engine.arm import BuiltArm
+from benchmarks.kernel.engine.correctness import run_correctness
+from benchmarks.kernel.engine.measurement import (
+    burst_pass,
+    interleaved_samples,
+    memory_pass,
+)
 from benchmarks.kernel.engine.statistics import (
     KERNEL_SIGNIFICANCE_METHODOLOGY,
     kernel_comparison,
 )
-from benchmarks.kernel.registry import (
-    CorrectnessCheck,
+from benchmarks.kernel.results.schema import (
+    ArmResult,
+    KernelScenarioResult,
+    ModeResult,
+)
+from benchmarks.kernel.schema import (
     KernelScenario,
     KernelWorkload,
     MODES,
     routing_divides_evenly,
     shape_summary,
-)
-from benchmarks.kernel.results.schema import (
-    ArmResult,
-    CorrectnessResult,
-    KernelScenarioResult,
-    ModeResult,
 )
 
 if TYPE_CHECKING:
@@ -44,24 +65,6 @@ if TYPE_CHECKING:
     # imports, which is what will let a later commit run each arm in its own
     # process without the engine dragging in every model's dependencies.
     from benchmarks.models.piper_qwen3.shape import PiperShape
-
-
-@dataclass
-class BuiltArm:
-    """A constructed arm: per-mode timed closures plus its validity hook.
-
-    Each ``calls`` closure performs exactly one timed operation over
-    prebuilt tensors; ``correctness_outputs`` runs the arm once on the
-    shared seeded inputs and returns the named tensors its declared
-    correctness checks compare.
-    """
-
-    name: str
-    calls: dict[str, Callable[[], object]]
-    correctness_outputs: Callable[[], dict[str, torch.Tensor]]
-    bytes_moved: int | None = None
-    floor: bool = False
-    notes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -79,274 +82,6 @@ def resolve_symbol(path: str) -> Any:
     module_name, _, attribute = path.partition(":")
     module = importlib.import_module(module_name)
     return getattr(module, attribute)
-
-
-@contextlib.contextmanager
-def _gc_paused():
-    """Keep collection cycles out of the timed region.
-
-    The measured arms only stay ahead of the GPU if the host keeps enqueuing;
-    a collection pause starves the stream and lands as idle time inside
-    whichever arm's interval was open. Measured on the swiglu modules: sd
-    fell from ~63 us to ~1.4 us and every 2x outlier disappeared, with the
-    median unchanged. ``timeit`` disables the collector for the same reason.
-    """
-    enabled = gc.isenabled()
-    gc.collect()
-    gc.disable()
-    try:
-        yield
-    finally:
-        if enabled:
-            gc.enable()
-
-
-def interleaved_samples(
-    arms: list[BuiltArm], mode: str, n: int, warmup: int
-) -> dict[str, list[float]]:
-    """Time all arms that support ``mode``, one cycle at a time."""
-    active = [arm for arm in arms if mode in arm.calls]
-    if not active:
-        return {}
-    for _ in range(warmup):
-        for arm in active:
-            arm.calls[mode]()
-    torch.cuda.synchronize()
-    # One extra cycle absorbs the post-sync cold start: the queue is empty
-    # after the warmup synchronize, so the first cycle cannot overlap host
-    # dispatch with device work and reads systematically high.
-    events = [
-        [torch.cuda.Event(enable_timing=True) for _ in range(len(active) + 1)]
-        for _ in range(n + 1)
-    ]
-    with _gc_paused():
-        for row in events:
-            row[0].record()
-            for slot, arm in enumerate(active):
-                arm.calls[mode]()
-                row[slot + 1].record()
-        torch.cuda.synchronize()
-    return {
-        arm.name: [
-            row[slot].elapsed_time(row[slot + 1]) * 1e3 for row in events[1:]
-        ]
-        for slot, arm in enumerate(active)
-    }
-
-
-def memory_pass(arm: BuiltArm, mode: str, iters: int) -> float:
-    """Peak allocated GiB across ``iters`` isolated calls of ``mode``."""
-    peak = 0.0
-    for _ in range(iters):
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-        arm.calls[mode]()
-        torch.cuda.synchronize()
-        peak = max(peak, torch.cuda.max_memory_allocated() / 2**30)
-    return peak
-
-
-def burst_pass(
-    arm: BuiltArm, bursts: tuple[int, ...], iters: int
-) -> dict[str, float]:
-    """Median us per call at increasing back-to-back burst sizes.
-
-    Distinguishes kernel cost from dispatch cost: if per-call time collapses
-    as the burst grows, single-call timing was host-dispatch-bound.
-    """
-    call = arm.calls["forward"]
-    result = {}
-    with _gc_paused():
-        for burst in bursts:
-            for _ in range(20):
-                call()
-            torch.cuda.synchronize()
-            samples = []
-            for _ in range(iters):
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                for _ in range(burst):
-                    call()
-                end.record()
-                torch.cuda.synchronize()
-                samples.append(start.elapsed_time(end) * 1e3 / burst)
-            result[str(burst)] = median(samples)
-    return result
-
-
-def _tensor_pair(
-    arm_outputs: dict[str, torch.Tensor],
-    reference_outputs: dict[str, torch.Tensor],
-    arm_name: str,
-    output: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if output not in arm_outputs:
-        raise RuntimeError(
-            f"{arm_name}: correctness_outputs did not produce {output!r}"
-        )
-    if output not in reference_outputs:
-        raise RuntimeError(
-            f"{arm_name}: reference did not produce {output!r}"
-        )
-    return arm_outputs[output], reference_outputs[output]
-
-
-def _check_rows(
-    arm_name: str,
-    check: CorrectnessCheck,
-    arm_outputs: dict[str, torch.Tensor],
-    reference_outputs: dict[str, torch.Tensor],
-) -> list[CorrectnessResult]:
-    rows = []
-    for output in check.outputs:
-        value, truth = _tensor_pair(
-            arm_outputs, reference_outputs, arm_name, output
-        )
-        if check.kind == "bitwise":
-            equal = value.shape == truth.shape and torch.equal(value, truth)
-            difference = (
-                (value.float() - truth.float()).abs().max().item()
-                if value.shape == truth.shape
-                else float("inf")
-            )
-            rows.append(
-                CorrectnessResult(
-                    arm=arm_name,
-                    reference=check.reference,
-                    kind=check.kind,
-                    output=output,
-                    metric="max_abs",
-                    value=difference,
-                    threshold=0.0,
-                    passed=None if check.informational else equal,
-                    informational=check.informational,
-                )
-            )
-        elif check.kind == "fp64_ulp":
-            truth64 = truth.double()
-            ulp = torch.ldexp(
-                torch.ones_like(truth64),
-                torch.floor(
-                    torch.log2(truth64.abs().clamp_min(1e-30))
-                ).long()
-                - 7,
-            )
-            mean_ulp = ((value.double() - truth64).abs() / ulp).mean().item()
-            rows.append(
-                CorrectnessResult(
-                    arm=arm_name,
-                    reference=check.reference,
-                    kind=check.kind,
-                    output=output,
-                    metric="mean_ulp",
-                    value=mean_ulp,
-                    threshold=check.max_mean_ulp,
-                    passed=None
-                    if check.informational
-                    else mean_ulp <= float(check.max_mean_ulp),
-                    informational=check.informational,
-                )
-            )
-        elif check.kind == "tolerance":
-            delta = (value.float() - truth.float()).abs()
-            if check.max_abs is not None:
-                max_abs = delta.max().item()
-                rows.append(
-                    CorrectnessResult(
-                        arm=arm_name,
-                        reference=check.reference,
-                        kind=check.kind,
-                        output=output,
-                        metric="max_abs",
-                        value=max_abs,
-                        threshold=check.max_abs,
-                        passed=None
-                        if check.informational
-                        else max_abs <= float(check.max_abs),
-                        informational=check.informational,
-                    )
-                )
-            if check.max_rel is not None:
-                max_rel = (
-                    (delta / truth.float().abs().clamp_min(1e-6))
-                    .max()
-                    .item()
-                )
-                rows.append(
-                    CorrectnessResult(
-                        arm=arm_name,
-                        reference=check.reference,
-                        kind=check.kind,
-                        output=output,
-                        metric="max_rel",
-                        value=max_rel,
-                        threshold=check.max_rel,
-                        passed=None
-                        if check.informational
-                        else max_rel <= float(check.max_rel),
-                        informational=check.informational,
-                    )
-                )
-            if check.max_rel_l2 is not None:
-                norm = truth.float().norm()
-                rel_l2 = (
-                    (delta.norm() / norm).item()
-                    if norm
-                    else delta.norm().item()
-                )
-                rows.append(
-                    CorrectnessResult(
-                        arm=arm_name,
-                        reference=check.reference,
-                        kind=check.kind,
-                        output=output,
-                        metric="rel_l2",
-                        value=rel_l2,
-                        threshold=check.max_rel_l2,
-                        passed=None
-                        if check.informational
-                        else rel_l2 <= float(check.max_rel_l2),
-                        informational=check.informational,
-                    )
-                )
-        else:
-            raise ValueError(f"unknown correctness kind {check.kind!r}")
-    return rows
-
-
-def run_correctness(
-    scenario: KernelScenario,
-    built: dict[str, BuiltArm],
-    fp64_reference: dict[str, torch.Tensor] | None,
-) -> tuple[list[CorrectnessResult], bool]:
-    outputs_cache: dict[str, dict[str, torch.Tensor]] = {}
-
-    def outputs_for(name: str) -> dict[str, torch.Tensor]:
-        if name == "fp64":
-            if fp64_reference is None:
-                raise RuntimeError(
-                    f"{scenario.name}: fp64 reference requested but the "
-                    f"scenario declares no reference_builder"
-                )
-            return fp64_reference
-        if name not in outputs_cache:
-            outputs_cache[name] = built[name].correctness_outputs()
-        return outputs_cache[name]
-
-    rows: list[CorrectnessResult] = []
-    for arm in scenario.arms:
-        for check in arm.correctness:
-            rows.extend(
-                _check_rows(
-                    arm.name,
-                    check,
-                    outputs_for(arm.name),
-                    outputs_for(check.reference),
-                )
-            )
-    all_passed = all(row.passed for row in rows if row.passed is not None)
-    return rows, all_passed
 
 
 def _heaviest_mode(arm: BuiltArm) -> str:

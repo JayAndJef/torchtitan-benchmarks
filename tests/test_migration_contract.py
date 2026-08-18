@@ -55,7 +55,22 @@ SWIGLU_INDUCTOR_OVERRIDE = (
     "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu."
     "piper_optimized_inductor_fused_grouped_experts"
 )
-KERNEL_ARMS_MODULE = "benchmarks.kernel.operations.arms"
+# One arm-builder module per kernel family, and every builder path a scenario
+# names -- inputs, fp64 reference and each arm -- must resolve inside its own
+# family's module. Pinned as data rather than derived from the scenario name,
+# so a scenario renamed without moving its builders is caught rather than
+# followed. The stronger form matters more than the flat prefix it replaced:
+# these are the strings ``resolve_symbol`` hands to importlib inside the GPU
+# worker, and a builder left behind in another family's module would still
+# import cleanly and still measure the right kernel -- it would just quietly
+# undo the split, and nothing else in the suite would notice.
+KERNEL_ARMS_MODULES = {
+    "rope": "benchmarks.kernel.operations.rope",
+    "swiglu": "benchmarks.kernel.operations.swiglu",
+    "qkv": "benchmarks.kernel.operations.qkv",
+    "lm_head": "benchmarks.kernel.operations.lm_head",
+    "attention": "benchmarks.kernel.operations.attention",
+}
 
 # Third-party roots override paths are allowed to name, so the "did this move
 # leave a first-party path behind?" check does not trip on the fork.
@@ -300,16 +315,22 @@ class KernelBuilderPathTests(unittest.TestCase):
                         f"{scenario.name}.reference_builder",
                     )
 
-    def test_all_builders_live_in_the_canonical_kernel_arms_module(self) -> None:
-        paths = []
+    def test_every_scenario_has_a_pinned_arms_module(self) -> None:
+        # Both directions, so the map cannot drift from the registry: a new
+        # scenario with no entry would otherwise be exempt from the check
+        # below, and a stale entry would pin a module nothing uses.
+        self.assertEqual(set(KERNEL_ARMS_MODULES), set(KERNEL_SCENARIOS))
+
+    def test_all_builders_live_in_their_own_familys_arms_module(self) -> None:
         for scenario in KERNEL_SCENARIOS.values():
-            paths.append(scenario.inputs_builder)
+            expected = KERNEL_ARMS_MODULES[scenario.name]
+            paths = [scenario.inputs_builder]
             if scenario.reference_builder is not None:
                 paths.append(scenario.reference_builder)
             paths.extend(arm.builder for arm in scenario.arms)
-        for path in paths:
-            with self.subTest(path=path):
-                self.assertEqual(_split_builder(path)[0], KERNEL_ARMS_MODULE)
+            for path in paths:
+                with self.subTest(scenario=scenario.name, path=path):
+                    self.assertEqual(_split_builder(path)[0], expected)
 
     def test_the_split_matches_resolve_symbol(self) -> None:
         """The colon format is resolve_symbol's, not a guess."""

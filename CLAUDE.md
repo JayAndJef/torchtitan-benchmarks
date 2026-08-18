@@ -82,10 +82,11 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/e2e/results.py` | Evaluation, region comparison, `results.json`, and its renderer |
 | `benchmarks/e2e/data/piper_qwen3.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
 | `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
-| `benchmarks/kernel/registry.py` | Kernel scenarios, arms, and `KernelWorkload` |
+| `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
+| `benchmarks/kernel/registry.py` | The five kernel scenarios themselves, declared with those types |
 | `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the subprocess it launches |
-| `benchmarks/kernel/engine/` | `run.py` (timing loop, correctness) and `statistics.py` |
-| `benchmarks/kernel/operations/arms.py` | Every kernel arm builder and inputs/reference builder |
+| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (round-robin timing, memory and burst passes), `correctness.py` (the gates), `run.py` (orchestration) and `statistics.py` |
+| `benchmarks/kernel/operations/` | Arm builders, one module per kernel family (`rope.py`, `swiglu.py`, `qkv.py`, `attention.py`, `lm_head.py`) plus `common.py` |
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`) and `reporting.py` |
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
@@ -339,7 +340,7 @@ put the geometry in the config *name* rather than in an explicit argument.
 `--model-size` (single-valued -- kernel-bench does not sweep sizes) and draw
 their geometry from the same `PIPER_SHAPES` entry, so a shape cannot drift
 between the two systems either. Batch and sequence length are **not** model
-shape: they live in `benchmarks/kernel/registry.py`'s `KernelWorkload`, and
+shape: they live in `benchmarks/kernel/schema.py`'s `KernelWorkload`, and
 `resolve_shape_and_workload` pairs the two and validates the pair.
 
 ### The 40-step floor
@@ -730,10 +731,23 @@ reduction, and CLAUDE.md's rule against max/ULP metrics on reductions applies.
 
 `*` = scenario baseline. `benchmarks/kernel/registry.py` is the registry: add an
 arm by appending a `KernelArm` with a builder path, and a scenario by appending
-a `KernelScenario`. Builders live in `benchmarks/kernel/operations/arms.py`
-(spelled `benchmarks.kernel.operations.arms:<fn>` in a builder path) and return a
-`BuiltArm` whose `calls` map a mode to a zero-argument timed closure and
-whose `correctness_outputs` returns named tensors for the gates.
+a `KernelScenario` (both declared by `benchmarks/kernel/schema.py`). Builders
+live in that family's module under `benchmarks/kernel/operations/`, one per
+scenario and named after it (spelled `benchmarks.kernel.operations.<scenario>:<fn>`
+in a builder path), and return a `BuiltArm` whose `calls` map a mode to a
+zero-argument timed closure and whose `correctness_outputs` returns named
+tensors for the gates.
+
+**A builder path is a string, and must stay one.** `benchmarks/kernel/engine/`
+imports `schema.py`, never `registry.py`, and never an `operations/` module:
+arms reach it only as already-resolved `BuiltArm` values via `resolve_symbol`.
+So do not move a scenario constant next to its family's builders -- that
+"colocate the family" move recreates `engine -> registry ->
+operations.<family> -> torchtitan` and drags every kernel family and its model
+dependencies into the engine's import graph, which is what per-arm process
+isolation cannot have. `tests/test_import_boundaries.py` section 3 asserts both
+halves; `tests/test_migration_contract.py` pins each scenario's builders to its
+own family module.
 
 ### Method
 

@@ -8,11 +8,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.kernel.engine.statistics import kernel_comparison
-from benchmarks.kernel.registry import (
-    KERNEL_SCENARIOS,
+from benchmarks.kernel.registry import KERNEL_SCENARIOS, kernel_scenario_by_name
+from benchmarks.kernel.schema import (
     KernelWorkload,
     MODES,
-    kernel_scenario_by_name,
     resolve_shape_and_workload,
     routing_divides_evenly,
     shape_summary,
@@ -55,11 +54,16 @@ class RegistryTests(unittest.TestCase):
             self.assertTrue(arm.compiled, arm.name)
 
     def test_builder_paths_resolve_without_importing_torch(self) -> None:
-        # Registry import must stay torch-free; the dotted paths just need
-        # to be well-formed module:function references.
-        registry = importlib.import_module("benchmarks.kernel.registry")
-        self.assertNotIn("torch", vars(registry))
+        # Both declaration modules must stay torch-free; the dotted paths just
+        # need to be well-formed module:function references, each one naming
+        # its *own* family's arm module. A builder left in another family's
+        # module would import and measure correctly, so nothing but this
+        # notices. tests/test_migration_contract.py pins the five literal
+        # module names; here the point is that they track the scenario.
+        for name in ("benchmarks.kernel.registry", "benchmarks.kernel.schema"):
+            self.assertNotIn("torch", vars(importlib.import_module(name)))
         for scenario in KERNEL_SCENARIOS.values():
+            expected = f"benchmarks.kernel.operations.{scenario.name}"
             references = [scenario.inputs_builder] + [
                 arm.builder for arm in scenario.arms
             ]
@@ -67,7 +71,7 @@ class RegistryTests(unittest.TestCase):
                 references.append(scenario.reference_builder)
             for reference in references:
                 module, _, function = reference.partition(":")
-                self.assertEqual(module, "benchmarks.kernel.operations.arms")
+                self.assertEqual(module, expected)
                 self.assertTrue(function.isidentifier(), reference)
 
     def test_only_raw_kernels_and_floors_stay_eager(self) -> None:

@@ -34,10 +34,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from benchmarks.kernel.registry import (
-        kernel_scenario_by_name,
-        resolve_shape_and_workload,
-    )
+    from benchmarks.kernel.registry import kernel_scenario_by_name
+    from benchmarks.kernel.schema import resolve_shape_and_workload
 
     try:
         scenario = kernel_scenario_by_name(args.scenario)
