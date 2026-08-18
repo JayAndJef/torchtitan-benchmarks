@@ -739,6 +739,11 @@ TEST_CENSUS = {
     # and +1 for the two derived columns the parent alone can compute.
     "test_kernel_cli": 25,
     "test_kernel_gpu_smoke": 4,
+    # Added when the merge got a direct caller: every other merge assertion
+    # reaches it through execute_kernel_run, which spawns replicate-major and
+    # therefore never hands _ordered_replicates the arrival order it exists
+    # to reject.
+    "test_kernel_merge": 4,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them.
@@ -764,7 +769,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 199
+TEST_CENSUS_TOTAL = 203
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
