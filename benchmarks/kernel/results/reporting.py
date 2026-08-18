@@ -144,15 +144,33 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
                     + " ".join(f"{values[size]:9.2f}" for size in sizes)
                 )
         lines.append(
-            f"  Per-call time still falling at the top means burst k="
-            f"{result.burst_k} is too small for that arm. The 'resid %'"
+            f"  The 'resid %' column above is the fall across the top two"
+            f" rungs, and '!' marks it above {BURST_RESIDUAL_FLAG * 100:g}%."
         )
         lines.append(
-            f"  column above is that fall, and '!' marks it above "
-            f"{BURST_RESIDUAL_FLAG * 100:g}%: those rows compare dispatch"
+            f"  A marked arm is still buying amortization at burst k="
+            f"{result.burst_k}, so its ratio moves with k and is not a"
         )
         lines.append(
-            "  cost, not kernel speed, and their ratios move with burst k."
+            "  kernel-speed claim. The test is one-sided: an unmarked arm is"
+        )
+        lines.append(
+            "  NOT thereby device-bound. A ladder can plateau at a dispatch"
+        )
+        lines.append(
+            "  cost that bursting cannot amortize, which is what the backward"
+        )
+        lines.append(
+            "  modes here do. Only profiler-summed device time separates the"
+        )
+        lines.append(
+            "  two, and nothing in this repo measures it. Treat a residual"
+        )
+        lines.append(
+            "  within a few points of the threshold as undecided: it is a"
+        )
+        lines.append(
+            "  difference of two medians and carries their noise."
         )
 
     lines.extend(["", "correctness:"])

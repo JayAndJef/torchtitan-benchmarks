@@ -92,7 +92,11 @@ KERNEL_MEASUREMENT_METHODOLOGY = {
         "is device-bound. Run --burst; burst_residual is the fraction by "
         "which per-call time still falls across the ladder's top two rungs, "
         "and an arm above burst_residual_flag_threshold has a burst_k-"
-        "dependent ratio that is not a kernel-speed claim."
+        "dependent ratio that is not a kernel-speed claim. The test is "
+        "one-sided: an arm below the threshold is NOT thereby device-bound, "
+        "because a ladder can plateau at a dispatch cost bursting cannot "
+        "amortize. burst_residual is a difference of two medians and "
+        "carries their noise, so a value near the threshold is undecided."
     ),
     "burst_residual_flag_threshold": BURST_RESIDUAL_FLAG,
     "arm_isolation": "one_process_per_arm_replicate",

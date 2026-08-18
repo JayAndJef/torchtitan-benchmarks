@@ -39,9 +39,20 @@ arms sit 6-19x above that floor and are still falling at k=64, so roughly
 ``baseline`` is 2.40x at k=1, 3.05x at k=16 and 3.09x at k=64. A ratio that
 moves with a harness parameter is not a property of the two kernels. Run
 ``--burst``, read the ``burst_residual`` column the merge derives from the
-ladder, and report a flagged row as a comparison of dispatch cost. A
-kernel-speed claim needs profiler-summed device time, which this module
-does not measure.
+ladder, and report a flagged row as a comparison of dispatch cost.
+
+**That test is one-sided, and the ladder says so itself.** An arm below
+the threshold is *not* thereby device-bound: a ladder can plateau at a
+dispatch cost that bursting cannot amortize. Rope backward does exactly
+that -- ``baseline`` reads 187/156/157/159 us across the ladder, flat from
+k=4 on, against ~12 us of device work. Flat means ``k`` has stopped buying
+anything, not that the number is device time. Separating the two needs
+profiler-summed device time, which this module does not measure.
+
+``burst_residual`` is also a difference of two medians and carries their
+noise. Two runs of the same rope forward ladder an hour apart put
+``copy_floor`` at 1.9% and then 4.8%, and ``te`` at 7.2% and then 14.2%.
+Read a value near the threshold as undecided rather than as a verdict.
 
 A burst of ``k`` back-to-back calls is still what a component looks like
 inside a steady-state training step, where the same kernel runs on every

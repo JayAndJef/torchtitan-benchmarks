@@ -266,6 +266,52 @@ class KernelResultsTests(unittest.TestCase):
             {"copy_floor": False, "baseline": True, "helion": True, "te": True},
         )
 
+    def test_a_flat_ladder_is_not_a_device_bound_verdict(self) -> None:
+        """The flag is one-sided, and rope backward is why.
+
+        Measured on an H200: ``baseline`` backward reads 187/156/157/159 us
+        across k=1/4/16/64, flat from k=4 on, against ~12 us of device work.
+        The residual is therefore tiny and the row carries no mark -- but
+        the number is still ~92% dispatch. A plateau says ``k`` stopped
+        buying amortization, never that the measurement became device time.
+        """
+        residual = _burst_residual(
+            {"backward": {"1": 187.14, "4": 156.17, "16": 156.64,
+                          "64": 158.68}},
+            "backward",
+        )
+        self.assertLess(residual, BURST_RESIDUAL_FLAG)
+        # The report must not let that silence read as a device-time claim.
+        # The caveat rides with the ladder, because an unmarked row is only
+        # readable at all once a ladder has run.
+        result = replace(
+            sample_result(),
+            arms={
+                "baseline": ArmResult(
+                    name="baseline",
+                    modes={
+                        "backward": ModeResult(
+                            summary=summarize([164.93]),
+                            replicates_us=((164.93,),),
+                            derived={"burst_residual": residual},
+                        )
+                    },
+                    burst_us_per_call={
+                        "backward": {"1": 187.14, "4": 156.17,
+                                     "16": 156.64, "64": 158.68}
+                    },
+                )
+            },
+        )
+        rendered = render_kernel_results(result)
+        row = next(
+            line for line in rendered.splitlines()
+            if line.startswith("  baseline")
+        )
+        self.assertNotIn("!", row)
+        self.assertIn("one-sided", rendered)
+        self.assertIn("NOT thereby device-bound", rendered)
+
     def test_unsupported_schema_rejected(self) -> None:
         # 1 is the pre-split schema and 2 the pre-burst one; rejecting
         # both is the point of each bump.
