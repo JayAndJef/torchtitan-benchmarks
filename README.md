@@ -191,10 +191,13 @@ the compiler fuses the graph around it.
 | `attention` | inner attention only: FlexAttention vs FlashAttention-3 varlen vs FlexAttention lowered to FlashAttention-4 |
 
 Each number is burst-amortized per-call device time, repeated over replicate
-sweeps so drift affects every arm equally. Every arm is built and timed in
-its own process, so one arm's dependencies never reach another's; the parent
-merges the per-worker fragments into the results file. Correctness gates run
-first and fail the run loudly, and no arm is timed after a failed gate. Every
+sweeps so drift affects every arm equally. Every arm is *timed* in its own
+process, so one arm's dependencies never reach another's during measurement;
+the parent merges the per-worker fragments into the results file. The
+correctness pass is the exception: it builds the whole roster in one process,
+because most arms name another arm as their reference, so a scenario whose
+arms cannot share a process must split those checks first. Correctness gates
+run first and fail the run loudly, and no arm is timed after a failed gate. Every
 declared arm reaches the results file with a status of `ok`, `skipped` or
 `failed`, so a host that cannot build one arm still measures the rest and
 says which one it dropped. Each scenario writes a manifest and results JSON

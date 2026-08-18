@@ -817,14 +817,21 @@ own family module.
   point; module arms retain the graph and re-run `torch.autograd.backward`,
   so only backward kernels are timed. `lm_head` is fwd+bwd only because
   `FusedLinearCrossEntropyLoss` runs its backward inside `__call__`.
-- **Every arm is built and timed in its own process.** A scenario is one
-  correctness worker plus `replicates x arms` timing workers, spawned
-  sequentially by `benchmarks/kernel/runner.py` in replicate-major order.
-  Each worker writes a JSON fragment under `fragments/`, and the parent
-  merges them (`benchmarks/kernel/results/merge.py`). This is what keeps one
-  arm's dependencies out of another arm's interpreter -- FA3 and
-  TransformerEngine cannot share a process at all -- and it is why the parent
-  computes the ratios: no worker sees a second arm.
+- **Every arm is timed in its own process. The gates still build them all in
+  one.** A scenario is one correctness worker plus `replicates x arms` timing
+  workers, spawned sequentially by `benchmarks/kernel/runner.py` in
+  replicate-major order. Each worker writes a JSON fragment under
+  `fragments/`, and the parent merges them
+  (`benchmarks/kernel/results/merge.py`). The timing split is what keeps one
+  arm's dependencies out of another arm's interpreter during measurement, and
+  it is why the parent computes the ratios: no timing worker sees a second
+  arm. **`run_correctness_pass` is the exception, and it is a live
+  constraint**: it builds *every* arm of the scenario in one interpreter,
+  because ten of the sixteen arms name another arm as their correctness
+  reference and a check needs both sides at once. So the first scenario
+  holding both a TransformerEngine arm and an FA3 arm -- which cannot share a
+  process at all -- dies in the correctness worker, and splitting the checks
+  per arm is the work that unblocks it.
   `benchmarks/kernel/engine/run.py`'s `run_kernel_scenario` composes the same
   two passes in a single process for the GPU smoke test; the runner never
   calls it.
