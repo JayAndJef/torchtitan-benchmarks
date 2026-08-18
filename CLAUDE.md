@@ -74,7 +74,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 
 | path | contents |
 |---|---|
-| `benchmarks/cli/` | Click CLI (`main.py`) plus `__main__.py`, which is what `python -m benchmarks.cli` runs |
+| `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group |
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |

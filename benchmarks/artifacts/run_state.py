@@ -25,7 +25,7 @@ for ``arm.name`` alone, so the import sits under ``TYPE_CHECKING``; see
 ``record_evaluation_status`` deliberately does not take the arm definitions
 the other three do, and returns silently when there is no state file.
 Evaluation runs after the arms are finished and is reachable from
-``benchmarks.cli.main evaluate <out_dir>`` against a directory whose
+``benchmarks.cli.e2e``'s ``evaluate <out_dir>`` against a directory whose
 scenario the current process never loaded -- including one written by an
 older schema -- so it reads and rewrites the ledger as plain JSON.
 """

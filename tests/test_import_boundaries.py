@@ -67,6 +67,9 @@ HEAVY_MODULES = (
 # is imported in a subprocess below and its ``sys.modules`` checked.
 PARENT_SIDE_MODULES = (
     "benchmarks.cli.main",
+    "benchmarks.cli.e2e",
+    "benchmarks.cli.kernel",
+    "benchmarks.cli.rendering",
     "benchmarks.e2e.registry",
     "benchmarks.e2e.launch",
     "benchmarks.e2e.runner",

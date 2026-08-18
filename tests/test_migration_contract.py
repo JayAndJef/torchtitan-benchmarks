@@ -727,7 +727,11 @@ class RepositoryRootTests(unittest.TestCase):
 # directory, a broken import swallowed by a loader error) drops to zero here
 # instead of quietly shrinking the suite.
 TEST_CENSUS = {
-    "test_cli": 16,
+    # 16 pre-migration, +1 for the assertion that importing
+    # benchmarks.cli.main alone yields all five commands -- the failure mode
+    # the cli.add_command wiring exists to prevent, added when the CLI split
+    # into main/e2e/kernel/rendering.
+    "test_cli": 17,
     "test_kernel_cli": 14,
     "test_kernel_gpu_smoke": 4,
     "test_kernel_results": 3,
@@ -748,7 +752,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 176
+TEST_CENSUS_TOTAL = 177
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

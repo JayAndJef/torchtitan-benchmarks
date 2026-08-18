@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,41 @@ from benchmarks.models.piper_qwen3.shape import HUGE
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
+
+    def test_importing_main_alone_registers_every_command(self) -> None:
+        """The group is fully populated by importing ``cli.main`` and nothing else.
+
+        ``run``, ``run-all`` and ``evaluate`` are defined in
+        ``benchmarks/cli/e2e.py`` and ``kernel-bench`` in
+        ``benchmarks/cli/kernel.py``, with plain ``@click.command``;
+        ``main.py`` attaches them with ``cli.add_command``. Binding them with
+        ``@cli.command`` in their own modules instead would invert that edge,
+        and ``from benchmarks.cli.main import cli`` -- what ``__main__.py``
+        and this file do -- would then yield a group holding only whichever
+        commands some earlier import had loaded. Nothing else would notice: a
+        CLI missing ``run-all`` starts fine and prints a usage message.
+
+        A subprocess, because the rest of the suite imports the command
+        modules for its patch targets; in this process the group would be
+        populated either way.
+        """
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from benchmarks.cli.main import cli\n"
+                "print(' '.join(sorted(cli.commands)))",
+            ],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.stdout.split(),
+            ["evaluate", "kernel-bench", "run", "run-all", "scenarios"],
+        )
 
     def test_root_help_and_scenario_listing(self) -> None:
         help_result = self.runner.invoke(cli, ["--help"])
@@ -54,7 +90,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.main.execute_run", return_value=completed
+            "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
                 cli, ["run", "2", "--compile-mode", "cuda-graph", "--ac", "none"]
@@ -69,7 +105,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.main.execute_run", return_value=completed
+            "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -80,8 +116,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
-                "benchmarks.cli.main.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.main._evaluate"):
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
                     cli,
                     [
@@ -111,7 +147,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.main.execute_run", return_value=completed
+            "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -157,7 +193,7 @@ class CliTests(unittest.TestCase):
             "benchmarks_git_rev": "bench-rev",
         }
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.cli.main.execute_run", side_effect=run_with_fake_process
+            "benchmarks.cli.e2e.execute_run", side_effect=run_with_fake_process
         ), mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", metadata),
@@ -203,7 +239,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.main.execute_run", return_value=completed
+            "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
                 cli,
@@ -234,8 +270,8 @@ class CliTests(unittest.TestCase):
             out_dir = Path(temporary)
             completed = SimpleNamespace(out_dir=out_dir)
             with mock.patch(
-                "benchmarks.cli.main.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.main._evaluate") as evaluate:
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
                 result = self.runner.invoke(
                     cli,
                     ["run-all", "6", "--scenario", "piper1b_rope"],
@@ -256,8 +292,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
-                "benchmarks.cli.main.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.main._evaluate"):
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
         self.assertEqual(result.exit_code, 0, result.output)
         requests = [call.args[0] for call in execute.call_args_list]
@@ -273,8 +309,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
-                "benchmarks.cli.main.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.main._evaluate"):
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
                     cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
                 )
@@ -284,8 +320,8 @@ class CliTests(unittest.TestCase):
 
     def test_all_scenarios_stops_at_the_first_failing_scenario(self) -> None:
         with mock.patch(
-            "benchmarks.cli.main.execute_run", side_effect=RuntimeError("arm failed")
-        ) as execute, mock.patch("benchmarks.cli.main._evaluate") as evaluate:
+            "benchmarks.cli.e2e.execute_run", side_effect=RuntimeError("arm failed")
+        ) as execute, mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
             result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(execute.call_count, 1)
@@ -306,8 +342,8 @@ class CliTests(unittest.TestCase):
 
     def test_run_all_does_not_evaluate_a_failed_execution(self) -> None:
         with mock.patch(
-            "benchmarks.cli.main.execute_run", side_effect=RuntimeError("arm failed")
-        ), mock.patch("benchmarks.cli.main._evaluate") as evaluate:
+            "benchmarks.cli.e2e.execute_run", side_effect=RuntimeError("arm failed")
+        ), mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
             result = self.runner.invoke(cli, ["run-all", "0"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("arm failed", result.output)
@@ -321,9 +357,9 @@ class CliTests(unittest.TestCase):
             )
             completed = SimpleNamespace(out_dir=out_dir)
             with mock.patch(
-                "benchmarks.cli.main.execute_run", return_value=completed
+                "benchmarks.cli.e2e.execute_run", return_value=completed
             ), mock.patch(
-                "benchmarks.cli.main._evaluate",
+                "benchmarks.cli.e2e._evaluate",
                 side_effect=click.ClickException("bad trace"),
             ):
                 result = self.runner.invoke(cli, ["run-all", "0"])

@@ -54,7 +54,7 @@ class KernelCliTests(unittest.TestCase):
 
     def test_flags_map_onto_the_request(self) -> None:
         with mock.patch(
-            "benchmarks.cli.main.execute_kernel_run", return_value=()
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(
                 cli,
@@ -89,7 +89,7 @@ class KernelCliTests(unittest.TestCase):
 
     def test_model_size_defaults_to_normal_and_rejects_unknown(self) -> None:
         with mock.patch(
-            "benchmarks.cli.main.execute_kernel_run", return_value=()
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -102,7 +102,7 @@ class KernelCliTests(unittest.TestCase):
 
     def test_defaults_to_every_scenario(self) -> None:
         with mock.patch(
-            "benchmarks.cli.main.execute_kernel_run", return_value=()
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -127,7 +127,7 @@ class KernelCliTests(unittest.TestCase):
             failed=True,
         )
         with mock.patch(
-            "benchmarks.cli.main.execute_kernel_run", return_value=(outcome,)
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=(outcome,)
         ):
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertNotEqual(result.exit_code, 0)

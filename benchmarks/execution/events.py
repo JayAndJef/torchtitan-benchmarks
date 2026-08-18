@@ -10,10 +10,11 @@ filed under:
   reason the whole resume/archive/validation path can be exercised on a box
   with no GPU.
 * ``RunEvent`` / ``EventHandler`` / ``_emit`` -- structured progress out. A
-  runner never prints; it emits, and ``benchmarks.cli.main`` decides how an
-  event is rendered. That inversion is what keeps the runners callable from
-  ``tools/`` and from tests, and it is why ``benchmarks.cli.main`` takes
-  exactly one name from ``execution/``.
+  runner never prints; it emits, and ``benchmarks.cli.rendering`` decides how
+  an event is rendered. That inversion is what keeps the runners callable
+  from ``tools/`` and from tests, and it is why ``RunEvent`` is the only name
+  the whole ``benchmarks.cli`` package takes from ``execution/`` -- one
+  module, one import, and no ``click`` on this side of the seam.
 
 ``_emit`` accepts a ``None`` handler so that the fourteen call sites in
 ``e2e/runner.py`` stay single expressions instead of conditionals; a runner
