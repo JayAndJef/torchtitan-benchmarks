@@ -76,7 +76,14 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # became "commands", one argv per pass. Renamed rather than redefined: a
 # reader of the old field would take the correctness worker's argv for the
 # whole run.
-KERNEL_MANIFEST_SCHEMA_VERSION = 4
+#
+# 5: "skipped_arms" records the arms this host never launched, and why. The
+# roster in "arms" is the registry's, so a manifest-only reader previously
+# had to diff it against "commands" to learn that an arm was dropped -- and
+# would read a schema-4 manifest written after this change identically to
+# one written before it. This file is write-only provenance, so the bump is
+# labelling, exactly as 3 was.
+KERNEL_MANIFEST_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -278,6 +285,7 @@ def kernel_manifest_data(
     commands: list[list[str]],
     hardware: str,
     metadata: dict[str, str],
+    skipped: Mapping[str, str] = MappingProxyType({}),
 ) -> dict:
     return {
         "schema_version": KERNEL_MANIFEST_SCHEMA_VERSION,
@@ -291,6 +299,11 @@ def kernel_manifest_data(
         "workload": asdict(workload),
         "shapes": shape_summary(scenario.name, shape, workload),
         "arms": [asdict(arm) for arm in scenario.arms],
+        # "arms" is the registry's roster, so it names arms this host never
+        # ran. The reason is recorded beside the name: a reader of the
+        # manifest alone can then tell a missing arm from a dropped one,
+        # without a diff of "arms" against "commands".
+        "skipped_arms": dict(skipped),
         "baseline_arm": scenario.baseline_arm,
         "replicates": request.replicates,
         "samples_per_replicate": request.samples_per_replicate,
@@ -442,7 +455,14 @@ def execute_kernel_run(
         atomic_write_json(
             out_dir / "manifest.json",
             kernel_manifest_data(
-                scenario, shape, workload, request, commands, hardware, metadata
+                scenario,
+                shape,
+                workload,
+                request,
+                commands,
+                hardware,
+                metadata,
+                skipped,
             ),
         )
         scenario_environment = (

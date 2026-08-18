@@ -427,9 +427,8 @@ class KernelRunnerTests(unittest.TestCase):
             return writer(command, **kwargs)
 
         metadata_patch, pinning_patch = patched_environment()
-        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
-            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
-        ):
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            out_dir = Path(temporary) / "kernels"
             execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
@@ -437,10 +436,12 @@ class KernelRunnerTests(unittest.TestCase):
                     replicates=2,
                     timestamp="stamp",
                     compiler_env=Path(temporary) / "missing.sh",
+                    out_dir=out_dir,
                 ),
                 process_runner=fake_process,
                 environment={"PATH": "/usr/bin"},
             )
+            manifest = json.loads((out_dir / "manifest.json").read_text())
         self.assertEqual(commands[0][commands[0].index("--mode") + 1], "correctness")
         self.assertEqual(
             commands[0][commands[0].index("--skip-arm") + 1], "te"
@@ -449,6 +450,14 @@ class KernelRunnerTests(unittest.TestCase):
             command[command.index("--arm") + 1] for command in commands[1:]
         }
         self.assertEqual(timed, {"copy_floor", "baseline", "helion"})
+
+        # The manifest says so on its own. "arms" is the registry roster and
+        # still lists te, so without this a reader must diff it against
+        # "commands" to learn that the arm never ran.
+        self.assertEqual(manifest["schema_version"], 5)
+        self.assertEqual(list(manifest["skipped_arms"]), ["te"])
+        self.assertIn("compiler environment", manifest["skipped_arms"]["te"])
+        self.assertIn("te", [arm["name"] for arm in manifest["arms"]])
 
     def test_worker_command_carries_pinning_env_and_manifest(self) -> None:
         captured = []
@@ -509,7 +518,8 @@ class KernelRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(manifest["kind"], "kernel")
-        self.assertEqual(manifest["schema_version"], 4)
+        self.assertEqual(manifest["schema_version"], 5)
+        self.assertEqual(manifest["skipped_arms"], {})
         self.assertEqual(manifest["scenario"], "swiglu")
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
         self.assertNotIn("spec", manifest)

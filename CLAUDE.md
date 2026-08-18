@@ -565,11 +565,11 @@ case, rank the implementations in the matching `kernel-bench` scenario
 instead: arm names deliberately match across the two registries (see
 "Scenarios and arms"), so `piper1b_attention/flex_flash` and
 `attention/flex_flash` are the same code at two scopes -- while remembering
-that a kernel-isolation number is never an end-to-end number, and that its
-medians are **wall time**: for small kernels they are 90%+ host dispatch, so
-a kernel-speed claim needs profiler-summed device time or `--burst`
-amortization, not the wall median (see "Method" under Kernel-isolation
-benchmarks). Do not apply the replacement more loosely than the tool it
+that a kernel-isolation number is **not device time**: for small kernels it
+is dominated by host dispatch, and `--burst` amortization does not remove
+that (see "Method" under Kernel-isolation benchmarks). A kernel-speed claim
+needs profiler-summed device time, which nothing in this repo currently
+measures. Do not apply the replacement more loosely than the tool it
 replaces. The **cross-engine** case -- attributing a megatron-vs-titan gap to
 particular components -- has no replacement at all, and is what the new
 head-to-head work is for.
@@ -783,12 +783,32 @@ own family module.
   `torch._functorch.config.donated_buffer = False`: retained-graph backward
   timing re-runs compiled backward graphs, which buffer donation forbids.
   This changes backward memory reuse, not the generated kernels.
-- The measurand is **burst-amortized per-call device time**: synchronize,
-  record a start event, launch `--burst-k` calls back to back, record an end
-  event, synchronize, divide by k. The former wall median is **gone**. On
-  this host-bound workload it was mostly host dispatch (the rope arms are
-  90%+ dispatch, device work ~11-13 us inside 131-286 us walls), which is
-  the harness rather than the kernel in an isolated benchmark.
+- The measurand is the **burst-amortized per-call cost under back-to-back
+  dispatch**: synchronize, record a start event, launch `--burst-k` calls
+  back to back, record an end event, synchronize, divide by k. The former
+  wall median is **gone**.
+- **That number is not device time, and on several arms it is mostly not.**
+  A CUDA event pair measures an interval on the stream, and the host has to
+  keep the stream fed. Where the host cannot enqueue faster than the device
+  drains, the interval holds the host stalls too. A burst amortizes the
+  fixed per-burst synchronize; it does not amortize per-call dispatch, so
+  no `k` removes them. Measured on an H200, rope forward, us per call at
+  k=1/4/16/64: `copy_floor` 27.66/16.16/13.43/13.18, `baseline`
+  125.49/88.96/76.91/73.10, `helion` 301.23/256.53/234.87/226.01, `te`
+  186.64/138.87/122.60/114.40. `copy_floor` converges onto the ~11-13 us of
+  device work these shapes carry, so the method works where an arm is
+  device-bound; the three module arms sit 6-19x above that floor and are
+  still falling at 64, so **roughly 85% of every published rope number is
+  host dispatch**. `qkv` is dispatch-heavy in absolute terms too, but both
+  its arms are, so the effect largely cancels in the ratio.
+- **A dispatch-bound arm carries a k-dependent ratio, so its ranking is not
+  a kernel result.** `helion` against `baseline` is 2.40x at k=1, 3.05x at
+  k=16 and 3.09x at k=64. Run `--burst`; the merge derives a `residual`
+  column from the top two rungs of the ladder and flags any arm whose
+  per-call time is still falling there. Report a flagged row as a
+  comparison of dispatch cost, never as a kernel-speed claim. **A
+  kernel-speed claim needs profiler-summed device time, which nothing in
+  this repo currently measures.**
 - **One `--burst-k` for every arm in a scenario.** A per-arm k makes arms
   incomparable: a k=64 arm overlaps 64 launches with device work and a k=4
   arm overlaps 4, and the residual bias runs in the same direction as the
@@ -906,7 +926,7 @@ arm measuring the baseline under an FA4 label.
 
 ```
 out/<timestamp>/kernels/<scenario>/<hardware>/
-  manifest.json      # schema 4: model_size, model_shape, workload, shapes, arms, replicates/burst_k/warmup_calls/seed, commands, provenance
+  manifest.json      # schema 5: model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/burst_k/warmup_calls/seed, commands, provenance
   results.json       # schema 4: every declared arm with a status, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
   kernel_bench.log   # every worker's stdout+stderr, in spawn order
   fragments/
@@ -931,7 +951,10 @@ when a scenario stopped being one worker invocation: `command` became
 `commands`, one argv per pass. The results file went 3 -> 4 when every
 declared arm started reaching it with a `status`: at schema 3 an arm this
 host could not run was absent, which is indistinguishable from an arm the
-registry never declared. The results loader enforces exact schema equality,
+registry never declared. The manifest alone went 4 -> 5 when `skipped_arms`
+arrived: `arms` is the registry roster, so it names arms the host never
+launched, and a manifest-only reader had to diff it against `commands` to
+find them. The results loader enforces exact schema equality,
 so older files are rejected rather than half-read; the manifest is
 write-only provenance and has no loader.
 
