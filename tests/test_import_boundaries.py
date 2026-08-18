@@ -3,10 +3,10 @@
 The harness is two processes with very different import budgets:
 
 * the **parent** -- the Click CLI, the scenario and kernel registries, the
-  artifact/trace/metrics modules, the model-shape registry -- which only ever
-  builds command lines, validates logs, and reads traces; and
+  artifact/trace/results packages, the model-shape registry -- which only
+  ever builds command lines, validates logs, and reads traces; and
 * the **worker** -- the TorchTitan training subprocess, the megatron driver,
-  and ``benchmarks.kernel_worker``'s post-argument-parsing body -- which is
+  and ``benchmarks.kernel.worker``'s post-argument-parsing body -- which is
   where torch, TransformerEngine, Megatron, FlashAttention, Triton and
   torchtitan legitimately live.
 
@@ -18,8 +18,9 @@ deliberately structural (subprocess imports plus ``ast`` inspection of the
 tracked sources) so a package move cannot quietly reintroduce a heavy import
 or a non-canonical import root.
 
-Nothing here imports ``piper1b.rope.te_rope_override``: that module JIT-builds
-a CUDA extension at import time.
+Nothing here imports
+``benchmarks.models.piper_qwen3.components.rope.te_rope_override``: that
+module JIT-builds a CUDA extension at import time.
 """
 
 import ast
@@ -38,10 +39,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TITAN_DIR = REPO_ROOT / "third_party" / "torchtitan"
 
 # The import roots intra-repo imports are allowed to target. The package
-# restructure collapses ``piper1b`` and ``megatron_baseline`` into
-# ``benchmarks``; when it lands this becomes ``("benchmarks",)`` and that
-# one-line edit is the only change this file needs.
-CANONICAL_ROOTS = ("benchmarks", "piper1b", "megatron_baseline")
+# restructure folded the two former top-level packages -- the Piper config
+# port and the Megatron baseline -- into ``benchmarks``, so there is now
+# exactly one library root. (Their retired names are spelled out in exactly
+# two places, both deliberate: CLAUDE.md's provenance-boundary paragraph and
+# tests/test_legacy_artifacts.py. This is not one of them.) This tuple
+# shrinking to a single entry *is* the assertion that the move happened: a
+# reintroduced top-level package would fail
+# ``test_module_scope_intra_repo_imports_use_canonical_roots`` the moment
+# anything imported it.
+CANONICAL_ROOTS = ("benchmarks",)
 
 # Importing any of these means the process paid for the ML stack -- and, for
 # torch, that CUDA initialization is one attribute access away.
@@ -59,35 +66,45 @@ HEAVY_MODULES = (
 # Every module the parent process may reach. Measured, not assumed: each one
 # is imported in a subprocess below and its ``sys.modules`` checked.
 PARENT_SIDE_MODULES = (
-    "benchmarks.cli",
-    "benchmarks.scenarios",
-    "benchmarks.kernels",
-    "benchmarks.artifacts",
-    "benchmarks.profile_regions",
-    "benchmarks.runtime",
-    "benchmarks.runner",
-    "benchmarks.kernel_worker",
-    "benchmarks.metrics",
-    "benchmarks.reporting",
-    "benchmarks.kernel_results",
-    "benchmarks.kernel_stats",
-    "benchmarks.kernel_runner",
-    "piper1b.model_shape",
-    "megatron_baseline.location",
+    "benchmarks.cli.main",
+    "benchmarks.e2e.registry",
+    "benchmarks.e2e.launch",
+    "benchmarks.e2e.runner",
+    "benchmarks.e2e.results",
+    "benchmarks.e2e.validation",
+    "benchmarks.traces.schema",
+    "benchmarks.traces.extraction",
+    "benchmarks.artifacts.manifests",
+    "benchmarks.artifacts.summaries",
+    "benchmarks.execution.environment",
+    "benchmarks.kernel.registry",
+    "benchmarks.kernel.runner",
+    "benchmarks.kernel.worker",
+    "benchmarks.kernel.engine.statistics",
+    "benchmarks.kernel.results.schema",
+    "benchmarks.kernel.results.reporting",
+    "benchmarks.models.piper_qwen3.shape",
+    "benchmarks.models.piper_qwen3.megatron_bootstrap",
+    # The ``--module`` chain. TorchTitan resolves ``--module
+    # benchmarks.models.piper_qwen3`` inside the *training* subprocess, which
+    # executes ``benchmarks/__init__.py``, ``benchmarks/models/__init__.py``
+    # and this package's ``__init__.py`` before anything else. They are
+    # docstring-only by design; listing the package here is what asserts it.
+    "benchmarks.models.piper_qwen3",
 )
 
 # Modules that import the ML stack at module scope. This is correct and
 # expected -- they run inside the worker -- so the boundary is asserted from
 # the other side: no parent-side module may import them at module scope.
 WORKER_SIDE_MODULES = (
-    "piper1b.config_registry",
-    "piper1b.parallelize",
-    "piper1b.pretokenized_data",
-    "piper1b.swiglu.combined_swiglu",
-    "piper1b.lm_head.losses",
-    "megatron_baseline.data",
-    "benchmarks.kernel_arms",
-    "benchmarks.kernel_bench",
+    "benchmarks.models.piper_qwen3.config_registry",
+    "benchmarks.models.piper_qwen3.parallelize",
+    "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu",
+    "benchmarks.models.piper_qwen3.components.lm_head.losses",
+    "benchmarks.e2e.data.piper_qwen3",
+    "benchmarks.e2e.megatron.data",
+    "benchmarks.kernel.operations.arms",
+    "benchmarks.kernel.engine.run",
 )
 
 
@@ -155,22 +172,37 @@ def run_import_probe(
 
 @functools.lru_cache(maxsize=1)
 def tracked_python_files() -> tuple[str, ...]:
-    """Repo-relative paths of every tracked ``.py`` file, via ``git ls-files``.
+    """Repo-relative paths of every in-repo ``.py`` file, via ``git ls-files``.
 
     Git is the enumerator on purpose: ``out/``, ``reports/`` and the stale
     worktree under ``.claude/`` all hold gitignored copies of these sources,
     and a filesystem walk would parse them as if they were the real thing.
     Submodule contents are gitlinks here, so ``third_party/`` contributes
     nothing -- which is also why ``import torchtitan`` is not intra-repo.
+
+    ``--others --exclude-standard`` adds files that exist but are not staged
+    yet, so a module written in this working tree is checked before it is
+    committed rather than after; ``--exclude-standard`` keeps the gitignore
+    protection above intact. The ``is_file`` filter drops the mirror case --
+    a path git still has in its index whose file has been deleted from the
+    working tree. That is a pending deletion, not an import to check.
     """
     completed = subprocess.run(
-        ["git", "ls-files", "-z", "*.py"],
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "*.py"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
     )
-    return tuple(sorted(p for p in completed.stdout.split("\0") if p))
+    return tuple(
+        sorted(
+            {
+                p
+                for p in completed.stdout.split("\0")
+                if p and (REPO_ROOT / p).is_file()
+            }
+        )
+    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -227,11 +259,18 @@ def module_scope_imports(path: str) -> tuple[tuple[str, int], ...]:
 
 
 def source_path(module: str) -> str:
-    """Repo-relative source file for a dotted module name."""
-    path = module.replace(".", "/") + ".py"
-    if not (REPO_ROOT / path).is_file():
-        raise AssertionError(f"no source file for module {module!r} at {path}")
-    return path
+    """Repo-relative source file for a dotted module name.
+
+    Resolves a package to its ``__init__.py``: after the restructure the
+    lists above name packages as well as modules (``benchmarks.models.
+    piper_qwen3`` is the ``--module`` token), and a package's ``__init__``
+    is exactly the file whose import cost is being asserted.
+    """
+    stem = module.replace(".", "/")
+    for candidate in (f"{stem}.py", f"{stem}/__init__.py"):
+        if (REPO_ROOT / candidate).is_file():
+            return candidate
+    raise AssertionError(f"no source file for module {module!r} at {stem}[.py]")
 
 
 def targets(imported: str, module: str) -> bool:
@@ -309,7 +348,7 @@ class WorkerSideBoundaryTest(unittest.TestCase):
         """The boundary itself: no module-scope path from parent to worker.
 
         Function-body imports are the sanctioned lazy pattern (see
-        ``benchmarks/kernel_worker.py``'s ``main``) and are not flagged.
+        ``benchmarks/kernel/worker.py``'s ``main``) and are not flagged.
         """
         for module in PARENT_SIDE_MODULES:
             path = source_path(module)
@@ -370,21 +409,33 @@ class CanonicalImportRootsTest(unittest.TestCase):
 class BenchmarksNameShadowingTest(unittest.TestCase):
     """Guards a name collision that is invisible until it silently isn't.
 
-    Training subprocesses run with ``cwd=third_party/torchtitan``
-    (``benchmarks/runner.py``, the ``process_runner(..., cwd=paths.titan_dir)``
-    call) and ``PYTHONPATH=<repo root>`` (``benchmarks/runtime.py``,
+    The **training** subprocess -- and only that one -- is exposed. It runs
+    with ``cwd=third_party/torchtitan`` (``benchmarks/e2e/runner.py``, the
+    ``process_runner(..., cwd=paths.titan_dir)`` call) and
+    ``PYTHONPATH=<repo root>`` (``benchmarks/execution/environment.py``,
     ``runtime_environment``). ``python -m`` puts the cwd at ``sys.path[0]``,
     *ahead* of everything ``PYTHONPATH`` contributes -- and the torchtitan
-    submodule ships a ``benchmarks/`` directory of its own.
+    submodule ships a ``benchmarks/`` directory of its own. The kernel
+    worker is *not* exposed: it runs with ``cwd=paths.bench_dir``
+    (``benchmarks/kernel/runner.py``), so the repo root is already
+    ``sys.path[0]`` there and our package wins outright. Do not widen this
+    docstring to claim otherwise.
+
+    The exposure is new, and the restructure created it. The training
+    subprocess used to resolve ``--module piper1b`` -- a name with no
+    collision. It now resolves ``--module benchmarks.models.piper_qwen3``,
+    and ``benchmarks`` is precisely the colliding name, so a shadowed import
+    would no longer cost one module: it would cost the whole library.
 
     Our package wins today for exactly one reason: that directory holds no
     ``__init__.py``, so it registers only as a namespace portion, and a
     regular package found later on the path beats it. Should a submodule bump
     ever add an ``__init__.py`` there, ``import benchmarks`` inside every
-    training and kernel-worker subprocess would resolve to torchtitan's
-    directory instead of ours, and the failure would surface as an
-    unrelated-looking ``AttributeError`` or ``ModuleNotFoundError`` deep
-    inside a run.
+    training subprocess would resolve to torchtitan's directory instead of
+    ours, and the failure would surface as an unrelated-looking
+    ``AttributeError`` or ``ModuleNotFoundError`` deep inside a run. This is
+    the regression test CLAUDE.md's submodule-bump checklist refers to; do
+    not delete it to make a bump green.
     """
 
     def test_torchtitan_benchmarks_directory_is_not_a_package(self):
@@ -436,32 +487,32 @@ class BenchmarksNameShadowingTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 5. ``benchmarks.kernel_worker`` stays cheap to import
+# 5. ``benchmarks.kernel.worker`` stays cheap to import
 # --------------------------------------------------------------------------
 
 
 class KernelWorkerImportCostTest(unittest.TestCase):
-    """``kernel_worker``'s heavy imports live inside ``main()``, deliberately.
+    """The kernel worker's heavy imports live inside ``main()``, deliberately.
 
     Its module scope holds only stdlib, so ``python -m
-    benchmarks.kernel_worker --help`` and an argument error (exit 2) both
+    benchmarks.kernel.worker --help`` and an argument error (exit 2) both
     return without paying for torch. Assertion 1 covers this incidentally by
     including the module in the parent-side list; it is restated here so the
     intent survives if that list is ever rearranged.
     """
 
     def test_kernel_worker_imports_without_the_ml_stack(self):
-        offenders = run_import_probe(("benchmarks.kernel_worker",))
+        offenders = run_import_probe(("benchmarks.kernel.worker",))
         self.assertEqual(
             offenders,
             {},
-            "benchmarks.kernel_worker pulled in "
-            f"{offenders.get('benchmarks.kernel_worker')} at import time; its "
+            "benchmarks.kernel.worker pulled in "
+            f"{offenders.get('benchmarks.kernel.worker')} at import time; its "
             "heavy imports belong inside main()",
         )
 
     def test_kernel_worker_module_scope_is_stdlib_only(self):
-        path = source_path("benchmarks.kernel_worker")
+        path = source_path("benchmarks.kernel.worker")
         roots = {imported.split(".")[0] for imported, _ in module_scope_imports(path)}
         self.assertEqual(
             roots - {"__future__"},

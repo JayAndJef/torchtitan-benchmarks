@@ -27,7 +27,9 @@ def _has_gcc_13() -> bool:
 )
 class TransformerEngineRoPETests(unittest.TestCase):
     def test_compiled_packed_positions_match_stock_forward_and_backward(self) -> None:
-        from piper1b.rope.te_rope_override import TECosSinRoPE
+        from benchmarks.models.piper_qwen3.components.rope.te_rope_override import (
+            TECosSinRoPE,
+        )
         from torchtitan.models.common.rope import CosSinRoPE
 
         config_kwargs = {

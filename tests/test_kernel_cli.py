@@ -12,10 +12,10 @@ from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.cli import cli
-from benchmarks.kernel_runner import KernelRunRequest, execute_kernel_run
-from benchmarks.kernels import KERNEL_SCENARIOS
-from benchmarks.runtime import CpuPinning
+from benchmarks.cli.main import cli
+from benchmarks.kernel.runner import KernelRunRequest, execute_kernel_run
+from benchmarks.kernel.registry import KERNEL_SCENARIOS
+from benchmarks.execution.environment import CpuPinning
 from tests.test_kernel_results import sample_result
 
 
@@ -32,11 +32,11 @@ PINNING = CpuPinning(("numactl", "--cpunodebind=1", "--membind=1"), "numactl tes
 def patched_environment():
     return (
         mock.patch(
-            "benchmarks.kernel_runner.hardware_metadata",
+            "benchmarks.kernel.runner.hardware_metadata",
             return_value=("test-gpu", dict(METADATA)),
         ),
         mock.patch(
-            "benchmarks.kernel_runner.resolve_cpu_pinning", return_value=PINNING
+            "benchmarks.kernel.runner.resolve_cpu_pinning", return_value=PINNING
         ),
     )
 
@@ -54,7 +54,7 @@ class KernelCliTests(unittest.TestCase):
 
     def test_flags_map_onto_the_request(self) -> None:
         with mock.patch(
-            "benchmarks.cli.execute_kernel_run", return_value=()
+            "benchmarks.cli.main.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(
                 cli,
@@ -89,7 +89,7 @@ class KernelCliTests(unittest.TestCase):
 
     def test_model_size_defaults_to_normal_and_rejects_unknown(self) -> None:
         with mock.patch(
-            "benchmarks.cli.execute_kernel_run", return_value=()
+            "benchmarks.cli.main.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -102,7 +102,7 @@ class KernelCliTests(unittest.TestCase):
 
     def test_defaults_to_every_scenario(self) -> None:
         with mock.patch(
-            "benchmarks.cli.execute_kernel_run", return_value=()
+            "benchmarks.cli.main.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -127,7 +127,7 @@ class KernelCliTests(unittest.TestCase):
             failed=True,
         )
         with mock.patch(
-            "benchmarks.cli.execute_kernel_run", return_value=(outcome,)
+            "benchmarks.cli.main.execute_kernel_run", return_value=(outcome,)
         ):
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertNotEqual(result.exit_code, 0)
@@ -153,7 +153,7 @@ class KernelRunnerTests(unittest.TestCase):
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
-            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
         ):
             compiler_env = Path(temporary) / "enable.sh"
             compiler_env.write_text("# no-op compiler environment\n")
@@ -190,7 +190,7 @@ class KernelRunnerTests(unittest.TestCase):
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
-            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
         ):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
@@ -238,7 +238,7 @@ class KernelRunnerTests(unittest.TestCase):
         command = captured["command"]
         self.assertEqual(command[:3], list(PINNING.prefix))
         self.assertIn("-m", command)
-        self.assertEqual(command[command.index("-m") + 1], "benchmarks.kernel_worker")
+        self.assertEqual(command[command.index("-m") + 1], "benchmarks.kernel.worker")
         self.assertEqual(command[command.index("--n") + 1], "5")
         self.assertNotIn("--burst", command)
         # Forwarded unconditionally, unlike the optional overrides.
@@ -273,9 +273,9 @@ class KernelRunnerTests(unittest.TestCase):
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
-            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
         ), mock.patch(
-            "benchmarks.kernel_runner.add_compiler_environment",
+            "benchmarks.kernel.runner.add_compiler_environment",
             side_effect=lambda env, script: {**env, "SOURCED": "1"},
         ) as compiler:
             execute_kernel_run(
@@ -300,9 +300,9 @@ class KernelRunnerTests(unittest.TestCase):
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
-            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
         ), mock.patch(
-            "benchmarks.kernel_runner.RuntimePaths.resolve"
+            "benchmarks.kernel.runner.RuntimePaths.resolve"
         ) as resolve:
             resolve.return_value = SimpleNamespace(
                 bench_dir=Path(temporary),
@@ -338,9 +338,9 @@ class KernelRunnerTests(unittest.TestCase):
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
-            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
         ), mock.patch(
-            "benchmarks.kernel_runner.add_compiler_environment",
+            "benchmarks.kernel.runner.add_compiler_environment",
             side_effect=lambda env, script: env,
         ):
             outcomes = execute_kernel_run(

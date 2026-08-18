@@ -4,11 +4,11 @@ Out-of-tree benchmarks for the Piper Qwen3-1B TorchTitan port. One CLI,
 two kinds of measurement:
 
 1. **Declarative end-to-end scenarios** -- `./run_bench.sh run` / `run-all`,
-   driven by `benchmarks/scenarios.py`. Runs real TorchTitan training,
+   driven by `benchmarks/e2e/registry.py`. Runs real TorchTitan training,
    validates, and evaluates.
 2. **Declarative kernel-isolation benchmarks** -- `./run_bench.sh
-   kernel-bench`, driven by `benchmarks/kernels.py`. Times competing kernel
-   implementations head-to-head on synthetic tensors at Piper-1B shapes.
+   kernel-bench`, driven by `benchmarks/kernel/registry.py`. Times competing
+   kernel implementations head-to-head on synthetic tensors at Piper-1B shapes.
 
 Never present kernel numbers as end-to-end results, or vice versa: a kernel
 that wins in isolation can be irrelevant once Inductor fuses the graph around
@@ -43,15 +43,17 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
   dependency, and never benchmark while it runs -- the build saturates the
   host and this workload is host-bound.
 - TorchTitan is a git submodule at `third_party/torchtitan`, installed editable.
-  `benchmarks/runtime.py:19` hardcodes it as `TITAN_DIR`.
+  `benchmarks/execution/environment.py:23` hardcodes it as `TITAN_DIR`, derived
+  from `BENCH_DIR` on the line above. It is defined once: the megatron data
+  module imports this one rather than redefining it.
 - Megatron-LM is a git submodule at `third_party/Megatron-LM` (pinned
   `59b72fa57`, core 0.20.0). It is **not** pip-installed (its pyproject wants
-  python >= 3.12); `megatron_baseline/location.py` puts it on `sys.path` in
-  the driver process only. `MEGATRON_DIR` overrides the location for
-  development checkouts; the manifest records the resolved rev.
+  python >= 3.12); `benchmarks/models/piper_qwen3/megatron_bootstrap.py` puts it
+  on `sys.path` in the driver process only. `MEGATRON_DIR` overrides the location
+  for development checkouts; the manifest records the resolved rev.
 - Every command runs under `.venv/bin/python`. `run_bench.sh` execs it directly;
-  `runtime.py` derives the training subprocess interpreter from `sys.executable`,
-  so the CLI and training always share one environment.
+  `benchmarks/e2e/launch.py` derives the training subprocess interpreter from
+  `sys.executable`, so the CLI and training always share one environment.
 - torch is pinned to an exact nightly (`2.14.0.dev20260729+cu130`). The nightly
   index retains roughly 60 days, so the pin will eventually need bumping. A bump
   changes the numbers -- rerun baselines, do not compare across it.
@@ -65,23 +67,78 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
 
 ## Repository map
 
+`benchmarks/` is the **one** first-party package. Everything importable lives
+under `benchmarks.`; the two argv-driven trace scripts live in `tools/` beside
+the other operator scripts. The three former top-level packages are gone --
+their names are listed once, in the provenance note below, and nowhere else.
+
 | path | contents |
 |---|---|
-| `benchmarks/` | Click CLI plus both systems: e2e (`scenarios/runner/metrics`) and kernel (`kernels/kernel_arms/kernel_bench/kernel_runner/kernel_worker/kernel_stats/kernel_results`) |
-| `piper1b/model_shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
-| `piper1b/config_registry.py` | The `--module piper1b` config port; all registered `--config` names |
-| `piper1b/rope/` | TE RoPE override + `te_rope_standalone.cu` |
-| `piper1b/swiglu/` | Combined-SwiGLU Triton kernels and override |
-| `piper1b/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
-| `piper1b/pretokenized_data.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
-| `megatron_baseline/` | Everything Megatron: location/provenance, Qwen3-1B GPTModel builder, THD data, training driver |
-| `analysis/` | Two argv-driven trace diagnostics (`analyze.py`, `per_block.py`) |
-| `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check) |
-| `tests/` | CPU + GPU unit tests |
+| `benchmarks/cli/` | Click CLI (`main.py`) plus `__main__.py`, which is what `python -m benchmarks.cli` runs |
+| `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
+| `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
+| `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |
+| `benchmarks/e2e/validation.py` | `validate_arm` and the `ValidationProfile` registry |
+| `benchmarks/e2e/results.py` | Evaluation, region comparison, `results.json`, and its renderer |
+| `benchmarks/e2e/data/piper_qwen3.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
+| `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
+| `benchmarks/kernel/registry.py` | Kernel scenarios, arms, and `KernelWorkload` |
+| `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the subprocess it launches |
+| `benchmarks/kernel/engine/` | `run.py` (timing loop, correctness) and `statistics.py` |
+| `benchmarks/kernel/operations/arms.py` | Every kernel arm builder and inputs/reference builder |
+| `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`) and `reporting.py` |
+| `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
+| `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
+| `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
+| `benchmarks/models/piper_qwen3/megatron_bootstrap.py` | Megatron location/provenance and the TE environment setup |
+| `benchmarks/models/piper_qwen3/megatron_model.py` | The Qwen3-1B megatron-core `GPTModel` builder |
+| `benchmarks/models/piper_qwen3/components/rope/` | TE RoPE override + `te_rope_standalone.cu` |
+| `benchmarks/models/piper_qwen3/components/swiglu/` | Combined-SwiGLU Triton kernels and override |
+| `benchmarks/models/piper_qwen3/components/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
+| `benchmarks/traces/` | `schema.py` (the `Region` declaration) and `extraction.py` (trace parsing, window and region pooling) |
+| `benchmarks/artifacts/` | Engine-neutral on-disk artifacts: `manifests.py` (manifest + run-state IO, output layout) and `summaries.py` (`SampleSummary`, shared by both systems) |
+| `benchmarks/execution/environment.py` | Subprocess environment: `BENCH_DIR`/`TITAN_DIR`, CPU pinning, hardware metadata, `ProcessRunner` |
+| `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), and the two argv-driven trace diagnostics `analyze.py` and `per_block.py` |
+| `tests/` | CPU + GPU unit tests. Deliberately **flat** -- every module does `sys.path.insert(0, <repo root>)` at a fixed depth, and `unittest discover -s tests` needs no `__init__.py` |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
 | `third_party/Megatron-LM/` | Pinned submodule (upstream NVIDIA, sys.path only) |
 | `out/` | Run outputs (gitignored) |
 | `reports/` | Local investigation notes (gitignored). Put conclusions here, not in docs. |
+
+### Provenance boundary: artifacts written before the restructure
+
+The layout above landed as a single flag-day commit, `<flagday sha>`. It
+retired three top-level packages -- `piper1b`, `megatron_baseline` and
+`analysis` -- into `benchmarks/` and `tools/`, and flattened the old
+`benchmarks.kernel_*` modules into `benchmarks/kernel/`. **This section is the
+only place in the repo's documentation where any retired module name still
+appears**, and here they appear as history, not as instructions; the
+retired-path audit allowlists it for that reason.
+
+Every manifest, `results.json` and report written **before** the flag day
+records the old module names, and they are still on disk: 197 `manifest.json`
+files under `out/`, of which 142 record `"module": "piper1b"`, 55 record
+`benchmarks.kernel_arms:<builder>` kernel-arm paths, and 21 record
+`python -m megatron_baseline.train` in `commands`.
+
+**Those strings are inert history.** No module of any of those names exists any
+more, and nothing imports one: manifest `commands` is a write-only provenance
+field, and the recorded builder paths are read as data, never resolved. An old
+run directory therefore still **decodes** -- `load_manifest`, `load_run` and
+`load_kernel_results` read every pre-restructure schema they read before, and
+`tests/test_legacy_artifacts.py` pins that with byte-frozen fixtures.
+
+What an old directory is **not** is **resumable**. `run-all --resume` aborts on
+a changed `benchmarks_git_rev`, and the flag day changes it -- so a run started
+before `<flagday sha>` cannot be continued after it, by design. Nothing here
+makes the old *numbers* wrong; a pure file move changes no measurement. It makes
+them a separate `benchmarks_git_rev`, which was already a comparability
+boundary.
+
+Do not "fix" a retired dotted path inside a recorded artifact. The fixtures
+under `tests/fixtures/legacy/` are byte-frozen evidence of runs that actually
+happened, the retired strings are the payload under test, and the retired-path
+audit allowlists them for exactly that reason.
 
 ## End-to-end scenarios
 
@@ -142,7 +199,7 @@ engine-neutral and has exactly two values:
 the torch-level name); the two max-autotune modes were **removed** after the
 full matrix showed them to be GPU-time regressions at these shapes
 (`reports/20260807-mode-matrix-plain-bf16.md`). `TORCH_COMPILE_MODE` in
-`benchmarks/artifacts.py` maps the harness name to the `--compile.mode`
+`benchmarks/e2e/registry.py` maps the harness name to the `--compile.mode`
 value delivered to the fork, which applies it to each block's
 `torch.compile` (`CompileConfig.mode`, applied in `distributed/compile.py`).
 Per-block scope is the whole point: a global `torch._inductor.config`
@@ -196,11 +253,12 @@ pure GPU cost at these sizes) for ~2.5 GiB more peak memory -- see
 `--model-size` is the **third global run axis**, exactly parallel to
 `--compile-mode` and `--ac`: one shape for every arm in the run, recorded in
 the manifest, gated by `--resume`, and a hard comparability boundary. The
-shapes live in `piper1b/model_shape.py` as frozen `PiperShape` dataclasses
-and are the single source of truth for *both* engines --
-`piper1b/config_registry.py` and `megatron_baseline/model.py` build from the
-same object, so a size cannot drift between them. That module imports
-nothing but `dataclasses`.
+shapes live in `benchmarks/models/piper_qwen3/shape.py` as frozen `PiperShape`
+dataclasses and are the single source of truth for *both* engines --
+`benchmarks/models/piper_qwen3/config_registry.py` and
+`benchmarks/models/piper_qwen3/megatron_model.py` build from the same object,
+so a size cannot drift between them. That module imports nothing but
+`dataclasses`.
 
 | | `normal` | `huge` |
 |---|---|---|
@@ -221,7 +279,7 @@ Everything except `dim` and `n_layers` is derived
 `moe_hidden_dim = dim*7/2`), and the parameter/flops formulas mirror
 torchtitan's `get_moe_model_nparams_and_flops`. `tests/test_model_shape.py`
 pins the five normal-size numbers against what a real run logs; they were
-previously duplicated by hand in `megatron_baseline/`.
+previously duplicated by hand in the Megatron builder.
 `supports_block_regions` is derived too (`n_layers > 1`, see below), and
 `parity_gate` -- the tolerance `tools/megatron_parity_check.py` enforces --
 is per-shape data on the same dataclass rather than a lookup table beside
@@ -243,7 +301,7 @@ transformer block. At dim 12288 the ratio inverts to 0.55x: the single layer
 is 64% of the parameters and the great majority of the FLOPs.
 
 **Why 12288 and not larger.** Megatron under `--compile-mode cuda-graph` is
-the binding constraint, because `megatron_baseline/train.py` allocates a bf16
+the binding constraint, because `benchmarks/e2e/megatron/train.py` allocates a bf16
 `main_grad` for *every* parameter under graph mode -- 10 B/param of state
 against titan's 8 (params 2 + grads 2 + fused-AdamW m,v 4). Measured on an
 idle H200 (139.81 GiB usable) with the megatron cuda-graph driver: dim 10240
@@ -281,7 +339,7 @@ put the geometry in the config *name* rather than in an explicit argument.
 `--model-size` (single-valued -- kernel-bench does not sweep sizes) and draw
 their geometry from the same `PIPER_SHAPES` entry, so a shape cannot drift
 between the two systems either. Batch and sequence length are **not** model
-shape: they live in `benchmarks/kernels.py`'s `KernelWorkload`, and
+shape: they live in `benchmarks/kernel/registry.py`'s `KernelWorkload`, and
 `resolve_shape_and_workload` pairs the two and validates the pair.
 
 ### The 40-step floor
@@ -326,10 +384,10 @@ are declining to set.
 |---|---|---|
 | `piper1b_rope` | `baseline` | TorchTitan `CosSinRoPE` |
 | | `helion` | override `torchtitan.overrides.helion_rope.helion_cos_sin_rope` |
-| | `te` | override `piper1b.rope.te_rope_override.te_rope`, needs gcc-13 |
+| | `te` | override `benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope`, needs gcc-13 |
 | `piper1b_swiglu` | `baseline` | TorchTitan `GroupedExperts` |
-| | `piper_optimized_triton` | override `piper1b.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts` |
-| | `piper_optimized_inductor` | override `piper1b.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts` |
+| | `piper_optimized_triton` | override `benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts` |
+| | `piper_optimized_inductor` | override `benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts` |
 | `piper1b_qkv` | `baseline` | config `qwen3_piper_1b_unfused_qkv` |
 | | `fused_qkv` | config `qwen3_piper_1b` |
 | `piper1b_lm_head` | `baseline` | config `qwen3_piper_1b_full_logits` |
@@ -387,7 +445,7 @@ scenario, where each arm carries its own compile treatment.
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios
 do not. The megatron scenario's `_pretokenized` configs swap the dataloader
-for `piper1b/pretokenized_data.py`'s replay loader (all 40 steps of c4_test
+for `benchmarks/e2e/data/piper_qwen3.py`'s replay loader (all 40 steps of c4_test
 batches materialized at init, ~zero per-step data-host cost, matching the
 megatron driver's treatment). `replay_steps` must be >= `--training.steps`
 or the loader hard-fails at exhaustion, so it tracks the run: the workload
@@ -424,7 +482,7 @@ are not comparable; `--resume` refuses to mix them.
 
 ### Validation
 
-`validate_arm` (`benchmarks/artifacts.py`) fails an arm on any of:
+`validate_arm` (`benchmarks/e2e/validation.py`) fails an arm on any of:
 
 1. Missing `<arm>.log`, or log lacking the profile's completion marker
    (`Training completed` for both engines).
@@ -499,8 +557,9 @@ construction, but Inductor can pick different configs for that shared code
 between arms, and the resulting drift routinely exceeds the effect under
 test. Quote the total only as the arm's step cost.
 
-**No in-tree tool currently attributes per-component GPU time.**
-`analysis/components.py` did, and it was removed. For the **same-engine**
+**No in-tree tool currently attributes per-component GPU time.** A
+`components.py` trace classifier did, and it was removed (before the package
+restructure; it never moved into `tools/`). For the **same-engine**
 case, rank the implementations in the matching `kernel-bench` scenario
 instead: arm names deliberately match across the two registries (see
 "Scenarios and arms"), so `piper1b_attention/flex_flash` and
@@ -606,7 +665,7 @@ e2e shell cannot leak settings into a kernel run.
 that breaks that skips `swiglu` **loudly** -- named numbers, a recorded error,
 a nonzero exit -- rather than capping or rounding anything; the other four
 scenarios are unaffected and still run. The same invariant is re-asserted
-inside `run_kernel_scenario`, so `python -m benchmarks.kernel_worker` and any
+inside `run_kernel_scenario`, so `python -m benchmarks.kernel.worker` and any
 other direct caller raise instead of measuring an expert split that does not
 cover the rows they built.
 
@@ -669,9 +728,10 @@ The fp64 reference is computed **per (row, kv group)**. A one-shot
 worth measuring. Gate the arms with `max_rel_l2` only: attention is a
 reduction, and CLAUDE.md's rule against max/ULP metrics on reductions applies.
 
-`*` = scenario baseline. `benchmarks/kernels.py` is the registry: add an arm
-by appending a `KernelArm` with a builder path, and a scenario by appending a
-`KernelScenario`. Builders live in `benchmarks/kernel_arms.py` and return a
+`*` = scenario baseline. `benchmarks/kernel/registry.py` is the registry: add an
+arm by appending a `KernelArm` with a builder path, and a scenario by appending
+a `KernelScenario`. Builders live in `benchmarks/kernel/operations/arms.py`
+(spelled `benchmarks.kernel.operations.arms:<fn>` in a builder path) and return a
 `BuiltArm` whose `calls` map a mode to a zero-argument timed closure and
 whose `correctness_outputs` returns named tensors for the gates.
 
@@ -767,8 +827,8 @@ equality, so schema-1 files are rejected rather than half-read.
 
 | script | measures | args |
 |---|---|---|
-| `analysis/analyze.py` | Two-trace diff: device/host totals, per-kernel movers | 2 positional trace paths |
-| `analysis/per_block.py` | Per-compiled-region GPU time, paired by size rank | 2 positional trace paths |
+| `tools/analyze.py` | Two-trace diff: device/host totals, per-kernel movers | 2 positional trace paths |
+| `tools/per_block.py` | Per-compiled-region GPU time, paired by size rank | 2 positional trace paths |
 
 Both take uncompressed Chrome traces, but runs write `.json.gz`. Decompress
 first:
@@ -797,8 +857,10 @@ published conclusion, and all of which outlive the tool that found them:
 
 ### CUDA extension builds
 
-`piper1b/rope/te_rope_standalone.cu` is JIT-built via
-`torch.utils.cpp_extension.load` when `te_rope_override.py` is imported. It
+`benchmarks/models/piper_qwen3/components/rope/te_rope_standalone.cu` is
+JIT-built via `torch.utils.cpp_extension.load` when `te_rope_override.py` is
+imported, which locates the `.cu` as its own directory sibling -- keep the two
+together if either ever moves again. It
 needs a C++20 host compiler; the stock one usually is not. Both the scenario
 runner (`requires_gcc_toolset`) and `kernel-bench` handle this automatically
 via `BENCH_COMPILER_ENV`, defaulting to `/opt/rh/gcc-toolset-13/enable`. To
@@ -808,16 +870,41 @@ import the override by hand, enable it yourself first:
 source /opt/rh/gcc-toolset-13/enable
 ```
 
-`piper1b/swiglu/` and `piper1b/lm_head/` are pure Triton/PyTorch and need no
-compiler setup.
+The sibling `components/swiglu/` and `components/lm_head/` packages are pure
+Triton/PyTorch and need no compiler setup.
 
 ## Model config and override mechanisms
 
-`--module piper1b` resolves through TorchTitan's config manager to
-`piper1b.config_registry`, found via `PYTHONPATH` (the runner sets it to the
-repo root). `--config <name>` is `getattr(config_registry, name)`, called with
-any `--config-arg KEY=VALUE` pairs as keyword arguments -- the runner always
-passes `size=<model-size>`.
+`--module benchmarks.models.piper_qwen3` resolves through TorchTitan's config
+manager to `benchmarks.models.piper_qwen3.config_registry`, found via
+`PYTHONPATH` (the runner sets it to the repo root). `--config <name>` is
+`getattr(config_registry, name)`, called with any `--config-arg KEY=VALUE` pairs
+as keyword arguments -- the runner always passes `size=<model-size>`.
+
+**Why the file is still called `config_registry.py`, and must stay that way.**
+The fork's `ConfigManager._load_config` takes an unrecognized `--module` down
+the fully-qualified branch and tries **two** candidates in order:
+
+```python
+for candidate in (f"{module_name}.config_registry", module_name):
+```
+
+So `--module benchmarks.models.piper_qwen3` resolves on **candidate 1**,
+`benchmarks.models.piper_qwen3.config_registry`, against the **unmodified**
+fork -- no torchtitan patch is involved in this, unlike `--config-arg`. Rename
+the file and candidate 1 fails; the manager then imports the *package* on
+candidate 2, `getattr` finds no `qwen3_piper_1b*` there, and every run dies at
+config load with a confusing "not found in benchmarks.models.piper_qwen3"
+message. Equally, do **not** pass the full path to `config_registry` as
+`--module`: it would resolve on candidate 2 instead and report a different
+`module_path` in that error. The name is a contract with the fork, not a
+stylistic choice. A test reimplements the two-candidate tuple and asserts
+candidate 1 wins.
+
+Because the `--module` value is imported inside the *training subprocess*,
+`benchmarks/__init__.py`, `benchmarks/models/__init__.py` and
+`benchmarks/models/piper_qwen3/__init__.py` all execute there. Keep all three
+import-light and Torch-free.
 
 `qwen3_piper_1b`: dim 1024, 16 layers, 16 heads / 8 KV heads, head_dim 64, flex
 attention, qk_norm; MoE on every layer with 4 experts, top_k 2, inter_dim 3584,
@@ -827,7 +914,8 @@ weight tying. Trains on `c4_test` (tokenizer vocab 2020) against the full
 they are a convergence sanity check only.
 
 **Execution model: single GPU, plain bf16, no FSDP.** The ModelSpec's
-`parallelize_fn` is `piper1b/parallelize.py:parallelize_piper1b`, which
+`parallelize_fn` is
+`benchmarks/models/piper_qwen3/parallelize.py:parallelize_piper1b`, which
 delegates to the fork's `parallelize_qwen3` with `skip_dp=True` (AC and
 per-block compile applied, FSDP skipped) and hard-errors at `world_size > 1`
 or any `training.dtype` other than `bfloat16`. `training.dtype="bfloat16"`
@@ -852,11 +940,17 @@ An arm changes behavior one of two ways:
 ## The Megatron baseline arm
 
 `piper1b_megatron`'s `baseline` arm trains the same Qwen3-1B model with
-Megatron-LM + TransformerEngine instead of TorchTitan. All Megatron
-knowledge lives in `megatron_baseline/`; the harness connects only through
-`Arm(launcher="megatron", validation="megatron")` and
-`megatron_baseline.location` for provenance. The runner launches
-`python -m megatron_baseline.train` with the workload sizes, seed, profiler
+Megatron-LM + TransformerEngine instead of TorchTitan. Megatron knowledge lives
+in two places: the driver and its data pipeline in `benchmarks/e2e/megatron/`,
+and the model builder plus the submodule bootstrap in
+`benchmarks/models/piper_qwen3/` (`megatron_model.py`,
+`megatron_bootstrap.py`) -- the split follows the rest of the tree, where a
+model definition sits under `models/` and an execution driver under `e2e/`. The
+harness connects only through `Arm(launcher="megatron",
+validation="megatron")` and
+`benchmarks.models.piper_qwen3.megatron_bootstrap` for provenance. The runner
+launches `python -m benchmarks.e2e.megatron.train` with the workload sizes,
+seed, profiler
 schedule, and compile mode; the driver replicates the titan treatment
 itself (fused AdamW on every param, titan's LR lambda, pre-clip-norm
 logging, sum/valid-tokens loss, gc handling, identical torch.profiler
@@ -865,12 +959,12 @@ schedule and trace layout, titan-shaped step log lines).
 Faithfulness guarantees, all verified:
 
 - **Same model**: bare megatron-core `GPTModel` built from the same
-  `piper1b.model_shape.PiperShape` the TorchTitan config uses -- exactly
-  1,066,241,024 bf16 params at `normal`, 10,528,837,760 at `huge`.
+  `benchmarks.models.piper_qwen3.shape.PiperShape` the TorchTitan config uses --
+  exactly 1,066,241,024 bf16 params at `normal`, 10,528,837,760 at `huge`.
   `tools/megatron_parity_check.py [--model-size SIZE]` transfers titan
   weights into the megatron layout and matches logits on a real batch -- run
-  it after touching `megatron_baseline/model.py` or bumping either
-  submodule. The gate is per-shape and lives on the shape itself
+  it after touching `benchmarks/models/piper_qwen3/megatron_model.py` or
+  bumping either submodule. The gate is per-shape and lives on the shape itself
   (`PiperShape.parity_gate`): 2e-2 at normal
   (measured 5.5e-3), 5e-2 at huge (measured 2.03e-2). The wider huge gate is
   bf16 accumulation, not slack, and it is evidenced rather than assumed --
@@ -880,7 +974,7 @@ Faithfulness guarantees, all verified:
   fp32. The QKV grouped-interleave is proved separately and *bitwise* by
   `_assert_qkv_roundtrip`, so a layout bug cannot hide inside a widened
   gate. Never widen one without both.
-- **Same data and masking**: `megatron_baseline/data.py` drains torchtitan's
+- **Same data and masking**: `benchmarks/e2e/megatron/data.py` drains torchtitan's
   own c4_test dataset class (bit-identical stream to the titan arms'
   replay loader; tested) and packs each batch's rows into TE THD form with
   `cu_seqlens` at the `positions == 0` document boundaries, reproducing
@@ -951,7 +1045,12 @@ GPU tests skip themselves when CUDA is unavailable. `test_te_rope.py`
 additionally requires g++ >= 13 and JIT-builds the CUDA extension on import.
 `test_lm_head_losses.py` includes a SHA-256 check that the vendored TE sources
 are unmodified except for import rewrites -- if you touch
-`piper1b/lm_head/te_*.py`, that test is supposed to fail.
+`benchmarks/models/piper_qwen3/components/lm_head/te_*.py`, that test is
+supposed to fail. The check normalizes each vendored file's local import lines
+back to their upstream spelling before hashing, which is why the package move
+did not require regenerating a single hash -- but it also means the rewritten
+import lines must match the strings the test substitutes, character for
+character.
 
 ## Bumping the TorchTitan submodule
 
@@ -985,7 +1084,25 @@ commits that upstream does not have; rebasing onto upstream must preserve them:
   it the harness cannot deliver a shape to a config function at all, and the
   registry is back to one `def` per (config, size) pair.
 
-`piper1b/parallelize.py` additionally relies on `parallelize_qwen3`'s
+**Also check, on every bump: `third_party/torchtitan/benchmarks/` must not
+acquire an `__init__.py`.** The fork ships a `benchmarks/` directory of
+markdown reports, and since the restructure that name collides with our root
+package. The training subprocess runs with `cwd=third_party/torchtitan`
+(`benchmarks/e2e/runner.py`, `cwd=paths.titan_dir`), and `python -m` puts the CWD at
+`sys.path[0]` -- *ahead* of the repo root we prepend to `PYTHONPATH`. It
+resolves to ours today only because that directory contains no `__init__.py`:
+it is a namespace portion, and a regular package found on a later path entry
+beats an earlier namespace portion. Add an `__init__.py` there -- which an
+upstream rebase could do without anyone noticing -- and it becomes a regular
+package that wins outright, silently stealing the name from the training
+subprocess and breaking `--module benchmarks.models.piper_qwen3` and every
+`--override.imports` path with it. The old top-level package name had no such
+exposure, so this hazard is new. A regression test guards it; do not delete
+that test to make a bump green. (The kernel worker is not exposed: it runs with
+`cwd=<repo root>`, so our package is `sys.path[0]` there.)
+
+`benchmarks/models/piper_qwen3/parallelize.py` additionally relies on
+`parallelize_qwen3`'s
 `skip_dp` kwarg and its ordering guarantee: AC, then `apply_compile` (which
 emits the `(mode=...)` log line), then the early return *before* mesh
 resolution and `apply_fsdp_to_decoder`. Note also that this fork applies no
@@ -1045,7 +1162,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   arms -- and imply `ac=sac`). Manifests before schema 7 predate the FSDP
   removal (they ran under FSDP2 mixed precision with fp32 masters) and are
   not comparable to schema-7+ runs at all -- different init RNG, different
-  optimizer numerics.
+  optimizer numerics. The package restructure moved `benchmarks_git_rev` again
+  without changing any measurement; see "Provenance boundary" above for what an
+  older directory can and cannot still be used for.
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only

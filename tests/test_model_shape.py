@@ -18,11 +18,22 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts import MODEL_SIZES, validate_arm, write_manifest
-from benchmarks.runner import RunRequest, command_for_arm, execute_run
-from benchmarks.runtime import CpuPinning
-from benchmarks.scenarios import SCENARIOS, piper_block_regions, scenario_by_name
-from piper1b.model_shape import HUGE, NORMAL, PIPER_SHAPES, PiperShape
+from benchmarks.artifacts.manifests import write_manifest
+from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.registry import (
+    SCENARIOS,
+    piper_block_regions,
+    scenario_by_name,
+)
+from benchmarks.e2e.runner import RunRequest, execute_run
+from benchmarks.e2e.validation import validate_arm
+from benchmarks.execution.environment import CpuPinning
+from benchmarks.models.piper_qwen3.shape import (
+    HUGE,
+    NORMAL,
+    PIPER_SHAPES,
+    PiperShape,
+)
 from tests.test_runner import _SAC_LINE, _compiled_line
 
 
@@ -31,7 +42,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         # These four are the exact values torchtitan prints
         # ("Total parameter count: dense D, sparse S, vision 0, active A")
         # and the constant tools/megatron_parity_check.py asserts. They were
-        # duplicated by hand in megatron_baseline before schema 9.
+        # duplicated by hand in the megatron baseline before schema 9.
         self.assertEqual(NORMAL.param_count, 1_066_241_024)
         self.assertEqual(NORMAL.nparams_dense, 361_532_416)
         self.assertEqual(NORMAL.nparams_sparse, 704_708_608)
@@ -110,7 +121,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
         """
         import inspect
 
-        import piper1b.config_registry as registry
+        import benchmarks.models.piper_qwen3.config_registry as registry
 
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
@@ -129,7 +140,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
                     self._assert_every_size_lands(factory, name)
 
     def _assert_every_size_lands(self, factory, name: str) -> None:
-        for size in MODEL_SIZES:
+        for size in tuple(PIPER_SHAPES):
             shape = PIPER_SHAPES[size]
             # One config gates its attention backend on the host GPU
             # (qwen3_piper_1b_flex_flash wants sm90+), which this CPU-only
@@ -155,7 +166,10 @@ class ConfigSizeClosureTests(unittest.TestCase):
         """
         import inspect
 
-        from piper1b.config_registry import _piper_1b_model, _piper_1b_trainer
+        from benchmarks.models.piper_qwen3.config_registry import (
+            _piper_1b_model,
+            _piper_1b_trainer,
+        )
 
         for builder in (_piper_1b_model, _piper_1b_trainer):
             with self.subTest(builder=builder.__name__):
@@ -168,7 +182,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
             _piper_1b_trainer(fuse_qkv=True, loss_kind="full_logits")
 
     def test_size_round_trips_through_the_config_argument(self) -> None:
-        from piper1b.config_registry import qwen3_piper_1b
+        from benchmarks.models.piper_qwen3.config_registry import qwen3_piper_1b
 
         self.assertEqual(qwen3_piper_1b(size="huge").model_spec.model.dim, 12288)
         self.assertEqual(qwen3_piper_1b(size="normal").model_spec.model.dim, 1024)
@@ -179,7 +193,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
             qwen3_piper_1b(size="enormous")
 
     def test_built_models_carry_the_requested_shape(self) -> None:
-        from piper1b.config_registry import qwen3_piper_1b
+        from benchmarks.models.piper_qwen3.config_registry import qwen3_piper_1b
 
         normal = qwen3_piper_1b().model_spec.model
         self.assertEqual(normal.dim, NORMAL.dim)
@@ -193,7 +207,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
         self.assertIsNone(huge.layers[0].moe.load_balance_coeff)
 
     def test_pretokenized_configs_pass_the_size_down_to_their_delegate(self) -> None:
-        from piper1b.config_registry import (
+        from benchmarks.models.piper_qwen3.config_registry import (
             qwen3_piper_1b_piper_optimized_te_ce_pretokenized,
             qwen3_piper_1b_pretokenized,
         )
@@ -267,7 +281,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--model-size") + 1], "huge")
 
     def test_megatron_driver_accepts_the_flag(self) -> None:
-        from megatron_baseline.train import parse_args
+        from benchmarks.e2e.megatron.train import parse_args
 
         parsed = parse_args(
             [
@@ -422,10 +436,10 @@ def _fake_process(size_line: str):
 class ManifestAndResumeTests(unittest.TestCase):
     def _run(self, **request_kwargs):
         with mock.patch(
-            "benchmarks.runner.hardware_metadata",
+            "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", _METADATA),
         ), mock.patch(
-            "benchmarks.runner.resolve_cpu_pinning",
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
         ):
             return execute_run(
@@ -460,12 +474,12 @@ class ManifestAndResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary) / "run"
             with mock.patch(
-                "benchmarks.runner.hardware_metadata",
+                "benchmarks.e2e.runner.hardware_metadata",
                 return_value=("test-gpu", _METADATA),
             ), mock.patch(
-                "benchmarks.runner.resolve_cpu_pinning",
+                "benchmarks.e2e.runner.resolve_cpu_pinning",
                 return_value=CpuPinning((), "none: test"),
-            ), mock.patch("benchmarks.runner.validate_arm"):
+            ), mock.patch("benchmarks.e2e.runner.validate_arm"):
                 execute_run(
                     RunRequest(
                         gpu="0",
@@ -535,7 +549,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             manifest["schema_version"] = 8
             (out_dir / "manifest.json").write_text(json.dumps(manifest))
 
-            from benchmarks.runner import _resume_mismatches
+            from benchmarks.artifacts.manifests import _resume_mismatches
 
             self.assertEqual(
                 _resume_mismatches(

@@ -47,15 +47,19 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts import MANIFEST_SCHEMA_VERSION, load_manifest
-from benchmarks.kernel_results import (
+from benchmarks.artifacts.manifests import (
+    MANIFEST_SCHEMA_VERSION,
+    _resume_mismatches,
+    load_manifest,
+    load_run,
+)
+from benchmarks.e2e.registry import scenario_by_name
+from benchmarks.e2e.runner import RunRequest, execute_run
+from benchmarks.execution.environment import CpuPinning
+from benchmarks.kernel.results.schema import (
     KERNEL_RESULTS_SCHEMA_VERSION,
     load_kernel_results,
 )
-from benchmarks.metrics import load_run
-from benchmarks.runner import RunRequest, _resume_mismatches, execute_run
-from benchmarks.runtime import CpuPinning
-from benchmarks.scenarios import scenario_by_name
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -147,7 +151,7 @@ IMPORT_PROBE = textwrap.dedent(
     import json, sys
     sys.path.insert(0, {repo!r})
 
-    from benchmarks.metrics import load_run
+    from benchmarks.artifacts.manifests import load_run
     from pathlib import Path
 
     # Everything the decoder itself pulls in, before it has seen an artifact.
@@ -350,10 +354,10 @@ class LegacyResumeTests(unittest.TestCase):
         never = mock.Mock(side_effect=AssertionError("training must not launch"))
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runner.hardware_metadata",
+            "benchmarks.e2e.runner.hardware_metadata",
             return_value=(self.manifest["hardware"], metadata),
         ), mock.patch(
-            "benchmarks.runner.resolve_cpu_pinning", return_value=pinning
+            "benchmarks.e2e.runner.resolve_cpu_pinning", return_value=pinning
         ):
             out_dir = _legacy_copy(Path(temporary) / "legacy")
             request = RunRequest(
@@ -413,7 +417,7 @@ class LegacyCommandsAreWriteOnlyTests(unittest.TestCase):
         self.assertTrue(runner_path.is_file(), runner_path)
         self.assertIsNone(COMMANDS_READ.search(runner_path.read_text()))
         # ``load_manifest`` hands the whole dict back; the write side is in
-        # artifacts.py and stores what the runner just built.
+        # artifacts/manifests.py and stores what the runner just built.
         self.assertIn("commands", load_manifest(E2E_SCHEMA_8))
 
     def test_resume_never_gets_far_enough_to_read_commands(self) -> None:
@@ -429,10 +433,10 @@ class LegacyCommandsAreWriteOnlyTests(unittest.TestCase):
         never = mock.Mock(side_effect=AssertionError("training must not launch"))
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runner.hardware_metadata",
+            "benchmarks.e2e.runner.hardware_metadata",
             return_value=("nvidia-h200", metadata),
         ), mock.patch(
-            "benchmarks.runner.resolve_cpu_pinning", return_value=pinning
+            "benchmarks.e2e.runner.resolve_cpu_pinning", return_value=pinning
         ):
             out_dir = _legacy_copy(Path(temporary) / "legacy")
             manifest_path = out_dir / "manifest.json"

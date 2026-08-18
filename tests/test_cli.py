@@ -14,11 +14,11 @@ from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.cli import cli
-from benchmarks.runner import execute_run
-from benchmarks.runtime import CpuPinning
-from benchmarks.scenarios import PIPER_1B_ROPE, SCENARIOS
-from piper1b.model_shape import HUGE
+from benchmarks.cli.main import cli
+from benchmarks.e2e.runner import execute_run
+from benchmarks.execution.environment import CpuPinning
+from benchmarks.e2e.registry import PIPER_1B_ROPE, SCENARIOS
+from benchmarks.models.piper_qwen3.shape import HUGE
 
 
 class CliTests(unittest.TestCase):
@@ -54,7 +54,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.execute_run", return_value=completed
+            "benchmarks.cli.main.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
                 cli, ["run", "2", "--compile-mode", "cuda-graph", "--ac", "none"]
@@ -69,7 +69,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.execute_run", return_value=completed
+            "benchmarks.cli.main.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -80,8 +80,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
-                "benchmarks.cli.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli._evaluate"):
+                "benchmarks.cli.main.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.main._evaluate"):
                 result = self.runner.invoke(
                     cli,
                     [
@@ -111,7 +111,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.execute_run", return_value=completed
+            "benchmarks.cli.main.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -157,12 +157,12 @@ class CliTests(unittest.TestCase):
             "benchmarks_git_rev": "bench-rev",
         }
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.cli.execute_run", side_effect=run_with_fake_process
+            "benchmarks.cli.main.execute_run", side_effect=run_with_fake_process
         ), mock.patch(
-            "benchmarks.runner.hardware_metadata",
+            "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", metadata),
         ), mock.patch(
-            "benchmarks.runner.resolve_cpu_pinning",
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
         ):
             out_dir = Path(temporary) / "run"
@@ -203,7 +203,7 @@ class CliTests(unittest.TestCase):
             selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
         )
         with mock.patch(
-            "benchmarks.cli.execute_run", return_value=completed
+            "benchmarks.cli.main.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
                 cli,
@@ -234,8 +234,8 @@ class CliTests(unittest.TestCase):
             out_dir = Path(temporary)
             completed = SimpleNamespace(out_dir=out_dir)
             with mock.patch(
-                "benchmarks.cli.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli._evaluate") as evaluate:
+                "benchmarks.cli.main.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.main._evaluate") as evaluate:
                 result = self.runner.invoke(
                     cli,
                     ["run-all", "6", "--scenario", "piper1b_rope"],
@@ -256,8 +256,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
-                "benchmarks.cli.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli._evaluate"):
+                "benchmarks.cli.main.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.main._evaluate"):
                 result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
         self.assertEqual(result.exit_code, 0, result.output)
         requests = [call.args[0] for call in execute.call_args_list]
@@ -273,8 +273,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
-                "benchmarks.cli.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli._evaluate"):
+                "benchmarks.cli.main.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.main._evaluate"):
                 result = self.runner.invoke(
                     cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
                 )
@@ -284,8 +284,8 @@ class CliTests(unittest.TestCase):
 
     def test_all_scenarios_stops_at_the_first_failing_scenario(self) -> None:
         with mock.patch(
-            "benchmarks.cli.execute_run", side_effect=RuntimeError("arm failed")
-        ) as execute, mock.patch("benchmarks.cli._evaluate") as evaluate:
+            "benchmarks.cli.main.execute_run", side_effect=RuntimeError("arm failed")
+        ) as execute, mock.patch("benchmarks.cli.main._evaluate") as evaluate:
             result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(execute.call_count, 1)
@@ -306,8 +306,8 @@ class CliTests(unittest.TestCase):
 
     def test_run_all_does_not_evaluate_a_failed_execution(self) -> None:
         with mock.patch(
-            "benchmarks.cli.execute_run", side_effect=RuntimeError("arm failed")
-        ), mock.patch("benchmarks.cli._evaluate") as evaluate:
+            "benchmarks.cli.main.execute_run", side_effect=RuntimeError("arm failed")
+        ), mock.patch("benchmarks.cli.main._evaluate") as evaluate:
             result = self.runner.invoke(cli, ["run-all", "0"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("arm failed", result.output)
@@ -321,9 +321,9 @@ class CliTests(unittest.TestCase):
             )
             completed = SimpleNamespace(out_dir=out_dir)
             with mock.patch(
-                "benchmarks.cli.execute_run", return_value=completed
+                "benchmarks.cli.main.execute_run", return_value=completed
             ), mock.patch(
-                "benchmarks.cli._evaluate",
+                "benchmarks.cli.main._evaluate",
                 side_effect=click.ClickException("bad trace"),
             ):
                 result = self.runner.invoke(cli, ["run-all", "0"])

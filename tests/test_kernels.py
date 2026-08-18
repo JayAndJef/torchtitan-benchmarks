@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.kernels import (
+from benchmarks.kernel.registry import (
     KERNEL_SCENARIOS,
     KernelWorkload,
     MODES,
@@ -16,7 +16,7 @@ from benchmarks.kernels import (
     routing_divides_evenly,
     shape_summary,
 )
-from benchmarks.kernel_stats import kernel_comparison
+from benchmarks.kernel.engine.statistics import kernel_comparison
 
 
 class RegistryTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class RegistryTests(unittest.TestCase):
     def test_builder_paths_resolve_without_importing_torch(self) -> None:
         # Registry import must stay torch-free; the dotted paths just need
         # to be well-formed module:function references.
-        registry = importlib.import_module("benchmarks.kernels")
+        registry = importlib.import_module("benchmarks.kernel.registry")
         self.assertNotIn("torch", vars(registry))
         for scenario in KERNEL_SCENARIOS.values():
             references = [scenario.inputs_builder] + [
@@ -67,7 +67,7 @@ class RegistryTests(unittest.TestCase):
                 references.append(scenario.reference_builder)
             for reference in references:
                 module, _, function = reference.partition(":")
-                self.assertEqual(module, "benchmarks.kernel_arms")
+                self.assertEqual(module, "benchmarks.kernel.operations.arms")
                 self.assertTrue(function.isidentifier(), reference)
 
     def test_only_raw_kernels_and_floors_stay_eager(self) -> None:
@@ -82,7 +82,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(eager, {("rope", "copy_floor")})
 
     def test_every_arm_has_a_description(self) -> None:
-        from benchmarks.scenarios import SCENARIOS
+        from benchmarks.e2e.registry import SCENARIOS
 
         for registry in (KERNEL_SCENARIOS, SCENARIOS):
             for scenario in registry.values():
@@ -217,7 +217,7 @@ class BalancedRoutingInvariantTests(unittest.TestCase):
 
     ``execute_kernel_run`` skips an unbalanced swiglu scenario loudly before
     it spawns a worker, but that is the friendly path, not the guard:
-    ``python -m benchmarks.kernel_worker`` and direct ``run_kernel_scenario``
+    ``python -m benchmarks.kernel.worker`` and direct ``run_kernel_scenario``
     callers (``tests/test_kernel_gpu_smoke.py``) never pass through it. Left
     unchecked there, ``swiglu_inputs`` builds ``batch * seq_len * top_k`` rows
     and then splits them into ``num_experts`` equal blocks that do not cover
@@ -225,7 +225,7 @@ class BalancedRoutingInvariantTests(unittest.TestCase):
     """
 
     def test_run_kernel_scenario_rejects_an_uneven_split(self) -> None:
-        from benchmarks.kernel_bench import RunOptions, run_kernel_scenario
+        from benchmarks.kernel.engine.run import RunOptions, run_kernel_scenario
 
         shape, workload = resolve_shape_and_workload(batch=3, seq_len=1025)
         with self.assertRaises(ValueError) as caught:

@@ -12,17 +12,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts import trace_files
-from benchmarks.runner import (
-    RunRequest,
-    command_for_arm,
-    execute_run,
-    validate_arm,
-    write_manifest,
-)
-from benchmarks.runtime import CpuPinning, resolve_cpu_pinning
-from benchmarks.metrics import stable_tps, training_metrics
-from benchmarks.scenarios import (
+from benchmarks.artifacts.manifests import trace_files, write_manifest
+from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.runner import RunRequest, execute_run
+from benchmarks.e2e.validation import validate_arm
+from benchmarks.execution.environment import CpuPinning, resolve_cpu_pinning
+from benchmarks.e2e.results import stable_tps, training_metrics
+from benchmarks.e2e.registry import (
     Arm,
     PIPER_1B_LM_HEAD,
     PIPER_1B_QKV,
@@ -32,7 +28,7 @@ from benchmarks.scenarios import (
     scenario_by_name,
 )
 from dataclasses import replace
-from piper1b.config_registry import (
+from benchmarks.models.piper_qwen3.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_full_logits,
     qwen3_piper_1b_fused_linear_ce,
@@ -40,7 +36,7 @@ from piper1b.config_registry import (
     qwen3_piper_1b_te_fused_ce,
     qwen3_piper_1b_unfused_qkv,
 )
-from piper1b.lm_head.losses import (
+from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
     PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
@@ -50,15 +46,16 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     LossWithLMHead,
 )
-from piper1b.model_shape import HUGE, NORMAL, PIPER_SHAPES
-from piper1b.parallelize import parallelize_piper1b
+from benchmarks.models.piper_qwen3.shape import HUGE, NORMAL, PIPER_SHAPES
+from benchmarks.models.piper_qwen3.parallelize import parallelize_piper1b
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
 
 PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
-    "piper1b.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts"
+    "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu."
+    "piper_optimized_triton_fused_grouped_experts"
 )
 
 
@@ -175,8 +172,8 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(
             inductor.override_imports,
             (
-                "piper1b.swiglu.combined_swiglu."
-                "piper_optimized_inductor_fused_grouped_experts",
+                "benchmarks.models.piper_qwen3.components.swiglu."
+                "combined_swiglu.piper_optimized_inductor_fused_grouped_experts",
             ),
         )
         self.assertEqual(inductor.overrides_per_block, 1)
@@ -187,7 +184,9 @@ class ScenarioTests(unittest.TestCase):
     def test_existing_scenarios_use_the_fixed_piper_workload(self) -> None:
         for scenario in (PIPER_1B_ROPE, PIPER_1B_SWIGLU):
             self.assertIs(scenario.workload, PIPER_1B_WORKLOAD)
-        self.assertEqual(PIPER_1B_WORKLOAD.module, "piper1b")
+        self.assertEqual(
+            PIPER_1B_WORKLOAD.module, "benchmarks.models.piper_qwen3"
+        )
         self.assertEqual(PIPER_1B_WORKLOAD.config, "qwen3_piper_1b")
         self.assertEqual(PIPER_1B_WORKLOAD.local_batch_size, 4)
         self.assertEqual(PIPER_1B_WORKLOAD.seq_len, 1024)
@@ -327,8 +326,16 @@ class CommandTests(unittest.TestCase):
         )
         self.assertNotIn("--override.imports", command)
         self.assertNotIn("--debug.seed", command)
-        self.assertEqual(command[:5], ["./run_train.sh", "--module", "piper1b",
-                                       "--config", "qwen3_piper_1b"])
+        self.assertEqual(
+            command[:5],
+            [
+                "./run_train.sh",
+                "--module",
+                "benchmarks.models.piper_qwen3",
+                "--config",
+                "qwen3_piper_1b",
+            ],
+        )
         self.assertIn("--compile.enable", command)
         self.assertIn("--profiler.enable_profiling", command)
 
@@ -385,7 +392,7 @@ class CommandTests(unittest.TestCase):
             workload, arm, Path("/out/baseline"), [], "cuda-graph", "none"
         )
         self.assertEqual(command[0], sys.executable)
-        self.assertEqual(command[1:3], ["-m", "megatron_baseline.train"])
+        self.assertEqual(command[1:3], ["-m", "benchmarks.e2e.megatron.train"])
         self.assertEqual(command[command.index("--mode") + 1], "cuda-graph")
         self.assertEqual(command[command.index("--seed") + 1], "42")
         self.assertEqual(command[command.index("--seq-len") + 1], "1024")
@@ -476,9 +483,11 @@ class MegatronScenarioTests(unittest.TestCase):
             self.assertEqual(arm.launcher, "torchtitan")
 
     def test_pretokenized_config_twins_build(self) -> None:
-        import piper1b.config_registry as registry
-        from piper1b.lm_head.losses import PiperOptimizedCrossEntropyLoss
-        from piper1b.pretokenized_data import PretokenizedReplayDataLoader
+        import benchmarks.models.piper_qwen3.config_registry as registry
+        from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataLoader
+        from benchmarks.models.piper_qwen3.components.lm_head.losses import (
+            PiperOptimizedCrossEntropyLoss,
+        )
 
         scenario = scenario_by_name("piper1b_megatron")
         config_names = {
@@ -523,8 +532,8 @@ class CpuPinningTests(unittest.TestCase):
 
     def test_pins_to_the_gpu_numa_node(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runtime.run_text", return_value="00000000:E3:00.0\n"
-        ), mock.patch("benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"):
+            "benchmarks.execution.environment.run_text", return_value="00000000:E3:00.0\n"
+        ), mock.patch("benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"):
             sysfs = self._sysfs(Path(temporary), "0000:e3:00.0", "1")
             pinning = resolve_cpu_pinning("7", sysfs_root=sysfs)
         self.assertEqual(
@@ -533,25 +542,25 @@ class CpuPinningTests(unittest.TestCase):
         self.assertEqual(pinning.description, "numactl --cpunodebind=1 --membind=1")
 
     def test_unpinned_when_prerequisites_are_missing(self) -> None:
-        with mock.patch("benchmarks.runtime.shutil.which", return_value=None):
+        with mock.patch("benchmarks.execution.environment.shutil.which", return_value=None):
             self.assertEqual(
                 resolve_cpu_pinning("7").prefix, ()
             )
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runtime.run_text",
+            "benchmarks.execution.environment.run_text",
             return_value="unavailable: nvidia-smi not found",
         ), mock.patch(
-            "benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"
+            "benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"
         ):
             pinning = resolve_cpu_pinning("7", sysfs_root=Path(temporary))
         self.assertEqual(pinning.prefix, ())
         self.assertIn("cannot resolve PCI bus id", pinning.description)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runtime.run_text", return_value="00000000:E3:00.0\n"
+            "benchmarks.execution.environment.run_text", return_value="00000000:E3:00.0\n"
         ), mock.patch(
-            "benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"
+            "benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"
         ):
             no_affinity = self._sysfs(Path(temporary), "0000:e3:00.0", "-1")
             pinning = resolve_cpu_pinning("7", sysfs_root=no_affinity)
@@ -559,9 +568,9 @@ class CpuPinningTests(unittest.TestCase):
         self.assertIn("no NUMA affinity", pinning.description)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runtime.run_text", return_value="00010001:03:00.0\n"
+            "benchmarks.execution.environment.run_text", return_value="00010001:03:00.0\n"
         ), mock.patch(
-            "benchmarks.runtime.shutil.which", return_value="/usr/bin/numactl"
+            "benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"
         ):
             truncatable = self._sysfs(Path(temporary), "0001:03:00.0", "0")
             pinning = resolve_cpu_pinning("7", sysfs_root=truncatable)
@@ -827,8 +836,8 @@ class ValidationTests(unittest.TestCase):
     def test_megatron_mode_line_matches_the_driver_constant(self) -> None:
         # The validation profile and the driver define the contract in two
         # places; this pins them together without importing megatron.
-        from benchmarks.artifacts import VALIDATION_PROFILES
-        from megatron_baseline.train import MODE_LINE
+        from benchmarks.e2e.megatron.train import MODE_LINE
+        from benchmarks.e2e.validation import VALIDATION_PROFILES
 
         for mode in ("default", "cuda-graph"):
             rendered = MODE_LINE.format(mode=mode, impl="anything")
@@ -967,10 +976,10 @@ class ResumeTests(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runner.hardware_metadata",
+            "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", metadata),
         ), mock.patch(
-            "benchmarks.runner.resolve_cpu_pinning",
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
         ):
             out_dir = Path(temporary) / "run"
@@ -1109,10 +1118,10 @@ class ResumeTests(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.runner.hardware_metadata",
+            "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", metadata),
         ), mock.patch(
-            "benchmarks.runner.resolve_cpu_pinning",
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
         ):
             out_dir = Path(temporary) / "run"

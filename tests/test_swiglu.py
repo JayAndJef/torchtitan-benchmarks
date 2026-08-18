@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from piper1b.swiglu.combined_swiglu import (
+from benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu import (
     combined_silu_and_mul_op,
     CombinedSwiGLUFusedGroupedExperts,
     piper_optimized_triton_fused_grouped_experts,

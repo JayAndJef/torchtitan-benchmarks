@@ -1,8 +1,8 @@
 """The behavioral contract a package restructure must preserve, frozen.
 
-Every module in this repo is about to be relocated. A move is only correct if
-nothing observable changes, and almost everything observable here is a
-*string*: scenario and arm ids that name published results, dotted override
+Every module in this repo was relocated by the ``benchmarks`` restructure. A
+move is only correct if nothing observable changes, and almost everything
+observable here is a *string*: scenario and arm ids that name published results, dotted override
 paths delivered to TorchTitan on the command line, "module:symbol" builder
 paths resolved inside the GPU worker, the ``--module`` token TorchTitan
 resolves through its own two-candidate algorithm, and two ``Path(__file__)``
@@ -12,11 +12,11 @@ are exercised by an import, and every one of them fails only at run time --
 
 This file pins all of them so a missed reference costs one CPU second.
 
-Everything the move is allowed to change lives in the constants at the top:
+Everything the move was allowed to change lives in the constants at the top:
 ``CANONICAL_ROOTS``, ``TITAN_CONFIG_MODULE``, ``MEGATRON_DRIVER_MODULE``, the
 override/builder path prefixes, and the golden argv lists. Updating this file
-after the move is a handful of data edits, and reverting the move is the same
-edits back -- the assertions themselves never move.
+for the move was a handful of data edits, and reverting the move would be the
+same edits back -- the assertions themselves never move.
 """
 
 import importlib.util
@@ -28,29 +28,34 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts import VALIDATION_PROFILES
-from benchmarks.kernels import KERNEL_SCENARIOS
-from benchmarks.runtime import BENCH_DIR, TITAN_DIR, command_for_arm
-from benchmarks.scenarios import SCENARIOS, scenario_by_name
-from megatron_baseline.location import MEGATRON_SUBMODULE, REPO_ROOT
+from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.registry import SCENARIOS, scenario_by_name
+from benchmarks.e2e.validation import VALIDATION_PROFILES
+from benchmarks.execution.environment import BENCH_DIR, TITAN_DIR
+from benchmarks.kernel.registry import KERNEL_SCENARIOS
+from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+    MEGATRON_SUBMODULE,
+    REPO_ROOT,
+)
 
 
-# The three first-party packages. Every importable name this repo owns lives
-# under one of them, and the runner exports their parent directory as
-# PYTHONPATH to the training subprocess.
-CANONICAL_ROOTS = ("benchmarks", "piper1b", "megatron_baseline")
+# The first-party package. Every importable name this repo owns lives under
+# it, and the runner exports its parent directory as PYTHONPATH to the
+# training subprocess. It was three roots before the restructure.
+CANONICAL_ROOTS = ("benchmarks",)
 
 # The two strings a mechanical move is allowed to change, and the only two.
 # TITAN_CONFIG_MODULE is the --module token; MEGATRON_DRIVER_MODULE is the
 # python -m target of the megatron launcher.
-TITAN_CONFIG_MODULE = "piper1b"
-MEGATRON_DRIVER_MODULE = "megatron_baseline.train"
+TITAN_CONFIG_MODULE = "benchmarks.models.piper_qwen3"
+MEGATRON_DRIVER_MODULE = "benchmarks.e2e.megatron.train"
 
 # Dotted-path prefixes the registries hand to importlib at run time.
 SWIGLU_INDUCTOR_OVERRIDE = (
-    "piper1b.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts"
+    "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu."
+    "piper_optimized_inductor_fused_grouped_experts"
 )
-KERNEL_ARMS_MODULE = "benchmarks.kernel_arms"
+KERNEL_ARMS_MODULE = "benchmarks.kernel.operations.arms"
 
 # Third-party roots override paths are allowed to name, so the "did this move
 # leave a first-party path behind?" check does not trip on the fork.
@@ -216,7 +221,7 @@ def _split_dotted(path: str) -> tuple[str, str]:
 
 
 def _split_builder(path: str) -> tuple[str, str]:
-    """Split ``module:symbol`` exactly as kernel_bench.resolve_symbol does."""
+    """Split ``module:symbol`` as kernel.engine.run.resolve_symbol does."""
     module_name, _, attribute = path.partition(":")
     return module_name, attribute
 
@@ -307,8 +312,8 @@ class KernelBuilderPathTests(unittest.TestCase):
                 self.assertEqual(_split_builder(path)[0], KERNEL_ARMS_MODULE)
 
     def test_the_split_matches_resolve_symbol(self) -> None:
-        """The colon format is kernel_bench.resolve_symbol's, not a guess."""
-        from benchmarks import kernel_bench
+        """The colon format is resolve_symbol's, not a guess."""
+        from benchmarks.kernel.engine import run as kernel_bench
 
         source = Path(kernel_bench.__file__).read_text()
         self.assertIn('path.partition(":")', source)
@@ -570,10 +575,10 @@ class TitanModuleResolutionTests(unittest.TestCase):
     def test_the_module_resolves_under_torchtitans_own_algorithm(self) -> None:
         """A bad --module string is caught here, before any GPU time.
 
-        The runner passes ``--module piper1b`` and TorchTitan resolves it in
-        the training subprocess. Nothing in this repo imports that path, so
-        after a move an unchanged --module would import cleanly on the CLI
-        side and die minutes into the run.
+        The runner passes ``--module benchmarks.models.piper_qwen3`` and
+        TorchTitan resolves it in the training subprocess. Nothing in this
+        repo imports that path, so after a move an unchanged --module would
+        import cleanly on the CLI side and die minutes into the run.
         """
         resolved = [
             candidate
@@ -647,10 +652,11 @@ def _repo_root_from_here() -> Path:
 class RepositoryRootTests(unittest.TestCase):
     """The only silent failure mode in the whole migration.
 
-    ``benchmarks.runtime.BENCH_DIR`` and
-    ``megatron_baseline.location.REPO_ROOT`` are both
-    ``Path(__file__).resolve().parent.parent`` today. The move changes how
-    deep those files sit, and a stale ``.parent`` chain does not raise: the
+    ``benchmarks.execution.environment.BENCH_DIR`` and
+    ``benchmarks.models.piper_qwen3.megatron_bootstrap.REPO_ROOT`` were both
+    ``Path(__file__).resolve().parent.parent`` before the move. The move
+    changed how deep those files sit (to ``parents[2]`` and ``parents[3]``),
+    and a stale ``.parent`` chain does not raise: the
     run starts, the training subprocess gets a PYTHONPATH one level off,
     ``out/`` and the cache land somewhere else, provenance reads the git rev
     of whatever repo happens to be there, and the numbers look fine. Every
@@ -713,8 +719,12 @@ TEST_CENSUS = {
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
+    # Added by the restructure: the sweep that asserts no retired module
+    # path survives anywhere git would ship. Censused like the rest so it
+    # cannot quietly stop being discovered.
+    "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 160
+TEST_CENSUS_TOTAL = 175
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

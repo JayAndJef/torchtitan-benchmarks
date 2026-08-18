@@ -16,19 +16,19 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from megatron_baseline.data import (
+from benchmarks.e2e.megatron.data import (
     C4_TEST_PATH,
     TOKENIZER_PATH,
     ThdBatch,
     thd_batches,
 )
-from megatron_baseline.train import lr_lambda_for
+from benchmarks.e2e.megatron.train import lr_lambda_for
 
 
 class PackingParityTests(unittest.TestCase):
     def test_streams_are_bitwise_identical(self) -> None:
-        from megatron_baseline.data import materialize_titan_samples
-        from piper1b.pretokenized_data import PretokenizedReplayDataset
+        from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataset
+        from benchmarks.e2e.megatron.data import materialize_titan_samples
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
         from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
 
@@ -67,7 +67,7 @@ class PackingParityTests(unittest.TestCase):
             self.assertTrue(torch.equal(m_label, t_label))
 
     def test_replay_exhaustion_is_loud(self) -> None:
-        from piper1b.pretokenized_data import PretokenizedReplayDataset
+        from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataset
 
         class TwoSamples:
             def __iter__(self):

@@ -1,23 +1,30 @@
 # torchtitan-benchmarks
 
 Declarative end-to-end and kernel microbenchmarks for the Piper Qwen3-1B
-TorchTitan port. The repository is out-of-tree: it registers the `piper1b`
-module and experiment overrides without modifying the TorchTitan checkout.
+TorchTitan port. The repository is out-of-tree: it registers the
+`benchmarks.models.piper_qwen3` module and experiment overrides without
+modifying the TorchTitan checkout.
 
 TorchTitan is pinned as a submodule at `third_party/torchtitan`. The port imports
 private TorchTitan Qwen3 helpers, so bumping the submodule means revalidating
-`piper1b/config_registry.py`. Every run records the revision it used in
-`manifest.json`.
+`benchmarks/models/piper_qwen3/config_registry.py`. Every run records the
+revision it used in `manifest.json`.
 
 ## Layout
 
+Everything importable lives in the single `benchmarks/` package; `tools/` holds
+the argv-driven operator scripts.
+
 | path | purpose |
 |---|---|
-| `piper1b/` | Piper Qwen3-1B config port and benchmark-local kernel overrides. |
-| `benchmarks/` | Declarative scenarios, Click CLI, runner, artifacts, metrics, and reporting. |
-| `megatron_baseline/` | Megatron-LM + TransformerEngine baseline: model builder, THD data, training driver. |
-| `analysis/` | Standalone trace-diagnostic scripts. |
-| `tools/` | Cross-engine parity check and the shared-box matrix supervisor. |
+| `benchmarks/cli/` | Click CLI and the `python -m benchmarks.cli` entry point. |
+| `benchmarks/e2e/` | End-to-end system: scenario registry, runner, subprocess launch, validation, results. Includes the Megatron-LM training driver under `e2e/megatron/`. |
+| `benchmarks/kernel/` | Kernel-isolation system: registry, runner/worker, timing engine, arm builders, results. |
+| `benchmarks/models/piper_qwen3/` | Piper Qwen3-1B config port, model shape, and benchmark-local kernel overrides under `components/`. Also the Megatron model builder and submodule bootstrap. |
+| `benchmarks/traces/` | Chrome-trace parsing and per-region pooling. |
+| `benchmarks/artifacts/` | Manifest and run-state IO, output layout, shared sample summaries. |
+| `benchmarks/execution/` | Subprocess environment: repo paths, CPU pinning, hardware metadata. |
+| `tools/` | Cross-engine parity check, the shared-box matrix supervisor, and standalone trace diagnostics. |
 | `tests/` | CLI, runner, artifact, metric, and kernel correctness tests. |
 | `third_party/torchtitan/` | Pinned TorchTitan submodule; installed editable into `.venv`. |
 | `third_party/Megatron-LM/` | Pinned Megatron-LM submodule; placed on `sys.path`, not pip-installed. |
@@ -37,8 +44,10 @@ where an arm explicitly selects an alternate trainer configuration.
 | `piper1b_attention` | `baseline`, `flash_attention_3`, `flex_flash` | FlexAttention, FlashAttention-3 varlen, and FlexAttention lowered to FlashAttention-4. |
 | `piper1b_megatron` | `baseline`, `titan_stock`, `titan_swiglu`, `titan_lm_head`, `titan_swiglu_lm_head` | Megatron-LM + TransformerEngine against the best-improved TorchTitan configurations. |
 
-Scenario definitions live in `benchmarks/scenarios.py`. They declare the
+Scenario definitions live in `benchmarks/e2e/registry.py`. They declare the
 workload, arm-specific trainer config, overrides, and expected trace markers.
+Scenario and arm names are stable identifiers and are unaffected by the package
+layout.
 
 ## Requirements
 
@@ -96,7 +105,8 @@ diverge.
 # Run one arm only.
 ./run_bench.sh run <gpu-index> --scenario piper1b_qkv --arm fused_qkv
 
-# Run at the huge model shape (1 layer, dim 12288; see piper1b/model_shape.py).
+# Run at the huge model shape (1 layer, dim 12288;
+# see benchmarks/models/piper_qwen3/shape.py).
 # Results are only comparable within one --model-size.
 ./run_bench.sh run-all <gpu-index> --scenario piper1b_megatron \
     --ac none --compile-mode cuda-graph --model-size huge
@@ -140,6 +150,12 @@ out/<timestamp>/<scenario>/<hardware>/
 Training runs are bound to the GPU's NUMA node with `numactl` when available,
 so host scheduling does not decide throughput; the manifest records the
 binding as `cpu_pinning`.
+
+Run directories written before the package restructure record the module names
+this repository used at the time. They still load and evaluate, but they cannot
+be resumed across it: `--resume` requires a matching `benchmarks_git_rev`, and
+the restructure changed it. No measurement changed -- a file move is not a
+benchmark result.
 
 Evaluation reports stable tokens/s, peak allocated memory, per-step GPU kernel
 time (the host-speed-immune way to compare kernel implementations), and each

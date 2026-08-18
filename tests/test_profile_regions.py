@@ -9,19 +9,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.profile_regions import (
+from benchmarks.traces.extraction import (
     PooledMetrics,
     pooled_window_metrics,
     trace_window_metrics,
 )
-from benchmarks.scenarios import Region
-from benchmarks.metrics import (
+from benchmarks.traces.schema import Region
+from benchmarks.e2e.results import (
     evaluate_run,
     losses,
     region_comparison,
+    render_evaluation,
     write_results,
 )
-from benchmarks.reporting import render_evaluation
 
 
 REGIONS = (

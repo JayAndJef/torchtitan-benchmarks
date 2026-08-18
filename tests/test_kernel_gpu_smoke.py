@@ -32,8 +32,8 @@ def _has_gcc_13() -> bool:
 @unittest.skipUnless(CUDA, "kernel benchmarks require CUDA")
 class KernelScenarioSmokeTests(unittest.TestCase):
     def _run(self, name: str) -> None:
-        from benchmarks.kernel_bench import RunOptions, run_kernel_scenario
-        from benchmarks.kernels import (
+        from benchmarks.kernel.engine.run import RunOptions, run_kernel_scenario
+        from benchmarks.kernel.registry import (
             kernel_scenario_by_name,
             resolve_shape_and_workload,
         )

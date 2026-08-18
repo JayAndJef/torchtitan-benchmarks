@@ -53,7 +53,7 @@ def rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def build_titan_model(shape, dtype=torch.bfloat16):
-    from piper1b.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
 
     config = _piper_1b_model(fuse_qkv=True, shape=shape)
     previous_dtype = torch.get_default_dtype()
@@ -70,7 +70,7 @@ def build_titan_model(shape, dtype=torch.bfloat16):
 
 
 def build_megatron_model(shape):
-    from megatron_baseline.model import build_model
+    from benchmarks.models.piper_qwen3.megatron_model import build_model
 
     model = build_model(seq_len=1024, shape=shape)
     model.eval()
@@ -187,7 +187,7 @@ def main() -> None:
         default=None,
         help=(
             "logit rel_l2 ceiling; defaults to the shape's own parity_gate "
-            "in piper1b/model_shape.py (normal 2e-2, huge 5e-2)"
+            "in benchmarks/models/piper_qwen3/shape.py (normal 2e-2, huge 5e-2)"
         ),
     )
     parser.add_argument(
@@ -201,7 +201,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    from piper1b.model_shape import shape_by_name
+    from benchmarks.models.piper_qwen3.shape import shape_by_name
 
     shape = shape_by_name(args.model_size)
     if args.gate is None:
@@ -216,7 +216,7 @@ def main() -> None:
     torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
     torch.cuda.set_device(0)
 
-    from megatron_baseline.location import (
+    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
         add_megatron_to_path,
         configure_te_environment,
     )
@@ -243,7 +243,7 @@ def main() -> None:
     transfer_weights(titan, megatron, shape)
     print("weight transfer complete (every tensor shape matched)")
 
-    from megatron_baseline.data import materialize_titan_samples, thd_batches
+    from benchmarks.e2e.megatron.data import materialize_titan_samples, thd_batches
 
     samples = materialize_titan_samples(seq_len=1024, num_samples=4)
     batch = thd_batches(samples, batch_size=4)[0]
