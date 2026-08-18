@@ -42,7 +42,18 @@ class KernelScenarioSmokeTests(unittest.TestCase):
             scenario,
             shape,
             workload,
-            RunOptions(n=3, warmup=1, memory_iters=1),
+            # burst_k > 1 deliberately. The backward arms retain their graph
+            # and re-run torch.autograd.backward, so a burst re-enters the
+            # same compiled backward graph k times in a row. That is the one
+            # property of burst timing no CPU test can reach, and this is
+            # where it is exercised.
+            RunOptions(
+                replicates=2,
+                samples_per_replicate=3,
+                burst_k=2,
+                warmup_calls=1,
+                memory_iters=1,
+            ),
             "smoke",
         )
         failures = [row for row in result.correctness if row.passed is False]
@@ -52,7 +63,12 @@ class KernelScenarioSmokeTests(unittest.TestCase):
             measured = result.arms[arm.name].modes
             self.assertEqual(set(measured), set(arm.modes), arm.name)
             for mode in arm.modes:
-                self.assertEqual(len(measured[mode].samples_us), 3)
+                # Replicate boundaries survive out of the engine, and the
+                # pooled view is their concatenation.
+                self.assertEqual(len(measured[mode].replicates_us), 2)
+                for replicate in measured[mode].replicates_us:
+                    self.assertEqual(len(replicate), 3)
+                self.assertEqual(len(measured[mode].samples_us), 6)
 
     def test_swiglu(self) -> None:
         self._run("swiglu")

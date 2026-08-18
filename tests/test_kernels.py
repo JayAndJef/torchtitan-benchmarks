@@ -249,6 +249,52 @@ class BalancedRoutingInvariantTests(unittest.TestCase):
         # runs -- diagnoses the workload rather than the missing device.
 
 
+class RunOptionsCallSiteTests(unittest.TestCase):
+    """Every ``RunOptions(...)`` in the tree names fields that exist.
+
+    The GPU smoke test skips itself without CUDA, so a renamed option there
+    stays green on every CPU host and fails only on the machine that can
+    actually measure. That is how the round-robin ``n``/``warmup`` pair
+    survived its own removal into a committed tree. This test reads the call
+    sites with ``ast`` instead of executing them, so a CPU host catches it.
+    """
+
+    def _call_sites(self):
+        import ast
+
+        root = Path(__file__).resolve().parent.parent
+        for path in sorted(root.glob("tests/*.py")) + sorted(
+            root.glob("benchmarks/**/*.py")
+        ):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None) == "RunOptions"
+                ):
+                    yield path.relative_to(root), node
+
+    def test_every_call_site_uses_real_fields(self) -> None:
+        import dataclasses
+
+        from benchmarks.kernel.engine.run import RunOptions
+
+        fields = {f.name for f in dataclasses.fields(RunOptions)}
+        sites = list(self._call_sites())
+        self.assertTrue(sites, "no RunOptions call sites found to check")
+        violations = []
+        for path, node in sites:
+            unknown = {kw.arg for kw in node.keywords if kw.arg} - fields
+            if unknown:
+                violations.append(f"{path}:{node.lineno}: {sorted(unknown)}")
+        self.assertEqual(
+            violations,
+            [],
+            "RunOptions constructed with fields it does not have:\n  "
+            + "\n  ".join(violations),
+        )
+
+
 def _replicates(values: list[float], per_replicate: int) -> list[list[float]]:
     """Split a flat sample list into equal replicates."""
     return [
