@@ -732,12 +732,12 @@ TEST_CENSUS = {
     # the cli.add_command wiring exists to prevent, added when the CLI split
     # into main/e2e/kernel/rendering.
     "test_cli": 17,
-    "test_kernel_cli": 17,
+    "test_kernel_cli": 19,
     "test_kernel_gpu_smoke": 4,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them.
-    "test_kernel_results": 4,
+    "test_kernel_results": 5,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility.
     "test_kernels": 26,
@@ -757,7 +757,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 188
+TEST_CENSUS_TOTAL = 191
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

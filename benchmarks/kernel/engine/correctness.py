@@ -194,7 +194,20 @@ def run_correctness(
 
     rows: list[CorrectnessResult] = []
     for arm in scenario.arms:
+        if arm.name not in built:
+            # Skipped by the caller: this host cannot run it. Its own gates
+            # go with it.
+            continue
         for check in arm.correctness:
+            if check.reference != "fp64" and check.reference not in built:
+                # Never dropped quietly. The parent closes its skip set over
+                # correctness references precisely so this cannot happen, so
+                # reaching it means an arm would be timed with nothing
+                # checking it.
+                raise ValueError(
+                    f"{scenario.name}: {arm.name} is gated against "
+                    f"{check.reference!r}, which was not built"
+                )
             rows.extend(
                 _check_rows(
                     arm.name,

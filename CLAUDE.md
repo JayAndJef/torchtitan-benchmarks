@@ -688,7 +688,7 @@ reporting anything about it.
 
 | scenario | arms | modes | notes |
 |---|---|---|---|
-| `rope` | `copy_floor`, `baseline`*, `helion`, `te` | fwd, bwd | `te` needs gcc-13; GB/s and x-floor reported |
+| `rope` | `copy_floor`, `baseline`*, `helion`, `te` | fwd, bwd | `te` alone needs gcc-13, and is skipped by name without it; GB/s and x-floor reported |
 | `swiglu` | `baseline`*, `piper_optimized_triton`, `piper_optimized_inductor` | fwd, bwd, fwd+bwd | whole expert layer only; both Piper arms fuse the w13 GEMM and differ in the activation (custom Triton op vs plain ops left to Inductor) |
 | `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
 | `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
@@ -837,13 +837,31 @@ own family module.
 - Correctness runs before timing and fails the run loudly (worker exit 3).
   **No timing worker launches after a failed gate**: a gate failure is the
   result, and measuring an arm already known to be wrong wastes the GPU.
-  `results.json` is still written, carrying the gates and no arms.
+  `results.json` is still written, carrying the gates and every arm at
+  `status: skipped`.
 - **A lost worker never becomes a quiet number.** A timing worker that writes
-  no fragment is reported as it happens and the sweep continues. Its arm is
-  then omitted from `results.json` with a recorded warning, and the scenario
-  exits nonzero. Losing the *anchor* arm writes no results at all -- every
-  comparison is a ratio against it, so the alternative is a table whose
-  missing ratios look like a scenario that declared none.
+  no fragment is reported as it happens and the sweep continues. Its arm then
+  lands in `results.json` at `status: failed` with the reason, plus a recorded
+  warning, and the scenario exits nonzero. Losing the *anchor* arm writes no
+  results at all -- every comparison is a ratio against it, so the
+  alternative is a table whose missing ratios look like a scenario that
+  declared none.
+- **Requirements belong to the arm, not to the scenario.** Without a C++20
+  host compiler, rope loses `te` and still measures `baseline`, `helion` and
+  `copy_floor`; the former scenario-level `requires_gcc_toolset` check threw
+  away all four. `resolve_arm_skips` decides the set in the parent, closes it
+  over correctness references (an arm whose reference is skipped is skipped
+  too -- timing an arm nothing checked is the wrongness the gates exist for),
+  and delivers it to the correctness worker as `--skip-arm NAME`. A skipped
+  arm is spawned in neither pass. The scenario-level property survives for
+  its one honest use: asking whether anything here needs the compiler at all,
+  which is what decides whether `add_compiler_environment` runs. That call
+  shells out to bash and is now resolved **once per run**.
+- **Every declared arm reaches `results.json`, measured or not**, carrying
+  `status` `ok`, `skipped` or `failed` and the reason. At schema 3 an arm
+  this host could not run and an arm the registry never declared were both
+  simply absent, so a reader could not tell a short roster from a complete
+  one. The skip of an *anchor* is the exception that costs the scenario.
 
 ### Choosing a correctness metric
 
@@ -882,7 +900,7 @@ arm measuring the baseline under an FA4 label.
 ```
 out/<timestamp>/kernels/<scenario>/<hardware>/
   manifest.json      # schema 4: model_size, model_shape, workload, shapes, arms, replicates/burst_k/warmup_calls/seed, commands, provenance
-  results.json       # schema 3: per-arm per-mode summaries + per-replicate samples, comparisons, correctness, warnings
+  results.json       # schema 4: every declared arm with a status, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
   kernel_bench.log   # every worker's stdout+stderr, in spawn order
   fragments/
     correctness.json         # the gate pass
@@ -903,8 +921,11 @@ became `replicates` / `samples_per_replicate` / `burst_k` / `warmup_calls`,
 and `samples_us` became `replicates_us` because the replicate boundaries are
 the repetition unit the statistics run over. The manifest alone went 3 -> 4
 when a scenario stopped being one worker invocation: `command` became
-`commands`, one argv per pass. The results loader enforces exact schema
-equality, so older files are rejected rather than half-read; the manifest is
+`commands`, one argv per pass. The results file went 3 -> 4 when every
+declared arm started reaching it with a `status`: at schema 3 an arm this
+host could not run was absent, which is indistinguishable from an arm the
+registry never declared. The results loader enforces exact schema equality,
+so older files are rejected rather than half-read; the manifest is
 write-only provenance and has no loader.
 
 ### Trace diagnostics

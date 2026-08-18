@@ -16,8 +16,16 @@ against the scenario's anchor arm, so an anchor that did not produce a
 complete replicate set leaves a table with no ratios in it -- which reads
 like a scenario that declared no comparisons rather than one whose baseline
 crashed. ``merge_kernel_fragments`` raises instead. A *non-anchor* arm that
-is incomplete is dropped, with a warning recorded in the results file, so
-the arms that did measure are still reported.
+is incomplete costs only itself: the arms that did measure are still
+reported.
+
+**Every declared arm reaches the file, measured or not.** An arm carries
+``status`` ``ok``, ``skipped`` or ``failed``, with the reason attached. An
+arm this host could not run (no C++20 compiler for the TE build) and an arm
+the registry never declared would otherwise read identically -- both simply
+absent -- and a reader has no way to tell a short roster from a complete one.
+The loud channel is still ``warnings``; the status is the machine-readable
+half of the same statement.
 
 **Replicate boundaries survive the round trip.** A fragment holds one
 replicate's samples, and the merge orders them by replicate index rather
@@ -34,7 +42,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from statistics import median
-from typing import Any, Sequence
+from types import MappingProxyType
+from typing import Any, Mapping, Sequence
 
 from benchmarks.artifacts.summaries import summarize
 from benchmarks.kernel.engine.statistics import (
@@ -148,20 +157,31 @@ def merge_kernel_fragments(
     correctness: dict[str, Any],
     timings: Sequence[dict[str, Any]],
     timings_ran: bool = True,
+    skipped: Mapping[str, str] = MappingProxyType({}),
 ) -> KernelScenarioResult:
     """Build the scenario result from one correctness and N timing fragments.
 
-    Raises ``ValueError`` when the anchor arm has no complete replicate set:
-    every comparison is a ratio against it, so there is nothing coherent to
-    write.
+    Raises ``ValueError`` when the anchor arm has no complete replicate set,
+    or when it was skipped: every comparison is a ratio against it, so there
+    is nothing coherent to write.
 
     ``timings_ran=False`` records a scenario whose gates failed, so no timing
     worker was ever launched. The file still carries the correctness rows --
     a failed gate is the result -- and ``replicates`` still records what was
     requested rather than the zero that ran, because the request is what the
     reader needs in order to repeat it.
+
+    ``skipped`` maps an arm this host never launched to the reason. The arm
+    still appears in the file, with ``status="skipped"``, because an absent
+    arm and an undeclared arm read identically.
     """
     _require_kind(correctness, CORRECTNESS_FRAGMENT_KIND)
+    if scenario.baseline_arm in skipped:
+        raise ValueError(
+            f"{scenario.name}: the anchor arm {scenario.baseline_arm!r} was "
+            f"skipped ({skipped[scenario.baseline_arm]}). Every comparison "
+            "is a ratio against it, so no results are written."
+        )
     grouped = _by_arm(timings)
     warnings: list[str] = []
     if not timings_ran:
@@ -171,13 +191,16 @@ def merge_kernel_fragments(
         )
 
     complete: dict[str, list[dict[str, Any]]] = {}
+    lost: dict[str, str] = {}
     for arm in scenario.arms if timings_ran else ():
+        if arm.name in skipped:
+            continue
         ordered = _ordered_replicates(grouped.get(arm.name, {}), replicates)
         if ordered is None:
             found = len(grouped.get(arm.name, {}))
             message = (
-                f"{arm.name}: {found} of {replicates} replicates produced a "
-                f"fragment; the arm is omitted from this file"
+                f"{found} of {replicates} replicates produced a fragment, so "
+                "this arm carries no timings"
             )
             if arm.name == scenario.baseline_arm:
                 raise ValueError(
@@ -186,7 +209,8 @@ def merge_kernel_fragments(
                     "a ratio against it, so no results are written rather "
                     "than a table with no ratios in it."
                 )
-            warnings.append(message)
+            warnings.append(f"{arm.name}: {message}")
+            lost[arm.name] = message
             continue
         complete[arm.name] = ordered
 
@@ -206,8 +230,26 @@ def merge_kernel_fragments(
         for mode in modes
     }
 
+    # Every declared arm, in declaration order, measured or not. An arm this
+    # host could not run and an arm the registry never declared must not read
+    # the same way, and at schema 3 both were simply absent.
     arm_results: dict[str, ArmResult] = {}
-    for name, ordered in complete.items():
+    for declaration in scenario.arms:
+        name = declaration.name
+        if name not in complete:
+            if name in skipped:
+                status, reason = "skipped", skipped[name]
+            elif name in lost:
+                status, reason = "failed", lost[name]
+            else:
+                status, reason = "skipped", (
+                    "the correctness gates failed, so no arm was timed"
+                )
+            arm_results[name] = ArmResult(
+                name=name, modes={}, status=status, status_reason=reason
+            )
+            continue
+        ordered = complete[name]
         first = ordered[0]
         bytes_moved = first["bytes_moved"]
         is_floor = name in floor_arms

@@ -204,12 +204,19 @@ def run_correctness_pass(
     shape: PiperShape,
     workload: KernelWorkload,
     options: RunOptions,
+    skip: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Gate every arm of the scenario. One process, once per scenario."""
+    """Gate every arm of the scenario. One process, once per scenario.
+
+    ``skip`` names the arms this host cannot run, so they are neither built
+    nor gated. The parent decides the set and closes it over correctness
+    references, so a *built* arm always has its reference beside it.
+    """
     inputs = _prepare(scenario, shape, workload, options)
     built = {
         arm.name: _seeded_build(arm, shape, workload, inputs, options.seed)
         for arm in scenario.arms
+        if arm.name not in skip
     }
     fp64_reference = (
         resolve_symbol(scenario.reference_builder)(shape, workload, inputs)

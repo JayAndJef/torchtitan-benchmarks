@@ -25,7 +25,18 @@ from benchmarks.artifacts.summaries import SampleSummary
 # ``replicates_us`` for the same reason: the replicate boundaries are the
 # repetition unit the statistics are computed over, and a flat list cannot
 # express them.
-KERNEL_RESULTS_SCHEMA_VERSION = 3
+#
+# 4: every declared arm now appears in ``arms``, carrying a ``status``. At
+# schema 3 an arm this host could not run and an arm that was never declared
+# looked identical -- both were simply absent -- so a reader could not tell a
+# short roster from a complete one. An arm that did not measure has empty
+# ``modes`` and a ``status_reason`` saying why.
+KERNEL_RESULTS_SCHEMA_VERSION = 4
+
+# ``ok`` measured. ``skipped`` was never launched, because this host cannot
+# run it or because the gates failed first. ``failed`` was launched and did
+# not produce a complete replicate set.
+ARM_STATUSES = ("ok", "skipped", "failed")
 
 
 @dataclass(frozen=True)
@@ -51,12 +62,25 @@ class ModeResult:
 
 @dataclass(frozen=True)
 class ArmResult:
+    """One declared arm's outcome. ``modes`` is empty unless ``status`` is
+    ``ok``: an arm that did not measure still appears, so the roster in the
+    file matches the roster in the registry."""
+
     name: str
     modes: dict[str, ModeResult]
     peak_memory_gib: float | None = None
     # Keyed by mode, then by burst size. Schema 2 keyed by burst size alone,
     # because the pass only ever ran on "forward".
     burst_us_per_call: dict[str, dict[str, float]] | None = None
+    status: str = "ok"
+    status_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in ARM_STATUSES:
+            raise ValueError(
+                f"{self.name}: unknown arm status {self.status!r}; "
+                f"expected one of {', '.join(ARM_STATUSES)}"
+            )
 
 
 @dataclass(frozen=True)
@@ -125,6 +149,8 @@ class KernelScenarioResult:
                     },
                     "peak_memory_gib": arm.peak_memory_gib,
                     "burst_us_per_call": arm.burst_us_per_call,
+                    "status": arm.status,
+                    "status_reason": arm.status_reason,
                 }
                 for name, arm in self.arms.items()
             },
@@ -161,6 +187,8 @@ class KernelScenarioResult:
                 },
                 peak_memory_gib=arm.get("peak_memory_gib"),
                 burst_us_per_call=arm.get("burst_us_per_call"),
+                status=arm["status"],
+                status_reason=arm["status_reason"],
             )
             for name, arm in value["arms"].items()
         }

@@ -37,6 +37,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import IO, Any, Mapping, Sequence
 
 from benchmarks.artifacts.layout import atomic_write_json, run_timestamp
@@ -130,6 +131,7 @@ def worker_command(
     mode: str,
     arm: str | None = None,
     replicate: int | None = None,
+    skip_arms: Sequence[str] = (),
 ) -> list[str]:
     """The argv for one worker pass. Deterministic, so the manifest can list
     every command the run will issue before the first one starts."""
@@ -162,6 +164,8 @@ def worker_command(
         command.extend(("--arm", arm))
     if replicate is not None:
         command.extend(("--replicate", str(replicate)))
+    for name in skip_arms:
+        command.extend(("--skip-arm", name))
     if request.burst:
         command.append("--burst")
     if request.batch is not None:
@@ -177,16 +181,60 @@ def fragment_path(fragments_dir: Path, arm: str, replicate: int) -> Path:
     return fragments_dir / f"timing__{arm}__r{replicate}.json"
 
 
+def resolve_arm_skips(
+    scenario: KernelScenario, *, compiler_unavailable: str | None
+) -> dict[str, str]:
+    """Which arms this host cannot run, and why, keyed by arm name.
+
+    **Requirements belong to the arm, not to the scenario.** Without a C++20
+    host compiler, rope loses ``te`` and still measures ``baseline``,
+    ``helion`` and ``copy_floor``. The scenario-level ``requires_gcc_toolset``
+    is an OR across arms, so using it to decide cost all four; it keeps its
+    one honest use, which is asking whether anything here needs the compiler
+    at all.
+
+    **The set is closed over correctness references.** An arm whose reference
+    is skipped is skipped too. The alternative is to time an arm that nothing
+    checked, which is the silent wrongness the gates exist to prevent. No
+    scenario produces the case today -- ``te`` is a referrer, never a
+    reference -- so the closure is a guard against the roster growing into
+    it.
+    """
+    skipped: dict[str, str] = {}
+    if compiler_unavailable is not None:
+        for arm in scenario.arms:
+            if arm.requires_gcc_toolset:
+                skipped[arm.name] = compiler_unavailable
+    while True:
+        grew = False
+        for arm in scenario.arms:
+            if arm.name in skipped:
+                continue
+            for check in arm.correctness:
+                if check.reference in skipped:
+                    skipped[arm.name] = (
+                        f"its correctness reference {check.reference!r} is "
+                        f"skipped: {skipped[check.reference]}"
+                    )
+                    grew = True
+                    break
+        if not grew:
+            return skipped
+
+
 def planned_commands(
     scenario: KernelScenario,
     request: KernelRunRequest,
     fragments_dir: Path,
     prefix: Sequence[str],
+    skipped: Mapping[str, str] = MappingProxyType({}),
 ) -> list[list[str]]:
     """Every worker argv this scenario will issue, in the order it issues it.
 
     Replicate-major, matching the sweep: one replicate spawns every arm once
-    in declaration order, and the replicate repeats.
+    in declaration order, and the replicate repeats. A skipped arm is spawned
+    in neither pass, and the manifest therefore lists what the run really
+    does rather than what a fully-equipped host would have done.
     """
     commands = [
         worker_command(
@@ -195,10 +243,13 @@ def planned_commands(
             request,
             prefix,
             mode="correctness",
+            skip_arms=[arm.name for arm in scenario.arms if arm.name in skipped],
         )
     ]
     for replicate in range(request.replicates):
         for arm in scenario.arms:
+            if arm.name in skipped:
+                continue
             commands.append(
                 worker_command(
                     scenario.name,
@@ -295,6 +346,36 @@ def execute_kernel_run(
     _emit(event_handler, "summary", metadata["nvidia_smi"])
     _emit(event_handler, "summary", f"cpu pinning: {pinning.description}")
 
+    # Resolved once per run, not once per scenario and certainly not once per
+    # worker: add_compiler_environment shells out to bash, and the answer
+    # cannot change between two scenarios of the same run.
+    compiler_environment = base_environment
+    compiler_unavailable: str | None = None
+    if any(
+        kernel_scenario_by_name(name).requires_gcc_toolset
+        for name in request.scenario_names
+    ):
+        if paths.compiler_env is None:
+            compiler_unavailable = (
+                "needs a C++20 host compiler for the TE build; set "
+                "--compiler-env/BENCH_COMPILER_ENV"
+            )
+        else:
+            try:
+                compiler_environment = add_compiler_environment(
+                    base_environment, paths.compiler_env
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                compiler_unavailable = (
+                    f"cannot prepare the compiler environment: {error}"
+                )
+        if compiler_unavailable is not None:
+            _emit(
+                event_handler,
+                "summary",
+                f"compiler environment unavailable: {compiler_unavailable}",
+            )
+
     outcomes = []
     for name in request.scenario_names:
         scenario = kernel_scenario_by_name(name)
@@ -304,19 +385,26 @@ def execute_kernel_run(
         out_dir = out_dir.expanduser().resolve()
         _emit(event_handler, "arm", f"=== kernel scenario: {name} ===")
 
-        if scenario.requires_gcc_toolset and paths.compiler_env is None:
-            outcomes.append(
-                KernelScenarioOutcome(
-                    scenario=name,
-                    out_dir=out_dir,
-                    result=None,
-                    error=(
-                        f"{name}: needs a C++20 host compiler for the TE "
-                        f"build; set --compiler-env/BENCH_COMPILER_ENV"
-                    ),
-                )
+        skipped = resolve_arm_skips(
+            scenario, compiler_unavailable=compiler_unavailable
+        )
+        if scenario.baseline_arm in skipped:
+            # The anchor carries every ratio, so losing it is the one skip
+            # that costs the scenario rather than an arm.
+            outcome = KernelScenarioOutcome(
+                scenario=name,
+                out_dir=out_dir,
+                result=None,
+                error=(
+                    f"{name}: the anchor arm {scenario.baseline_arm!r} "
+                    f"{skipped[scenario.baseline_arm]}"
+                ),
             )
+            _emit(event_handler, "error", f"ERROR {outcome.error}")
+            outcomes.append(outcome)
             continue
+        for arm_name, reason in skipped.items():
+            _emit(event_handler, "summary", f"skipping {name}/{arm_name}: {reason}")
 
         if scenario.requires_balanced_routing and not routing_divides_evenly(
             shape, workload
@@ -342,7 +430,7 @@ def execute_kernel_run(
         fragments_dir = out_dir / "fragments"
         fragments_dir.mkdir()
         commands = planned_commands(
-            scenario, request, fragments_dir, pinning.prefix
+            scenario, request, fragments_dir, pinning.prefix, skipped
         )
 
         atomic_write_json(
@@ -351,24 +439,11 @@ def execute_kernel_run(
                 scenario, shape, workload, request, commands, hardware, metadata
             ),
         )
-        scenario_environment = base_environment
-        if scenario.requires_gcc_toolset:
-            # Containment: a broken compiler environment is this scenario's
-            # failure, not grounds for abandoning the ones that do not need it.
-            try:
-                scenario_environment = add_compiler_environment(
-                    base_environment, paths.compiler_env
-                )
-            except (OSError, ValueError, subprocess.SubprocessError) as error:
-                outcome = KernelScenarioOutcome(
-                    scenario=name,
-                    out_dir=out_dir,
-                    result=None,
-                    error=f"{name}: cannot prepare the compiler environment: {error}",
-                )
-                _emit(event_handler, "error", f"ERROR {outcome.error}")
-                outcomes.append(outcome)
-                continue
+        scenario_environment = (
+            compiler_environment
+            if scenario.requires_gcc_toolset
+            else base_environment
+        )
 
         log_path = out_dir / "kernel_bench.log"
         # One log for the whole scenario: every worker of every pass appends
@@ -460,6 +535,7 @@ def execute_kernel_run(
                 correctness=correctness,
                 timings=timings,
                 timings_ran=not gates_failed,
+                skipped=skipped,
             )
         except (ValueError, KeyError) as merge_error:
             error = f"{name}: {merge_error}"

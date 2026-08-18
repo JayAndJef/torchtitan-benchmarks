@@ -31,6 +31,16 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
     ]
     lines.extend(f"WARNING: {warning}" for warning in result.warnings)
 
+    # Printed before the tables, so an arm missing from them is never read as
+    # an arm the scenario does not declare.
+    unmeasured = [arm for arm in result.arms.values() if arm.status != "ok"]
+    if unmeasured:
+        lines.append("")
+        for arm in unmeasured:
+            lines.append(
+                f"  {arm.status.upper()} {arm.name:22s} {arm.status_reason}"
+            )
+
     comparisons = {
         (row["arm"], row["mode"]): row for row in result.comparisons
     }

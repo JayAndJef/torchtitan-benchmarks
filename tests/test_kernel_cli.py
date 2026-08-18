@@ -19,7 +19,16 @@ from benchmarks.kernel.results.merge import (
     CORRECTNESS_FRAGMENT_KIND,
     TIMING_FRAGMENT_KIND,
 )
-from benchmarks.kernel.runner import KernelRunRequest, execute_kernel_run
+from benchmarks.kernel.runner import (
+    KernelRunRequest,
+    execute_kernel_run,
+    resolve_arm_skips,
+)
+from benchmarks.kernel.schema import (
+    CorrectnessCheck,
+    KernelArm,
+    KernelScenario,
+)
 from tests.test_kernel_results import sample_result
 
 
@@ -269,7 +278,64 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertLess(error_index, swiglu_index)
         self.assertIn("boom", kinds[error_index][1])
 
-    def test_broken_compiler_env_fails_only_its_scenario(self) -> None:
+    def test_a_skip_closes_over_correctness_references(self) -> None:
+        """An arm whose reference is skipped is skipped too. Timing an arm
+        that nothing checked is the silent wrongness the gates exist for.
+
+        No scenario reaches this today -- rope's ``te`` is a referrer, never a
+        reference -- so the closure is guarding the roster's growth, and the
+        synthetic scenario is how it gets exercised at all.
+        """
+
+        def arm(name, requires_gcc=False, reference=None):
+            return KernelArm(
+                name=name,
+                description=name,
+                builder=f"benchmarks.kernel.operations.rope:build_{name}",
+                modes=("forward",),
+                requires_gcc_toolset=requires_gcc,
+                correctness=(
+                    ()
+                    if reference is None
+                    else (
+                        CorrectnessCheck(
+                            kind="tolerance",
+                            reference=reference,
+                            outputs=("out",),
+                            max_rel_l2=1e-2,
+                        ),
+                    )
+                ),
+            )
+
+        scenario = KernelScenario(
+            name="rope",
+            description="synthetic",
+            inputs_builder="benchmarks.kernel.operations.rope:rope_inputs",
+            reference_builder=None,
+            baseline_arm="anchor",
+            arms=(
+                arm("anchor"),
+                arm("needs_compiler", requires_gcc=True),
+                arm("gated_on_it", reference="needs_compiler"),
+                arm("gated_on_that", reference="gated_on_it"),
+                arm("independent", reference="anchor"),
+            ),
+        )
+        self.assertEqual(
+            resolve_arm_skips(scenario, compiler_unavailable=None), {}
+        )
+        skipped = resolve_arm_skips(scenario, compiler_unavailable="no gcc")
+        self.assertEqual(
+            sorted(skipped), ["gated_on_it", "gated_on_that", "needs_compiler"]
+        )
+        self.assertEqual(skipped["needs_compiler"], "no gcc")
+        self.assertIn("'needs_compiler' is skipped", skipped["gated_on_it"])
+        self.assertIn("'gated_on_it' is skipped", skipped["gated_on_that"])
+
+    def test_a_broken_compiler_env_costs_the_te_arm_only(self) -> None:
+        """The requirement belongs to the arm. Rope still measures its other
+        three arms, which the former scenario-level check threw away."""
         fake_process = fragment_writer()
 
         metadata_patch, pinning_patch = patched_environment()
@@ -280,6 +346,7 @@ class KernelRunnerTests(unittest.TestCase):
                 KernelRunRequest(
                     gpu="7",
                     scenario_names=("rope", "swiglu"),
+                    replicates=2,
                     timestamp="stamp",
                     compiler_env=Path(temporary) / "missing.sh",
                 ),
@@ -287,9 +354,47 @@ class KernelRunnerTests(unittest.TestCase):
                 environment={"PATH": "/usr/bin"},
             )
         by_name = {outcome.scenario: outcome for outcome in outcomes}
-        self.assertTrue(by_name["rope"].failed)
-        self.assertIn("compiler environment", by_name["rope"].error)
+        self.assertFalse(by_name["rope"].failed)
         self.assertFalse(by_name["swiglu"].failed)
+        arms = by_name["rope"].result.arms
+        self.assertEqual(arms["te"].status, "skipped")
+        self.assertIn("compiler environment", arms["te"].status_reason)
+        self.assertEqual(arms["te"].modes, {})
+        for name in ("baseline", "helion", "copy_floor"):
+            self.assertEqual(arms[name].status, "ok", name)
+
+    def test_a_skipped_arm_is_spawned_in_neither_pass(self) -> None:
+        commands = []
+
+        writer = fragment_writer()
+
+        def fake_process(command, **kwargs):
+            commands.append(command)
+            return writer(command, **kwargs)
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
+            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
+        ):
+            execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("rope",),
+                    replicates=2,
+                    timestamp="stamp",
+                    compiler_env=Path(temporary) / "missing.sh",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(commands[0][commands[0].index("--mode") + 1], "correctness")
+        self.assertEqual(
+            commands[0][commands[0].index("--skip-arm") + 1], "te"
+        )
+        timed = {
+            command[command.index("--arm") + 1] for command in commands[1:]
+        }
+        self.assertEqual(timed, {"copy_floor", "baseline", "helion"})
 
     def test_worker_command_carries_pinning_env_and_manifest(self) -> None:
         captured = []
@@ -372,8 +477,24 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertFalse(outcomes[0].failed)
         self.assertIsNotNone(outcomes[0].result)
 
-    def test_compiler_environment_only_for_scenarios_that_need_it(self) -> None:
-        fake_process = fragment_writer()
+    def test_the_compiler_environment_is_resolved_once_per_run(self) -> None:
+        """It shells out to bash, and the answer cannot change between two
+        scenarios of one run. A run needing it at all pays exactly once; a run
+        needing it nowhere pays nothing."""
+
+        def run(scenario_names, temporary, compiler):
+            execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=scenario_names,
+                    replicates=2,
+                    timestamp="-".join(scenario_names),
+                    compiler_env=Path(temporary) / "enable.sh",
+                ),
+                process_runner=fragment_writer(),
+                environment={"PATH": "/usr/bin"},
+            )
+            return compiler.call_count
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
@@ -382,19 +503,10 @@ class KernelRunnerTests(unittest.TestCase):
             "benchmarks.kernel.runner.add_compiler_environment",
             side_effect=lambda env, script: {**env, "SOURCED": "1"},
         ) as compiler:
-            execute_kernel_run(
-                KernelRunRequest(
-                    gpu="7",
-                    scenario_names=("swiglu", "rope"),
-                    timestamp="stamp",
-                    compiler_env=Path(temporary) / "enable.sh",
-                ),
-                process_runner=fake_process,
-                environment={"PATH": "/usr/bin"},
-            )
-        self.assertEqual(compiler.call_count, 1)
+            self.assertEqual(run(("swiglu",), temporary, compiler), 0)
+            self.assertEqual(run(("swiglu", "rope"), temporary, compiler), 1)
 
-    def test_missing_compiler_env_fails_only_the_te_scenario(self) -> None:
+    def test_missing_compiler_env_skips_only_the_te_arm(self) -> None:
         fake_process = fragment_writer()
 
         metadata_patch, pinning_patch = patched_environment()
@@ -413,6 +525,7 @@ class KernelRunnerTests(unittest.TestCase):
                 KernelRunRequest(
                     gpu="7",
                     scenario_names=("swiglu", "rope"),
+                    replicates=2,
                     timestamp="stamp",
                 ),
                 process_runner=fake_process,
@@ -420,8 +533,11 @@ class KernelRunnerTests(unittest.TestCase):
             )
         by_name = {outcome.scenario: outcome for outcome in outcomes}
         self.assertFalse(by_name["swiglu"].failed)
-        self.assertTrue(by_name["rope"].failed)
-        self.assertIn("C++20 host compiler", by_name["rope"].error)
+        self.assertFalse(by_name["rope"].failed)
+        arms = by_name["rope"].result.arms
+        self.assertEqual(arms["te"].status, "skipped")
+        self.assertIn("C++20 host compiler", arms["te"].status_reason)
+        self.assertEqual(arms["baseline"].status, "ok")
 
     def test_unbalanced_routing_skips_only_swiglu(self) -> None:
         """An odd batch x seq_len breaks swiglu's balanced split (rows =
@@ -516,7 +632,12 @@ class KernelRunnerTests(unittest.TestCase):
         result = outcomes[0].result
         self.assertIsNotNone(result)
         self.assertFalse(result.all_correctness_passed)
-        self.assertEqual(result.arms, {})
+        # Every declared arm is still in the file, so a reader can tell a
+        # scenario that measured nothing from one that declared nothing.
+        self.assertEqual(
+            {name: arm.status for name, arm in result.arms.items()},
+            {arm.name: "skipped" for arm in kernel_scenario_by_name("swiglu").arms},
+        )
         # The request is recorded, not the zero replicates that ran.
         self.assertEqual(result.replicates, 2)
         self.assertTrue(
@@ -570,8 +691,10 @@ class KernelRunnerTests(unittest.TestCase):
             )
         result = outcomes[0].result
         self.assertIsNotNone(result)
-        self.assertNotIn(lost, result.arms)
-        self.assertIn(scenario.baseline_arm, result.arms)
+        self.assertEqual(result.arms[lost].status, "failed")
+        self.assertEqual(result.arms[lost].modes, {})
+        self.assertIn("1 of 2 replicates", result.arms[lost].status_reason)
+        self.assertEqual(result.arms[scenario.baseline_arm].status, "ok")
         self.assertTrue(
             any(lost in warning for warning in result.warnings), result.warnings
         )

@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -82,9 +83,10 @@ def sample_result() -> KernelScenarioResult:
 
 
 class KernelResultsTests(unittest.TestCase):
-    def test_schema_three_records_the_burst_timing_parameters(self) -> None:
-        """Schema 3 replaced n/warmup; reusing either name is the bug."""
-        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 3)
+    def test_schema_four_records_the_burst_parameters_and_statuses(self) -> None:
+        """Schema 3 replaced n/warmup; reusing either name is the bug.
+        Schema 4 added the per-arm status."""
+        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 4)
         payload = sample_result().to_dict()
         # Schema 2's model/workload split, still asserted.
         self.assertNotIn("spec", payload)
@@ -99,6 +101,31 @@ class KernelResultsTests(unittest.TestCase):
         self.assertEqual(payload["samples_per_replicate"], 2)
         self.assertEqual(payload["burst_k"], 16)
         self.assertEqual(payload["warmup_calls"], 1)
+        self.assertEqual(payload["arms"]["baseline"]["status"], "ok")
+        self.assertIsNone(payload["arms"]["baseline"]["status_reason"])
+
+    def test_an_unmeasured_arm_carries_a_status_and_a_reason(self) -> None:
+        """An arm this host could not run and an arm nobody declared must not
+        read the same way."""
+        result = replace(
+            sample_result(),
+            arms={
+                "te": ArmResult(
+                    name="te",
+                    modes={},
+                    status="skipped",
+                    status_reason="no C++20 host compiler",
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "results.json"
+            write_kernel_results(result, path)
+            loaded = load_kernel_results(path)
+        self.assertEqual(loaded.arms["te"].status, "skipped")
+        self.assertEqual(loaded.arms["te"].status_reason, "no C++20 host compiler")
+        with self.assertRaisesRegex(ValueError, "unknown arm status"):
+            ArmResult(name="te", modes={}, status="nope")
 
     def test_replicate_boundaries_survive_the_round_trip(self) -> None:
         """The boundaries are the repetition unit; a flat list loses them."""

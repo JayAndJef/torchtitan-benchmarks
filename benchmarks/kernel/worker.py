@@ -8,7 +8,9 @@ parent merges the fragments into ``results.json``.
 Two modes, matching the two passes:
 
 * ``--mode correctness`` builds every arm and gates them. Once per scenario,
-  and first -- a failed gate means no timing is worth taking.
+  and first -- a failed gate means no timing is worth taking. ``--skip-arm``
+  removes an arm this host cannot run, so a missing compiler costs the TE arm
+  and not the whole scenario.
 * ``--mode timing --arm NAME --replicate N`` builds that one arm and times it
   for that one replicate.
 
@@ -42,6 +44,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--replicate", type=int, default=None, help="timing mode only"
     )
+    parser.add_argument(
+        "--skip-arm",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "correctness mode only: an arm this host cannot run, so it is "
+            "neither built nor gated. Repeatable."
+        ),
+    )
     parser.add_argument("--replicates", type=int, default=5)
     parser.add_argument("--samples-per-replicate", type=int, default=40)
     parser.add_argument("--burst-k", type=int, default=16)
@@ -73,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.mode == "timing":
             scenario.arm(args.arm)
+        for name in args.skip_arm:
+            scenario.arm(name)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -103,7 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         if args.mode == "correctness":
-            fragment = run_correctness_pass(scenario, shape, workload, options)
+            fragment = run_correctness_pass(
+                scenario, shape, workload, options, frozenset(args.skip_arm)
+            )
         else:
             fragment = run_timing_pass(
                 scenario, args.arm, args.replicate, shape, workload, options
