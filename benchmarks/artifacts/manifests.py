@@ -90,7 +90,11 @@ def manifest_data(
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
     ac_mode: str,
-    model_size: str = "normal",
+    # No default. This value is what the manifest *claims* the run was, and
+    # _resume_mismatches below already requires it explicitly; a writer that
+    # defaults what the checker demands is the asymmetry that lets a huge run
+    # be recorded, resumed and published as "normal".
+    model_size: str,
 ) -> dict[str, Any]:
     shape = PIPER_SHAPES[model_size]
     return {
@@ -123,7 +127,7 @@ def write_manifest(
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
     ac_mode: str,
-    model_size: str = "normal",
+    model_size: str,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",

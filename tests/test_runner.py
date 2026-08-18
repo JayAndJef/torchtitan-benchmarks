@@ -603,6 +603,7 @@ class ManifestTests(unittest.TestCase):
                 extra_args,
                 "cuda-graph",
                 "none",
+                "normal",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 

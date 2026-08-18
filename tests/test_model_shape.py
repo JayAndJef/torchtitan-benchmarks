@@ -562,6 +562,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                 (),
                 "default",
                 "sac",
+                "normal",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             del manifest["model_size"]
