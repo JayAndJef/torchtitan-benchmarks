@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.artifacts.summaries import summarize
 from benchmarks.kernel.results.schema import (
     ArmResult,
     CorrectnessResult,
@@ -17,7 +18,6 @@ from benchmarks.kernel.results.schema import (
     load_kernel_results,
     write_kernel_results,
 )
-from benchmarks.artifacts.summaries import summarize
 
 
 def sample_result() -> KernelScenarioResult:

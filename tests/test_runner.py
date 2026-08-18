@@ -14,10 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.manifests import trace_files, write_manifest
 from benchmarks.e2e.launch import command_for_arm
-from benchmarks.e2e.runner import RunRequest, execute_run
-from benchmarks.e2e.validation import validate_arm
-from benchmarks.execution.environment import CpuPinning, resolve_cpu_pinning
-from benchmarks.e2e.results import stable_tps, training_metrics
 from benchmarks.e2e.registry import (
     Arm,
     PIPER_1B_LM_HEAD,
@@ -27,7 +23,16 @@ from benchmarks.e2e.registry import (
     PIPER_1B_WORKLOAD,
     scenario_by_name,
 )
+from benchmarks.e2e.results import stable_tps, training_metrics
+from benchmarks.e2e.runner import RunRequest, execute_run
+from benchmarks.e2e.validation import validate_arm
+from benchmarks.execution.environment import CpuPinning, resolve_cpu_pinning
 from dataclasses import replace
+from benchmarks.models.piper_qwen3.components.lm_head.losses import (
+    FusedLinearCrossEntropyLoss,
+    PiperOptimizedCrossEntropyLoss,
+    TECrossEntropyLoss,
+)
 from benchmarks.models.piper_qwen3.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_full_logits,
@@ -36,18 +41,13 @@ from benchmarks.models.piper_qwen3.config_registry import (
     qwen3_piper_1b_te_fused_ce,
     qwen3_piper_1b_unfused_qkv,
 )
-from benchmarks.models.piper_qwen3.components.lm_head.losses import (
-    FusedLinearCrossEntropyLoss,
-    PiperOptimizedCrossEntropyLoss,
-    TECrossEntropyLoss,
-)
 from torchtitan.components.loss import (
     ChunkedLossWrapper,
     CrossEntropyLoss,
     LossWithLMHead,
 )
-from benchmarks.models.piper_qwen3.shape import HUGE, NORMAL, PIPER_SHAPES
 from benchmarks.models.piper_qwen3.parallelize import parallelize_piper1b
+from benchmarks.models.piper_qwen3.shape import HUGE, NORMAL, PIPER_SHAPES
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common import FusedQKVLinear, QKVLinear

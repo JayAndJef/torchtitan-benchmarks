@@ -9,12 +9,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.traces.extraction import (
-    PooledMetrics,
-    pooled_window_metrics,
-    trace_window_metrics,
-)
-from benchmarks.traces.schema import Region
 from benchmarks.e2e.results import (
     evaluate_run,
     losses,
@@ -22,6 +16,12 @@ from benchmarks.e2e.results import (
     render_evaluation,
     write_results,
 )
+from benchmarks.traces.extraction import (
+    PooledMetrics,
+    pooled_window_metrics,
+    trace_window_metrics,
+)
+from benchmarks.traces.schema import Region
 
 
 REGIONS = (

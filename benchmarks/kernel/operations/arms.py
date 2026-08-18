@@ -38,11 +38,11 @@ from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
 )
-from benchmarks.models.piper_qwen3.shape import PiperShape
 from benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu import (
     CombinedSwiGLUFusedGroupedExperts,
     InductorSwiGLUFusedGroupedExperts,
 )
+from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
 WEIGHT_STD = 0.02

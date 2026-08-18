@@ -19,18 +19,6 @@ from pathlib import Path
 from typing import Mapping
 
 from benchmarks.artifacts.manifests import atomic_write_json, run_timestamp
-from benchmarks.kernel.results.schema import (
-    KernelScenarioResult,
-    load_kernel_results,
-)
-from benchmarks.kernel.registry import (
-    KernelScenario,
-    KernelWorkload,
-    kernel_scenario_by_name,
-    resolve_shape_and_workload,
-    routing_divides_evenly,
-    shape_summary,
-)
 from benchmarks.execution.environment import (
     BENCH_DIR,
     EventHandler,
@@ -40,6 +28,18 @@ from benchmarks.execution.environment import (
     hardware_metadata,
     resolve_cpu_pinning,
     runtime_environment,
+)
+from benchmarks.kernel.registry import (
+    KernelScenario,
+    KernelWorkload,
+    kernel_scenario_by_name,
+    resolve_shape_and_workload,
+    routing_divides_evenly,
+    shape_summary,
+)
+from benchmarks.kernel.results.schema import (
+    KernelScenarioResult,
+    load_kernel_results,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 

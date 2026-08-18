@@ -15,9 +15,9 @@ from click.testing import CliRunner
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.cli.main import cli
+from benchmarks.e2e.registry import PIPER_1B_ROPE, SCENARIOS
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.environment import CpuPinning
-from benchmarks.e2e.registry import PIPER_1B_ROPE, SCENARIOS
 from benchmarks.models.piper_qwen3.shape import HUGE
 
 

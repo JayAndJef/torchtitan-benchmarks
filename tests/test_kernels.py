@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.kernel.engine.statistics import kernel_comparison
 from benchmarks.kernel.registry import (
     KERNEL_SCENARIOS,
     KernelWorkload,
@@ -16,7 +17,6 @@ from benchmarks.kernel.registry import (
     routing_divides_evenly,
     shape_summary,
 )
-from benchmarks.kernel.engine.statistics import kernel_comparison
 
 
 class RegistryTests(unittest.TestCase):

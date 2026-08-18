@@ -18,12 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 
-from benchmarks.kernel.results.schema import (
-    ArmResult,
-    CorrectnessResult,
-    KernelScenarioResult,
-    ModeResult,
-)
+from benchmarks.artifacts.summaries import summarize
 from benchmarks.kernel.engine.statistics import (
     KERNEL_SIGNIFICANCE_METHODOLOGY,
     kernel_comparison,
@@ -36,7 +31,12 @@ from benchmarks.kernel.registry import (
     routing_divides_evenly,
     shape_summary,
 )
-from benchmarks.artifacts.summaries import summarize
+from benchmarks.kernel.results.schema import (
+    ArmResult,
+    CorrectnessResult,
+    KernelScenarioResult,
+    ModeResult,
+)
 
 if TYPE_CHECKING:
     # Annotation-only. The engine must not import a model package: arms reach
