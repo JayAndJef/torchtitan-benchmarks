@@ -54,20 +54,18 @@ def rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def build_titan_model(shape, dtype=torch.bfloat16):
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    """The registry's model, built the way an in-process caller builds it.
 
-    config = _piper_1b_model(fuse_qkv=True, shape=shape)
-    previous_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
-    try:
-        with torch.device("cuda"):
-            model = config.build()
-    finally:
-        torch.set_default_dtype(previous_dtype)
-    torch.manual_seed(42)
-    model.init_states(buffer_device=torch.device("cuda"))
-    model.eval()
-    return model
+    The recipe lives in ``benchmarks/models/piper_qwen3/titan_model.py``, for
+    the same reason the weight map moved: the cross-engine kernel arms need
+    the identical build, and a second copy would drift from this one exactly
+    where it matters least visibly -- the default dtype during construction.
+    """
+    from benchmarks.models.piper_qwen3.titan_model import (
+        build_titan_model as build,
+    )
+
+    return build(shape=shape, dtype=dtype, device="cuda", eval_mode=True)
 
 
 def build_megatron_model(shape):

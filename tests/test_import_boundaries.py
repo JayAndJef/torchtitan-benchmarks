@@ -125,6 +125,9 @@ WORKER_SIDE_MODULES = (
     # module scope is what it is, not an oversight -- unlike mcore_profiles,
     # which describes the same model and stays parent-side.
     "benchmarks.models.piper_qwen3.megatron_weights",
+    # The in-process titan build. It imports config_registry, so it reaches
+    # torchtitan at module scope by construction.
+    "benchmarks.models.piper_qwen3.titan_model",
     "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron.data",
     "benchmarks.kernel.operations.attention",

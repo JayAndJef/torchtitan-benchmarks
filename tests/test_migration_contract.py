@@ -781,12 +781,17 @@ TEST_CENSUS = {
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
+    # New with the in-process titan build: 3 that pin the override count
+    # -- the kernel-side equivalent of validation rule 2, and the only
+    # guard an arm whose kernel has no distinctive name can have -- and 6
+    # that pin the build itself, its dtype delivery and its seeding.
+    "test_titan_model": 9,
     # Added by the restructure: the sweep that asserts no retired module
     # path survives anywhere git would ship. Censused like the rest so it
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 238
+TEST_CENSUS_TOTAL = 247
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
