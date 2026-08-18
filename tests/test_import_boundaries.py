@@ -101,11 +101,41 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.parallelize",
     "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu",
     "benchmarks.models.piper_qwen3.components.lm_head.losses",
+    "benchmarks.models.piper_qwen3.components.lm_head.te_cross_entropy",
+    "benchmarks.models.piper_qwen3.components.lm_head.te_common_cross_entropy",
+    "benchmarks.models.piper_qwen3.components.lm_head.te_triton_cross_entropy",
+    "benchmarks.models.piper_qwen3.components.lm_head.piper_optimized_cross_entropy",
+    "benchmarks.models.piper_qwen3.components.rope.te_rope_override",
     "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron.data",
     "benchmarks.kernel.operations.arms",
     "benchmarks.kernel.engine.run",
 )
+
+# The third category, and the reason two lists were never enough. These run in
+# a worker -- so the parent must not import them -- but they are ML-free at
+# module scope, because each defers its heavy imports into a function body.
+# That deferral is load-bearing rather than stylistic:
+#
+# * ``e2e.megatron.train`` is a ``python -m`` entry point, so ``--help`` must
+#   not pay for torch, exactly as ``kernel.worker`` does not; and
+# * ``models.piper_qwen3.megatron_model`` *cannot* import Megatron at module
+#   scope, because ``megatron_bootstrap`` has to put Megatron on ``sys.path``
+#   first. Hoisting its imports would not be a style regression, it would
+#   break the module outright.
+#
+# They fail WORKER_SIDE_MODULES' justification test by construction (they
+# import nothing heavy to find), which is what makes them a category and not
+# an oversight. They get the same parent-must-not-import assertion, plus the
+# dynamic ML-free probe that the parent-side modules get -- the deferral is
+# the property worth locking.
+WORKER_SIDE_DEFERRED_MODULES = (
+    "benchmarks.e2e.megatron.train",
+    "benchmarks.models.piper_qwen3.megatron_model",
+)
+
+# Every module the parent must not reach at module scope, whichever reason.
+ALL_WORKER_SIDE_MODULES = WORKER_SIDE_MODULES + WORKER_SIDE_DEFERRED_MODULES
 
 
 # --------------------------------------------------------------------------
@@ -344,6 +374,25 @@ class WorkerSideBoundaryTest(unittest.TestCase):
                     "parent side now",
                 )
 
+    def test_deferred_worker_modules_stay_ml_free_at_import(self):
+        """The deferral in WORKER_SIDE_DEFERRED_MODULES actually holds.
+
+        Dynamic, unlike the static check above, because that is the whole
+        claim: these have no module-scope heavy import to inspect, so the
+        only way to know the imports really are deferred is to import them
+        and look. For ``megatron_model`` this is also a correctness gate --
+        Megatron is not importable until ``megatron_bootstrap`` has placed it
+        on ``sys.path``, so a hoisted import would break the module, not just
+        slow it down.
+        """
+        offenders = run_import_probe(WORKER_SIDE_DEFERRED_MODULES)
+        self.assertEqual(
+            offenders,
+            {},
+            "deferred worker modules pulled in the ML stack at import: "
+            + "; ".join(f"{k} -> {', '.join(v)}" for k, v in sorted(offenders.items())),
+        )
+
     def test_parent_side_modules_do_not_import_worker_side_modules(self):
         """The boundary itself: no module-scope path from parent to worker.
 
@@ -353,7 +402,7 @@ class WorkerSideBoundaryTest(unittest.TestCase):
         for module in PARENT_SIDE_MODULES:
             path = source_path(module)
             for imported, lineno in module_scope_imports(path):
-                for worker in WORKER_SIDE_MODULES:
+                for worker in ALL_WORKER_SIDE_MODULES:
                     with self.subTest(module=module, imported=imported):
                         self.assertFalse(
                             targets(imported, worker),
@@ -361,6 +410,77 @@ class WorkerSideBoundaryTest(unittest.TestCase):
                             "module scope; move it inside the function that "
                             "needs it",
                         )
+
+
+def tracked_benchmarks_modules() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Every module under ``benchmarks/``, split into leaves and packages.
+
+    Derived from ``git ls-files`` rather than listed, because the point is to
+    catch the module nobody remembered to classify.
+    """
+    leaves, packages = [], []
+    for path in tracked_python_files():
+        parts = Path(path).with_suffix("").parts
+        if parts[0] != "benchmarks":
+            continue
+        if parts[-1] == "__main__":
+            continue  # executed, never imported by name
+        if parts[-1] == "__init__":
+            packages.append(".".join(parts[:-1]))
+        else:
+            leaves.append(".".join(parts))
+    return tuple(sorted(leaves)), tuple(sorted(packages))
+
+
+class ClassificationCompletenessTest(unittest.TestCase):
+    """The lists above describe the whole tree, not a remembered subset.
+
+    Without this, every boundary assertion is silently scoped to whatever
+    was listed: a new module -- or one that a package move renamed -- simply
+    goes unchecked, and the suite still reports green. The restructure
+    produced exactly that gap, which is why this exists.
+    """
+
+    def test_every_module_is_classified_exactly_once(self):
+        leaves, _ = tracked_benchmarks_modules()
+        classified = list(PARENT_SIDE_MODULES) + list(ALL_WORKER_SIDE_MODULES)
+        # Packages may be listed (benchmarks.models.piper_qwen3 is the
+        # --module token); leaves must be.
+        unclassified = [m for m in leaves if m not in set(classified)]
+        self.assertEqual(
+            unclassified,
+            [],
+            "modules under benchmarks/ belong to no import-boundary class, so "
+            "nothing asserts where they may be imported from:\n  "
+            + "\n  ".join(unclassified),
+        )
+        duplicated = sorted({m for m in classified if classified.count(m) > 1})
+        self.assertEqual(
+            duplicated,
+            [],
+            f"modules classified more than once: {duplicated}",
+        )
+
+    def test_package_inits_are_docstring_only(self):
+        """``__init__.py`` files declare ownership and import nothing.
+
+        A package whose ``__init__`` imports its own submodules would drag
+        the ML stack in through any import of the package -- and the
+        ``--module benchmarks.models.piper_qwen3`` chain executes three of
+        these before torchtitan reads a single config.
+        """
+        _, packages = tracked_benchmarks_modules()
+        offenders = []
+        for package in packages:
+            path = source_path(package)
+            for imported, lineno in module_scope_imports(path):
+                offenders.append(f"{path}:{lineno}: {imported}")
+        self.assertEqual(
+            offenders,
+            [],
+            "package __init__ files must stay docstring-only:\n  "
+            + "\n  ".join(offenders),
+        )
 
 
 # --------------------------------------------------------------------------
