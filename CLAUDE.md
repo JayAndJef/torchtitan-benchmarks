@@ -806,9 +806,17 @@ own family module.
   k=16 and 3.09x at k=64. Run `--burst`; the merge derives a `residual`
   column from the top two rungs of the ladder and flags any arm whose
   per-call time is still falling there. Report a flagged row as a
-  comparison of dispatch cost, never as a kernel-speed claim. **A
-  kernel-speed claim needs profiler-summed device time, which nothing in
-  this repo currently measures.**
+  comparison of dispatch cost, never as a kernel-speed claim.
+- **That test is one-sided, and an unflagged arm is not device-bound.** A
+  ladder can plateau at a dispatch cost bursting cannot amortize. Rope
+  backward does exactly that: `baseline` reads 187/156/157/159 us across
+  k=1/4/16/64, flat from k=4 on, against ~12 us of device work. Flat means
+  `k` stopped buying amortization, not that the number became device time.
+  The residual is also a difference of two medians and carries their
+  noise -- the same rope forward ladder an hour apart put `copy_floor` at
+  1.9% then 4.8%, and `te` at 7.2% then 14.2% -- so read a value near the
+  2% threshold as undecided. **A kernel-speed claim needs profiler-summed
+  device time, which nothing in this repo currently measures.**
 - **One `--burst-k` for every arm in a scenario.** A per-arm k makes arms
   incomparable: a k=64 arm overlaps 64 launches with device work and a k=4
   arm overlaps 4, and the residual bias runs in the same direction as the
