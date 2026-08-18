@@ -75,12 +75,22 @@ def correctness_fragment(scenario: str, passed: bool = True) -> dict:
 
 
 def timing_fragment(
-    scenario: str, arm: str, replicate: int, measured: bool = True
+    scenario: str,
+    arm: str,
+    replicate: int,
+    measured: bool = True,
+    bytes_moved: int | None = None,
+    scale: float = 1.0,
 ) -> dict:
     """A worker's output, shaped exactly as ``run_timing_pass`` writes it.
 
     ``measured=False`` is the arm that ran and timed nothing: the worker
     completed and wrote its fragment, and every mode in it is empty.
+
+    ``bytes_moved`` is what the parent turns into the GB/s column. Only the
+    rope builders report it, so it defaults to None as most arms write it.
+    ``scale`` multiplies the samples, which is how one arm is given a
+    different median from its neighbours.
     """
     declaration = kernel_scenario_by_name(scenario).arm(arm)
     return {
@@ -91,12 +101,12 @@ def timing_fragment(
         # Distinct per replicate, so a merge that scrambled the boundaries
         # would produce different statistics rather than the same ones.
         "modes": {
-            mode: [10.0 + replicate + index for index in range(3)]
+            mode: [(10.0 + replicate + index) * scale for index in range(3)]
             for mode in declaration.modes
         }
         if measured
         else {},
-        "bytes_moved": None,
+        "bytes_moved": bytes_moved,
         "peak_memory_gib": 1.5 if replicate == 0 else None,
         "burst_us_per_call": None,
     }
@@ -110,6 +120,8 @@ def fragment_writer(
     timing_exit: int = 0,
     skip_timing: tuple[tuple[str, str, int], ...] = (),
     empty_arms: tuple[str, ...] = (),
+    bytes_moved: int | None = None,
+    arm_scale: dict[str, float] | None = None,
 ):
     """A ``process_runner`` that plays the worker protocol.
 
@@ -124,7 +136,11 @@ def fragment_writer(
     verdict in the code and the opposite one on disk.
 
     ``empty_arms`` names arms whose workers all succeed and time nothing.
+    ``bytes_moved`` is reported by every arm, which is what the GB/s column
+    is derived from. ``arm_scale`` multiplies one named arm's samples, so a
+    scenario can carry arms with different medians.
     """
+    scales = arm_scale or {}
     codes = correctness_code or {}
 
     def fake_process(command, **kwargs):
@@ -149,7 +165,12 @@ def fragment_writer(
         fragment.write_text(
             json.dumps(
                 timing_fragment(
-                    scenario, arm, replicate, measured=arm not in empty_arms
+                    scenario,
+                    arm,
+                    replicate,
+                    measured=arm not in empty_arms,
+                    bytes_moved=bytes_moved,
+                    scale=scales.get(arm, 1.0),
                 )
             )
         )
@@ -856,6 +877,44 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertIsNone(outcomes[0].result)
         self.assertIn("anchor arm", outcomes[0].error)
         self.assertIn("no samples", outcomes[0].error)
+
+    def test_the_derived_columns_are_computed_from_the_registry(self) -> None:
+        """GB/s and x-floor, the two numbers no worker can produce.
+
+        Only the parent holds a second arm, so the floor ratio is its work;
+        and since ``is_floor`` moved from ``BuiltArm`` to the registry, the
+        parent reads it from the declaration rather than from the fragment.
+        Deleting the whole derived block left the suite green: the fixture
+        reported no ``bytes_moved``, so GB/s was never computed at all.
+        """
+        fake_process = fragment_writer(
+            bytes_moved=4_000_000, arm_scale={"copy_floor": 0.5}
+        )
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("rope",),
+                    replicates=2,
+                    out_dir=Path(temporary) / "kernels",
+                    compiler_env=Path(temporary) / "missing.sh",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+            )
+        arms = outcomes[0].result.arms
+        # Samples are 10..13 over two replicates, so the pooled median is
+        # 11.5 us; copy_floor's are halved, so its median is 5.75 us.
+        baseline = arms["baseline"].modes["forward"].derived
+        self.assertAlmostEqual(baseline["gbps"], 4e6 / 11.5e-6 / 1e9)
+        self.assertAlmostEqual(baseline["x_floor"], 2.0)
+        self.assertAlmostEqual(arms["helion"].modes["forward"].derived["x_floor"], 2.0)
+        # The floor is the denominator, so it carries no ratio to itself.
+        floor = arms["copy_floor"].modes["forward"].derived
+        self.assertNotIn("x_floor", floor)
+        self.assertAlmostEqual(floor["gbps"], 4e6 / 5.75e-6 / 1e9)
 
     def test_replicate_boundaries_survive_the_merge(self) -> None:
         """The merge orders fragments by replicate index, not by arrival."""

@@ -735,8 +735,9 @@ TEST_CENSUS = {
     # 19 pre-fix, +2 for the two halves of the correctness verdict: a failed
     # gate fragment beside a clean exit code, and a timing worker that dies
     # after it writes. +2 more for the arm that measured nothing, as a
-    # non-anchor and as the anchor. +1 for the three counts that refuse zero.
-    "test_kernel_cli": 24,
+    # non-anchor and as the anchor. +1 for the three counts that refuse zero,
+    # and +1 for the two derived columns the parent alone can compute.
+    "test_kernel_cli": 25,
     "test_kernel_gpu_smoke": 4,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
@@ -763,7 +764,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 198
+TEST_CENSUS_TOTAL = 199
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
