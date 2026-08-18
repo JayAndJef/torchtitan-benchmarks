@@ -14,7 +14,7 @@ import gc
 import importlib
 from dataclasses import asdict, dataclass, field
 from statistics import median
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 
@@ -37,7 +37,13 @@ from benchmarks.kernel.registry import (
     shape_summary,
 )
 from benchmarks.artifacts.summaries import summarize
-from benchmarks.models.piper_qwen3.shape import PiperShape
+
+if TYPE_CHECKING:
+    # Annotation-only. The engine must not import a model package: arms reach
+    # it as already-resolved BuiltArm values via resolve_symbol, never as
+    # imports, which is what will let a later commit run each arm in its own
+    # process without the engine dragging in every model's dependencies.
+    from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
 @dataclass

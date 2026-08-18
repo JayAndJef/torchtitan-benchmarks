@@ -17,6 +17,23 @@ raises on an unknown one. ``tests/test_model_shape.py`` asserts every
 (scenario, arm) config accepts every registered size and builds the shape
 it names.
 
+**Reverse edge, pending resolution.** The ``_pretokenized`` configs import
+``PretokenizedReplayDataLoader`` from ``benchmarks.e2e.data.piper_qwen3``,
+so ``models/`` depends on ``e2e/``. This is the one import direction the
+package layering does not want, and it is *new*: before the restructure the
+configs and the replay loader were siblings in a single model package, so the
+reference was intra-package and legal. Splitting that package by ownership --
+geometry and configs to ``models/``, the run-shaped replay loader to
+``e2e/`` -- is what exposed it.
+It is a real edge, not an artifact of annotations: the loader is constructed
+at runtime by the dataloader factory. It forms no cycle (nothing under
+``e2e/`` imports this module; torchtitan reaches it by ``--module`` through
+``ConfigManager``, not by import), and this module's sole non-test consumer
+is that ``getattr`` lookup. The candidate resolution is to move the replay
+loader under ``models/piper_qwen3/`` alongside the configs that are its only
+caller, which deletes the edge outright; it is deferred rather than done
+here because the flag-day commit moved code without redesigning it.
+
 Known deltas vs piper (identical across all benchmark arms, so they do not
 affect the RoPE comparison):
 - torchtitan's MoE layer builder hardcodes route_norm=True (piper: False);
@@ -52,14 +69,15 @@ from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
+# See "Reverse edge, pending resolution" above: models/ -> e2e/.
+from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataLoader
 from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
     PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
 )
-from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 from benchmarks.models.piper_qwen3.parallelize import parallelize_piper1b
-from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataLoader
+from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 
 def _piper_1b_model(

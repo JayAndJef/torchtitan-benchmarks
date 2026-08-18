@@ -2,15 +2,25 @@
 
 **Structural edge, pending resolution.** This module imports from
 ``benchmarks.e2e.registry`` at runtime, which inverts the intuitive layering
-(``artifacts/`` looks lower-level than ``e2e/`` and is not). The edge is
-one-directional -- ``e2e/registry.py`` imports nothing from ``artifacts/`` --
-so it forms no cycle, but it is *structural* rather than incidental: a
-manifest is a serialization of a run's scenario and arms, so the builders
-here need those types by construction. Two names cross at runtime,
-``Workload`` (``_resume_workload`` reconstructs and revalidates it from
-recorded JSON) and ``EXECUTION_MODEL`` (a manifest self-description field);
-``Scenario`` and ``Arm`` are annotation-only and are imported under
-``TYPE_CHECKING``, so they cost nothing at runtime. The candidate resolution
+(``artifacts/`` looks lower-level than ``e2e/`` and is not). It is
+*structural* rather than incidental: a manifest is a serialization of a run's
+scenario and arms, so the builders here need those types by construction. Two
+names cross at runtime, ``Workload`` (``_resume_workload`` reconstructs and
+revalidates it from recorded JSON) and ``EXECUTION_MODEL`` (a manifest
+self-description field); ``Scenario`` and ``Arm`` are annotation-only and are
+imported under ``TYPE_CHECKING``, so they cost nothing at runtime.
+
+Be precise about what does and does not cycle. At *module* granularity there
+is no cycle: ``e2e/registry.py`` imports nothing from ``artifacts/``. At
+*package* granularity there is one, because ``e2e/runner.py``,
+``e2e/results.py`` and ``e2e/validation.py`` all import from this module. So
+``artifacts/`` and ``e2e/`` are mutually dependent as packages and only the
+module-level ordering keeps imports resolvable. The third name this module
+takes from ``e2e`` makes the point sharpest: ``RunRequest`` comes from
+``e2e/runner.py``, which imports this module at runtime, so that pair *would*
+be a genuine module-level cycle -- it is legal only because it is confined to
+``TYPE_CHECKING``. Anything moved out of that block must be re-checked. The
+candidate resolution
 is to move the e2e-shaped manifest builders into ``e2e/`` and leave
 ``artifacts/`` holding only engine-neutral pieces (``atomic_write_json``,
 schema-checked ``load_manifest``, layout helpers, ``summaries.py``); the
