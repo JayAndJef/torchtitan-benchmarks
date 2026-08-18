@@ -173,9 +173,23 @@ def _seeded_build(
 
     The re-seed makes an arm's parameters depend on the arm alone, never on
     how many arms were built before it. See this module's docstring.
+
+    The gate below is where ``KernelArm`` becomes the authority. Every
+    consumer downstream reads the declared modes: the manifest lists them,
+    the merge pairs an arm against its opponent mode by mode, and a reader
+    ranks implementations by them. A builder that returned one extra closure
+    would publish a timed operation the registry never described, and one
+    that dropped a closure would leave a declared mode silently absent from
+    the table. Both are wrong in the same way, so both raise here.
     """
     torch.manual_seed(seed)
-    return resolve_symbol(arm.builder)(shape, workload, inputs)
+    built = resolve_symbol(arm.builder)(shape, workload, inputs)
+    if set(built.calls) != set(arm.modes):
+        raise ValueError(
+            f"{arm.name}: the builder exposes modes {sorted(built.calls)}, "
+            f"but the scenario declares {sorted(arm.modes)}"
+        )
+    return built
 
 
 def _environment() -> dict[str, Any]:
@@ -249,15 +263,15 @@ def run_timing_pass(
         "arm": arm_name,
         "replicate": replicate,
         "modes": modes,
-        # Arm properties the parent needs for the derived columns; the parent
-        # never sees a BuiltArm.
+        # The one arm property the parent needs and cannot read from the
+        # declaration; the parent never sees a BuiltArm. Whether the arm is a
+        # floor is declared, so the merge reads it from the registry instead.
         "bytes_moved": arm.bytes_moved,
-        "floor": arm.floor,
         "peak_memory_gib": None,
         "burst_us_per_call": None,
     }
     if replicate == 0:
-        if not arm.floor:
+        if not declaration.is_floor:
             fragment["peak_memory_gib"] = memory_pass(
                 arm, _heaviest_mode(arm), options.memory_iters
             )

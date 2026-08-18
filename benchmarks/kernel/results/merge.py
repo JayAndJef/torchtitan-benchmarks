@@ -193,10 +193,11 @@ def merge_kernel_fragments(
     samples = {
         name: _mode_samples(ordered) for name, ordered in complete.items()
     }
+    # Declared, not reported by the fragment: a floor is a property of the
+    # arm the registry describes, and the x-floor column belongs to a reader
+    # who has the registry and no GPU.
     floor_arms = {
-        name
-        for name, ordered in complete.items()
-        if bool(ordered[0]["floor"])
+        name for name in complete if scenario.arm(name).is_floor
     }
     floor_medians = {
         mode: median(value for replicate in modes[mode] for value in replicate)
@@ -236,36 +237,32 @@ def merge_kernel_fragments(
             burst_us_per_call=first["burst_us_per_call"],
         )
 
-    # An arm that serves as another arm's opponent is itself a reference and
-    # gets no comparison row; compare_to exists so an arm measured at a
-    # different scope than the scenario baseline can face a same-scope
-    # opponent instead of an apples-to-oranges baseline ratio.
-    references = {scenario.baseline_arm} | {
-        arm.compare_to for arm in scenario.arms if arm.compare_to
-    }
+    # Which rows exist is declared by the scenario, never inferred here. A
+    # scenario whose two sides are not a like-for-like cut says so by
+    # declaring no pair, and this loop then writes no ratio -- where the
+    # former per-arm ``compare_to`` could only redirect a row, not decline
+    # one. An arm absent from ``samples`` was already warned about above, or
+    # the gates failed and nothing was timed.
     comparisons: list[dict[str, Any]] = []
-    for arm in scenario.arms:
-        if arm.name not in samples or arm.name in references:
+    for arm_name, opponent in scenario.comparison_pairs():
+        if arm_name not in samples:
             continue
-        if arm.name in floor_arms:
-            continue
-        opponent = arm.compare_to or scenario.baseline_arm
         if opponent not in samples:
             warnings.append(
-                f"{arm.name}: opponent {opponent!r} is absent, so this arm "
+                f"{arm_name}: opponent {opponent!r} is absent, so this arm "
                 "carries no ratio"
             )
             continue
-        for mode in samples[arm.name]:
+        for mode in samples[arm_name]:
             if mode not in samples[opponent]:
                 continue
             row: dict[str, Any] = {
-                "arm": arm.name,
+                "arm": arm_name,
                 "opponent": opponent,
                 "mode": mode,
             }
             row.update(
-                kernel_comparison(samples[opponent][mode], samples[arm.name][mode])
+                kernel_comparison(samples[opponent][mode], samples[arm_name][mode])
             )
             comparisons.append(row)
 

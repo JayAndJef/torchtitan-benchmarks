@@ -156,7 +156,6 @@ def build_rope_copy_floor(
         calls={"forward": forward},
         correctness_outputs=dict,
         bytes_moved=inputs.qk_bytes,
-        floor=True,
     )
 
 

@@ -3,6 +3,7 @@
 import importlib
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -30,9 +31,6 @@ class RegistryTests(unittest.TestCase):
             )
             for arm in scenario.arms:
                 self.assertTrue(set(arm.modes) <= set(MODES), arm.name)
-                if arm.compare_to is not None:
-                    opponent = scenario.arm(arm.compare_to)
-                    self.assertTrue(set(arm.modes) & set(opponent.modes))
                 for check in arm.correctness:
                     self.assertIn(
                         check.kind, ("bitwise", "tolerance", "fp64_ulp")
@@ -41,6 +39,37 @@ class RegistryTests(unittest.TestCase):
                         self.assertIsNotNone(scenario.reference_builder)
                     else:
                         scenario.arm(check.reference)
+
+    def test_every_comparison_pair_shares_a_mode(self) -> None:
+        """A declared row that shares no mode would write nothing at all."""
+        for scenario in KERNEL_SCENARIOS.values():
+            pairs = scenario.comparison_pairs()
+            self.assertTrue(pairs, scenario.name)
+            for arm_name, opponent in pairs:
+                arm = scenario.arm(arm_name)
+                self.assertFalse(arm.is_floor, arm_name)
+                self.assertNotEqual(arm_name, opponent)
+                self.assertTrue(
+                    set(arm.modes) & set(scenario.arm(opponent).modes),
+                    f"{scenario.name}: {arm_name} vs {opponent}",
+                )
+
+    def test_the_five_scenarios_derive_their_comparisons(self) -> None:
+        """None of the five declares an explicit set, so every non-floor arm
+        faces the anchor. Part C's cross-engine scenarios are what the
+        explicit form exists for."""
+        for scenario in KERNEL_SCENARIOS.values():
+            self.assertIsNone(scenario.comparisons, scenario.name)
+        self.assertEqual(
+            kernel_scenario_by_name("rope").comparison_pairs(),
+            (("helion", "baseline"), ("te", "baseline")),
+        )
+
+    def test_a_scenario_may_declare_that_it_publishes_no_ratio(self) -> None:
+        scenario = kernel_scenario_by_name("qkv")
+        self.assertEqual(replace(scenario, comparisons=()).comparison_pairs(), ())
+        with self.assertRaisesRegex(ValueError, "Unknown arm"):
+            replace(scenario, comparisons=(("fused_qkv", "nope"),))
 
     def test_attention_arms(self) -> None:
         scenario = KERNEL_SCENARIOS["attention"]

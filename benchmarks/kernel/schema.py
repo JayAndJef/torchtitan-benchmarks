@@ -160,18 +160,23 @@ class KernelArm:
     ``builder`` is a dotted path ("module:function") resolved in the GPU
     worker; the function receives (shape, workload, inputs) and returns a
     BuiltArm whose per-mode closures are the timed operations.
-    ``compare_to`` names the opponent arm for ratio and significance rows
-    (None means the scenario baseline); comparisons only happen between arms
-    sharing a mode.
     ``compiled`` records that the builder runs the arm under torch.compile,
     as production does; raw-kernel arms and floors stay eager on purpose.
+
+    **This declaration is the authority, and the builder must agree with
+    it.** ``modes`` says which operations the arm exposes and ``is_floor``
+    says whether it is a bandwidth floor rather than an implementation.
+    ``benchmarks.kernel.engine.run`` raises when the built arm disagrees,
+    instead of letting the builder decide silently. A mode the registry does
+    not declare would otherwise be timed and published under a label nothing
+    describes, and a floor known only to its builder cannot be read by the
+    parent that computes the x-floor column.
     """
 
     name: str
     description: str
     builder: str
     modes: tuple[str, ...]
-    compare_to: str | None = None
     correctness: tuple[CorrectnessCheck, ...] = ()
     requires_gcc_toolset: bool = False
     is_floor: bool = False
@@ -186,6 +191,15 @@ class KernelScenario:
     every expert an equal slice of the routed rows; the runner refuses to run
     it on a workload where they do not divide evenly, rather than silently
     rounding the split.
+
+    ``comparisons`` declares which ratio rows the results file publishes, as
+    ordered ``(arm, opponent)`` pairs. ``None`` means "derive the usual
+    single-anchor set": every arm except the anchor and the floors, each
+    against the anchor. An explicit tuple is exhaustive, and the empty tuple
+    is a scenario that publishes no ratio at all -- which a scenario holding
+    two engines whose cut is not like-for-like must be able to say. It
+    replaces the former per-arm ``compare_to``, which could name a different
+    opponent but could not decline a row.
     """
 
     name: str
@@ -195,6 +209,15 @@ class KernelScenario:
     arms: tuple[KernelArm, ...]
     baseline_arm: str
     requires_balanced_routing: bool = False
+    comparisons: tuple[tuple[str, str], ...] | None = None
+
+    def __post_init__(self) -> None:
+        # At import, so a mistyped opponent fails when the registry loads
+        # rather than after a GPU has measured every arm.
+        self.arm(self.baseline_arm)
+        for arm_name, opponent in self.comparisons or ():
+            self.arm(arm_name)
+            self.arm(opponent)
 
     def arm(self, name: str) -> KernelArm:
         for arm in self.arms:
@@ -203,6 +226,16 @@ class KernelScenario:
         raise ValueError(
             f"Unknown arm {name!r} for kernel scenario {self.name!r}. "
             f"Available arms: {', '.join(arm.name for arm in self.arms)}"
+        )
+
+    def comparison_pairs(self) -> tuple[tuple[str, str], ...]:
+        """The ``(arm, opponent)`` rows this scenario publishes."""
+        if self.comparisons is not None:
+            return self.comparisons
+        return tuple(
+            (arm.name, self.baseline_arm)
+            for arm in self.arms
+            if arm.name != self.baseline_arm and not arm.is_floor
         )
 
     @property

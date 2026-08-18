@@ -82,7 +82,6 @@ def timing_fragment(scenario: str, arm: str, replicate: int) -> dict:
             for mode in declaration.modes
         },
         "bytes_moved": None,
-        "floor": declaration.is_floor,
         "peak_memory_gib": 1.5 if replicate == 0 else None,
         "burst_us_per_call": None,
     }

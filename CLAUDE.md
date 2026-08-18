@@ -740,6 +740,24 @@ in a builder path), and return a `BuiltArm` whose `calls` map a mode to a
 zero-argument timed closure and whose `correctness_outputs` returns named
 tensors for the gates.
 
+**The declaration is the authority, and the builder must agree with it.**
+`KernelArm.modes` says which operations exist and `KernelArm.is_floor` says
+whether the arm is a bandwidth floor rather than an implementation.
+`_seeded_build` raises when `BuiltArm.calls` does not match the declared
+modes exactly, and the merge reads `is_floor` from the registry, so
+`BuiltArm` carries neither. This is what lets a reader check the roster
+without a GPU: an undeclared mode would be timed and published under a label
+nothing describes, and a floor known only to its builder could not produce
+the x-floor column, which the parent computes.
+
+**Which comparisons exist is declared too.** `KernelScenario.comparisons` is
+a tuple of `(arm, opponent)` pairs. Left `None` -- as all five scenarios
+leave it -- it derives the usual set: every non-floor arm against the anchor.
+An explicit tuple is exhaustive, and the empty tuple declares a scenario that
+publishes no ratio at all, which a scenario whose two sides are not a
+like-for-like cut must be able to say. It replaces the per-arm `compare_to`,
+which could redirect a row but could not decline one.
+
 **A builder path is a string, and must stay one.** `benchmarks/kernel/engine/`
 imports `schema.py`, never `registry.py`, and never an `operations/` module:
 arms reach it only as already-resolved `BuiltArm` values via `resolve_symbol`.

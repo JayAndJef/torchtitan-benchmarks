@@ -38,11 +38,16 @@ class BuiltArm:
     prebuilt tensors; ``correctness_outputs`` runs the arm once on the
     shared seeded inputs and returns the named tensors its declared
     correctness checks compare.
+
+    It says nothing about *which* modes the arm was supposed to expose, or
+    whether the arm is a bandwidth floor. ``KernelArm`` declares both, and
+    ``engine.run`` raises when ``calls`` disagrees with the declaration --
+    so this type carries what only the build can know, and the registry
+    carries what a reader must be able to check without a GPU.
     """
 
     name: str
     calls: dict[str, Callable[[], object]]
     correctness_outputs: Callable[[], dict[str, torch.Tensor]]
     bytes_moved: int | None = None
-    floor: bool = False
     notes: dict[str, Any] = field(default_factory=dict)
