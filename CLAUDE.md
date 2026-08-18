@@ -84,10 +84,10 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
 | `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
 | `benchmarks/kernel/registry.py` | The five kernel scenarios themselves, declared with those types |
-| `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the subprocess it launches |
+| `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness |
 | `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration) and `statistics.py` |
 | `benchmarks/kernel/operations/` | Arm builders, one module per kernel family (`rope.py`, `swiglu.py`, `qkv.py`, `attention.py`, `lm_head.py`) plus `common.py` |
-| `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`) and `reporting.py` |
+| `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments) and `reporting.py` |
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
 | `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
@@ -799,7 +799,33 @@ own family module.
   point; module arms retain the graph and re-run `torch.autograd.backward`,
   so only backward kernels are timed. `lm_head` is fwd+bwd only because
   `FusedLinearCrossEntropyLoss` runs its backward inside `__call__`.
+- **Every arm is built and timed in its own process.** A scenario is one
+  correctness worker plus `replicates x arms` timing workers, spawned
+  sequentially by `benchmarks/kernel/runner.py` in replicate-major order.
+  Each worker writes a JSON fragment under `fragments/`, and the parent
+  merges them (`benchmarks/kernel/results/merge.py`). This is what keeps one
+  arm's dependencies out of another arm's interpreter -- FA3 and
+  TransformerEngine cannot share a process at all -- and it is why the parent
+  computes the ratios: no worker sees a second arm.
+  `benchmarks/kernel/engine/run.py`'s `run_kernel_scenario` composes the same
+  two passes in a single process for the GPU smoke test; the runner never
+  calls it.
+- **Re-seeding is per arm build, not per process.** Inputs rebuild
+  bit-identically in every worker (the inputs builder owns its generator),
+  but builders consume the global RNG, so an arm built second in one process
+  would otherwise get different weights than the same arm built alone.
+  `_seeded_build` re-seeds before every build, so the arm the correctness
+  pass gates is the arm the timing pass measures.
 - Correctness runs before timing and fails the run loudly (worker exit 3).
+  **No timing worker launches after a failed gate**: a gate failure is the
+  result, and measuring an arm already known to be wrong wastes the GPU.
+  `results.json` is still written, carrying the gates and no arms.
+- **A lost worker never becomes a quiet number.** A timing worker that writes
+  no fragment is reported as it happens and the sweep continues. Its arm is
+  then omitted from `results.json` with a recorded warning, and the scenario
+  exits nonzero. Losing the *anchor* arm writes no results at all -- every
+  comparison is a ratio against it, so the alternative is a table whose
+  missing ratios look like a scenario that declared none.
 
 ### Choosing a correctness metric
 
@@ -837,17 +863,31 @@ arm measuring the baseline under an FA4 label.
 
 ```
 out/<timestamp>/kernels/<scenario>/<hardware>/
-  manifest.json      # schema 2: model_size, model_shape, workload, shapes, arms, n/warmup/seed, command, provenance
-  results.json       # schema 2: per-arm per-mode summaries + raw samples, comparisons, correctness
-  kernel_bench.log   # worker stdout+stderr
+  manifest.json      # schema 4: model_size, model_shape, workload, shapes, arms, replicates/burst_k/warmup_calls/seed, commands, provenance
+  results.json       # schema 3: per-arm per-mode summaries + per-replicate samples, comparisons, correctness, warnings
+  kernel_bench.log   # every worker's stdout+stderr, in spawn order
+  fragments/
+    correctness.json         # the gate pass
+    timing__<arm>__r<N>.json # one per (arm, replicate)
 ```
 
-Raw per-cycle samples are kept in `results.json` so a run can be re-analyzed
-without re-measuring. Both schemas went 1 -> 2 together when the flat `spec`
-was split into `model_size` / `model_shape` / `workload` -- `model_shape` is
-the same `describe()` payload the e2e manifest records, so the two systems
-state model identity identically. The results loader enforces exact schema
-equality, so schema-1 files are rejected rather than half-read.
+Raw per-replicate samples are kept in `results.json` so a run can be
+re-analyzed without re-measuring, and the fragments are kept so a merge can
+be redone without re-measuring either. `model_shape` is the same `describe()`
+payload the e2e manifest records, so the two systems state model identity
+identically.
+
+Schema history, and why each step renamed rather than reinterpreted a field:
+both went 1 -> 2 when the flat `spec` split into `model_size` /
+`model_shape` / `workload`. Both went 2 -> 3 when the measurand changed --
+`n`/`warmup` counted round-robin cycles and were printed as such, so they
+became `replicates` / `samples_per_replicate` / `burst_k` / `warmup_calls`,
+and `samples_us` became `replicates_us` because the replicate boundaries are
+the repetition unit the statistics run over. The manifest alone went 3 -> 4
+when a scenario stopped being one worker invocation: `command` became
+`commands`, one argv per pass. The results loader enforces exact schema
+equality, so older files are rejected rather than half-read; the manifest is
+write-only provenance and has no loader.
 
 ### Trace diagnostics
 

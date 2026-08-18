@@ -191,11 +191,13 @@ the compiler fuses the graph around it.
 | `attention` | inner attention only: FlexAttention vs FlashAttention-3 varlen vs FlexAttention lowered to FlashAttention-4 |
 
 Each number is burst-amortized per-call device time, repeated over replicate
-sweeps so drift affects every arm equally. Correctness gates run before
-timing and fail the run loudly, and each scenario writes a manifest and
-results JSON (with the raw per-replicate samples) under
-`out/<timestamp>/kernels/`. `./run_bench.sh scenarios` lists every scenario
-and arm.
+sweeps so drift affects every arm equally. Every arm is built and timed in
+its own process, so one arm's dependencies never reach another's; the parent
+merges the per-worker fragments into the results file. Correctness gates run
+first and fail the run loudly, and no arm is timed after a failed gate. Each
+scenario writes a manifest and results JSON (with the raw per-replicate
+samples) under `out/<timestamp>/kernels/`. `./run_bench.sh scenarios` lists
+every scenario and arm.
 
 ## Tests
 

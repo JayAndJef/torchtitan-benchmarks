@@ -1,11 +1,28 @@
-"""GPU worker entry point for one kernel-benchmark scenario.
+"""GPU worker entry point for one kernel-benchmark pass.
 
-Launched by the CLI parent as ``numactl ... python -m benchmarks.kernel.worker``
+Launched by the parent as ``numactl ... python -m benchmarks.kernel.worker``
 inside the prepared environment (CUDA_VISIBLE_DEVICES, cache dirs, compiler
-env). Writes results.json into the prepared output directory.
+env). One invocation runs **one** pass and writes **one** JSON fragment; the
+parent merges the fragments into ``results.json``.
 
-Exit codes: 0 success; 3 correctness gates failed (results.json still
+Two modes, matching the two passes:
+
+* ``--mode correctness`` builds every arm and gates them. Once per scenario,
+  and first -- a failed gate means no timing is worth taking.
+* ``--mode timing --arm NAME --replicate N`` builds that one arm and times it
+  for that one replicate.
+
+The timing mode is why this file exists in this shape. One arm per process is
+what keeps an arm's dependencies out of every other arm's interpreter: FA3
+and TransformerEngine cannot share a process at all (a cuDNN soname
+collision, see CLAUDE.md), and a build failure or a leaked CUDA context in
+one arm cannot reach another.
+
+Exit codes: 0 success; 3 correctness gates failed (the fragment is still
 written); 2 bad arguments; 1 build or environment failure.
+
+Module scope stays stdlib-only, so ``--help`` and an argument error return
+without paying for torch. ``tests/test_import_boundaries.py`` pins that.
 """
 
 from __future__ import annotations
@@ -19,8 +36,12 @@ from pathlib import Path
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="benchmarks.kernel.worker")
     parser.add_argument("--scenario", required=True)
-    parser.add_argument("--out-dir", required=True, type=Path)
-    parser.add_argument("--hardware", required=True)
+    parser.add_argument("--mode", required=True, choices=("correctness", "timing"))
+    parser.add_argument("--fragment", required=True, type=Path)
+    parser.add_argument("--arm", default=None, help="timing mode only")
+    parser.add_argument(
+        "--replicate", type=int, default=None, help="timing mode only"
+    )
     parser.add_argument("--replicates", type=int, default=5)
     parser.add_argument("--samples-per-replicate", type=int, default=40)
     parser.add_argument("--burst-k", type=int, default=16)
@@ -31,7 +52,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--max-seq-len", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.mode == "timing" and (args.arm is None or args.replicate is None):
+        parser.error("--mode timing requires --arm and --replicate")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
             seq_len=args.seq_len,
             max_seq_len=args.max_seq_len,
         )
+        if args.mode == "timing":
+            scenario.arm(args.arm)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -60,8 +86,12 @@ def main(argv: list[str] | None = None) -> int:
     # generated kernels, and applies to every arm alike.
     functorch_config.donated_buffer = False
 
-    from benchmarks.kernel.engine.run import RunOptions, run_kernel_scenario
-    from benchmarks.kernel.results.schema import write_kernel_results
+    from benchmarks.artifacts.layout import atomic_write_json
+    from benchmarks.kernel.engine.run import (
+        RunOptions,
+        run_correctness_pass,
+        run_timing_pass,
+    )
 
     options = RunOptions(
         replicates=args.replicates,
@@ -72,21 +102,25 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
     )
     try:
-        result = run_kernel_scenario(
-            scenario, shape, workload, options, args.hardware
-        )
+        if args.mode == "correctness":
+            fragment = run_correctness_pass(scenario, shape, workload, options)
+        else:
+            fragment = run_timing_pass(
+                scenario, args.arm, args.replicate, shape, workload, options
+            )
     except Exception:
         traceback.print_exc()
         return 1
 
-    destination = write_kernel_results(result, args.out_dir / "results.json")
-    print(f"results: {destination}")
-    if not result.all_correctness_passed:
+    atomic_write_json(args.fragment, fragment)
+    print(f"fragment: {args.fragment}")
+
+    if args.mode == "correctness" and not fragment["all_passed"]:
         failed = [
-            f"{row.arm}.{row.output} {row.metric}={row.value:.4g}"
-            f" (limit {row.threshold})"
-            for row in result.correctness
-            if row.passed is False
+            f"{row['arm']}.{row['output']} {row['metric']}={row['value']:.4g}"
+            f" (limit {row['threshold']})"
+            for row in fragment["rows"]
+            if row["passed"] is False
         ]
         print("correctness FAILED: " + "; ".join(failed), file=sys.stderr)
         return 3

@@ -92,6 +92,7 @@ PARENT_SIDE_MODULES = (
     "benchmarks.kernel.worker",
     "benchmarks.kernel.engine.statistics",
     "benchmarks.kernel.results.schema",
+    "benchmarks.kernel.results.merge",
     "benchmarks.kernel.results.reporting",
     "benchmarks.models.piper_qwen3.shape",
     "benchmarks.models.piper_qwen3.megatron_bootstrap",
