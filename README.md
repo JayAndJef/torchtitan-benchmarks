@@ -15,9 +15,12 @@ private TorchTitan Qwen3 helpers, so bumping the submodule means revalidating
 |---|---|
 | `piper1b/` | Piper Qwen3-1B config port and benchmark-local kernel overrides. |
 | `benchmarks/` | Declarative scenarios, Click CLI, runner, artifacts, metrics, and reporting. |
+| `megatron_baseline/` | Megatron-LM + TransformerEngine baseline: model builder, THD data, training driver. |
 | `analysis/` | Standalone trace-diagnostic scripts. |
+| `tools/` | Cross-engine parity check and the shared-box matrix supervisor. |
 | `tests/` | CLI, runner, artifact, metric, and kernel correctness tests. |
 | `third_party/torchtitan/` | Pinned TorchTitan submodule; installed editable into `.venv`. |
+| `third_party/Megatron-LM/` | Pinned Megatron-LM submodule; placed on `sys.path`, not pip-installed. |
 
 The model configuration is registered as `qwen3_piper_1b`. The port represents
 Piper's 1B routed-MoE Qwen3 variant; all scenarios use the same model except
@@ -28,9 +31,11 @@ where an arm explicitly selects an alternate trainer configuration.
 | scenario | arms | comparison |
 |---|---|---|
 | `piper1b_rope` | `baseline`, `helion`, `te` | Stock, Helion, and TE-derived RoPE. |
-| `piper1b_swiglu` | `baseline`, `fused_grouped_experts` | Stock routed experts and local combined-gradient grouped experts. |
+| `piper1b_swiglu` | `baseline`, `piper_optimized_triton`, `piper_optimized_inductor` | Stock routed experts and the two Piper fused-w13 grouped-expert variants. |
 | `piper1b_qkv` | `baseline`, `fused_qkv` | Separate Q/K/V projections and a fused QKV projection. |
 | `piper1b_lm_head` | `baseline`, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | Full-logits, PyTorch fused linear-CE, TE fused CE, and Piper-optimized TE CE. |
+| `piper1b_attention` | `baseline`, `flash_attention_3`, `flex_flash` | FlexAttention, FlashAttention-3 varlen, and FlexAttention lowered to FlashAttention-4. |
+| `piper1b_megatron` | `baseline`, `titan_stock`, `titan_swiglu`, `titan_lm_head`, `titan_swiglu_lm_head` | Megatron-LM + TransformerEngine against the best-improved TorchTitan configurations. |
 
 Scenario definitions live in `benchmarks/scenarios.py`. They declare the
 workload, arm-specific trainer config, overrides, and expected trace markers.
@@ -39,9 +44,10 @@ workload, arm-specific trainer config, overrides, and expected trace markers.
 
 - An NVIDIA driver reporting CUDA 13.0 or newer in the `nvidia-smi` header. The
   locked wheels are cu130 builds covering `sm_75` through `sm_120`, so Ampere
-  (A6000, A100) and Hopper (H100, H200) work without changes. On an older driver,
-  relock against a cu128 nightly index; results from a relocked environment are
-  not comparable to those already in `out/`.
+  (A6000, A100) and Hopper (H100, H200) work without changes. On a driver that
+  reports less, `run_bench.sh` sources `cuda_compat.sh`, which stages NVIDIA's
+  forward-compat userspace driver under `.cuda-compat/` and prepends it to
+  `LD_LIBRARY_PATH`; it is a no-op on drivers that already report 13.0+.
 - `uv`, and a host compiler satisfying C++20 for the standalone TE CUDA
   extensions.
 
@@ -55,19 +61,25 @@ it.
 ```bash
 git clone --recurse-submodules https://github.com/JayAndJef/torchtitan-benchmarks
 cd torchtitan-benchmarks
-uv sync
+./sync.sh
 ```
 
 For a clone made without `--recurse-submodules`:
 
 ```bash
-git submodule update --init third_party/torchtitan
-uv sync
+git submodule update --init --recursive
+./sync.sh
 ```
 
-`uv sync` creates `.venv` with the pinned torch, the submodule installed editable,
-and the benchmark dependencies. `run_bench.sh` uses that interpreter, and the same
-one launches training, so the CLI and the training process cannot diverge.
+`sync.sh` wraps `uv sync` in two passes: the first installs torch and the NVIDIA
+header wheels, the second builds the dependency groups that compile without
+build isolation against the pinned nightly. A plain `uv sync` works only once
+those wheels are already in uv's cache.
+
+The result is a `.venv` with the pinned torch, the TorchTitan submodule installed
+editable, and the benchmark dependencies. `run_bench.sh` uses that interpreter,
+and the same one launches training, so the CLI and the training process cannot
+diverge.
 
 ## Run
 
@@ -106,7 +118,8 @@ failure. It cannot be combined with `--scenario`, `--out`, `--resume`, or
 `--results`.
 
 The runner accepts `--batch`, `--seq-len`, `--steps`, `--out`, `--cache-root`,
-and `--compiler-env`; `--help` shows their environment-variable
+and `--compiler-env`, plus the three global comparability axes `--compile-mode`,
+`--ac`, and `--model-size`; `--help` shows their environment-variable
 equivalents. The default workload is batch 4, sequence length 1024, and 40
 steps. It requires at least two profiler windows, so use at least 40 steps
 unless the scenario schedule is also changed.
@@ -150,15 +163,16 @@ the compiler fuses the graph around it.
 ```bash
 ./run_bench.sh kernel-bench <gpu>                      # all scenarios
 ./run_bench.sh kernel-bench <gpu> --scenario swiglu    # one scenario
-./run_bench.sh kernel-bench <gpu> --n 200 --burst      # more cycles + dispatch diagnostic
+./run_bench.sh kernel-bench <gpu> --burst              # add the dispatch-cost diagnostic
 ```
 
 | scenario | compares |
 |---|---|
 | `rope` | stock `CosSinRoPE` vs Helion vs TransformerEngine, against a copy-bandwidth floor |
-| `swiglu` | stock vs fused vs combined-layout grouped experts, at module and raw-kernel level |
+| `swiglu` | stock grouped experts vs the two Piper fused-w13 variants, whole expert layer only |
 | `qkv` | separate Q/K/V projections vs one fused QKV GEMM |
 | `lm_head` | full logits vs fused linear-CE vs TE and Piper-optimized cross entropy |
+| `attention` | inner attention only: FlexAttention vs FlashAttention-3 varlen vs FlexAttention lowered to FlashAttention-4 |
 
 Arms are timed round-robin so drift affects them equally, correctness gates
 run before timing and fail the run loudly, and each scenario writes a

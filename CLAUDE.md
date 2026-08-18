@@ -43,7 +43,7 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
   dependency, and never benchmark while it runs -- the build saturates the
   host and this workload is host-bound.
 - TorchTitan is a git submodule at `third_party/torchtitan`, installed editable.
-  `benchmarks/runtime.py:18` hardcodes it as `TITAN_DIR`.
+  `benchmarks/runtime.py:19` hardcodes it as `TITAN_DIR`.
 - Megatron-LM is a git submodule at `third_party/Megatron-LM` (pinned
   `59b72fa57`, core 0.20.0). It is **not** pip-installed (its pyproject wants
   python >= 3.12); `megatron_baseline/location.py` puts it on `sys.path` in
@@ -76,7 +76,7 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
 | `piper1b/pretokenized_data.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
 | `megatron_baseline/` | Everything Megatron: location/provenance, Qwen3-1B GPTModel builder, THD data, training driver |
 | `analysis/` | Two argv-driven trace diagnostics (`analyze.py`, `per_block.py`) |
-| `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor) |
+| `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check) |
 | `tests/` | CPU + GPU unit tests |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
 | `third_party/Megatron-LM/` | Pinned submodule (upstream NVIDIA, sys.path only) |
