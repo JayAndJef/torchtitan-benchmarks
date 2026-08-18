@@ -30,8 +30,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.moe import GroupedExperts
-
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     WEIGHT_STD,
@@ -40,10 +38,6 @@ from benchmarks.kernel.operations.common import (
     _reset_grads,
 )
 from benchmarks.kernel.schema import KernelWorkload
-from benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu import (
-    CombinedSwiGLUFusedGroupedExperts,
-    InductorSwiGLUFusedGroupedExperts,
-)
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
@@ -171,6 +165,8 @@ def _build_swiglu_module(config_cls, shape: PiperShape, inputs: SwigluInputs):
 def build_swiglu_baseline(
     shape: PiperShape, workload: KernelWorkload, inputs: SwigluInputs
 ) -> BuiltArm:
+    from torchtitan.models.common.moe import GroupedExperts
+
     module = _build_swiglu_module(GroupedExperts, shape, inputs)
     return _swiglu_module_arm(
         "baseline", module, inputs, _stock_weight_grads
@@ -180,6 +176,10 @@ def build_swiglu_baseline(
 def build_swiglu_piper_optimized_triton(
     shape: PiperShape, workload: KernelWorkload, inputs: SwigluInputs
 ) -> BuiltArm:
+    from benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu import (
+        CombinedSwiGLUFusedGroupedExperts,
+    )
+
     module = _build_swiglu_module(
         CombinedSwiGLUFusedGroupedExperts, shape, inputs
     )
@@ -191,6 +191,10 @@ def build_swiglu_piper_optimized_triton(
 def build_swiglu_piper_optimized_inductor(
     shape: PiperShape, workload: KernelWorkload, inputs: SwigluInputs
 ) -> BuiltArm:
+    from benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu import (
+        InductorSwiGLUFusedGroupedExperts,
+    )
+
     module = _build_swiglu_module(
         InductorSwiGLUFusedGroupedExperts, shape, inputs
     )

@@ -538,6 +538,42 @@ ENGINE_FORBIDDEN_IMPORTS = (
 # paths strings in the first place.
 DECLARATION_MODULES = ("benchmarks.kernel.schema", "benchmarks.kernel.registry")
 
+# The third edge of the same constraint, one level down. The two above keep
+# the *engine* free of the arms; this one keeps each arm free of the others.
+#
+# Per-arm process isolation only pays off if a process imports the one arm it
+# builds. Every family module imports torch, which is unavoidable and shared,
+# but an implementation import at module scope is paid by every arm in the
+# family -- so the whole family's dependencies land in every one of its
+# processes. That is not a tidiness argument: FA3 and TransformerEngine cannot
+# share a process (a cuDNN soname collision, see CLAUDE.md), and importing
+# ``te_rope_override`` JIT-builds a CUDA extension needing a C++20 compiler
+# the run may not have configured. ``attention.py`` has always followed this
+# rule, for the FA3 half of exactly that reason; the rest of the package
+# follows it now.
+#
+# The rule is per *scope*, not per module: these names are welcome inside a
+# builder body, and ``all_imports`` is deliberately not used here.
+OPERATIONS_DIRECTORY = "benchmarks/kernel/operations/"
+OPERATIONS_DEFERRED_IMPORTS = (
+    "torchtitan",
+    "transformer_engine",
+    "megatron",
+    "flash_attn",
+    "flash_attn_interface",
+    "triton",
+    "helion",
+    "benchmarks.models.piper_qwen3.components",
+)
+
+
+def operations_source_files() -> tuple[str, ...]:
+    return tuple(
+        path
+        for path in tracked_python_files()
+        if path.startswith(OPERATIONS_DIRECTORY)
+    )
+
 
 def engine_source_files() -> tuple[str, ...]:
     return tuple(
@@ -676,6 +712,69 @@ class KernelEngineImportBoundaryTest(unittest.TestCase):
             "a kernel scenario declaration imports an arm builder; builder "
             "paths are resolved by dotted string inside the worker:\n  "
             + "\n  ".join(violations),
+        )
+
+
+class OperationsDeferredImportTest(unittest.TestCase):
+    """Each arm's dependencies are paid for by that arm's process alone."""
+
+    def test_the_operations_package_has_source_files_to_check(self):
+        """Negative control: a renamed package would make the rest vacuous."""
+        self.assertTrue(
+            operations_source_files(),
+            f"no tracked sources under {OPERATIONS_DIRECTORY}; the assertion "
+            "below would pass by sweeping nothing",
+        )
+
+    def test_operations_modules_defer_every_implementation_import(self):
+        """Module scope may reach torch and the harness. Nothing else."""
+        violations = []
+        for path in operations_source_files():
+            for imported, lineno in module_scope_imports(path):
+                for forbidden in OPERATIONS_DEFERRED_IMPORTS:
+                    if targets(imported, forbidden):
+                        violations.append(f"{path}:{lineno}: {imported}")
+        self.assertEqual(
+            violations,
+            [],
+            "an arm builder module imports an implementation at module "
+            "scope; move it into the builder that needs it, so per-arm "
+            "process isolation pays for one arm and not the family:\n  "
+            + "\n  ".join(violations),
+        )
+
+    def test_every_builder_module_still_defers_something(self):
+        """Positive control, and it is the one that catches a silent revert.
+
+        The assertion above passes on a module that imports nothing at all,
+        so on its own it cannot tell a deferred import from a deleted arm.
+        Each family module must therefore still name an implementation
+        somewhere in its body.
+        """
+        families = [
+            path
+            for path in operations_source_files()
+            if not path.endswith(("__init__.py", "common.py"))
+        ]
+        self.assertTrue(families, "no family modules found to check")
+        missing = []
+        for path in families:
+            deferred = {
+                imported
+                for imported, _ in all_imports(path)
+            } - {imported for imported, _ in module_scope_imports(path)}
+            if not any(
+                targets(imported, forbidden)
+                for imported in deferred
+                for forbidden in OPERATIONS_DEFERRED_IMPORTS
+            ):
+                missing.append(path)
+        self.assertEqual(
+            missing,
+            [],
+            "these builder modules defer no implementation import at all, so "
+            "the module-scope assertion above is vacuous for them:\n  "
+            + "\n  ".join(missing),
         )
 
 

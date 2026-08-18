@@ -29,8 +29,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.models.common import FusedQKVLinear, Linear, QKVLinear
-
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     WEIGHT_STD,
@@ -156,6 +154,8 @@ def _finalize_qkv(module: nn.Module, inputs: QkvInputs) -> nn.Module:
 def build_qkv_baseline(
     shape: PiperShape, workload: KernelWorkload, inputs: QkvInputs
 ) -> BuiltArm:
+    from torchtitan.models.common import Linear, QKVLinear
+
     module = QKVLinear.Config(
         head_dim=shape.head_dim,
         wq=Linear.Config(
@@ -172,6 +172,8 @@ def build_qkv_baseline(
 def build_qkv_fused_qkv(
     shape: PiperShape, workload: KernelWorkload, inputs: QkvInputs
 ) -> BuiltArm:
+    from torchtitan.models.common import FusedQKVLinear, Linear
+
     module = FusedQKVLinear.Config(
         head_dim=shape.head_dim,
         n_heads=shape.n_heads,

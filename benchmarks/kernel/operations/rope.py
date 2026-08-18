@@ -16,12 +16,16 @@ Two facts specific to this family:
   fallback from a success and only ``_assert_kernel_marker`` can. Each arm
   calls ``forward()`` once before profiling it, to compile the no-grad
   variant so the profile captures kernels rather than compilation.
-* ``benchmarks.models.piper_qwen3.components.rope.te_rope_override`` is
-  imported *inside* ``build_rope_te`` and must stay there: importing it
+* **Every implementation import is deferred into the builder that needs it**,
+  which is the rule across ``operations/`` rather than a habit of this
+  module. ``te_rope_override`` is the sharpest case -- importing it
   JIT-builds a CUDA extension needing the gcc-13 environment the runner
-  injects for this scenario only. A module-scope import would make the whole
-  operations package unimportable without a C++20 compiler, and
-  ``tests/test_import_boundaries.py`` deliberately never imports that module.
+  injects for this scenario only, so a module-scope import would make the
+  whole operations package unimportable without a C++20 compiler. The other
+  two follow the same rule for the same reason at a lower cost: one arm per
+  process means a process pays only for the arm it builds.
+  ``tests/test_import_boundaries.py`` pins this, and deliberately never
+  imports ``te_rope_override`` itself.
 
 Both ``rope_inputs`` and every ``build_*`` take (shape, workload, ...) even
 where they read only one, because ``resolve_symbol`` calls them all
@@ -33,9 +37,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-
-from torchtitan.models.common.rope import CosSinRoPE
-from torchtitan.overrides.helion_rope import HelionCosSinRoPE
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
@@ -162,6 +163,8 @@ def build_rope_copy_floor(
 def build_rope_baseline(
     shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
 ) -> BuiltArm:
+    from torchtitan.models.common.rope import CosSinRoPE
+
     module = CosSinRoPE.Config(
         dim=shape.head_dim,
         max_seq_len=shape.max_seq_len,
@@ -204,6 +207,8 @@ def build_rope_baseline(
 def build_rope_helion(
     shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
 ) -> BuiltArm:
+    from torchtitan.overrides.helion_rope import HelionCosSinRoPE
+
     module = HelionCosSinRoPE.Config(
         dim=shape.head_dim,
         max_seq_len=shape.max_seq_len,

@@ -12,7 +12,7 @@ choice: ``FusedLinearCrossEntropyLoss`` runs its backward inside ``__call__``,
 so there is no point at which forward has finished and backward has not. The
 other three arms are restricted to the same mode to stay comparable.
 
-Every loss is built with ``LOSS_COMPILE`` -- the production
+Every loss is built with ``_loss_compile()`` -- the production
 ``CompileConfig(components=["loss"])`` -- so the arms face the same Inductor
 treatment they face end-to-end. ``fused_linear_ce`` is the one arm that owns
 the LM head instead of receiving logits (torchtitan's ``LossWithLMHead``
@@ -29,21 +29,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.config import CompileConfig
-
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import _randn
 from benchmarks.kernel.schema import KernelWorkload
-from benchmarks.models.piper_qwen3.components.lm_head.losses import (
-    FusedLinearCrossEntropyLoss,
-    PiperOptimizedCrossEntropyLoss,
-    TECrossEntropyLoss,
-)
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
-LOSS_COMPILE = CompileConfig(enable=True, components=["loss"])
+def _loss_compile():
+    """The production ``CompileConfig(components=["loss"])``, built on demand.
+
+    A module-scope constant would need ``torchtitan.config`` at module scope,
+    which the deferred-import rule forbids. Every builder calls this instead,
+    so all four arms still face one treatment.
+    """
+    from torchtitan.config import CompileConfig
+
+    return CompileConfig(enable=True, components=["loss"])
 
 
 @dataclass
@@ -112,9 +113,11 @@ def _lm_head_arm(name: str, inputs: LmHeadInputs, loss_call) -> BuiltArm:
 def build_lm_head_baseline(
     shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
+    from torchtitan.components.loss import CrossEntropyLoss
+
     loss_obj = CrossEntropyLoss.Config(
         global_vocab_size=shape.vocab_size
-    ).build(compile_config=LOSS_COMPILE)
+    ).build(compile_config=_loss_compile())
 
     def loss_call(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         logits = F.linear(hidden, weight)
@@ -127,9 +130,13 @@ def build_lm_head_baseline(
 def build_lm_head_fused_linear_ce(
     shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
+    from benchmarks.models.piper_qwen3.components.lm_head.losses import (
+        FusedLinearCrossEntropyLoss,
+    )
+
     loss_obj = FusedLinearCrossEntropyLoss.Config(
         batch_chunk_size=None, chunking_method=None
-    ).build(compile_config=LOSS_COMPILE)
+    ).build(compile_config=_loss_compile())
     hidden = inputs.hidden.clone().requires_grad_()
     lm_head = nn.Linear(
         shape.dim, shape.vocab_size, bias=False, device=hidden.device
@@ -163,7 +170,11 @@ def build_lm_head_fused_linear_ce(
 def build_lm_head_te_fused_ce(
     shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
-    loss_obj = TECrossEntropyLoss.Config().build(compile_config=LOSS_COMPILE)
+    from benchmarks.models.piper_qwen3.components.lm_head.losses import (
+        TECrossEntropyLoss,
+    )
+
+    loss_obj = TECrossEntropyLoss.Config().build(compile_config=_loss_compile())
 
     def loss_call(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         logits = F.linear(hidden, weight)
@@ -176,8 +187,12 @@ def build_lm_head_te_fused_ce(
 def build_lm_head_piper_optimized_te_ce(
     shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
+    from benchmarks.models.piper_qwen3.components.lm_head.losses import (
+        PiperOptimizedCrossEntropyLoss,
+    )
+
     loss_obj = PiperOptimizedCrossEntropyLoss.Config().build(
-        compile_config=LOSS_COMPILE
+        compile_config=_loss_compile()
     )
 
     def loss_call(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
