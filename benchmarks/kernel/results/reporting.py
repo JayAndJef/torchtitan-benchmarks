@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from benchmarks.artifacts.summaries import _pvalue, _value
 from benchmarks.kernel.results.schema import KernelScenarioResult
+from benchmarks.kernel.schema import MODES
 
 
 def _ratio_ci(row: dict | None) -> str:
@@ -44,7 +45,10 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
     comparisons = {
         (row["arm"], row["mode"]): row for row in result.comparisons
     }
-    for mode in ("forward", "backward", "forward_backward"):
+    # MODES, not a copy of it. A sixth mode added to the schema would
+    # otherwise be measured, merged, written to results.json, and printed by
+    # nothing -- the one failure this table cannot report about itself.
+    for mode in MODES:
         arms = [
             name
             for name, arm in result.arms.items()
