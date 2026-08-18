@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from benchmarks.artifacts.manifests import atomic_write_json
+from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.artifacts.summaries import SampleSummary
 
 

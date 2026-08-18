@@ -55,7 +55,7 @@ from benchmarks.artifacts.manifests import (
 )
 from benchmarks.e2e.registry import scenario_by_name
 from benchmarks.e2e.runner import RunRequest, execute_run
-from benchmarks.execution.environment import CpuPinning
+from benchmarks.execution.affinity import CpuPinning
 from benchmarks.kernel.results.schema import (
     KERNEL_RESULTS_SCHEMA_VERSION,
     load_kernel_results,

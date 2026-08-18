@@ -43,8 +43,8 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
   dependency, and never benchmark while it runs -- the build saturates the
   host and this workload is host-bound.
 - TorchTitan is a git submodule at `third_party/torchtitan`, installed editable.
-  `benchmarks/execution/environment.py:23` hardcodes it as `TITAN_DIR`, derived
-  from `BENCH_DIR` on the line above. It is defined once: the megatron data
+  `benchmarks/execution/paths.py` hardcodes it as `TITAN_DIR`, derived from
+  `BENCH_DIR` on the line above. It is defined once: the megatron data
   module imports this one rather than redefining it.
 - Megatron-LM is a git submodule at `third_party/Megatron-LM` (pinned
   `59b72fa57`, core 0.20.0). It is **not** pip-installed (its pyproject wants
@@ -96,8 +96,8 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/models/piper_qwen3/components/swiglu/` | Combined-SwiGLU Triton kernels and override |
 | `benchmarks/models/piper_qwen3/components/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
 | `benchmarks/traces/` | `schema.py` (the `Region` declaration) and `extraction.py` (trace parsing, window and region pooling) |
-| `benchmarks/artifacts/` | Engine-neutral on-disk artifacts: `manifests.py` (manifest + run-state IO, output layout) and `summaries.py` (`SampleSummary`, shared by both systems) |
-| `benchmarks/execution/environment.py` | Subprocess environment: `BENCH_DIR`/`TITAN_DIR`, CPU pinning, hardware metadata, `ProcessRunner` |
+| `benchmarks/artifacts/` | On-disk artifacts: `layout.py` (output layout, `trace_files`, `atomic_write_json` -- the only JSON writer), `manifests.py` (the manifest schema and the resume predicate; the one module here coupled to `e2e/`), `run_state.py` (the per-arm ledger) and `summaries.py` (`SampleSummary`, shared by both systems) |
+| `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning), `provenance.py` (`hardware_metadata`), `events.py` (`RunEvent`, `ProcessRunner`) |
 | `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), and the two argv-driven trace diagnostics `analyze.py` and `per_block.py` |
 | `tests/` | CPU + GPU unit tests. Deliberately **flat** -- every module does `sys.path.insert(0, <repo root>)` at a fixed depth, and `unittest discover -s tests` needs no `__init__.py` |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |

@@ -2,7 +2,7 @@
 
 Scenarios describe what differs between arms, and nothing else: command
 construction (``benchmarks.e2e.launch``), provenance collection
-(``benchmarks.execution.environment``), and validation
+(``benchmarks.execution.provenance``), and validation
 (``benchmarks.e2e.validation``) each live in their own module and read these
 declarations. That is what lets a new ablation be a registry entry rather
 than a new copy of the training harness.

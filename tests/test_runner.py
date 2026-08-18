@@ -12,7 +12,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts.manifests import trace_files, write_manifest
+from benchmarks.artifacts.layout import trace_files
+from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import (
     Arm,
@@ -26,7 +27,7 @@ from benchmarks.e2e.registry import (
 from benchmarks.e2e.results import stable_tps, training_metrics
 from benchmarks.e2e.runner import RunRequest, execute_run
 from benchmarks.e2e.validation import validate_arm
-from benchmarks.execution.environment import CpuPinning, resolve_cpu_pinning
+from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from dataclasses import replace
 from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
@@ -532,8 +533,8 @@ class CpuPinningTests(unittest.TestCase):
 
     def test_pins_to_the_gpu_numa_node(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.execution.environment.run_text", return_value="00000000:E3:00.0\n"
-        ), mock.patch("benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"):
+            "benchmarks.execution.affinity.run_text", return_value="00000000:E3:00.0\n"
+        ), mock.patch("benchmarks.execution.affinity.shutil.which", return_value="/usr/bin/numactl"):
             sysfs = self._sysfs(Path(temporary), "0000:e3:00.0", "1")
             pinning = resolve_cpu_pinning("7", sysfs_root=sysfs)
         self.assertEqual(
@@ -542,25 +543,25 @@ class CpuPinningTests(unittest.TestCase):
         self.assertEqual(pinning.description, "numactl --cpunodebind=1 --membind=1")
 
     def test_unpinned_when_prerequisites_are_missing(self) -> None:
-        with mock.patch("benchmarks.execution.environment.shutil.which", return_value=None):
+        with mock.patch("benchmarks.execution.affinity.shutil.which", return_value=None):
             self.assertEqual(
                 resolve_cpu_pinning("7").prefix, ()
             )
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.execution.environment.run_text",
+            "benchmarks.execution.affinity.run_text",
             return_value="unavailable: nvidia-smi not found",
         ), mock.patch(
-            "benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"
+            "benchmarks.execution.affinity.shutil.which", return_value="/usr/bin/numactl"
         ):
             pinning = resolve_cpu_pinning("7", sysfs_root=Path(temporary))
         self.assertEqual(pinning.prefix, ())
         self.assertIn("cannot resolve PCI bus id", pinning.description)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.execution.environment.run_text", return_value="00000000:E3:00.0\n"
+            "benchmarks.execution.affinity.run_text", return_value="00000000:E3:00.0\n"
         ), mock.patch(
-            "benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"
+            "benchmarks.execution.affinity.shutil.which", return_value="/usr/bin/numactl"
         ):
             no_affinity = self._sysfs(Path(temporary), "0000:e3:00.0", "-1")
             pinning = resolve_cpu_pinning("7", sysfs_root=no_affinity)
@@ -568,9 +569,9 @@ class CpuPinningTests(unittest.TestCase):
         self.assertIn("no NUMA affinity", pinning.description)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.execution.environment.run_text", return_value="00010001:03:00.0\n"
+            "benchmarks.execution.affinity.run_text", return_value="00010001:03:00.0\n"
         ), mock.patch(
-            "benchmarks.execution.environment.shutil.which", return_value="/usr/bin/numactl"
+            "benchmarks.execution.affinity.shutil.which", return_value="/usr/bin/numactl"
         ):
             truncatable = self._sysfs(Path(temporary), "0001:03:00.0", "0")
             pinning = resolve_cpu_pinning("7", sysfs_root=truncatable)

@@ -17,7 +17,8 @@ from typing import Any
 
 from scipy import stats as scipy_stats
 
-from benchmarks.artifacts.manifests import atomic_write_json, load_run, trace_files
+from benchmarks.artifacts.layout import atomic_write_json, trace_files
+from benchmarks.artifacts.manifests import load_run
 from benchmarks.artifacts.summaries import (
     SampleSummary,
     _value,

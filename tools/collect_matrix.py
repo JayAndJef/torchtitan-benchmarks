@@ -37,7 +37,7 @@ def cells(root: Path, size_filter: str | None):
 
 
 def launch_counts(cell_dir: Path, arms: list[str]) -> dict[str, float]:
-    from benchmarks.artifacts.manifests import trace_files
+    from benchmarks.artifacts.layout import trace_files
     from benchmarks.traces.extraction import pooled_window_metrics
 
     counts: dict[str, float] = {}

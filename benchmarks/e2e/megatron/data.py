@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import torch
 
-from benchmarks.execution.environment import TITAN_DIR
+from benchmarks.execution.paths import TITAN_DIR
 
 C4_TEST_PATH = TITAN_DIR / "tests" / "assets" / "c4_test"
 TOKENIZER_PATH = TITAN_DIR / "tests" / "assets" / "tokenizer"

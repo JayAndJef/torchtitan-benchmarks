@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from benchmarks.artifacts.manifests import trace_files
+from benchmarks.artifacts.layout import trace_files
 from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
     TORCH_COMPILE_MODE,

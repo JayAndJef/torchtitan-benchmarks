@@ -1,4 +1,26 @@
-"""Benchmark output layout, manifests, and resumable state.
+"""``manifest.json``: what a run is, and whether it may be resumed.
+
+Everything here serializes one run's *identity* -- scenario, arms, the
+command line each arm was launched with, the three global axes
+(``compile_mode`` / ``ac_mode`` / ``model_size``), the resolved model shape,
+the execution model, and the provenance block -- reads one back including
+manifests written by older schemas, and decides whether a recorded run is
+the same run the caller is now asking for.
+
+Those last two are here rather than in modules of their own on purpose. A
+manifest field and its resume rule are two halves of one invariant: adding
+the ``--model-size`` axis (schema 9) added ``model_size`` to
+``manifest_data`` *and* a ``model_size`` comparison to
+``_resume_mismatches`` in a single commit, and a field recorded but not
+gated is a comparability boundary that silently does not hold. Splitting
+reader from writer would divide the same invariant the other way -- a schema
+bump has to move both together, and neither half is meaningful alone.
+
+What *is* split out is everything engine-neutral: output layout and the
+atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
+sample summarization is ``summaries.py``. This module is exactly the part
+that is not, which is why the whole of the edge described below now lands in
+one file.
 
 **Structural edge, pending resolution.** This module imports from
 ``benchmarks.e2e.registry`` at runtime, which inverts the intuitive layering
@@ -12,23 +34,24 @@ imported under ``TYPE_CHECKING``, so they cost nothing at runtime.
 
 Be precise about what does and does not cycle. At *module* granularity there
 is no cycle: ``e2e/registry.py`` imports nothing from ``artifacts/``. At
-*package* granularity there is one, because ``e2e/runner.py``,
-``e2e/results.py`` and ``e2e/validation.py`` all import from this module. So
+*package* granularity there is one, because ``e2e/runner.py`` and
+``e2e/results.py`` import from this module. (``e2e/validation.py`` used to as
+well; it needed only ``trace_files`` and now takes it from ``layout.py``.) So
 ``artifacts/`` and ``e2e/`` are mutually dependent as packages and only the
 module-level ordering keeps imports resolvable. The third name this module
 takes from ``e2e`` makes the point sharpest: ``RunRequest`` comes from
 ``e2e/runner.py``, which imports this module at runtime, so that pair *would*
 be a genuine module-level cycle -- it is legal only because it is confined to
 ``TYPE_CHECKING``. Anything moved out of that block must be re-checked. The
-candidate resolution
-is to move the e2e-shaped manifest builders into ``e2e/`` and leave
-``artifacts/`` holding only engine-neutral pieces (``atomic_write_json``,
-schema-checked ``load_manifest``, layout helpers, ``summaries.py``); the
-cheapest partial step is to relocate ``EXECUTION_MODEL`` into this module,
-whose ``manifest_data`` is its only consumer repo-wide, which deletes one of
-the two outright and leaves ``Workload`` as the single genuinely structural
-runtime edge. Neither is done here: this is a mechanical move, and the
-redesign is deferred to a follow-up commit rather than made permanent.
+candidate resolution is to move this module into ``e2e/`` outright, leaving
+``artifacts/`` engine-neutral; splitting ``layout.py`` and ``run_state.py``
+off was the step that reduced it to a single-file move, since every symbol
+that would have had to stay behind is already elsewhere. The cheapest
+partial step remains relocating ``EXECUTION_MODEL`` into this module, whose
+``manifest_data`` is its only consumer repo-wide, which deletes one of the
+two runtime names outright and leaves ``Workload`` as the single genuinely
+structural edge. Neither is done here: this commit splits by concern, and
+the redesign is deferred rather than made permanent.
 
 A **second and unrelated** ``e2e`` edge exists here: ``load_run`` imports
 ``PIPER_1B_REGIONS`` to infer regions for schema-<8 manifests. That
@@ -40,15 +63,13 @@ change; when it is fixed, this edge disappears on its own.
 
 from __future__ import annotations
 
-import datetime as dt
 import json
-import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
+from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.e2e.registry import EXECUTION_MODEL, PIPER_1B_REGIONS, Workload
-from benchmarks.execution.environment import BENCH_DIR
 from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 from benchmarks.traces.schema import Region
 
@@ -58,11 +79,6 @@ if TYPE_CHECKING:
 
 
 MANIFEST_SCHEMA_VERSION = 9
-STATE_SCHEMA_VERSION = 1
-
-
-def trace_files(arm_dir: Path) -> list[Path]:
-    return sorted(arm_dir.glob("profiling/traces*/iteration_*/rank0_trace.json.gz"))
 
 
 def manifest_data(
@@ -95,12 +111,6 @@ def manifest_data(
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
         "execution_model": EXECUTION_MODEL,
     }
-
-
-def atomic_write_json(path: Path, value: Any) -> None:
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
-    temporary.replace(path)
 
 
 def write_manifest(
@@ -139,113 +149,6 @@ def load_manifest(out_dir: Path) -> dict[str, Any]:
         return json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read manifest {manifest_path}: {error}") from error
-
-
-def initial_run_state(arms: tuple[Arm, ...]) -> dict[str, Any]:
-    return {
-        "schema_version": STATE_SCHEMA_VERSION,
-        "status": "pending",
-        "arms": {
-            arm.name: {"status": "pending", "attempts": 0} for arm in arms
-        },
-    }
-
-
-def load_run_state(out_dir: Path, arms: tuple[Arm, ...]) -> dict[str, Any]:
-    path = out_dir / "run_state.json"
-    if not path.exists():
-        return initial_run_state(arms)
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read run state {path}: {error}") from error
-
-
-def update_run_state(
-    out_dir: Path,
-    state: dict[str, Any],
-    *,
-    arm_name: str | None = None,
-    status: str,
-    error: str | None = None,
-) -> None:
-    now = dt.datetime.now(dt.timezone.utc).strftime("%FT%TZ")
-    if arm_name is None:
-        state["status"] = status
-        state[f"{status}_at"] = now
-    else:
-        arm_state = state["arms"][arm_name]
-        arm_state["status"] = status
-        arm_state[f"{status}_at"] = now
-        if status == "running":
-            arm_state["attempts"] = int(arm_state.get("attempts", 0)) + 1
-        if error is not None:
-            arm_state["error"] = error
-        elif "error" in arm_state:
-            del arm_state["error"]
-    atomic_write_json(out_dir / "run_state.json", state)
-
-
-def record_evaluation_status(
-    out_dir: Path, *, completed: bool, error: str | None = None
-) -> None:
-    """Record automatic evaluation without requiring arm definitions."""
-    path = out_dir / "run_state.json"
-    if not path.exists():
-        return
-    try:
-        state = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as state_error:
-        raise ValueError(
-            f"cannot read run state {path}: {state_error}"
-        ) from state_error
-    now = dt.datetime.now(dt.timezone.utc).strftime("%FT%TZ")
-    status = "completed" if completed else "evaluation_failed"
-    state["status"] = status
-    state["evaluation"] = {"status": status, f"{status}_at": now}
-    if error is not None:
-        state["evaluation"]["error"] = error
-    atomic_write_json(path, state)
-
-
-def archive_incomplete_arm(out_dir: Path, arm_name: str) -> Path | None:
-    """Move incomplete artifacts aside so retrying never destroys evidence."""
-    arm_dir = out_dir / arm_name
-    log_path = out_dir / f"{arm_name}.log"
-    if not arm_dir.exists() and not log_path.exists():
-        return None
-
-    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    archive = out_dir / "attempts" / timestamp / arm_name
-    suffix = 1
-    while archive.exists():
-        archive = out_dir / "attempts" / f"{timestamp}-{suffix}" / arm_name
-        suffix += 1
-    archive.mkdir(parents=True)
-    if arm_dir.exists():
-        shutil.move(str(arm_dir), str(archive / "artifacts"))
-    if log_path.exists():
-        shutil.move(str(log_path), str(archive / log_path.name))
-    return archive
-
-
-def run_timestamp() -> str:
-    """Directory-safe UTC stamp; shared across a multi-scenario sweep."""
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _default_output_dir(
-    scenario: Scenario,
-    hardware: str,
-    requested: Path | None,
-    environment: Mapping[str, str],
-    timestamp: str | None = None,
-) -> Path:
-    if requested is not None:
-        return requested.expanduser().resolve()
-    if env_out := environment.get("OUT"):
-        return Path(env_out).expanduser().resolve()
-    return BENCH_DIR / "out" / (timestamp or run_timestamp()) / scenario.name / hardware
 
 
 def _resume_mismatches(

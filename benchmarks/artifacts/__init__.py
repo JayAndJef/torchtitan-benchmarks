@@ -1,1 +1,1 @@
-"""On-disk run artifacts: manifests, resumable state, and sample summaries."""
+"""On-disk run artifacts: output layout, manifests, run state, summaries."""

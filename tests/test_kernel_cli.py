@@ -13,7 +13,7 @@ from click.testing import CliRunner
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.cli.main import cli
-from benchmarks.execution.environment import CpuPinning
+from benchmarks.execution.affinity import CpuPinning
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
 from benchmarks.kernel.runner import KernelRunRequest, execute_kernel_run
 from tests.test_kernel_results import sample_result

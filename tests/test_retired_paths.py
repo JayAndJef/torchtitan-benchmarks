@@ -208,7 +208,7 @@ RETIRED_BENCHMARKS_MODULES = (
 # used to be artifacts.py and is now artifacts/; likewise cli.py -> cli/. A
 # stale ``from benchmarks.artifacts import trace_files`` is therefore a
 # *symbol* error, not a module error: the dotted prefix still resolves, so no
-# regex can tell it from the legal ``benchmarks.artifacts.manifests``.
+# regex can tell it from the legal ``benchmarks.artifacts.layout``.
 MODULES_THAT_BECAME_PACKAGES = ("benchmarks.artifacts", "benchmarks.cli")
 
 # ``(?<![A-Za-z0-9_])`` is the left word boundary and the trailing ``[./]``
@@ -607,7 +607,7 @@ class PackageSymbolImportTests(unittest.TestCase):
     ``artifacts.py`` became ``artifacts/`` and ``cli.py`` became ``cli/``, so
     the dotted prefix still resolves and the text sweep above cannot see the
     difference between the retired ``from benchmarks.artifacts import
-    trace_files`` and the correct ``from benchmarks.artifacts.manifests
+    trace_files`` and the correct ``from benchmarks.artifacts.layout
     import trace_files``. Rather than weaken the sweep or allowlist the two
     names -- which would leave the most likely stale import unguarded -- this
     resolves them exactly, with ``ast``: an import of a name that is neither

@@ -18,17 +18,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping
 
-from benchmarks.artifacts.manifests import atomic_write_json, run_timestamp
+from benchmarks.artifacts.layout import atomic_write_json, run_timestamp
+from benchmarks.execution.affinity import resolve_cpu_pinning
 from benchmarks.execution.environment import (
-    BENCH_DIR,
-    EventHandler,
-    RunEvent,
-    RuntimePaths,
     add_compiler_environment,
-    hardware_metadata,
-    resolve_cpu_pinning,
     runtime_environment,
 )
+from benchmarks.execution.events import EventHandler, RunEvent
+from benchmarks.execution.paths import BENCH_DIR, RuntimePaths
+from benchmarks.execution.provenance import hardware_metadata
 from benchmarks.kernel.registry import (
     KernelScenario,
     KernelWorkload,

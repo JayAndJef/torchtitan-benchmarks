@@ -13,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.e2e.runner import RunRequest, execute_run
-from benchmarks.execution.environment import CpuPinning
+from benchmarks.execution.affinity import CpuPinning
 from tests.test_runner import _SAC_LINE, _SIZE_LINE, _compiled_line
 
 

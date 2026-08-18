@@ -1,1 +1,1 @@
-"""Process execution: paths, provenance, NUMA pinning, and the subprocess environment."""
+"""Process execution: paths, environment, NUMA pinning, provenance, events."""

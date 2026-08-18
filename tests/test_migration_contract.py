@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import SCENARIOS, scenario_by_name
 from benchmarks.e2e.validation import VALIDATION_PROFILES
-from benchmarks.execution.environment import BENCH_DIR, TITAN_DIR
+from benchmarks.execution.paths import BENCH_DIR, TITAN_DIR
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
 from benchmarks.models.piper_qwen3.megatron_bootstrap import (
     MEGATRON_SUBMODULE,
@@ -652,7 +652,7 @@ def _repo_root_from_here() -> Path:
 class RepositoryRootTests(unittest.TestCase):
     """The only silent failure mode in the whole migration.
 
-    ``benchmarks.execution.environment.BENCH_DIR`` and
+    ``benchmarks.execution.paths.BENCH_DIR`` and
     ``benchmarks.models.piper_qwen3.megatron_bootstrap.REPO_ROOT`` were both
     ``Path(__file__).resolve().parent.parent`` before the move. The move
     changed how deep those files sit (to ``parents[2]`` and ``parents[3]``),

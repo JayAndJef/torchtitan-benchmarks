@@ -1,180 +1,49 @@
-"""Process execution for benchmark runs: paths, provenance, and pinning.
+"""The environment a training or kernel-worker subprocess is launched with.
 
-Everything here is engine-neutral and shared by both measurement systems:
-where the repository and its submodules live, how a training or worker
-subprocess is pinned and environed, what provenance gets recorded, and the
-event/callable types the runners use to report progress.
+Two builders, in the order the runners call them.
+
+``runtime_environment`` constructs the isolated single-GPU environment every
+arm of a run shares. Three of its entries are load-bearing rather than
+cosmetic: ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` with ``CUDA_VISIBLE_DEVICES`` is
+what makes the CLI's ``<gpu>`` argument a stable PCI index rather than a
+driver-enumeration accident; ``NGPU=1`` pins the run single-GPU; and
+``PYTHONPATH`` gets the repository root prepended, which is how the training
+subprocess resolves ``--module benchmarks.models.piper_qwen3`` and every
+``--override.imports`` path. (Prepended, not replaced -- an inherited
+``PYTHONPATH`` survives behind it.) The three build-cache directories are
+set from ``RuntimePaths.cache_root`` only if the caller has not already set
+them, so ``--cache-root`` is a default and not an override.
+
+That ``PYTHONPATH`` line is one half of the ``benchmarks`` name-shadowing
+hazard: the training subprocess also runs with ``cwd`` inside the torchtitan
+submodule, which ``python -m`` puts at ``sys.path[0]`` *ahead* of anything
+here. ``tests/test_import_boundaries.py`` names this module for that reason;
+see its ``BenchmarksNameShadowingTest``.
+
+``add_compiler_environment`` then layers a sourced shell script on top for
+the arms whose CUDA extension needs a C++20 host compiler. It sources the
+script in a real ``bash`` and reads back ``env -0``, because the toolset
+scripts are shell, not a key/value file. It is applied per arm (``e2e``) or
+per scenario (``kernel-bench``) rather than to the base environment, so a
+toolset that rewrites ``PATH`` or ``LD_LIBRARY_PATH`` cannot silently alter
+an arm that never asked for it. A missing script raises: the alternative is
+an arm that reports a JIT-build failure forty seconds into a run.
+
+Neither function knows what a scenario is, and neither records anything --
+the manifest's provenance block is ``provenance.py``, the ``numactl`` prefix
+is ``affinity.py``, and the locations both of those and this one consume are
+``paths.py``.
 """
 
 from __future__ import annotations
 
 import os
-import re
-import shutil
 import subprocess
 import sys
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Mapping
 
-
-BENCH_DIR = Path(__file__).resolve().parents[2]
-TITAN_DIR = BENCH_DIR / "third_party" / "torchtitan"
-
-
-@dataclass(frozen=True)
-class RuntimePaths:
-    """Filesystem locations needed to execute a benchmark."""
-
-    bench_dir: Path
-    titan_dir: Path
-    cache_root: Path
-    compiler_env: Path | None
-
-    @classmethod
-    def resolve(
-        cls,
-        *,
-        cache_root: Path | None = None,
-        compiler_env: Path | None = None,
-        environment: Mapping[str, str] | None = None,
-    ) -> RuntimePaths:
-        environment = environment or os.environ
-        cache = cache_root or _optional_path(environment.get("BENCHMARK_CACHE_ROOT"))
-        if cache is None:
-            cache = Path(tempfile.gettempdir()) / "torchtitan-benchmarks"
-
-        compiler = compiler_env or _optional_path(environment.get("BENCH_COMPILER_ENV"))
-        if compiler is None:
-            legacy_toolset = Path("/opt/rh/gcc-toolset-13/enable")
-            compiler = legacy_toolset if legacy_toolset.exists() else None
-
-        return cls(
-            bench_dir=BENCH_DIR,
-            titan_dir=TITAN_DIR,
-            cache_root=cache.expanduser().resolve(),
-            compiler_env=compiler.expanduser().resolve() if compiler else None,
-        )
-
-
-def _optional_path(value: str | None) -> Path | None:
-    return Path(value) if value else None
-
-
-PCI_BUS_ID = re.compile(
-    r"^([0-9a-fA-F]{4,8}):([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])$"
-)
-
-
-@dataclass(frozen=True)
-class CpuPinning:
-    """Command prefix binding training to the GPU's NUMA node.
-
-    The training step is host-bound at benchmark sizes, so where the scheduler
-    places the process decides tokens/s. Binding CPU and memory to the GPU's
-    own NUMA node removes that draw. An empty prefix means unpinned; the
-    description says why and is recorded in the manifest, where resume treats
-    it as a comparability boundary like the GPU itself.
-    """
-
-    prefix: tuple[str, ...]
-    description: str
-
-
-def resolve_cpu_pinning(gpu: str, *, sysfs_root: Path = Path("/sys")) -> CpuPinning:
-    if shutil.which("numactl") is None:
-        return CpuPinning((), "none: numactl not available")
-    bus_id = run_text(
-        [
-            "nvidia-smi",
-            "--id=" + gpu,
-            "--query-gpu=pci.bus_id",
-            "--format=csv,noheader",
-        ]
-    ).strip()
-    match = PCI_BUS_ID.match(bus_id)
-    if match is None:
-        return CpuPinning((), f"none: cannot resolve PCI bus id ({bus_id})")
-    if int(match.group(1), 16) > 0xFFFF:
-        return CpuPinning((), f"none: unsupported PCI domain in {bus_id}")
-    device = f"{match.group(1)[-4:]}:{match.group(2)}".lower()
-    node_path = sysfs_root / "bus/pci/devices" / device / "numa_node"
-    try:
-        node = int(node_path.read_text())
-    except (OSError, ValueError):
-        return CpuPinning((), f"none: cannot read {node_path}")
-    if node < 0:
-        return CpuPinning((), f"none: {device} reports no NUMA affinity")
-    return CpuPinning(
-        ("numactl", f"--cpunodebind={node}", f"--membind={node}"),
-        f"numactl --cpunodebind={node} --membind={node}",
-    )
-
-
-def _megatron_git_rev() -> str:
-    try:
-        from benchmarks.models.piper_qwen3.megatron_bootstrap import megatron_git_rev
-    except ImportError as error:
-        return f"unavailable: {error}"
-    return megatron_git_rev()
-
-
-def _te_version() -> str:
-    import importlib.metadata
-
-    try:
-        return importlib.metadata.version("transformer-engine")
-    except importlib.metadata.PackageNotFoundError:
-        return "unavailable: transformer-engine not installed"
-
-
-def run_text(command: list[str], *, cwd: Path | None = None) -> str:
-    """Run a metadata command, returning a diagnostic instead of failing."""
-    try:
-        return subprocess.check_output(
-            command, text=True, stderr=subprocess.STDOUT, cwd=cwd
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        return f"unavailable: {error}"
-
-
-def hardware_metadata(
-    paths: RuntimePaths, gpu: str, hardware_label: str
-) -> tuple[str, dict[str, str]]:
-    """Collect the hardware and source provenance stored in the manifest."""
-    query = run_text(
-        [
-            "nvidia-smi",
-            "--id=" + gpu,
-            "--query-gpu=index,name,uuid,driver_version",
-            "--format=csv,noheader",
-        ]
-    ).strip()
-    metadata = {
-        "requested_gpu": gpu,
-        "nvidia_smi": query,
-        "torch_version": run_text(
-            [sys.executable, "-c", "import torch; print(torch.__version__)"],
-            cwd=paths.titan_dir,
-        ).strip(),
-        "torchtitan_git_rev": run_text(
-            ["git", "rev-parse", "HEAD"], cwd=paths.titan_dir
-        ).strip(),
-        "benchmarks_git_rev": run_text(
-            ["git", "rev-parse", "HEAD"], cwd=paths.bench_dir
-        ).strip(),
-        # Megatron provenance is recorded (and resume-gated) for every run:
-        # megatron_bootstrap.py never imports megatron, so this stays cheap
-        # even for pure-titan scenarios.
-        "megatron_git_rev": _megatron_git_rev(),
-        "te_version": _te_version(),
-    }
-    if hardware_label != "auto":
-        return hardware_label, metadata
-    name = query.split(",")[1].strip() if "," in query else f"gpu{gpu}"
-    label = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
-    return label, metadata
+from benchmarks.execution.paths import RuntimePaths
 
 
 def runtime_environment(
@@ -226,24 +95,3 @@ def add_compiler_environment(
             key, value = entry.split("=", 1)
             result[key] = value
     return result
-
-
-@dataclass(frozen=True)
-class RunEvent:
-    kind: str
-    message: str
-    arm_name: str | None = None
-
-
-EventHandler = Callable[[RunEvent], None]
-ProcessRunner = Callable[..., subprocess.CompletedProcess]
-
-
-def _emit(
-    handler: EventHandler | None,
-    kind: str,
-    message: str,
-    arm_name: str | None = None,
-) -> None:
-    if handler is not None:
-        handler(RunEvent(kind=kind, message=message, arm_name=arm_name))

@@ -74,9 +74,15 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.validation",
     "benchmarks.traces.schema",
     "benchmarks.traces.extraction",
+    "benchmarks.artifacts.layout",
     "benchmarks.artifacts.manifests",
+    "benchmarks.artifacts.run_state",
     "benchmarks.artifacts.summaries",
+    "benchmarks.execution.affinity",
     "benchmarks.execution.environment",
+    "benchmarks.execution.events",
+    "benchmarks.execution.paths",
+    "benchmarks.execution.provenance",
     "benchmarks.kernel.registry",
     "benchmarks.kernel.runner",
     "benchmarks.kernel.worker",
@@ -533,10 +539,11 @@ class BenchmarksNameShadowingTest(unittest.TestCase):
     with ``cwd=third_party/torchtitan`` (``benchmarks/e2e/runner.py``, the
     ``process_runner(..., cwd=paths.titan_dir)`` call) and
     ``PYTHONPATH=<repo root>`` (``benchmarks/execution/environment.py``,
-    ``runtime_environment``). ``python -m`` puts the cwd at ``sys.path[0]``,
-    *ahead* of everything ``PYTHONPATH`` contributes -- and the torchtitan
-    submodule ships a ``benchmarks/`` directory of its own. The kernel
-    worker is *not* exposed: it runs with ``cwd=paths.bench_dir``
+    ``runtime_environment``; the root itself is ``BENCH_DIR``, in
+    ``benchmarks/execution/paths.py``). ``python -m`` puts the cwd at
+    ``sys.path[0]``, *ahead* of everything ``PYTHONPATH`` contributes -- and
+    the torchtitan submodule ships a ``benchmarks/`` directory of its own. The
+    kernel worker is *not* exposed: it runs with ``cwd=paths.bench_dir``
     (``benchmarks/kernel/runner.py``), so the repo root is already
     ``sys.path[0]`` there and our package wins outright. Do not widen this
     docstring to claim otherwise.

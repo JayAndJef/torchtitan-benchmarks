@@ -10,16 +10,17 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping
 
+from benchmarks.artifacts.layout import _default_output_dir, archive_incomplete_arm
 from benchmarks.artifacts.manifests import (
-    _default_output_dir,
     _resume_mismatches,
     _resume_workload,
-    archive_incomplete_arm,
-    initial_run_state,
     load_manifest,
+    write_manifest,
+)
+from benchmarks.artifacts.run_state import (
+    initial_run_state,
     load_run_state,
     update_run_state,
-    write_manifest,
 )
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import (
@@ -32,16 +33,14 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.validation import validate_arm
+from benchmarks.execution.affinity import resolve_cpu_pinning
 from benchmarks.execution.environment import (
-    EventHandler,
-    ProcessRunner,
-    RuntimePaths,
-    _emit,
     add_compiler_environment,
-    hardware_metadata,
-    resolve_cpu_pinning,
     runtime_environment,
 )
+from benchmarks.execution.events import EventHandler, ProcessRunner, _emit
+from benchmarks.execution.paths import RuntimePaths
+from benchmarks.execution.provenance import hardware_metadata
 from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 
 
