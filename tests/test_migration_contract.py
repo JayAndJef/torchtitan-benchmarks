@@ -713,7 +713,10 @@ TEST_CENSUS = {
     "test_kernels": 19,
     "test_lm_head_losses": 8,
     "test_megatron_data": 5,
-    "test_model_shape": 25,
+    # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
+    # the symmetric twin of the titan builders' one, added when the megatron
+    # side stopped defaulting to the normal shape.
+    "test_model_shape": 26,
     "test_profile_regions": 19,
     "test_runner": 41,
     "test_run_validation": 1,
@@ -724,7 +727,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 175
+TEST_CENSUS_TOTAL = 176
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -181,6 +181,26 @@ class ConfigSizeClosureTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             _piper_1b_trainer(fuse_qkv=True, loss_kind="full_logits")
 
+    def test_the_megatron_builder_requires_an_explicit_shape(self) -> None:
+        """The same rule on the other engine's builder, for the same reason.
+
+        ``build_model`` is the megatron twin of ``_piper_1b_model``: both
+        construct the same geometry from the same ``PiperShape``, and the
+        whole point of that sharing is that a size cannot drift between the
+        engines. A default here would reintroduce the drift on one side --
+        and it would land in the arm with the least protection, since
+        ``tools/megatron_parity_check.py`` builds the model outside the
+        harness and so never reaches validation rule 11's parameter-count
+        check. Signature inspection only; this imports no megatron.
+        """
+        import inspect
+
+        from benchmarks.models.piper_qwen3.megatron_model import build_model
+
+        parameter = inspect.signature(build_model).parameters["shape"]
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(parameter.default, inspect.Parameter.empty)
+
     def test_size_round_trips_through_the_config_argument(self) -> None:
         from benchmarks.models.piper_qwen3.config_registry import qwen3_piper_1b
 

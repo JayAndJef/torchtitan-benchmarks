@@ -30,13 +30,17 @@ dataclass defaults are the wrong baseline; see the fusion block below.
 
 from __future__ import annotations
 
-from benchmarks.models.piper_qwen3.shape import NORMAL, PiperShape
+from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
 def build_model(
     *,
     seq_len: int,
-    shape: PiperShape = NORMAL,
+    # No default, matching the titan builders this is the twin of: a default
+    # could only be reached by a future omission, and would then build the
+    # normal geometry silently under whatever --model-size the run asked for.
+    # Both call sites already pass it.
+    shape: PiperShape,
     cuda_graph_impl: str | None = None,
     cuda_graph_modules: tuple[str, ...] = (),
     use_cpu_initialization: bool = False,
