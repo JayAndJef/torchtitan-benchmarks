@@ -91,8 +91,11 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
 | `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
+| `benchmarks/models/piper_qwen3/mcore_profiles.py` | Megatron behaviour as data: one `McoreProfile` per variant, torch-free and parent-side |
 | `benchmarks/models/piper_qwen3/megatron_bootstrap.py` | Megatron location/provenance and the TE environment setup |
-| `benchmarks/models/piper_qwen3/megatron_model.py` | The Qwen3-1B megatron-core `GPTModel` builder |
+| `benchmarks/models/piper_qwen3/megatron_model.py` | The Qwen3-1B megatron-core `GPTModel` builder; takes a shape and a profile |
+| `benchmarks/models/piper_qwen3/megatron_weights.py` | The titan-to-megatron per-parameter map, tagged by component so a caller can take a slice |
+| `benchmarks/models/piper_qwen3/titan_model.py` | The in-process titan build, and the override count that replaces the `[Override]` log check |
 | `benchmarks/models/piper_qwen3/components/rope/` | TE RoPE override + `te_rope_standalone.cu` |
 | `benchmarks/models/piper_qwen3/components/swiglu/` | Combined-SwiGLU Triton kernels and override |
 | `benchmarks/models/piper_qwen3/components/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
@@ -1086,10 +1089,26 @@ An arm changes behavior one of two ways:
 Megatron-LM + TransformerEngine instead of TorchTitan. Megatron knowledge lives
 in two places: the driver and its data pipeline in `benchmarks/e2e/megatron/`,
 and the model builder plus the submodule bootstrap in
-`benchmarks/models/piper_qwen3/` (`megatron_model.py`,
+`benchmarks/models/piper_qwen3/` (`megatron_model.py`, `mcore_profiles.py`,
 `megatron_bootstrap.py`) -- the split follows the rest of the tree, where a
-model definition sits under `models/` and an execution driver under `e2e/`. The
-harness connects only through `Arm(launcher="megatron",
+model definition sits under `models/` and an execution driver under `e2e/`.
+
+**Configuration is data.** `build_model` takes a `PiperShape` for the
+geometry and an `McoreProfile` for the behaviour, and adds nothing of its
+own. A profile is a `(config_overrides, spec_kwargs)` pair, because
+`moe_grouped_gemm` and `qk_layernorm` reach the model through *both* the
+config and the layer spec: the expert and qk-norm module classes come from
+the spec, so a profile that set only the config field would build the
+grouped kernel and publish it under an ungrouped label. `McoreProfile`
+refuses that profile. No correctness gate could catch it -- both
+implementations are numerically right. The registry is torch-free and
+encodes torch values as names (`"silu"`, `"bfloat16"`), so the parent can
+name, record and diff a profile without the ML stack. Both `build_model`
+arguments are required, for the same reason: an omitted one builds the
+default under another arm's label, which is a wrong number rather than a
+missing one.
+
+The harness connects only through `Arm(launcher="megatron",
 validation="megatron")` and
 `benchmarks.models.piper_qwen3.megatron_bootstrap` for provenance. The runner
 launches `python -m benchmarks.e2e.megatron.train` with the workload sizes,
@@ -1106,8 +1125,12 @@ Faithfulness guarantees, all verified:
   exactly 1,066,241,024 bf16 params at `normal`, 10,528,837,760 at `huge`.
   `tools/megatron_parity_check.py [--model-size SIZE]` transfers titan
   weights into the megatron layout and matches logits on a real batch -- run
-  it after touching `benchmarks/models/piper_qwen3/megatron_model.py` or
-  bumping either submodule. The gate is per-shape and lives on the shape itself
+  it after touching `benchmarks/models/piper_qwen3/megatron_model.py`,
+  `mcore_profiles.py`, `megatron_weights.py`, `titan_model.py`, or after
+  bumping either submodule. It owns neither the build nor the map any more:
+  it builds both engines through the same helpers a cross-engine kernel arm
+  uses, which is what makes it their numerics check rather than a parallel
+  implementation. The gate is per-shape and lives on the shape itself
   (`PiperShape.parity_gate`): 2e-2 at normal
   (measured 5.5e-3), 5e-2 at huge (measured 2.03e-2). The wider huge gate is
   bf16 accumulation, not slack, and it is evidenced rather than assumed --
@@ -1135,9 +1158,14 @@ Faithfulness guarantees, all verified:
   where argparse defaults them `True` (`--no-bias-swiglu-fusion` is
   `action="store_false"`, forwarded as `bias_activation_fusion`). Running
   the dataclass defaults once cost 11.9 GPU ms/step of unfused SwiGLU and
-  produced a bogus engine verdict. `train.py` now asserts the fusion state
-  and logs `Megatron fusions: ...`, and the arm pins `_mul_silu_split` /
-  `_permute_kernel` as trace markers. `gradient_accumulation_fusion` is the
+  produced a bogus engine verdict. Those flags are now the `base` profile in
+  `mcore_profiles.py`, and `train.py` asserts the built config against what
+  the profile *declares* rather than against a fixed all-on list. Both
+  directions fail the run: a flag declared on that came out off is the old
+  handicap, and a flag declared off that came out on is a variant that did
+  not take. It logs `Megatron fusions: profile=<name> ...`, and the arm pins
+  `_mul_silu_split` / `_permute_kernel` as trace markers.
+  `gradient_accumulation_fusion` is the
   one performance default deliberately declined (its fused wgrad path needs
   apex-style `main_grad` buffers we have no DDP wrapper to provide); its
   cost is unmeasured.
