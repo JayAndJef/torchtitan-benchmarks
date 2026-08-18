@@ -486,7 +486,16 @@ def execute_kernel_run(
                 outcomes.append(outcome)
                 continue
 
-            gates_failed = correctness_code == 3
+            # The exit code and the fragment are two independent statements of
+            # one verdict, and either one failing is a failure. The worker
+            # writes the fragment *before* it computes the code, so a process
+            # that dies in that window -- a signal, an OSError on the report,
+            # an OOM kill -- leaves "all_passed": false beside a code that is
+            # not 3. Reading the code alone published a failed gate as a pass,
+            # with a full set of timings under it.
+            gates_failed = correctness_code == 3 or not correctness.get(
+                "all_passed"
+            )
             timings: list[dict[str, Any]] = []
             failed_passes: list[str] = []
             if gates_failed:
@@ -517,6 +526,18 @@ def execute_kernel_run(
                             f"with {code} and wrote no fragment",
                         )
                         continue
+                    if code != 0:
+                        # The samples stand -- the worker writes the fragment
+                        # before it returns -- so this costs the arm nothing.
+                        # It is still said out loud: the code reports a death
+                        # after the write, and a discarded exit code is how a
+                        # silent failure starts.
+                        _emit(
+                            event_handler,
+                            "error",
+                            f"WARNING {name}: timing worker {arm} r{replicate} "
+                            f"wrote its fragment and then exited with {code}",
+                        )
                     timings.append(fragment)
 
         result = None

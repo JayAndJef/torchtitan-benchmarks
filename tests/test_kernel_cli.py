@@ -100,6 +100,8 @@ def fragment_writer(
     *,
     correctness_passes: bool = True,
     correctness_code: dict[str, int] | None = None,
+    correctness_exit: int | None = None,
+    timing_exit: int = 0,
     skip_timing: tuple[tuple[str, str, int], ...] = (),
 ):
     """A ``process_runner`` that plays the worker protocol.
@@ -108,6 +110,11 @@ def fragment_writer(
     writes no fragment, which is how a build failure looks to the parent.
     ``skip_timing`` names (scenario, arm, replicate) triples whose timing
     worker crashes the same way.
+
+    ``correctness_exit`` and ``timing_exit`` decouple the exit code from the
+    fragment, which is the real worker's window: it writes the fragment first
+    and computes the code afterwards, so a death in between reports one
+    verdict in the code and the opposite one on disk.
     """
     codes = correctness_code or {}
 
@@ -122,6 +129,8 @@ def fragment_writer(
             fragment.write_text(
                 json.dumps(correctness_fragment(scenario, correctness_passes))
             )
+            if correctness_exit is not None:
+                return SimpleNamespace(returncode=correctness_exit)
             return SimpleNamespace(returncode=0 if correctness_passes else 3)
         arm = command[command.index("--arm") + 1]
         replicate = int(command[command.index("--replicate") + 1])
@@ -131,7 +140,7 @@ def fragment_writer(
         fragment.write_text(
             json.dumps(timing_fragment(scenario, arm, replicate))
         )
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=timing_exit)
 
     return fake_process
 
@@ -642,6 +651,69 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(result.replicates, 2)
         self.assertTrue(
             any("no arm was timed" in warning for warning in result.warnings)
+        )
+
+    def test_a_failed_gate_fragment_outranks_a_clean_exit_code(self) -> None:
+        """The verdict is the fragment as well as the code.
+
+        The worker writes the fragment before it computes the code, so a
+        signal or an OOM kill in that window leaves a recorded failure beside
+        an exit code that is not 3. Reading the code alone timed every arm and
+        published the numbers next to ``all_correctness_passed: false``.
+        """
+        seen = []
+        writer = fragment_writer(correctness_passes=False, correctness_exit=0)
+
+        def fake_process(command, **kwargs):
+            seen.append(command[command.index("--mode") + 1])
+            return writer(command, **kwargs)
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("swiglu",),
+                    replicates=2,
+                    out_dir=Path(temporary) / "kernels",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(seen, ["correctness"])
+        self.assertTrue(outcomes[0].correctness_failed)
+        self.assertTrue(outcomes[0].failed)
+        self.assertFalse(outcomes[0].result.all_correctness_passed)
+
+    def test_a_timing_worker_that_dies_after_writing_is_reported(self) -> None:
+        """Its samples stand, and its exit code is still said out loud."""
+        events = []
+        fake_process = fragment_writer(timing_exit=9)
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("qkv",),
+                    replicates=2,
+                    out_dir=Path(temporary) / "kernels",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+                event_handler=events.append,
+            )
+        self.assertFalse(outcomes[0].failed)
+        self.assertEqual(
+            {name: arm.status for name, arm in outcomes[0].result.arms.items()},
+            {"baseline": "ok", "fused_qkv": "ok"},
+        )
+        self.assertTrue(
+            any(
+                "wrote its fragment and then exited with 9" in event.message
+                for event in events
+            ),
+            [event.message for event in events],
         )
 
     def test_anchor_loss_writes_no_results(self) -> None:
