@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "kind": "kernel",
+  "scenario": "qkv",
+  "description": "QKV projection: three separate GEMMs vs one fused GEMM.",
+  "spec": {
+    "dim": 1024,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "head_dim": 64,
+    "num_experts": 4,
+    "top_k": 2,
+    "moe_hidden_dim": 3584,
+    "vocab_size": 151936,
+    "batch": 4,
+    "seq_len": 1024,
+    "max_seq_len": 2048,
+    "theta": 1000000.0
+  },
+  "shapes": {
+    "x": [
+      4,
+      1024,
+      1024
+    ],
+    "wq": [
+      1024,
+      1024
+    ],
+    "wk": [
+      512,
+      1024
+    ],
+    "wv": [
+      512,
+      1024
+    ],
+    "wqkv": [
+      2048,
+      1024
+    ]
+  },
+  "arms": [
+    {
+      "name": "unfused",
+      "description": "TorchTitan QKVLinear (wq + wkv GEMMs)",
+      "builder": "benchmarks.kernel_arms:build_qkv_unfused",
+      "modes": [
+        "forward",
+        "backward",
+        "forward_backward"
+      ],
+      "compare_to": null,
+      "correctness": [
+        {
+          "kind": "tolerance",
+          "reference": "fp64",
+          "outputs": [
+            "q_out",
+            "k_out",
+            "v_out"
+          ],
+          "max_mean_ulp": null,
+          "max_abs": null,
+          "max_rel": null,
+          "max_rel_l2": 0.02,
+          "informational": false
+        }
+      ],
+      "requires_gcc_toolset": false,
+      "is_floor": false
+    },
+    {
+      "name": "fused",
+      "description": "TorchTitan FusedQKVLinear (single wqkv GEMM + split)",
+      "builder": "benchmarks.kernel_arms:build_qkv_fused",
+      "modes": [
+        "forward",
+        "backward",
+        "forward_backward"
+      ],
+      "compare_to": null,
+      "correctness": [
+        {
+          "kind": "tolerance",
+          "reference": "fp64",
+          "outputs": [
+            "q_out",
+            "k_out",
+            "v_out"
+          ],
+          "max_mean_ulp": null,
+          "max_abs": null,
+          "max_rel": null,
+          "max_rel_l2": 0.02,
+          "informational": false
+        },
+        {
+          "kind": "tolerance",
+          "reference": "unfused",
+          "outputs": [
+            "q_out",
+            "k_out",
+            "v_out",
+            "x_grad"
+          ],
+          "max_mean_ulp": null,
+          "max_abs": null,
+          "max_rel": null,
+          "max_rel_l2": 0.02,
+          "informational": false
+        },
+        {
+          "kind": "bitwise",
+          "reference": "unfused",
+          "outputs": [
+            "q_out",
+            "k_out",
+            "v_out"
+          ],
+          "max_mean_ulp": null,
+          "max_abs": null,
+          "max_rel": null,
+          "max_rel_l2": null,
+          "informational": true
+        }
+      ],
+      "requires_gcc_toolset": false,
+      "is_floor": false
+    }
+  ],
+  "baseline_arm": "unfused",
+  "n": 5,
+  "warmup": 2,
+  "burst": false,
+  "seed": 0,
+  "command": [
+    "numactl",
+    "--cpunodebind=1",
+    "--membind=1",
+    "/m-coriander/coriander/jayden/torchtitan-benchmarks/.venv/bin/python",
+    "-m",
+    "benchmarks.kernel_worker",
+    "--scenario",
+    "qkv",
+    "--out-dir",
+    "/m-coriander/coriander/jayden/torchtitan-benchmarks/out/20260806T042025Z/kernels/qkv/nvidia-h200",
+    "--hardware",
+    "nvidia-h200",
+    "--n",
+    "5",
+    "--warmup",
+    "2",
+    "--seed",
+    "0"
+  ],
+  "hardware": "nvidia-h200",
+  "hardware_metadata": {
+    "requested_gpu": "7",
+    "nvidia_smi": "7, NVIDIA H200, GPU-9032fd52-bd9f-22c0-eea2-37c118ce21aa, 570.211.01",
+    "torch_version": "2.14.0.dev20260729+cu130",
+    "torchtitan_git_rev": "43d328adcb50e2f57a9454369bb8590efa654a74",
+    "benchmarks_git_rev": "f762f3c5221e6be64dc2da3e6d001bbfd7afc85d",
+    "cpu_pinning": "numactl --cpunodebind=1 --membind=1"
+  },
+  "created_at": "2026-08-06T04:20:25Z"
+}

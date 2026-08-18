@@ -1,0 +1,373 @@
+{
+  "schema_version": 1,
+  "kind": "kernel",
+  "scenario": "qkv",
+  "hardware": "nvidia-h200",
+  "spec": {
+    "dim": 1024,
+    "n_heads": 16,
+    "n_kv_heads": 8,
+    "head_dim": 64,
+    "num_experts": 4,
+    "top_k": 2,
+    "moe_hidden_dim": 3584,
+    "vocab_size": 151936,
+    "batch": 4,
+    "seq_len": 1024,
+    "max_seq_len": 2048,
+    "theta": 1000000.0
+  },
+  "shapes": {
+    "x": [
+      4,
+      1024,
+      1024
+    ],
+    "wq": [
+      1024,
+      1024
+    ],
+    "wk": [
+      512,
+      1024
+    ],
+    "wv": [
+      512,
+      1024
+    ],
+    "wqkv": [
+      2048,
+      1024
+    ]
+  },
+  "n": 5,
+  "warmup": 2,
+  "seed": 0,
+  "arms": {
+    "unfused": {
+      "modes": {
+        "forward": {
+          "summary": {
+            "count": 5,
+            "mean_us": 196.6208040714264,
+            "median_us": 198.59200716018677,
+            "standard_deviation_us": 10.784012681798362
+          },
+          "samples_us": [
+            206.88000321388245,
+            191.71200692653656,
+            198.59200716018677,
+            205.31199872493744,
+            180.60800433158875
+          ],
+          "derived": {}
+        },
+        "backward": {
+          "summary": {
+            "count": 5,
+            "mean_us": 399.46240186691284,
+            "median_us": 403.0719995498657,
+            "standard_deviation_us": 14.819437321753238
+          },
+          "samples_us": [
+            419.77599263191223,
+            403.80799770355225,
+            403.0719995498657,
+            381.18401169776917,
+            389.47200775146484
+          ],
+          "derived": {}
+        },
+        "forward_backward": {
+          "summary": {
+            "count": 5,
+            "mean_us": 690.2783989906311,
+            "median_us": 696.3520050048828,
+            "standard_deviation_us": 22.743521918330657
+          },
+          "samples_us": [
+            715.5200242996216,
+            696.3520050048828,
+            704.7359943389893,
+            675.711989402771,
+            659.0719819068909
+          ],
+          "derived": {}
+        }
+      },
+      "peak_memory_gib": 0.341796875,
+      "burst_us_per_call": null
+    },
+    "fused": {
+      "modes": {
+        "forward": {
+          "summary": {
+            "count": 5,
+            "mean_us": 189.86879885196686,
+            "median_us": 181.2800019979477,
+            "standard_deviation_us": 16.895160070783717
+          },
+          "samples_us": [
+            212.73599565029144,
+            179.1040003299713,
+            181.2800019979477,
+            173.567995429039,
+            202.65600085258484
+          ],
+          "derived": {}
+        },
+        "backward": {
+          "summary": {
+            "count": 5,
+            "mean_us": 297.8752017021179,
+            "median_us": 297.08799719810486,
+            "standard_deviation_us": 14.601129166428091
+          },
+          "samples_us": [
+            317.27999448776245,
+            297.08799719810486,
+            287.4560058116913,
+            306.68801069259644,
+            280.86400032043457
+          ],
+          "derived": {}
+        },
+        "forward_backward": {
+          "summary": {
+            "count": 5,
+            "mean_us": 583.8144063949585,
+            "median_us": 581.3760161399841,
+            "standard_deviation_us": 17.05118452486745
+          },
+          "samples_us": [
+            612.9279732704163,
+            571.2000131607056,
+            581.3760161399841,
+            571.7120170593262,
+            581.8560123443604
+          ],
+          "derived": {}
+        }
+      },
+      "peak_memory_gib": 0.34375,
+      "burst_us_per_call": null
+    }
+  },
+  "comparisons": [
+    {
+      "arm": "fused",
+      "opponent": "unfused",
+      "mode": "forward",
+      "n_base": 5,
+      "n_arm": 5,
+      "base_median_us": 198.59200716018677,
+      "arm_median_us": 181.2800019979477,
+      "base_mean_us": 196.6208040714264,
+      "arm_mean_us": 189.86879885196686,
+      "median_ratio": 0.9128262742806411,
+      "mean_ratio": 0.9656597619395009,
+      "welch_p": 0.4765750227989035,
+      "mwu_p": 0.5476190476190477,
+      "wilcoxon_p": 0.625,
+      "cohens_d": -0.4764030054770309,
+      "arm_faster_fraction": 0.6
+    },
+    {
+      "arm": "fused",
+      "opponent": "unfused",
+      "mode": "backward",
+      "n_base": 5,
+      "n_arm": 5,
+      "base_median_us": 403.0719995498657,
+      "arm_median_us": 297.08799719810486,
+      "base_mean_us": 399.46240186691284,
+      "arm_mean_us": 297.8752017021179,
+      "median_ratio": 0.737059377803173,
+      "mean_ratio": 0.7456902084150581,
+      "welch_p": 4.394954427100154e-06,
+      "mwu_p": 0.007936507936507936,
+      "wilcoxon_p": 0.0625,
+      "cohens_d": -6.905672847246744,
+      "arm_faster_fraction": 1
+    },
+    {
+      "arm": "fused",
+      "opponent": "unfused",
+      "mode": "forward_backward",
+      "n_base": 5,
+      "n_arm": 5,
+      "base_median_us": 696.3520050048828,
+      "arm_median_us": 581.3760161399841,
+      "base_mean_us": 690.2783989906311,
+      "arm_mean_us": 583.8144063949585,
+      "median_ratio": 0.8348881197461441,
+      "mean_ratio": 0.8457665881601525,
+      "welch_p": 4.8851186394896334e-05,
+      "mwu_p": 0.007936507936507936,
+      "wilcoxon_p": 0.0625,
+      "cohens_d": -5.29674658726492,
+      "arm_faster_fraction": 1
+    }
+  ],
+  "correctness": [
+    {
+      "arm": "unfused",
+      "reference": "fp64",
+      "kind": "tolerance",
+      "output": "q_out",
+      "metric": "rel_l2",
+      "value": 0.001657998189330101,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "unfused",
+      "reference": "fp64",
+      "kind": "tolerance",
+      "output": "k_out",
+      "metric": "rel_l2",
+      "value": 0.0016578065697103739,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "unfused",
+      "reference": "fp64",
+      "kind": "tolerance",
+      "output": "v_out",
+      "metric": "rel_l2",
+      "value": 0.0016610180027782917,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "fp64",
+      "kind": "tolerance",
+      "output": "q_out",
+      "metric": "rel_l2",
+      "value": 0.001657998189330101,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "fp64",
+      "kind": "tolerance",
+      "output": "k_out",
+      "metric": "rel_l2",
+      "value": 0.0016578065697103739,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "fp64",
+      "kind": "tolerance",
+      "output": "v_out",
+      "metric": "rel_l2",
+      "value": 0.0016610180027782917,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "unfused",
+      "kind": "tolerance",
+      "output": "q_out",
+      "metric": "rel_l2",
+      "value": 0.0,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "unfused",
+      "kind": "tolerance",
+      "output": "k_out",
+      "metric": "rel_l2",
+      "value": 0.0,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "unfused",
+      "kind": "tolerance",
+      "output": "v_out",
+      "metric": "rel_l2",
+      "value": 0.0,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "unfused",
+      "kind": "tolerance",
+      "output": "x_grad",
+      "metric": "rel_l2",
+      "value": 0.003169684438034892,
+      "threshold": 0.02,
+      "passed": true,
+      "informational": false
+    },
+    {
+      "arm": "fused",
+      "reference": "unfused",
+      "kind": "bitwise",
+      "output": "q_out",
+      "metric": "max_abs",
+      "value": 0.0,
+      "threshold": 0.0,
+      "passed": null,
+      "informational": true
+    },
+    {
+      "arm": "fused",
+      "reference": "unfused",
+      "kind": "bitwise",
+      "output": "k_out",
+      "metric": "max_abs",
+      "value": 0.0,
+      "threshold": 0.0,
+      "passed": null,
+      "informational": true
+    },
+    {
+      "arm": "fused",
+      "reference": "unfused",
+      "kind": "bitwise",
+      "output": "v_out",
+      "metric": "max_abs",
+      "value": 0.0,
+      "threshold": 0.0,
+      "passed": null,
+      "informational": true
+    }
+  ],
+  "all_correctness_passed": true,
+  "methodology": {
+    "interpretation": "paired_interleaved_repeats",
+    "sample_unit": "interleaved_timing_cycle",
+    "independence_assumption_met": true,
+    "note": "Arms are timed round-robin within each cycle, so drift affects all arms equally and Wilcoxon operates on paired per-cycle deltas. These p-values are inferential for this run on this hardware; they say nothing about other shapes, GPUs, or torch versions.",
+    "l2_flush": false,
+    "l2_flush_rationale": "arms are interleaved, so cache state is equalized across arms rather than cleared",
+    "gc_paused_during_timing": true,
+    "units": "microseconds"
+  },
+  "environment": {
+    "device": "NVIDIA H200",
+    "torch_version": "2.14.0.dev20260729+cu130"
+  },
+  "warnings": []
+}
