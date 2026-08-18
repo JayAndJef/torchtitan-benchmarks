@@ -242,6 +242,17 @@ class KernelCliTests(unittest.TestCase):
             execute.call_args.args[0].scenario_names, tuple(KERNEL_SCENARIOS)
         )
 
+    def test_the_three_counts_refuse_a_zero(self) -> None:
+        """Each names a repetition the run cannot have none of, and each used
+        to reach the GPU and fail there, or not fail at all."""
+        for flag in ("--replicates", "--samples-per-replicate", "--burst-k"):
+            with self.subTest(flag=flag):
+                result = self.runner.invoke(
+                    cli, ["kernel-bench", "7", flag, "0"]
+                )
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("is not in the range", result.output)
+
     def test_out_requires_a_single_scenario(self) -> None:
         result = self.runner.invoke(
             cli, ["kernel-bench", "7", "--out", "/tmp/kernels"]

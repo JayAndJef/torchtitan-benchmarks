@@ -61,18 +61,29 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
     "--replicates",
     default=5,
     show_default=True,
+    # Each of the three counts something a run cannot have none of, and none
+    # of the three refused a zero here. ``--replicates 0`` reached median()
+    # with an empty list and died on a StatisticsError from the standard
+    # library; ``--samples-per-replicate 0`` timed one burst and discarded
+    # it, so every arm produced an empty mode map; ``--burst-k 0`` divided a
+    # burst by no calls and was caught only inside the worker. The range
+    # check states the requirement where the operator reads it, before a GPU
+    # is claimed.
+    type=click.IntRange(min=1),
     help="Sweeps of every arm; the repetition unit the CI is taken over.",
 )
 @click.option(
     "--samples-per-replicate",
     default=40,
     show_default=True,
+    type=click.IntRange(min=1),
     help="Timed bursts per arm per mode, within one replicate.",
 )
 @click.option(
     "--burst-k",
     default=16,
     show_default=True,
+    type=click.IntRange(min=1),
     help="Calls per timed burst. One value for every arm in the scenario.",
 )
 @click.option(
