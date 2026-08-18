@@ -348,6 +348,75 @@ class RunOptionsCallSiteTests(unittest.TestCase):
         )
 
 
+def _stub_builder(modes: tuple[str, ...]):
+    """A builder that exposes exactly ``modes`` and computes nothing.
+
+    ``_seeded_build`` resolves a builder by dotted path, so the stubs below
+    are module-level names this file hands back to it as
+    ``"<this module>:<name>"``. They need no device: the gate under test
+    compares two key sets.
+    """
+
+    def build(shape, workload, inputs):
+        from benchmarks.kernel.engine.arm import BuiltArm
+
+        return BuiltArm(
+            name="stub",
+            calls={mode: (lambda: None) for mode in modes},
+            correctness_outputs=lambda: {},
+        )
+
+    return build
+
+
+_stub_forward_only = _stub_builder(("forward",))
+_stub_forward_and_backward = _stub_builder(("forward", "backward"))
+
+
+class SeededBuildContractTests(unittest.TestCase):
+    """Where ``KernelArm`` becomes the authority over ``BuiltArm``.
+
+    Every consumer downstream reads the *declared* modes: the manifest lists
+    them, the merge pairs an arm against its opponent mode by mode, and a
+    reader ranks implementations by them. A builder with one extra closure
+    publishes a timed operation the registry never described; one with a
+    closure missing leaves a declared mode absent from the table. Both are
+    wrong in the same way, and both raise.
+    """
+
+    def _arm(self, builder: str, modes: tuple[str, ...]):
+        from benchmarks.kernel.schema import KernelArm
+
+        return KernelArm(
+            name="stub",
+            description="stub",
+            builder=f"{__name__}:{builder}",
+            modes=modes,
+        )
+
+    def _build(self, arm):
+        from benchmarks.kernel.engine.run import _seeded_build
+
+        shape, workload = resolve_shape_and_workload()
+        return _seeded_build(arm, shape, workload, {}, 0)
+
+    def test_the_builder_must_expose_exactly_the_declared_modes(self) -> None:
+        extra = self._arm("_stub_forward_and_backward", ("forward",))
+        with self.assertRaises(ValueError) as caught:
+            self._build(extra)
+        self.assertIn("['backward', 'forward']", str(caught.exception))
+        self.assertIn("['forward']", str(caught.exception))
+
+        missing = self._arm("_stub_forward_only", ("forward", "backward"))
+        with self.assertRaises(ValueError) as caught:
+            self._build(missing)
+        self.assertIn("['forward']", str(caught.exception))
+        self.assertIn("['backward', 'forward']", str(caught.exception))
+
+        agreed = self._arm("_stub_forward_only", ("forward",))
+        self.assertEqual(set(self._build(agreed).calls), {"forward"})
+
+
 def _replicates(values: list[float], per_replicate: int) -> list[list[float]]:
     """Split a flat sample list into equal replicates."""
     return [
