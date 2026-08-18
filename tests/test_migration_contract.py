@@ -767,6 +767,11 @@ TEST_CENSUS = {
     # profile.
     "test_mcore_profiles": 20,
     "test_megatron_data": 5,
+    # New with the promotion of the cross-engine weight map out of
+    # tools/megatron_parity_check.py: 3 that pin the QKV grouped
+    # interleave (including that the guard rejects a plain concatenation)
+    # and 8 that pin the transfer, its component slices and its refusals.
+    "test_megatron_weights": 11,
     # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
     # the symmetric twin of the titan builders' one, added when the megatron
     # side stopped defaulting to the normal shape.
@@ -781,7 +786,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 227
+TEST_CENSUS_TOTAL = 238
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -27,7 +27,8 @@ reference and megatron's 3.286e-2, a ratio of 1.011 -- and the
 engine-to-engine distance (2.027e-2) is SMALLER than either engine's distance
 to fp32. The two engines are therefore equally correct and the residual is
 reduction order, not layout. The interleave itself is proved separately and
-bitwise by _assert_qkv_roundtrip. Do not widen a gate without that evidence.
+bitwise by megatron_weights.assert_qkv_roundtrip. Do not widen a gate without
+that evidence.
 
 Memory: two full models plus fp32 logit copies live on one GPU, so the huge
 shape needs an otherwise idle card (~55-60 GiB at dim 12288).
@@ -82,104 +83,19 @@ def build_megatron_model(shape):
 
 
 def transfer_weights(titan, megatron, shape) -> None:
-    """Copy titan parameters into the megatron layout, in place."""
-    state = dict(titan.state_dict())
+    """Copy every titan parameter into the megatron layout, in place.
 
-    def put(megatron_name: str, tensor: torch.Tensor) -> None:
-        target = dict(megatron.named_parameters())[megatron_name]
-        if target.shape != tensor.shape:
-            raise ValueError(
-                f"{megatron_name}: shape {tuple(target.shape)} != "
-                f"source {tuple(tensor.shape)}"
-            )
-        with torch.no_grad():
-            target.copy_(tensor)
-
-    put("embedding.word_embeddings.weight", state["tok_embeddings.weight"])
-    put("output_layer.weight", state["lm_head.weight"])
-    put("decoder.final_layernorm.weight", state["norm.weight"])
-    for layer in range(shape.n_layers):
-        titan_prefix = f"layers.{layer}"
-        mega_prefix = f"decoder.layers.{layer}"
-        # Titan's fused module exposes unfused-style wq/wk/wv in its state
-        # dict (the merge hook re-packs on load). Assemble megatron's grouped
-        # interleave (n_kv_heads, [q_per_group..., k, v], head_dim, dim)
-        # explicitly -- the same concatenation titan's fused init uses.
-        wq = state[f"{titan_prefix}.attention.qkv_linear.wq.weight"]
-        wk = state[f"{titan_prefix}.attention.qkv_linear.wk.weight"]
-        wv = state[f"{titan_prefix}.attention.qkv_linear.wv.weight"]
-        # wq is [n_heads*head_dim, dim] = [dim, dim]; wk/wv are
-        # [n_kv_heads*head_dim, dim] = [dim/2, dim]. The concat over dim=1
-        # gives (n_kv_heads, heads_per_group + 2, head_dim, dim) and
-        # qkv_out_features = (n_heads + 2*n_kv_heads)*head_dim = 2*dim.
-        grouped = torch.cat(
-            [
-                wq.view(shape.n_kv_heads, shape.heads_per_group, shape.head_dim, shape.dim),
-                wk.view(shape.n_kv_heads, 1, shape.head_dim, shape.dim),
-                wv.view(shape.n_kv_heads, 1, shape.head_dim, shape.dim),
-            ],
-            dim=1,
-        ).reshape(shape.qkv_out_features, shape.dim)
-        _assert_qkv_roundtrip(grouped, wq, wk, wv, shape)
-        put(f"{mega_prefix}.self_attention.linear_qkv.weight", grouped)
-        put(
-            f"{mega_prefix}.self_attention.linear_qkv.layer_norm_weight",
-            state[f"{titan_prefix}.attention_norm.weight"],
-        )
-        put(
-            f"{mega_prefix}.self_attention.linear_proj.weight",
-            state[f"{titan_prefix}.attention.wo.weight"],
-        )
-        put(
-            f"{mega_prefix}.self_attention.q_layernorm.weight",
-            state[f"{titan_prefix}.attention.q_norm.weight"],
-        )
-        put(
-            f"{mega_prefix}.self_attention.k_layernorm.weight",
-            state[f"{titan_prefix}.attention.k_norm.weight"],
-        )
-        put(
-            f"{mega_prefix}.pre_mlp_layernorm.weight",
-            state[f"{titan_prefix}.ffn_norm.weight"],
-        )
-        put(
-            f"{mega_prefix}.mlp.router.weight",
-            state[f"{titan_prefix}.moe.router.gate.weight"],
-        )
-        w1 = state[f"{titan_prefix}.moe.routed_experts.inner_experts.w1_EFD"]
-        w2 = state[f"{titan_prefix}.moe.routed_experts.inner_experts.w2_EDF"]
-        w3 = state[f"{titan_prefix}.moe.routed_experts.inner_experts.w3_EFD"]
-        for expert in range(shape.num_experts):
-            # megatron gated fc1 rows: [gate (titan w1); up (titan w3)].
-            put(
-                f"{mega_prefix}.mlp.experts.linear_fc1.weight{expert}",
-                torch.cat([w1[expert], w3[expert]], dim=0),
-            )
-            put(
-                f"{mega_prefix}.mlp.experts.linear_fc2.weight{expert}",
-                w2[expert],
-            )
-
-
-def _assert_qkv_roundtrip(grouped, wq, wk, wv, shape) -> None:
-    """Reconstruct wq/wk/wv from the interleave and require bitwise equality.
-
-    A wrong interleave produces rel_l2 of order 1 in the full forward pass,
-    which is a slow and ambiguous way to find a five-literal reshape bug.
-    This isolates the reshape itself.
+    The map itself lives in
+    ``benchmarks/models/piper_qwen3/megatron_weights.py``, because the
+    cross-engine kernel arms need the same one. This tool is its numerics
+    check: a wrong mapping shows up here as a logit disagreement, and the
+    QKV interleave is proved bitwise inside the map itself.
     """
-    view = grouped.view(
-        shape.n_kv_heads, shape.heads_per_group + 2, shape.head_dim, shape.dim
+    from benchmarks.models.piper_qwen3.megatron_weights import (
+        transfer_weights as apply_transfers,
     )
-    back_q = view[:, : shape.heads_per_group].reshape(wq.shape)
-    back_k = view[:, shape.heads_per_group].reshape(wk.shape)
-    back_v = view[:, shape.heads_per_group + 1].reshape(wv.shape)
-    for name, got, want in (("wq", back_q, wq), ("wk", back_k, wk), ("wv", back_v, wv)):
-        if not torch.equal(got, want):
-            raise AssertionError(
-                f"qkv interleave is not invertible for {name} at shape "
-                f"{shape.name} (dim {shape.dim}, n_kv_heads {shape.n_kv_heads})"
-            )
+
+    apply_transfers(titan, megatron, shape)
 
 
 def main() -> None:

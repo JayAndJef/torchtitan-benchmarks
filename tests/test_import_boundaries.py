@@ -121,6 +121,10 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.components.lm_head.te_triton_cross_entropy",
     "benchmarks.models.piper_qwen3.components.lm_head.piper_optimized_cross_entropy",
     "benchmarks.models.piper_qwen3.components.rope.te_rope_override",
+    # The cross-engine weight map. It reshapes and copies tensors, so torch at
+    # module scope is what it is, not an oversight -- unlike mcore_profiles,
+    # which describes the same model and stays parent-side.
+    "benchmarks.models.piper_qwen3.megatron_weights",
     "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron.data",
     "benchmarks.kernel.operations.attention",

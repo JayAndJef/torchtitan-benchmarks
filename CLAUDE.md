@@ -1115,7 +1115,8 @@ Faithfulness guarantees, all verified:
   bf16 output sits 3.25e-2 from it against megatron's 3.29e-2 (ratio 1.011),
   i.e. the engines agree with each other better than either agrees with
   fp32. The QKV grouped-interleave is proved separately and *bitwise* by
-  `_assert_qkv_roundtrip`, so a layout bug cannot hide inside a widened
+  `megatron_weights.assert_qkv_roundtrip`, so a layout bug cannot hide
+  inside a widened
   gate. Never widen one without both.
 - **Same data and masking**: `benchmarks/e2e/megatron/data.py` drains torchtitan's
   own c4_test dataset class (bit-identical stream to the titan arms'
