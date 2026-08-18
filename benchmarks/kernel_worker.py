@@ -24,6 +24,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--n", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--burst", action="store_true")
+    parser.add_argument("--model-size", default="normal")
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--max-seq-len", type=int, default=None)
@@ -33,11 +34,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from benchmarks.kernels import kernel_scenario_by_name, spec_with_overrides
+    from benchmarks.kernels import (
+        kernel_scenario_by_name,
+        resolve_shape_and_workload,
+    )
 
     try:
         scenario = kernel_scenario_by_name(args.scenario)
-        spec = spec_with_overrides(
+        shape, workload = resolve_shape_and_workload(
+            model_size=args.model_size,
             batch=args.batch,
             seq_len=args.seq_len,
             max_seq_len=args.max_seq_len,
@@ -62,7 +67,9 @@ def main(argv: list[str] | None = None) -> int:
         n=args.n, warmup=args.warmup, burst=args.burst, seed=args.seed
     )
     try:
-        result = run_kernel_scenario(scenario, spec, options, args.hardware)
+        result = run_kernel_scenario(
+            scenario, shape, workload, options, args.hardware
+        )
     except Exception:
         traceback.print_exc()
         return 1

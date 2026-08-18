@@ -33,12 +33,17 @@ def _has_gcc_13() -> bool:
 class KernelScenarioSmokeTests(unittest.TestCase):
     def _run(self, name: str) -> None:
         from benchmarks.kernel_bench import RunOptions, run_kernel_scenario
-        from benchmarks.kernels import Piper1BSpec, kernel_scenario_by_name
+        from benchmarks.kernels import (
+            kernel_scenario_by_name,
+            resolve_shape_and_workload,
+        )
 
         scenario = kernel_scenario_by_name(name)
+        shape, workload = resolve_shape_and_workload(batch=1)
         result = run_kernel_scenario(
             scenario,
-            Piper1BSpec(batch=1),
+            shape,
+            workload,
             RunOptions(n=3, warmup=1, memory_iters=1),
             "smoke",
         )

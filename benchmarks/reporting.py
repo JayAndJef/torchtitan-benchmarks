@@ -151,7 +151,8 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
         f"{name}={value}" for name, value in result.shapes.items()
     )
     lines = [
-        f"== kernel scenario: {result.scenario}   hardware: {result.hardware} ==",
+        f"== kernel scenario: {result.scenario}   "
+        f"model size: {result.model_size}   hardware: {result.hardware} ==",
         f"shapes: {shapes}",
         f"n={result.n} interleaved cycles, warmup={result.warmup}, "
         f"seed={result.seed}",

@@ -1,9 +1,9 @@
 """CPU-only tests for the --model-size axis.
 
 Covers the shape arithmetic (pinned against the numbers a real run logs),
-the config-name closure the runner resolves through, the derivation of
-regions and override counts from the shape, and the manifest/resume
-plumbing.
+the closure of every scenario arm's config over every registered size, the
+derivation of regions and override counts from the shape, and the
+manifest/resume plumbing.
 """
 
 import gzip
@@ -22,13 +22,7 @@ from benchmarks.artifacts import MODEL_SIZES, validate_arm, write_manifest
 from benchmarks.runner import RunRequest, command_for_arm, execute_run
 from benchmarks.runtime import CpuPinning
 from benchmarks.scenarios import SCENARIOS, piper_block_regions, scenario_by_name
-from piper1b.model_shape import (
-    HUGE,
-    NORMAL,
-    PIPER_SHAPES,
-    PiperShape,
-    resolve_config_name,
-)
+from piper1b.model_shape import HUGE, NORMAL, PIPER_SHAPES, PiperShape
 from tests.test_runner import _SAC_LINE, _compiled_line
 
 
@@ -79,78 +73,177 @@ class ShapeArithmeticTests(unittest.TestCase):
             self.assertEqual(json.loads(json.dumps(described)), described)
             self.assertEqual(described["name"], shape.name)
 
+    def test_block_region_support_is_derived_from_the_layer_count(self) -> None:
+        # Not a per-shape flag anyone can set wrong: a 1-layer block graph is
+        # not structurally identifiable, at any dim.
+        self.assertTrue(NORMAL.supports_block_regions)
+        self.assertFalse(HUGE.supports_block_regions)
+        self.assertFalse(
+            PiperShape(name="probe", dim=1024, n_layers=1).supports_block_regions
+        )
+        self.assertTrue(
+            PiperShape(name="probe", dim=1024, n_layers=2).supports_block_regions
+        )
 
-class ConfigNameClosureTests(unittest.TestCase):
-    def test_every_scenario_arm_resolves_at_every_size(self) -> None:
+    def test_parity_gate_is_shape_data(self) -> None:
+        # tools/megatron_parity_check.py reads these; the huge gate is wider
+        # only because bf16 accumulation scales with the reduction length.
+        self.assertEqual(NORMAL.parity_gate, 2e-2)
+        self.assertEqual(HUGE.parity_gate, 5e-2)
+        self.assertEqual(
+            PiperShape(name="probe", dim=1024, n_layers=2).parity_gate, 2e-2
+        )
+        for shape in PIPER_SHAPES.values():
+            self.assertEqual(
+                shape.describe(seq_len=1024)["parity_gate"], shape.parity_gate
+            )
+
+
+class ConfigSizeClosureTests(unittest.TestCase):
+    def test_every_scenario_arm_builds_at_every_size(self) -> None:
+        """Every arm's config resolves and accepts every registered size.
+
+        This is the closure the runner depends on: it emits ``--config <name>
+        --config-arg size=<size>`` for whatever the arm names, so a config
+        that did not accept the keyword -- or accepted it and ignored it --
+        would publish a run under the wrong shape.
+        """
+        import inspect
+
         import piper1b.config_registry as registry
 
-        for size in MODEL_SIZES:
-            for scenario in SCENARIOS.values():
-                for arm in scenario.arms:
-                    if arm.launcher != "torchtitan":
-                        continue
-                    name = resolve_config_name(
-                        arm.config or scenario.workload.config, size
+        for scenario in SCENARIOS.values():
+            for arm in scenario.arms:
+                if arm.launcher != "torchtitan":
+                    continue
+                name = arm.config or scenario.workload.config
+                with self.subTest(scenario=scenario.name, arm=arm.name):
+                    factory = getattr(registry, name, None)
+                    self.assertTrue(
+                        callable(factory), f"{name} is not a config factory"
                     )
-                    with self.subTest(size=size, scenario=scenario.name, arm=arm.name):
-                        factory = getattr(registry, name, None)
-                        self.assertTrue(
-                            callable(factory), f"{name} is not a config factory"
-                        )
+                    parameter = inspect.signature(factory).parameters.get("size")
+                    self.assertIsNotNone(parameter, f"{name} takes no size")
+                    self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+                    self.assertEqual(parameter.default, "normal")
+                    self._assert_every_size_lands(factory, name)
 
-    def test_naming_convention(self) -> None:
-        self.assertEqual(resolve_config_name("qwen3_piper_1b", "normal"),
-                         "qwen3_piper_1b")
-        self.assertEqual(resolve_config_name("qwen3_piper_1b", "huge"),
-                         "qwen3_piper_1b_huge")
+    def _assert_every_size_lands(self, factory, name: str) -> None:
+        for size in MODEL_SIZES:
+            shape = PIPER_SHAPES[size]
+            # One config gates its attention backend on the host GPU
+            # (qwen3_piper_1b_flex_flash wants sm90+), which this CPU-only
+            # suite does not have. Skipping it would retire the only check on
+            # a config that accepts ``size`` and ignores it, so pretend the
+            # capability instead: the fork imports has_cuda_capability inside
+            # get_attention_config, so patching its source module reaches it,
+            # and nothing here runs a kernel.
+            with mock.patch(
+                "torchtitan.tools.utils.has_cuda_capability", return_value=True
+            ):
+                model = factory(size=size).model_spec.model
+            self.assertEqual(model.dim, shape.dim, f"{name} at {size}")
+            self.assertEqual(len(model.layers), shape.n_layers, f"{name} at {size}")
+
+    def test_the_private_builders_require_an_explicit_shape(self) -> None:
+        """No default shape on the builders every public config calls.
+
+        All eleven call sites pass ``shape=`` today, so a default could only
+        ever be reached by a future omission -- and would then build the
+        normal geometry silently, under whatever size the run asked for. That
+        is the exact silent fallback the ``size`` keyword replaced.
+        """
+        import inspect
+
+        from piper1b.config_registry import _piper_1b_model, _piper_1b_trainer
+
+        for builder in (_piper_1b_model, _piper_1b_trainer):
+            with self.subTest(builder=builder.__name__):
+                parameter = inspect.signature(builder).parameters["shape"]
+                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+                self.assertIs(parameter.default, inspect.Parameter.empty)
+        with self.assertRaises(TypeError):
+            _piper_1b_model(fuse_qkv=True)
+        with self.assertRaises(TypeError):
+            _piper_1b_trainer(fuse_qkv=True, loss_kind="full_logits")
+
+    def test_size_round_trips_through_the_config_argument(self) -> None:
+        from piper1b.config_registry import qwen3_piper_1b
+
+        self.assertEqual(qwen3_piper_1b(size="huge").model_spec.model.dim, 12288)
+        self.assertEqual(qwen3_piper_1b(size="normal").model_spec.model.dim, 1024)
+        # The default is the normal shape, so an unparameterized call is the
+        # historical config.
+        self.assertEqual(qwen3_piper_1b().model_spec.model.dim, NORMAL.dim)
         with self.assertRaisesRegex(ValueError, "Unknown model size"):
-            resolve_config_name("qwen3_piper_1b", "enormous")
+            qwen3_piper_1b(size="enormous")
 
     def test_built_models_carry_the_requested_shape(self) -> None:
-        from piper1b.config_registry import qwen3_piper_1b, qwen3_piper_1b_huge
+        from piper1b.config_registry import qwen3_piper_1b
 
         normal = qwen3_piper_1b().model_spec.model
         self.assertEqual(normal.dim, NORMAL.dim)
         self.assertEqual(len(normal.layers), NORMAL.n_layers)
 
-        huge = qwen3_piper_1b_huge().model_spec.model
+        huge = qwen3_piper_1b(size="huge").model_spec.model
         self.assertEqual(huge.dim, HUGE.dim)
         self.assertEqual(len(huge.layers), HUGE.n_layers)
         self.assertEqual(huge.vocab_size, HUGE.vocab_size)
         # The load_balance_coeff=None fixup must survive the parameterization.
         self.assertIsNone(huge.layers[0].moe.load_balance_coeff)
 
-    def test_pretokenized_replay_steps_track_the_config_steps(self) -> None:
+    def test_pretokenized_configs_pass_the_size_down_to_their_delegate(self) -> None:
         from piper1b.config_registry import (
+            qwen3_piper_1b_piper_optimized_te_ce_pretokenized,
             qwen3_piper_1b_pretokenized,
-            qwen3_piper_1b_pretokenized_huge,
         )
 
         for factory in (
             qwen3_piper_1b_pretokenized,
-            qwen3_piper_1b_pretokenized_huge,
+            qwen3_piper_1b_piper_optimized_te_ce_pretokenized,
         ):
-            config = factory()
-            self.assertEqual(
-                config.dataloader.replay_steps, config.training.steps
-            )
+            for size, shape in PIPER_SHAPES.items():
+                with self.subTest(config=factory.__name__, size=size):
+                    config = factory(size=size)
+                    self.assertEqual(config.model_spec.model.dim, shape.dim)
+                    # replay_steps tracks the config's own step count.
+                    self.assertEqual(
+                        config.dataloader.replay_steps, config.training.steps
+                    )
 
 
 class CommandTests(unittest.TestCase):
-    def test_titan_command_uses_the_size_suffixed_config(self) -> None:
+    def test_titan_command_delivers_the_size_as_a_config_argument(self) -> None:
         scenario = scenario_by_name("piper1b_megatron")
         arm = scenario.arm("titan_stock")
         command = command_for_arm(
             scenario.workload, arm, Path("/tmp/arm"), (), model_size="huge"
         )
+        # The config name is the arm's, unmangled: the shape rides alongside.
         self.assertEqual(
             command[command.index("--config") + 1],
-            "qwen3_piper_1b_pretokenized_huge",
+            "qwen3_piper_1b_pretokenized",
         )
+        self.assertEqual(
+            command[command.index("--config-arg") + 1], "size=huge"
+        )
+        self.assertFalse([token for token in command if token.endswith("_huge")])
         # replay_steps must track --training.steps or the loader hard-fails.
         self.assertEqual(
             command[command.index("--dataloader.replay-steps") + 1],
             command[command.index("--training.steps") + 1],
+        )
+
+    def test_the_default_size_is_delivered_explicitly_too(self) -> None:
+        scenario = scenario_by_name("piper1b_rope")
+        command = command_for_arm(
+            scenario.workload, scenario.arm("baseline"), Path("/tmp/arm"), ()
+        )
+        self.assertEqual(
+            command[command.index("--config") + 1], "qwen3_piper_1b"
+        )
+        self.assertEqual(
+            command[command.index("--config-arg") + 1], "size=normal"
         )
 
     def test_non_replay_scenarios_do_not_get_the_replay_flag(self) -> None:
@@ -359,12 +452,9 @@ class ManifestAndResumeTests(unittest.TestCase):
         # Rule 7's structural matcher cannot identify a 1-layer block graph,
         # so the run says so instead of claiming a region it cannot verify.
         self.assertEqual(manifest["regions"], [])
-        self.assertEqual(
-            manifest["commands"]["baseline"][
-                manifest["commands"]["baseline"].index("--config") + 1
-            ],
-            "qwen3_piper_1b_huge",
-        )
+        command = manifest["commands"]["baseline"]
+        self.assertEqual(command[command.index("--config") + 1], "qwen3_piper_1b")
+        self.assertEqual(command[command.index("--config-arg") + 1], "size=huge")
 
     def test_normal_run_still_declares_the_eighty_invocation_regions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

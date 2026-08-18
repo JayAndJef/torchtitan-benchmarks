@@ -1,5 +1,6 @@
 """CPU-only tests for the Click benchmark interface."""
 
+import gzip
 import json
 import sys
 import tempfile
@@ -14,7 +15,10 @@ from click.testing import CliRunner
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.cli import cli
+from benchmarks.runner import execute_run
+from benchmarks.runtime import CpuPinning
 from benchmarks.scenarios import PIPER_1B_ROPE, SCENARIOS
+from piper1b.model_shape import HUGE
 
 
 class CliTests(unittest.TestCase):
@@ -115,6 +119,78 @@ class CliTests(unittest.TestCase):
 
         rejected = self.runner.invoke(cli, ["run", "2", "--model-size", "enormous"])
         self.assertNotEqual(rejected.exit_code, 0)
+
+    def test_model_size_reaches_the_recorded_training_command(self) -> None:
+        """--model-size arrives as --config-arg, not as a mangled config name.
+
+        Runs the real runner behind a fake training process, so the assertion
+        is on the command the manifest actually records.
+        """
+
+        def fake_process(command, **kwargs):
+            kwargs["stdout"].write(
+                "[titan] - root - INFO - Compiling each TransformerBlock with "
+                "torch.compile (mode=default)\n"
+                "[titan] - root - INFO - Model qwen3 piper_1B "
+                f"size: {HUGE.param_count:,} total parameters\n"
+                "Training completed\n"
+            )
+            arm_dir = Path(command[command.index("--dump-folder") + 1])
+            for iteration in (20, 40):
+                trace = (
+                    arm_dir
+                    / f"profiling/traces/iteration_{iteration}/rank0_trace.json.gz"
+                )
+                trace.parent.mkdir(parents=True, exist_ok=True)
+                with gzip.open(trace, "wt") as trace_file:
+                    json.dump({"traceEvents": []}, trace_file)
+            return SimpleNamespace(returncode=0)
+
+        def run_with_fake_process(request, **kwargs):
+            return execute_run(request, process_runner=fake_process, **kwargs)
+
+        metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+        }
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.cli.execute_run", side_effect=run_with_fake_process
+        ), mock.patch(
+            "benchmarks.runner.hardware_metadata",
+            return_value=("test-gpu", metadata),
+        ), mock.patch(
+            "benchmarks.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            out_dir = Path(temporary) / "run"
+            result = self.runner.invoke(
+                cli,
+                [
+                    "run",
+                    "0",
+                    "--scenario",
+                    "piper1b_attention",
+                    "--arm",
+                    "baseline",
+                    "--ac",
+                    "none",
+                    "--model-size",
+                    "huge",
+                    "--out",
+                    str(out_dir),
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+
+        self.assertEqual(manifest["model_size"], "huge")
+        command = manifest["commands"]["baseline"]
+        self.assertEqual(command[command.index("--config") + 1], "qwen3_piper_1b")
+        self.assertEqual(command[command.index("--config-arg") + 1], "size=huge")
+        self.assertFalse([token for token in command if token.endswith("_huge")])
 
     def test_unknown_compile_mode_is_rejected(self) -> None:
         result = self.runner.invoke(cli, ["run", "2", "--compile-mode", "turbo"])

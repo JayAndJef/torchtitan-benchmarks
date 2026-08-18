@@ -1,8 +1,12 @@
 """GPU arm builders for kernel-isolation benchmarks.
 
 Each ``*_inputs`` function materializes one scenario's shared tensors from
-the Piper-1B spec; each ``build_*`` function constructs one arm around those
-tensors and returns a ``BuiltArm`` whose closures are the timed operations.
+the model geometry (``PiperShape``) and the workload run through it
+(``KernelWorkload``); each ``build_*`` function constructs one arm around
+those tensors and returns a ``BuiltArm`` whose closures are the timed
+operations. Both take the pair even where an individual builder reads only
+one of them, because ``kernel_bench`` resolves every builder by dotted path
+and calls them identically. Private helpers below take only what they use.
 Timing closures and correctness runs use separate leaf tensors so retained
 backward graphs are never disturbed.
 
@@ -28,12 +32,13 @@ from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.overrides.helion_rope import HelionCosSinRoPE
 
 from benchmarks.kernel_bench import BuiltArm
-from benchmarks.kernels import Piper1BSpec
+from benchmarks.kernels import KernelWorkload
 from piper1b.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
     PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
 )
+from piper1b.model_shape import PiperShape
 from piper1b.swiglu.combined_swiglu import (
     CombinedSwiGLUFusedGroupedExperts,
     InductorSwiGLUFusedGroupedExperts,
@@ -110,11 +115,14 @@ class RopeInputs:
 
 
 def rope_inputs(
-    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+    shape: PiperShape,
+    workload: KernelWorkload,
+    device: torch.device,
+    generator: torch.Generator,
 ) -> RopeInputs:
-    batch, seq = spec.batch, spec.seq_len
-    q = _randn((batch, seq, spec.n_heads, spec.head_dim), device, generator)
-    k = _randn((batch, seq, spec.n_kv_heads, spec.head_dim), device, generator)
+    batch, seq = workload.batch, workload.seq_len
+    q = _randn((batch, seq, shape.n_heads, shape.head_dim), device, generator)
+    k = _randn((batch, seq, shape.n_kv_heads, shape.head_dim), device, generator)
     gq = _randn_like(q, generator)
     gk = _randn_like(k, generator)
     positions = (
@@ -140,19 +148,19 @@ def _randn_like(reference: torch.Tensor, generator: torch.Generator) -> torch.Te
 
 
 def _rope_tables_fp64(
-    spec: Piper1BSpec, device: torch.device
+    shape: PiperShape, workload: KernelWorkload, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    half = spec.head_dim // 2
+    half = shape.head_dim // 2
     inv_freq = 1.0 / (
-        spec.theta
+        shape.rope_theta
         ** (
-            torch.arange(0, spec.head_dim, 2, dtype=torch.float64, device=device)[
+            torch.arange(0, shape.head_dim, 2, dtype=torch.float64, device=device)[
                 :half
             ]
-            / spec.head_dim
+            / shape.head_dim
         )
     )
-    t = torch.arange(spec.seq_len, dtype=torch.float64, device=device)
+    t = torch.arange(workload.seq_len, dtype=torch.float64, device=device)
     angles = torch.cat([torch.outer(t, inv_freq)] * 2, dim=-1)
     return angles.cos(), angles.sin()
 
@@ -182,10 +190,10 @@ def _rope_truth_backward(
 
 
 def rope_reference(
-    spec: Piper1BSpec, inputs: RopeInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
 ) -> dict[str, torch.Tensor]:
-    cos64, sin64 = _rope_tables_fp64(spec, inputs.q.device)
-    half = spec.head_dim // 2
+    cos64, sin64 = _rope_tables_fp64(shape, workload, inputs.q.device)
+    half = shape.head_dim // 2
     return {
         "q_out": _rope_truth_forward(inputs.q, cos64, sin64, half),
         "k_out": _rope_truth_forward(inputs.k, cos64, sin64, half),
@@ -195,7 +203,7 @@ def rope_reference(
 
 
 def build_rope_copy_floor(
-    spec: Piper1BSpec, inputs: RopeInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
 ) -> BuiltArm:
     q_out = torch.empty_like(inputs.q)
     k_out = torch.empty_like(inputs.k)
@@ -213,9 +221,13 @@ def build_rope_copy_floor(
     )
 
 
-def build_rope_baseline(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
+def build_rope_baseline(
+    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
+) -> BuiltArm:
     module = CosSinRoPE.Config(
-        dim=spec.head_dim, max_seq_len=spec.max_seq_len, theta=spec.theta
+        dim=shape.head_dim,
+        max_seq_len=shape.max_seq_len,
+        theta=shape.rope_theta,
     ).build()
     module.init_states(buffer_device=inputs.q.device)
     module = _compile_module(module)
@@ -251,9 +263,13 @@ def build_rope_baseline(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
     )
 
 
-def build_rope_helion(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
+def build_rope_helion(
+    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
+) -> BuiltArm:
     module = HelionCosSinRoPE.Config(
-        dim=spec.head_dim, max_seq_len=spec.max_seq_len, theta=spec.theta
+        dim=shape.head_dim,
+        max_seq_len=shape.max_seq_len,
+        theta=shape.rope_theta,
     ).build()
     module.init_states(buffer_device=inputs.q.device)
     module = _compile_module(module)
@@ -292,11 +308,15 @@ def build_rope_helion(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
     )
 
 
-def build_rope_te(spec: Piper1BSpec, inputs: RopeInputs) -> BuiltArm:
+def build_rope_te(
+    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
+) -> BuiltArm:
     from piper1b.rope.te_rope_override import TECosSinRoPE
 
     module = TECosSinRoPE.Config(
-        dim=spec.head_dim, max_seq_len=spec.max_seq_len, theta=spec.theta
+        dim=shape.head_dim,
+        max_seq_len=shape.max_seq_len,
+        theta=shape.rope_theta,
     ).build()
     module.init_states(buffer_device=inputs.q.device)
     module = _compile_module(module)
@@ -347,31 +367,34 @@ class SwigluInputs:
 
 
 def swiglu_inputs(
-    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+    shape: PiperShape,
+    workload: KernelWorkload,
+    device: torch.device,
+    generator: torch.Generator,
 ) -> SwigluInputs:
-    rows = spec.batch * spec.seq_len * spec.top_k
-    hidden = spec.moe_hidden_dim
-    per_expert = rows // spec.num_experts
+    rows = workload.batch * workload.seq_len * shape.top_k
+    hidden = shape.moe_hidden_dim
+    per_expert = rows // shape.num_experts
     counts = torch.full(
-        (spec.num_experts,), per_expert, device=device, dtype=torch.int32
+        (shape.num_experts,), per_expert, device=device, dtype=torch.int32
     )
     stock_state = {
         "w1_EFD": _randn(
-            (spec.num_experts, hidden, spec.dim),
+            (shape.num_experts, hidden, shape.dim),
             device,
             generator,
             torch.float32,
             WEIGHT_STD,
         ),
         "w2_EDF": _randn(
-            (spec.num_experts, spec.dim, hidden),
+            (shape.num_experts, shape.dim, hidden),
             device,
             generator,
             torch.float32,
             WEIGHT_STD,
         ),
         "w3_EFD": _randn(
-            (spec.num_experts, hidden, spec.dim),
+            (shape.num_experts, hidden, shape.dim),
             device,
             generator,
             torch.float32,
@@ -379,8 +402,8 @@ def swiglu_inputs(
         ),
     }
     return SwigluInputs(
-        x=_randn((rows, spec.dim), device, generator),
-        grad_out=_randn((rows, spec.dim), device, generator),
+        x=_randn((rows, shape.dim), device, generator),
+        grad_out=_randn((rows, shape.dim), device, generator),
         counts=counts,
         stock_state=stock_state,
     )
@@ -444,11 +467,11 @@ def _fused_weight_grads(module: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
-def _build_swiglu_module(config_cls, spec: Piper1BSpec, inputs: SwigluInputs):
+def _build_swiglu_module(config_cls, shape: PiperShape, inputs: SwigluInputs):
     module = config_cls.Config(
-        dim=spec.dim,
-        hidden_dim=spec.moe_hidden_dim,
-        num_experts=spec.num_experts,
+        dim=shape.dim,
+        hidden_dim=shape.moe_hidden_dim,
+        num_experts=shape.num_experts,
     ).build()
     module.to(inputs.x.device)
     module.load_state_dict(inputs.stock_state)
@@ -457,19 +480,19 @@ def _build_swiglu_module(config_cls, spec: Piper1BSpec, inputs: SwigluInputs):
 
 
 def build_swiglu_baseline(
-    spec: Piper1BSpec, inputs: SwigluInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: SwigluInputs
 ) -> BuiltArm:
-    module = _build_swiglu_module(GroupedExperts, spec, inputs)
+    module = _build_swiglu_module(GroupedExperts, shape, inputs)
     return _swiglu_module_arm(
         "baseline", module, inputs, _stock_weight_grads
     )
 
 
 def build_swiglu_piper_optimized_triton(
-    spec: Piper1BSpec, inputs: SwigluInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: SwigluInputs
 ) -> BuiltArm:
     module = _build_swiglu_module(
-        CombinedSwiGLUFusedGroupedExperts, spec, inputs
+        CombinedSwiGLUFusedGroupedExperts, shape, inputs
     )
     return _swiglu_module_arm(
         "piper_optimized_triton", module, inputs, _fused_weight_grads
@@ -477,10 +500,10 @@ def build_swiglu_piper_optimized_triton(
 
 
 def build_swiglu_piper_optimized_inductor(
-    spec: Piper1BSpec, inputs: SwigluInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: SwigluInputs
 ) -> BuiltArm:
     module = _build_swiglu_module(
-        InductorSwiGLUFusedGroupedExperts, spec, inputs
+        InductorSwiGLUFusedGroupedExperts, shape, inputs
     )
     return _swiglu_module_arm(
         "piper_optimized_inductor", module, inputs, _fused_weight_grads
@@ -500,51 +523,56 @@ class QkvInputs:
 
 
 def qkv_inputs(
-    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+    shape: PiperShape,
+    workload: KernelWorkload,
+    device: torch.device,
+    generator: torch.Generator,
 ) -> QkvInputs:
-    batch, seq = spec.batch, spec.seq_len
-    q_out = spec.n_heads * spec.head_dim
-    kv_out = spec.n_kv_heads * spec.head_dim
+    batch, seq = workload.batch, workload.seq_len
+    q_out = shape.n_heads * shape.head_dim
+    kv_out = shape.n_kv_heads * shape.head_dim
     weight_state = {
         "wq.weight": _randn(
-            (q_out, spec.dim), device, generator, torch.float32, WEIGHT_STD
+            (q_out, shape.dim), device, generator, torch.float32, WEIGHT_STD
         ),
         "wk.weight": _randn(
-            (kv_out, spec.dim), device, generator, torch.float32, WEIGHT_STD
+            (kv_out, shape.dim), device, generator, torch.float32, WEIGHT_STD
         ),
         "wv.weight": _randn(
-            (kv_out, spec.dim), device, generator, torch.float32, WEIGHT_STD
+            (kv_out, shape.dim), device, generator, torch.float32, WEIGHT_STD
         ),
     }
     return QkvInputs(
-        x=_randn((batch, seq, spec.dim), device, generator),
-        gq=_randn((batch, seq, spec.n_heads, spec.head_dim), device, generator),
+        x=_randn((batch, seq, shape.dim), device, generator),
+        gq=_randn(
+            (batch, seq, shape.n_heads, shape.head_dim), device, generator
+        ),
         gk=_randn(
-            (batch, seq, spec.n_kv_heads, spec.head_dim), device, generator
+            (batch, seq, shape.n_kv_heads, shape.head_dim), device, generator
         ),
         gv=_randn(
-            (batch, seq, spec.n_kv_heads, spec.head_dim), device, generator
+            (batch, seq, shape.n_kv_heads, shape.head_dim), device, generator
         ),
         weight_state=weight_state,
     )
 
 
 def qkv_reference(
-    spec: Piper1BSpec, inputs: QkvInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: QkvInputs
 ) -> dict[str, torch.Tensor]:
-    batch, seq = spec.batch, spec.seq_len
+    batch, seq = workload.batch, workload.seq_len
     x64 = inputs.x.double()
 
     def project(weight: torch.Tensor, heads: int) -> torch.Tensor:
         quantized = weight.to(torch.bfloat16).double()
         return F.linear(x64, quantized).view(
-            batch, seq, heads, spec.head_dim
+            batch, seq, heads, shape.head_dim
         )
 
     return {
-        "q_out": project(inputs.weight_state["wq.weight"], spec.n_heads),
-        "k_out": project(inputs.weight_state["wk.weight"], spec.n_kv_heads),
-        "v_out": project(inputs.weight_state["wv.weight"], spec.n_kv_heads),
+        "q_out": project(inputs.weight_state["wq.weight"], shape.n_heads),
+        "k_out": project(inputs.weight_state["wk.weight"], shape.n_kv_heads),
+        "v_out": project(inputs.weight_state["wv.weight"], shape.n_kv_heads),
     }
 
 
@@ -596,26 +624,32 @@ def _finalize_qkv(module: nn.Module, inputs: QkvInputs) -> nn.Module:
     return _compile_module(module)
 
 
-def build_qkv_baseline(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
+def build_qkv_baseline(
+    shape: PiperShape, workload: KernelWorkload, inputs: QkvInputs
+) -> BuiltArm:
     module = QKVLinear.Config(
-        head_dim=spec.head_dim,
+        head_dim=shape.head_dim,
         wq=Linear.Config(
-            in_features=spec.dim, out_features=spec.n_heads * spec.head_dim
+            in_features=shape.dim, out_features=shape.n_heads * shape.head_dim
         ),
         wkv=Linear.Config(
-            in_features=spec.dim, out_features=spec.n_kv_heads * spec.head_dim
+            in_features=shape.dim,
+            out_features=shape.n_kv_heads * shape.head_dim,
         ),
     ).build()
     return _qkv_arm("baseline", _finalize_qkv(module, inputs), inputs)
 
 
-def build_qkv_fused_qkv(spec: Piper1BSpec, inputs: QkvInputs) -> BuiltArm:
-    fused_out = (spec.n_heads + 2 * spec.n_kv_heads) * spec.head_dim
+def build_qkv_fused_qkv(
+    shape: PiperShape, workload: KernelWorkload, inputs: QkvInputs
+) -> BuiltArm:
     module = FusedQKVLinear.Config(
-        head_dim=spec.head_dim,
-        n_heads=spec.n_heads,
-        n_kv_heads=spec.n_kv_heads,
-        wqkv=Linear.Config(in_features=spec.dim, out_features=fused_out),
+        head_dim=shape.head_dim,
+        n_heads=shape.n_heads,
+        n_kv_heads=shape.n_kv_heads,
+        wqkv=Linear.Config(
+            in_features=shape.dim, out_features=shape.qkv_out_features
+        ),
     ).build()
     return _qkv_arm("fused_qkv", _finalize_qkv(module, inputs), inputs)
 
@@ -654,7 +688,7 @@ class AttentionInputs:
 
 
 def _packed_positions(
-    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+    workload: KernelWorkload, device: torch.device, generator: torch.Generator
 ) -> torch.Tensor:
     """Synthetic packed-document positions: reset to 0 at each document start.
 
@@ -665,10 +699,10 @@ def _packed_positions(
     require.
     """
     rows = []
-    low = max(1, spec.seq_len // 16)
-    high = max(low + 1, spec.seq_len // 2)
-    for _ in range(spec.batch):
-        positions, remaining = [], spec.seq_len
+    low = max(1, workload.seq_len // 16)
+    high = max(low + 1, workload.seq_len // 2)
+    for _ in range(workload.batch):
+        positions, remaining = [], workload.seq_len
         while remaining > 0:
             length = int(
                 torch.randint(low, high, (1,), generator=generator).item()
@@ -681,7 +715,10 @@ def _packed_positions(
 
 
 def attention_inputs(
-    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+    shape: PiperShape,
+    workload: KernelWorkload,
+    device: torch.device,
+    generator: torch.Generator,
 ) -> AttentionInputs:
     from torch.nn.attention.flex_attention import and_masks
     from torchtitan.models.common.attention import (
@@ -691,16 +728,16 @@ def attention_inputs(
         get_efficient_causal_mask_mod_for_packed_document,
     )
 
-    batch, seq = spec.batch, spec.seq_len
-    q = _randn((batch, seq, spec.n_heads, spec.head_dim), device, generator)
-    k = _randn((batch, seq, spec.n_kv_heads, spec.head_dim), device, generator)
-    v = _randn((batch, seq, spec.n_kv_heads, spec.head_dim), device, generator)
+    batch, seq = workload.batch, workload.seq_len
+    q = _randn((batch, seq, shape.n_heads, shape.head_dim), device, generator)
+    k = _randn((batch, seq, shape.n_kv_heads, shape.head_dim), device, generator)
+    v = _randn((batch, seq, shape.n_kv_heads, shape.head_dim), device, generator)
     grad_out = _randn_like(q, generator)
 
     cpu_generator = torch.Generator(device="cpu").manual_seed(
         int(generator.initial_seed()) & 0x7FFFFFFF
     )
-    positions = _packed_positions(spec, device, cpu_generator)
+    positions = _packed_positions(workload, device, cpu_generator)
 
     # Both mask forms are built ONCE here, never inside a timed closure:
     # create_varlen_metadata_for_document contains a .item() device-to-host
@@ -731,13 +768,13 @@ def attention_inputs(
         block_mask=mask_at(128),
         block_mask_flash=mask_at(FLEX_FLASH_BLOCK_SIZE),
         cu_seqlens=varlen.cu_seq_q,
-        scale=spec.head_dim**-0.5,
+        scale=shape.head_dim**-0.5,
         num_documents=int((positions == 0).sum()),
     )
 
 
 def attention_reference(
-    spec: Piper1BSpec, inputs: AttentionInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: AttentionInputs
 ) -> dict[str, torch.Tensor]:
     """fp64 masked-softmax attention, computed per (row, kv group).
 
@@ -746,8 +783,8 @@ def attention_reference(
     reference would OOM exactly at the shapes worth measuring. Per chunk it
     is [heads_per_kv, L, L], which stays a few hundred MiB.
     """
-    batch, seq = spec.batch, spec.seq_len
-    heads_per_kv = spec.n_heads // spec.n_kv_heads
+    batch, seq = workload.batch, workload.seq_len
+    heads_per_kv = shape.heads_per_group
     device = inputs.q.device
 
     document = torch.cumsum((inputs.positions == 0).int(), dim=1) - 1
@@ -756,7 +793,7 @@ def attention_reference(
     out = torch.empty_like(inputs.q, dtype=torch.float64)
     dq = torch.empty_like(out)
     dk = torch.zeros(
-        (batch, seq, spec.n_kv_heads, spec.head_dim),
+        (batch, seq, shape.n_kv_heads, shape.head_dim),
         device=device,
         dtype=torch.float64,
     )
@@ -765,7 +802,7 @@ def attention_reference(
     for b in range(batch):
         same_document = document[b][:, None] == document[b][None, :]
         mask = same_document & causal
-        for group in range(spec.n_kv_heads):
+        for group in range(shape.n_kv_heads):
             lo, hi = group * heads_per_kv, (group + 1) * heads_per_kv
             q_chunk = (
                 inputs.q[b, :, lo:hi].double().detach().transpose(0, 1).requires_grad_()
@@ -837,12 +874,12 @@ def _attention_arm(name: str, inputs: AttentionInputs, call) -> BuiltArm:
 
 
 def build_attention_baseline(
-    spec: Piper1BSpec, inputs: AttentionInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: AttentionInputs
 ) -> BuiltArm:
     from torchtitan.models.common.attention import FlexAttention
 
     module = FlexAttention.Config().build()
-    enable_gqa = spec.n_heads > spec.n_kv_heads
+    enable_gqa = shape.n_heads > shape.n_kv_heads
 
     def call(q, k, v):
         # FlexAttention already holds a class-level torch.compile of
@@ -865,7 +902,7 @@ def build_attention_baseline(
 
 
 def build_attention_flex_flash(
-    spec: Piper1BSpec, inputs: AttentionInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: AttentionInputs
 ) -> BuiltArm:
     """FlexAttention lowered to FlashAttention-4 instead of a Triton template.
 
@@ -879,7 +916,7 @@ def build_attention_flex_flash(
         block_size=FLEX_FLASH_BLOCK_SIZE,
         kernel_options={"BACKEND": "FLASH"},
     ).build()
-    enable_gqa = spec.n_heads > spec.n_kv_heads
+    enable_gqa = shape.n_heads > shape.n_kv_heads
 
     def call(q, k, v):
         # Not wrapped in _compile_module, matching baseline: the class holds
@@ -901,7 +938,7 @@ def build_attention_flex_flash(
 
 
 def build_attention_flash3(
-    spec: Piper1BSpec, inputs: AttentionInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: AttentionInputs
 ) -> BuiltArm:
     """FlashAttention-3 varlen over the packed (THD) sequences.
 
@@ -916,12 +953,12 @@ def build_attention_flash3(
 
     # Compiled: the baseline is too, via FlexAttention's class-level compile.
     module = _compile_module(VarlenAttention.Config().build())
-    enable_gqa = spec.n_heads > spec.n_kv_heads
+    enable_gqa = shape.n_heads > shape.n_kv_heads
     metadata = VarlenMetadata(
         cu_seq_q=inputs.cu_seqlens,
         cu_seq_k=inputs.cu_seqlens,
-        max_q=spec.seq_len,
-        max_k=spec.seq_len,
+        max_q=workload.seq_len,
+        max_k=workload.seq_len,
     )
 
     def call(q, k, v):
@@ -953,25 +990,28 @@ class LmHeadInputs:
 
 
 def lm_head_inputs(
-    spec: Piper1BSpec, device: torch.device, generator: torch.Generator
+    shape: PiperShape,
+    workload: KernelWorkload,
+    device: torch.device,
+    generator: torch.Generator,
 ) -> LmHeadInputs:
-    batch, seq = spec.batch, spec.seq_len
+    batch, seq = workload.batch, workload.seq_len
     weight = _randn(
-        (spec.vocab_size, spec.dim),
+        (shape.vocab_size, shape.dim),
         device,
         generator,
         torch.bfloat16,
-        1.0 / spec.dim**0.5,
+        1.0 / shape.dim**0.5,
     )
     labels = torch.randint(
-        spec.vocab_size,
+        shape.vocab_size,
         (batch, seq),
         device=device,
         generator=generator,
         dtype=torch.int64,
     )
     return LmHeadInputs(
-        hidden=_randn((batch, seq, spec.dim), device, generator),
+        hidden=_randn((batch, seq, shape.dim), device, generator),
         weight=weight,
         labels=labels,
         valid_tokens=float(batch * seq),
@@ -1005,10 +1045,10 @@ def _lm_head_arm(name: str, inputs: LmHeadInputs, loss_call) -> BuiltArm:
 
 
 def build_lm_head_baseline(
-    spec: Piper1BSpec, inputs: LmHeadInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
     loss_obj = CrossEntropyLoss.Config(
-        global_vocab_size=spec.vocab_size
+        global_vocab_size=shape.vocab_size
     ).build(compile_config=LOSS_COMPILE)
 
     def loss_call(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -1020,14 +1060,14 @@ def build_lm_head_baseline(
 
 
 def build_lm_head_fused_linear_ce(
-    spec: Piper1BSpec, inputs: LmHeadInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
     loss_obj = FusedLinearCrossEntropyLoss.Config(
         batch_chunk_size=None, chunking_method=None
     ).build(compile_config=LOSS_COMPILE)
     hidden = inputs.hidden.clone().requires_grad_()
     lm_head = nn.Linear(
-        spec.dim, spec.vocab_size, bias=False, device=hidden.device
+        shape.dim, shape.vocab_size, bias=False, device=hidden.device
     ).to(torch.bfloat16)
     with torch.no_grad():
         lm_head.weight.copy_(inputs.weight)
@@ -1056,7 +1096,7 @@ def build_lm_head_fused_linear_ce(
 
 
 def build_lm_head_te_fused_ce(
-    spec: Piper1BSpec, inputs: LmHeadInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
     loss_obj = TECrossEntropyLoss.Config().build(compile_config=LOSS_COMPILE)
 
@@ -1069,7 +1109,7 @@ def build_lm_head_te_fused_ce(
 
 
 def build_lm_head_piper_optimized_te_ce(
-    spec: Piper1BSpec, inputs: LmHeadInputs
+    shape: PiperShape, workload: KernelWorkload, inputs: LmHeadInputs
 ) -> BuiltArm:
     loss_obj = PiperOptimizedCrossEntropyLoss.Config().build(
         compile_config=LOSS_COMPILE

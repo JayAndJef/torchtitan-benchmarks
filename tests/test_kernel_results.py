@@ -25,7 +25,9 @@ def sample_result() -> KernelScenarioResult:
     return KernelScenarioResult(
         scenario="swiglu",
         hardware="test-gpu",
-        spec={"dim": 1024, "batch": 4},
+        model_size="normal",
+        model_shape={"name": "normal", "dim": 1024, "n_layers": 16},
+        workload={"batch": 4, "seq_len": 1024},
         shapes={"x": [8192, 1024]},
         n=4,
         warmup=1,
@@ -76,6 +78,15 @@ def sample_result() -> KernelScenarioResult:
 
 
 class KernelResultsTests(unittest.TestCase):
+    def test_schema_two_records_model_identity(self) -> None:
+        """Schema 2 replaced the flat spec with the model/workload split."""
+        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 2)
+        payload = sample_result().to_dict()
+        self.assertNotIn("spec", payload)
+        self.assertEqual(payload["model_size"], "normal")
+        self.assertEqual(payload["model_shape"]["dim"], 1024)
+        self.assertEqual(payload["workload"], {"batch": 4, "seq_len": 1024})
+
     def test_round_trip_through_json(self) -> None:
         result = sample_result()
         with tempfile.TemporaryDirectory() as temporary:
@@ -86,6 +97,8 @@ class KernelResultsTests(unittest.TestCase):
 
         self.assertEqual(raw["schema_version"], KERNEL_RESULTS_SCHEMA_VERSION)
         self.assertEqual(raw["kind"], "kernel")
+        self.assertEqual(loaded.model_size, result.model_size)
+        self.assertEqual(loaded.workload, result.workload)
         # Non-finite floats must be nulled for strict JSON.
         self.assertIsNone(
             raw["arms"]["baseline"]["modes"]["forward"]["derived"]["gbps"]
@@ -99,13 +112,15 @@ class KernelResultsTests(unittest.TestCase):
         self.assertEqual(loaded.warnings, result.warnings)
 
     def test_unsupported_schema_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "results.json"
-            payload = sample_result().to_dict()
-            payload["schema_version"] = 99
-            path.write_text(json.dumps(payload))
-            with self.assertRaisesRegex(ValueError, "unsupported"):
-                load_kernel_results(path)
+        # 1 is the pre-split schema; rejecting it is the point of the bump.
+        for version in (1, 99):
+            with tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "results.json"
+                payload = sample_result().to_dict()
+                payload["schema_version"] = version
+                path.write_text(json.dumps(payload))
+                with self.assertRaisesRegex(ValueError, "unsupported"):
+                    load_kernel_results(path)
 
 
 if __name__ == "__main__":

@@ -9,11 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.kernels import (
     KERNEL_SCENARIOS,
+    KernelWorkload,
     MODES,
-    Piper1BSpec,
     kernel_scenario_by_name,
+    resolve_shape_and_workload,
+    routing_divides_evenly,
     shape_summary,
-    spec_with_overrides,
 )
 from benchmarks.kernel_stats import kernel_comparison
 
@@ -104,27 +105,144 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown arm"):
             kernel_scenario_by_name("rope").arm("nope")
 
-    def test_spec_shape_arithmetic(self) -> None:
-        spec = Piper1BSpec()
-        spec.validate()
-        swiglu = shape_summary("swiglu", spec)
+    def test_only_swiglu_needs_balanced_routing(self) -> None:
+        balanced = {
+            scenario.name
+            for scenario in KERNEL_SCENARIOS.values()
+            if scenario.requires_balanced_routing
+        }
+        self.assertEqual(balanced, {"swiglu"})
+
+
+class ShapeAndWorkloadTests(unittest.TestCase):
+    def test_shape_arithmetic(self) -> None:
+        shape, workload = resolve_shape_and_workload()
+        self.assertEqual((workload.batch, workload.seq_len), (4, 1024))
+        swiglu = shape_summary("swiglu", shape, workload)
         self.assertEqual(swiglu["x"], [8192, 1024])
         self.assertEqual(swiglu["tokens_per_expert"], [2048] * 4)
-        qkv = shape_summary("qkv", spec)
+        qkv = shape_summary("qkv", shape, workload)
         self.assertEqual(qkv["wqkv"], [2048, 1024])
         self.assertEqual(qkv["wk"], [512, 1024])
-        lm_head = shape_summary("lm_head", spec)
+        lm_head = shape_summary("lm_head", shape, workload)
         self.assertEqual(lm_head["tokens"], 4096)
         self.assertEqual(lm_head["weight"], [151936, 1024])
-        rope = shape_summary("rope", spec)
+        rope = shape_summary("rope", shape, workload)
         self.assertEqual(rope["q"], [4, 1024, 16, 64])
         self.assertEqual(rope["k"], [4, 1024, 8, 64])
 
-    def test_spec_overrides_validate(self) -> None:
-        spec = spec_with_overrides(batch=1, seq_len=2048)
-        self.assertEqual(shape_summary("swiglu", spec)["x"], [4096, 1024])
+    def test_model_size_selects_the_geometry_not_the_workload(self) -> None:
+        shape, workload = resolve_shape_and_workload(model_size="huge")
+        self.assertEqual(shape.name, "huge")
+        self.assertEqual(shape.dim, 12288)
+        # The workload is untouched by the size: batch is not a model property.
+        self.assertEqual(workload, KernelWorkload())
+        self.assertEqual(
+            shape_summary("lm_head", shape, workload)["hidden"],
+            [4, 1024, 12288],
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown model size"):
+            resolve_shape_and_workload(model_size="enormous")
+
+    def test_workload_overrides_apply(self) -> None:
+        shape, workload = resolve_shape_and_workload(batch=1, seq_len=2048)
+        self.assertEqual(
+            shape_summary("swiglu", shape, workload)["x"], [4096, 1024]
+        )
+
+    def test_seq_len_is_bounded_by_the_shapes_ceiling(self) -> None:
         with self.assertRaisesRegex(ValueError, "exceeds max_seq_len"):
-            spec_with_overrides(seq_len=4096)
+            resolve_shape_and_workload(seq_len=4096)
+
+    def test_max_seq_len_override_replaces_the_shape_before_the_check(
+        self,
+    ) -> None:
+        """Ordering is load-bearing: the attention sweep raises the ceiling
+        precisely so it can then set seq_len above the old one."""
+        shape, workload = resolve_shape_and_workload(
+            seq_len=4096, max_seq_len=4096
+        )
+        self.assertEqual(shape.max_seq_len, 4096)
+        self.assertEqual(workload.seq_len, 4096)
+        # replace() on the registered shape, not a mutation of it.
+        self.assertEqual(shape.name, "normal")
+        self.assertEqual(resolve_shape_and_workload()[0].max_seq_len, 2048)
+        self.assertEqual(
+            shape_summary("attention", shape, workload)["max_seq_len"], 4096
+        )
+
+    def test_routing_needs_an_even_row_count(self) -> None:
+        """rows = batch * seq_len * top_k, and both shapes carry top_k 2 with
+        4 experts, so the split fails exactly when batch * seq_len is odd."""
+        shape, workload = resolve_shape_and_workload(batch=3, seq_len=1025)
+        self.assertFalse(routing_divides_evenly(shape, workload))  # 6150 rows
+        # An odd batch alone is fine at the default even seq_len: 3 * 1024 * 2
+        # = 6144 rows, which 4 experts do split.
+        self.assertTrue(
+            routing_divides_evenly(*resolve_shape_and_workload(batch=3))
+        )
+        self.assertTrue(
+            routing_divides_evenly(*resolve_shape_and_workload(batch=4))
+        )
+
+    def test_split_covers_every_former_spec_field(self) -> None:
+        """The twelve fields the single flat spec used to carry are all still
+        reachable, each from exactly one of the two objects."""
+        shape, workload = resolve_shape_and_workload()
+        geometry = (
+            "dim",
+            "n_heads",
+            "n_kv_heads",
+            "head_dim",
+            "num_experts",
+            "top_k",
+            "moe_hidden_dim",
+            "vocab_size",
+            "max_seq_len",
+        )
+        for name in geometry:
+            self.assertTrue(hasattr(shape, name), name)
+            # No facade: the workload must not answer geometry questions.
+            self.assertFalse(hasattr(workload, name), name)
+        for name in ("batch", "seq_len"):
+            self.assertTrue(hasattr(workload, name), name)
+            self.assertFalse(hasattr(shape, name), name)
+        # The twelfth: the old spec's "theta" is PiperShape's "rope_theta".
+        self.assertEqual(shape.rope_theta, 1_000_000.0)
+        self.assertFalse(hasattr(shape, "theta"))
+
+
+class BalancedRoutingInvariantTests(unittest.TestCase):
+    """The invariant must hold at every entry point, not just the runner's.
+
+    ``execute_kernel_run`` skips an unbalanced swiglu scenario loudly before
+    it spawns a worker, but that is the friendly path, not the guard:
+    ``python -m benchmarks.kernel_worker`` and direct ``run_kernel_scenario``
+    callers (``tests/test_kernel_gpu_smoke.py``) never pass through it. Left
+    unchecked there, ``swiglu_inputs`` builds ``batch * seq_len * top_k`` rows
+    and then splits them into ``num_experts`` equal blocks that do not cover
+    them -- a different workload measured under the scenario's name.
+    """
+
+    def test_run_kernel_scenario_rejects_an_uneven_split(self) -> None:
+        from benchmarks.kernel_bench import RunOptions, run_kernel_scenario
+
+        shape, workload = resolve_shape_and_workload(batch=3, seq_len=1025)
+        with self.assertRaises(ValueError) as caught:
+            run_kernel_scenario(
+                kernel_scenario_by_name("swiglu"),
+                shape,
+                workload,
+                RunOptions(),
+                "test",
+            )
+        message = str(caught.exception)
+        # The numbers, not just a complaint: 3 x 1025 x 2 rows over 4 experts.
+        self.assertIn("6150 routed rows", message)
+        self.assertIn("batch 3 x seq 1025 x top_k 2", message)
+        self.assertIn("4 experts", message)
+        # Raised before the CUDA check, so a CPU-only host -- where this test
+        # runs -- diagnoses the workload rather than the missing device.
 
 
 class KernelComparisonTests(unittest.TestCase):

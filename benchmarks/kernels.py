@@ -14,73 +14,83 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from piper1b.model_shape import PiperShape, shape_by_name
+
 
 MODES = ("forward", "backward", "forward_backward")
 
 
 @dataclass(frozen=True)
-class Piper1BSpec:
-    """Model constants every kernel family derives its shapes from.
+class KernelWorkload:
+    """What is run through the model, as opposed to what the model is.
 
-    The spec deliberately holds no per-family shapes; each scenario's inputs
-    builder computes what it needs (swiglu rows = batch * seq_len * top_k,
-    fused-qkv out features = (n_heads + 2 * n_kv_heads) * head_dim, lm_head
-    tokens = batch * seq_len).
+    Kept separate from ``PiperShape`` so batch size is independent of
+    geometry: the same shape is measurable at any batch, and a batch change
+    is not a model change. Everything geometric -- dim, head counts, expert
+    width, vocabulary, ``max_seq_len`` -- belongs to the shape, and no
+    per-family shapes live in either: each scenario's inputs builder computes
+    what it needs (swiglu rows = batch * seq_len * top_k, fused-qkv out
+    features = (n_heads + 2 * n_kv_heads) * head_dim, lm_head tokens =
+    batch * seq_len).
     """
 
-    dim: int = 1024
-    n_heads: int = 16
-    n_kv_heads: int = 8
-    head_dim: int = 64
-    num_experts: int = 4
-    top_k: int = 2
-    moe_hidden_dim: int = 3584
-    vocab_size: int = 151936
     batch: int = 4
     seq_len: int = 1024
-    max_seq_len: int = 2048
-    theta: float = 1_000_000.0
-
-    def validate(self) -> None:
-        if self.seq_len > self.max_seq_len:
-            raise ValueError(
-                f"seq_len ({self.seq_len}) exceeds max_seq_len "
-                f"({self.max_seq_len}); RoPE tables are sized by max_seq_len"
-            )
-        if self.n_heads * self.head_dim != self.dim:
-            raise ValueError(
-                f"n_heads * head_dim ({self.n_heads * self.head_dim}) must "
-                f"equal dim ({self.dim})"
-            )
-        if self.n_heads % self.n_kv_heads:
-            raise ValueError(
-                f"n_heads ({self.n_heads}) must be divisible by n_kv_heads "
-                f"({self.n_kv_heads})"
-            )
-        if (self.batch * self.seq_len * self.top_k) % self.num_experts:
-            raise ValueError(
-                "routed rows must divide evenly among experts for the "
-                "balanced-routing workload"
-            )
 
 
-def spec_with_overrides(
+def validate_shape_and_workload(
+    shape: PiperShape, workload: KernelWorkload
+) -> None:
+    """Raise ValueError on a shape/workload pair no scenario can run.
+
+    Only constraints that genuinely cross the two live here. The purely
+    geometric ones are structurally unrepresentable: ``PiperShape`` derives
+    both head counts from ``dim`` and ``head_dim``, so
+    ``n_heads * head_dim == dim`` and ``n_heads % n_kv_heads == 0`` cannot be
+    violated and there is nothing to assert.
+    """
+    if workload.seq_len > shape.max_seq_len:
+        raise ValueError(
+            f"seq_len ({workload.seq_len}) exceeds max_seq_len "
+            f"({shape.max_seq_len}); RoPE tables are sized by max_seq_len"
+        )
+
+
+def routing_divides_evenly(
+    shape: PiperShape, workload: KernelWorkload
+) -> bool:
+    """Whether swiglu's synthetic workload routes rows evenly across experts.
+
+    Scenario-scoped on purpose: only the swiglu inputs builder hands every
+    expert an equal slice of ``batch * seq_len * top_k`` rows, so an uneven
+    split is that scenario's problem and must not fail rope, qkv, lm_head or
+    attention.
+    """
+    return (
+        workload.batch * workload.seq_len * shape.top_k
+    ) % shape.num_experts == 0
+
+
+def resolve_shape_and_workload(
     *,
+    model_size: str = "normal",
     batch: int | None = None,
     seq_len: int | None = None,
     max_seq_len: int | None = None,
-) -> Piper1BSpec:
-    spec = Piper1BSpec()
-    # max_seq_len first: validate() rejects seq_len > max_seq_len, and the
-    # attention sweep runs past the 2048 default.
+) -> tuple[PiperShape, KernelWorkload]:
+    """The geometry and the workload one kernel-bench run measures."""
+    shape = shape_by_name(model_size)
+    # max_seq_len first: validation rejects seq_len > max_seq_len, and the
+    # attention sweep raises the ceiling precisely in order to run past it.
     if max_seq_len is not None:
-        spec = replace(spec, max_seq_len=int(max_seq_len))
+        shape = replace(shape, max_seq_len=int(max_seq_len))
+    workload = KernelWorkload()
     if batch is not None:
-        spec = replace(spec, batch=int(batch))
+        workload = replace(workload, batch=int(batch))
     if seq_len is not None:
-        spec = replace(spec, seq_len=int(seq_len))
-    spec.validate()
-    return spec
+        workload = replace(workload, seq_len=int(seq_len))
+    validate_shape_and_workload(shape, workload)
+    return shape, workload
 
 
 @dataclass(frozen=True)
@@ -125,10 +135,11 @@ class KernelArm:
     """One implementation in a head-to-head kernel comparison.
 
     ``builder`` is a dotted path ("module:function") resolved in the GPU
-    worker; the function receives (spec, inputs) and returns a BuiltArm
-    whose per-mode closures are the timed operations. ``compare_to`` names
-    the opponent arm for ratio and significance rows (None means the
-    scenario baseline); comparisons only happen between arms sharing a mode.
+    worker; the function receives (shape, workload, inputs) and returns a
+    BuiltArm whose per-mode closures are the timed operations.
+    ``compare_to`` names the opponent arm for ratio and significance rows
+    (None means the scenario baseline); comparisons only happen between arms
+    sharing a mode.
     ``compiled`` records that the builder runs the arm under torch.compile,
     as production does; raw-kernel arms and floors stay eager on purpose.
     """
@@ -146,7 +157,13 @@ class KernelArm:
 
 @dataclass(frozen=True)
 class KernelScenario:
-    """A kernel family and its comparable implementation arms."""
+    """A kernel family and its comparable implementation arms.
+
+    ``requires_balanced_routing`` marks a scenario whose inputs builder hands
+    every expert an equal slice of the routed rows; the runner refuses to run
+    it on a workload where they do not divide evenly, rather than silently
+    rounding the split.
+    """
 
     name: str
     description: str
@@ -154,6 +171,7 @@ class KernelScenario:
     reference_builder: str | None
     arms: tuple[KernelArm, ...]
     baseline_arm: str
+    requires_balanced_routing: bool = False
 
     def arm(self, name: str) -> KernelArm:
         for arm in self.arms:
@@ -264,6 +282,7 @@ SWIGLU = KernelScenario(
     inputs_builder="benchmarks.kernel_arms:swiglu_inputs",
     reference_builder=None,
     baseline_arm="baseline",
+    requires_balanced_routing=True,
     arms=(
         KernelArm(
             name="baseline",
@@ -527,46 +546,47 @@ def kernel_scenario_by_name(name: str) -> KernelScenario:
         ) from None
 
 
-def shape_summary(scenario_name: str, spec: Piper1BSpec) -> dict[str, object]:
+def shape_summary(
+    scenario_name: str, shape: PiperShape, workload: KernelWorkload
+) -> dict[str, object]:
     """Derived shapes recorded in the manifest for provenance."""
-    batch, seq = spec.batch, spec.seq_len
+    batch, seq = workload.batch, workload.seq_len
     if scenario_name == "rope":
         return {
-            "q": [batch, seq, spec.n_heads, spec.head_dim],
-            "k": [batch, seq, spec.n_kv_heads, spec.head_dim],
+            "q": [batch, seq, shape.n_heads, shape.head_dim],
+            "k": [batch, seq, shape.n_kv_heads, shape.head_dim],
             "positions": [batch, seq],
-            "table_rows": spec.max_seq_len,
+            "table_rows": shape.max_seq_len,
         }
     if scenario_name == "swiglu":
-        rows = batch * seq * spec.top_k
-        per_expert = rows // spec.num_experts
+        rows = batch * seq * shape.top_k
+        per_expert = rows // shape.num_experts
         return {
-            "x": [rows, spec.dim],
-            "tokens_per_expert": [per_expert] * spec.num_experts,
+            "x": [rows, shape.dim],
+            "tokens_per_expert": [per_expert] * shape.num_experts,
         }
     if scenario_name == "qkv":
-        kv_out = spec.n_kv_heads * spec.head_dim
-        fused_out = (spec.n_heads + 2 * spec.n_kv_heads) * spec.head_dim
+        kv_out = shape.n_kv_heads * shape.head_dim
         return {
-            "x": [batch, seq, spec.dim],
-            "wq": [spec.n_heads * spec.head_dim, spec.dim],
-            "wk": [kv_out, spec.dim],
-            "wv": [kv_out, spec.dim],
-            "wqkv": [fused_out, spec.dim],
+            "x": [batch, seq, shape.dim],
+            "wq": [shape.n_heads * shape.head_dim, shape.dim],
+            "wk": [kv_out, shape.dim],
+            "wv": [kv_out, shape.dim],
+            "wqkv": [shape.qkv_out_features, shape.dim],
         }
     if scenario_name == "lm_head":
         return {
-            "hidden": [batch, seq, spec.dim],
-            "weight": [spec.vocab_size, spec.dim],
+            "hidden": [batch, seq, shape.dim],
+            "weight": [shape.vocab_size, shape.dim],
             "tokens": batch * seq,
         }
     if scenario_name == "attention":
         return {
-            "q": [batch, seq, spec.n_heads, spec.head_dim],
-            "k": [batch, seq, spec.n_kv_heads, spec.head_dim],
-            "v": [batch, seq, spec.n_kv_heads, spec.head_dim],
+            "q": [batch, seq, shape.n_heads, shape.head_dim],
+            "k": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            "v": [batch, seq, shape.n_kv_heads, shape.head_dim],
             "positions": [batch, seq],
             "packed_tokens": batch * seq,
-            "max_seq_len": spec.max_seq_len,
+            "max_seq_len": shape.max_seq_len,
         }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

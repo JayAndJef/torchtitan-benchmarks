@@ -292,13 +292,28 @@ def run_all_command(
     is_flag=True,
     help="Add the 1/4/16/64 burst dispatch-cost diagnostic.",
 )
-@click.option("--batch", type=int, help="Override the Piper-1B batch size.")
-@click.option("--seq-len", type=int, help="Override the Piper-1B sequence length.")
+@click.option(
+    "--model-size",
+    default="normal",
+    show_default=True,
+    type=click.Choice(MODEL_SIZES),
+    help="Model shape from piper1b/model_shape.py; sizes the geometry only.",
+)
+@click.option(
+    "--batch",
+    type=int,
+    help="Batch size run through the model; not a model property.",
+)
+@click.option(
+    "--seq-len",
+    type=int,
+    help="Sequence length run through the model; not a model property.",
+)
 @click.option(
     "--max-seq-len",
     type=int,
     help=(
-        "Raise the Piper-1B max_seq_len ceiling (default 2048); needed to "
+        "Raise the shape's max_seq_len ceiling (default 2048); needed to "
         "sweep attention past 2048. Also sizes the RoPE cos/sin tables."
     ),
 )

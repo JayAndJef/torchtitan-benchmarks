@@ -68,6 +68,8 @@ class KernelCliTests(unittest.TestCase):
                     "--warmup",
                     "5",
                     "--burst",
+                    "--model-size",
+                    "huge",
                     "--batch",
                     "1",
                     "--seq-len",
@@ -82,7 +84,21 @@ class KernelCliTests(unittest.TestCase):
         self.assertEqual(request.scenario_names, ("swiglu",))
         self.assertEqual((request.n, request.warmup, request.seed), (20, 5, 3))
         self.assertTrue(request.burst)
+        self.assertEqual(request.model_size, "huge")
         self.assertEqual((request.batch, request.seq_len), (1, 512))
+
+    def test_model_size_defaults_to_normal_and_rejects_unknown(self) -> None:
+        with mock.patch(
+            "benchmarks.cli.execute_kernel_run", return_value=()
+        ) as execute:
+            result = self.runner.invoke(cli, ["kernel-bench", "7"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_args.args[0].model_size, "normal")
+
+        result = self.runner.invoke(
+            cli, ["kernel-bench", "7", "--model-size", "enormous"]
+        )
+        self.assertNotEqual(result.exit_code, 0)
 
     def test_defaults_to_every_scenario(self) -> None:
         with mock.patch(
@@ -225,14 +241,21 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("-m") + 1], "benchmarks.kernel_worker")
         self.assertEqual(command[command.index("--n") + 1], "5")
         self.assertNotIn("--burst", command)
+        # Forwarded unconditionally, unlike the optional overrides.
+        self.assertEqual(command[command.index("--model-size") + 1], "normal")
+        self.assertNotIn("--batch", command)
         self.assertEqual(captured["env"]["CUDA_VISIBLE_DEVICES"], "7")
         self.assertEqual(captured["env"]["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
 
         self.assertEqual(manifest["kind"], "kernel")
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["scenario"], "swiglu")
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
-        self.assertEqual(manifest["spec"]["dim"], 1024)
+        self.assertNotIn("spec", manifest)
+        self.assertEqual(manifest["model_size"], "normal")
+        self.assertEqual(manifest["model_shape"]["dim"], 1024)
+        self.assertEqual(manifest["model_shape"]["n_layers"], 16)
+        self.assertEqual(manifest["workload"], {"batch": 4, "seq_len": 1024})
         self.assertEqual(manifest["shapes"]["x"], [8192, 1024])
         self.assertEqual(manifest["n"], 5)
 
@@ -300,6 +323,58 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertFalse(by_name["swiglu"].failed)
         self.assertTrue(by_name["rope"].failed)
         self.assertIn("C++20 host compiler", by_name["rope"].error)
+
+    def test_unbalanced_routing_skips_only_swiglu(self) -> None:
+        """An odd batch x seq_len breaks swiglu's balanced split (rows =
+        batch * seq_len * top_k against 4 experts); the other scenarios run."""
+        events = []
+
+        def fake_process(command, **kwargs):
+            out_dir = Path(command[command.index("--out-dir") + 1])
+            payload = sample_result().to_dict()
+            payload["scenario"] = command[command.index("--scenario") + 1]
+            (out_dir / "results.json").write_text(json.dumps(payload))
+            return SimpleNamespace(returncode=0)
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch, mock.patch(
+            "benchmarks.kernel_runner.BENCH_DIR", Path(temporary)
+        ), mock.patch(
+            "benchmarks.kernel_runner.add_compiler_environment",
+            side_effect=lambda env, script: env,
+        ):
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("swiglu", "rope"),
+                    batch=3,
+                    seq_len=1025,
+                    timestamp="stamp",
+                    compiler_env=Path(temporary) / "enable.sh",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+                event_handler=events.append,
+            )
+        by_name = {outcome.scenario: outcome for outcome in outcomes}
+        self.assertTrue(by_name["swiglu"].failed)
+        self.assertIn(
+            "6150 routed rows (batch 3 x seq 1025 x top_k 2) do not divide "
+            "evenly among 4 experts",
+            by_name["swiglu"].error,
+        )
+        self.assertIsNone(by_name["swiglu"].result)
+        self.assertFalse(by_name["rope"].failed)
+        self.assertIsNotNone(by_name["rope"].result)
+        # Loud, not silent: the skip is streamed as it happens.
+        self.assertTrue(
+            any(
+                event.kind == "error" and "6150 routed rows" in event.message
+                for event in events
+            )
+        )
+        # No output directory is created for a scenario that never ran.
+        self.assertFalse(by_name["swiglu"].out_dir.exists())
 
     def test_worker_crash_surfaces_the_log_tail(self) -> None:
         def crashing_process(command, **kwargs):

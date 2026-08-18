@@ -7,11 +7,13 @@ max_seq_len 2048, no weight tying, vocab 151936, load_balance_coeff=None).
 
 Every geometry knob comes from ``piper1b.model_shape.PiperShape`` -- the same
 object ``megatron_baseline/model.py`` builds its twin from -- so the two
-engines cannot drift. Each public config has a ``_huge`` twin built from the
-``huge`` shape; the naming convention ``<config>_<size>`` is what
-``benchmarks/runtime.py`` resolves ``--model-size`` through, and
-``tests/test_model_shape.py`` asserts the closure over every (scenario, arm,
-size) triple.
+engines cannot drift. Each public config takes one ``size`` keyword naming a
+``PIPER_SHAPES`` entry, so a shape costs one registry entry and no config
+edit at all. The runner delivers it as ``--config-arg size=<name>``, which
+the fork's ``ConfigManager`` forwards as a keyword argument; the value
+arrives as a string and ``shape_by_name`` raises on an unknown one.
+``tests/test_model_shape.py`` asserts every (scenario, arm) config accepts
+every registered size and builds the shape it names.
 
 Known deltas vs piper (identical across all benchmark arms, so they do not
 affect the RoPE comparison):
@@ -53,13 +55,13 @@ from piper1b.lm_head.losses import (
     PiperOptimizedCrossEntropyLoss,
     TECrossEntropyLoss,
 )
-from piper1b.model_shape import HUGE, NORMAL, PiperShape
+from piper1b.model_shape import PiperShape, shape_by_name
 from piper1b.parallelize import parallelize_piper1b
 from piper1b.pretokenized_data import PretokenizedReplayDataLoader
 
 
 def _piper_1b_model(
-    *, fuse_qkv: bool, attn_backend: str = "flex", shape: PiperShape = NORMAL
+    *, fuse_qkv: bool, shape: PiperShape, attn_backend: str = "flex"
 ) -> Qwen3Model.Config:
     dim = shape.dim
     head_dim = shape.head_dim
@@ -107,15 +109,15 @@ def _piper_1b_model(
     )
 
 
-def qwen3_piper_1b(*, shape: PiperShape = NORMAL) -> Trainer.Config:
+def qwen3_piper_1b(*, size: str = "normal") -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="full_logits",
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
-def qwen3_piper_1b_varlen(*, shape: PiperShape = NORMAL) -> Trainer.Config:
+def qwen3_piper_1b_varlen(*, size: str = "normal") -> Trainer.Config:
     """Piper-1B with FlashAttention-3 varlen instead of FlexAttention.
 
     ``attn_backend="varlen"`` selects VarlenAttention, whose constructor
@@ -129,11 +131,11 @@ def qwen3_piper_1b_varlen(*, shape: PiperShape = NORMAL) -> Trainer.Config:
         fuse_qkv=True,
         loss_kind="full_logits",
         attn_backend="varlen",
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
-def qwen3_piper_1b_flex_flash(*, shape: PiperShape = NORMAL) -> Trainer.Config:
+def qwen3_piper_1b_flex_flash(*, size: str = "normal") -> Trainer.Config:
     """Piper-1B with FlexAttention lowered to FlashAttention-4 kernels.
 
     ``attn_backend="flex_flash"`` keeps FlexAttention and its BlockMask -- only
@@ -149,129 +151,71 @@ def qwen3_piper_1b_flex_flash(*, shape: PiperShape = NORMAL) -> Trainer.Config:
         fuse_qkv=True,
         loss_kind="full_logits",
         attn_backend="flex_flash",
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
-def qwen3_piper_1b_unfused_qkv(*, shape: PiperShape = NORMAL) -> Trainer.Config:
+def qwen3_piper_1b_unfused_qkv(*, size: str = "normal") -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=False,
         loss_kind="full_logits",
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
-def qwen3_piper_1b_full_logits(*, shape: PiperShape = NORMAL) -> Trainer.Config:
+def qwen3_piper_1b_full_logits(*, size: str = "normal") -> Trainer.Config:
     """Piper's vanilla full lm_head followed by cross entropy."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="full_logits",
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
-def qwen3_piper_1b_fused_linear_ce(
-    *, shape: PiperShape = NORMAL
-) -> Trainer.Config:
+def qwen3_piper_1b_fused_linear_ce(*, size: str = "normal") -> Trainer.Config:
     """Full-token PyTorch-native fused linear plus cross entropy."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="fused_linear_ce",
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
-def qwen3_piper_1b_te_fused_ce(*, shape: PiperShape = NORMAL) -> Trainer.Config:
+def qwen3_piper_1b_te_fused_ce(*, size: str = "normal") -> Trainer.Config:
     """Full-token lm_head followed by TransformerEngine fused CE."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="te_fused_ce",
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
 def qwen3_piper_1b_piper_optimized_te_ce(
-    *, attn_backend: str = "flex", shape: PiperShape = NORMAL
+    *, attn_backend: str = "flex", size: str = "normal"
 ) -> Trainer.Config:
     """Full-token lm_head followed by Piper-optimized TE-derived CE."""
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="piper_optimized_te_ce",
         attn_backend=attn_backend,
-        shape=shape,
+        shape=shape_by_name(size),
     )
 
 
-def qwen3_piper_1b_pretokenized(*, shape: PiperShape = NORMAL) -> Trainer.Config:
+def qwen3_piper_1b_pretokenized(*, size: str = "normal") -> Trainer.Config:
     """Stock model on the pre-tokenized replay stream (piper1b_megatron)."""
-    return _with_pretokenized_replay(qwen3_piper_1b(shape=shape))
+    # Pass the size on rather than a resolved shape: the delegate resolves it
+    # itself, and resolving here as well would be two places to keep in step.
+    return _with_pretokenized_replay(qwen3_piper_1b(size=size))
 
 
 def qwen3_piper_1b_piper_optimized_te_ce_pretokenized(
-    *, shape: PiperShape = NORMAL
+    *, size: str = "normal"
 ) -> Trainer.Config:
     """Piper-optimized TE CE loss on the pre-tokenized replay stream."""
     return _with_pretokenized_replay(
-        qwen3_piper_1b_piper_optimized_te_ce(shape=shape)
+        qwen3_piper_1b_piper_optimized_te_ce(size=size)
     )
-
-
-# --- huge-shape twins -------------------------------------------------------
-#
-# One explicit def per public config, not a globals() loop: torchtitan
-# resolves a config with getattr(module, name), which would work either way,
-# but explicit names stay greppable, importable by tests, and carry a
-# __name__ (tests/test_runner.py's ParallelizeTests subTest relies on it).
-
-
-def qwen3_piper_1b_huge() -> Trainer.Config:
-    """qwen3_piper_1b at the huge shape (piper1b/model_shape.py)."""
-    return qwen3_piper_1b(shape=HUGE)
-
-
-def qwen3_piper_1b_varlen_huge() -> Trainer.Config:
-    """qwen3_piper_1b_varlen at the huge shape."""
-    return qwen3_piper_1b_varlen(shape=HUGE)
-
-
-def qwen3_piper_1b_flex_flash_huge() -> Trainer.Config:
-    """qwen3_piper_1b_flex_flash at the huge shape."""
-    return qwen3_piper_1b_flex_flash(shape=HUGE)
-
-
-def qwen3_piper_1b_unfused_qkv_huge() -> Trainer.Config:
-    """qwen3_piper_1b_unfused_qkv at the huge shape."""
-    return qwen3_piper_1b_unfused_qkv(shape=HUGE)
-
-
-def qwen3_piper_1b_full_logits_huge() -> Trainer.Config:
-    """qwen3_piper_1b_full_logits at the huge shape."""
-    return qwen3_piper_1b_full_logits(shape=HUGE)
-
-
-def qwen3_piper_1b_fused_linear_ce_huge() -> Trainer.Config:
-    """qwen3_piper_1b_fused_linear_ce at the huge shape."""
-    return qwen3_piper_1b_fused_linear_ce(shape=HUGE)
-
-
-def qwen3_piper_1b_te_fused_ce_huge() -> Trainer.Config:
-    """qwen3_piper_1b_te_fused_ce at the huge shape."""
-    return qwen3_piper_1b_te_fused_ce(shape=HUGE)
-
-
-def qwen3_piper_1b_piper_optimized_te_ce_huge() -> Trainer.Config:
-    """qwen3_piper_1b_piper_optimized_te_ce at the huge shape."""
-    return qwen3_piper_1b_piper_optimized_te_ce(shape=HUGE)
-
-
-def qwen3_piper_1b_pretokenized_huge() -> Trainer.Config:
-    """qwen3_piper_1b_pretokenized at the huge shape."""
-    return qwen3_piper_1b_pretokenized(shape=HUGE)
-
-
-def qwen3_piper_1b_piper_optimized_te_ce_pretokenized_huge() -> Trainer.Config:
-    """qwen3_piper_1b_piper_optimized_te_ce_pretokenized at the huge shape."""
-    return qwen3_piper_1b_piper_optimized_te_ce_pretokenized(shape=HUGE)
 
 
 def _with_pretokenized_replay(config: Trainer.Config) -> Trainer.Config:
@@ -293,8 +237,8 @@ def _piper_1b_trainer(
     *,
     fuse_qkv: bool,
     loss_kind: str,
+    shape: PiperShape,
     attn_backend: str = "flex",
-    shape: PiperShape = NORMAL,
 ) -> Trainer.Config:
     model_spec = ModelSpec(
         name="qwen3",

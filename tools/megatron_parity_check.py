@@ -17,6 +17,18 @@ Run manually during bring-up (not part of CI):
 Expected agreement is bf16-level (rel_l2 around 2e-3), not bitwise: the
 engines use different kernels and different reduction orders.
 
+The ceiling is ``PiperShape.parity_gate``, per shape (normal 2e-2, huge
+5e-2), and it is bf16-accumulation-scaled rather than arbitrary: rel_l2 grows
+roughly with the square root of the reduction length, so the 12x dim of the
+huge shape moves the normal shape's measured 5.5e-3 to 2.0e-2 (sqrt(12) =
+3.46; predicted 1.9e-2). MEASURED with --fp32-reference on 20260809: running
+the same weights in fp32 puts titan's own bf16 output 3.251e-2 from the
+reference and megatron's 3.286e-2, a ratio of 1.011 -- and the
+engine-to-engine distance (2.027e-2) is SMALLER than either engine's distance
+to fp32. The two engines are therefore equally correct and the residual is
+reduction order, not layout. The interleave itself is proved separately and
+bitwise by _assert_qkv_roundtrip. Do not widen a gate without that evidence.
+
 Memory: two full models plus fp32 logit copies live on one GPU, so the huge
 shape needs an otherwise idle card (~55-60 GiB at dim 12288).
 """
@@ -32,20 +44,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import torch
-
-
-# Logit rel_l2 ceiling per shape. The gate is bf16-accumulation-scaled, not
-# arbitrary: rel_l2 grows roughly with the square root of the reduction
-# length, so the 12x dim of the huge shape moves the normal shape's measured
-# 5.5e-3 to 2.0e-2 (sqrt(12) = 3.46; predicted 1.9e-2). MEASURED with
-# --fp32-reference on 20260809: running the same weights in fp32 puts titan's
-# own bf16 output 3.251e-2 from the reference and megatron's 3.286e-2, a
-# ratio of 1.011 -- and the engine-to-engine distance (2.027e-2) is SMALLER
-# than either engine's distance to fp32. The two engines are therefore
-# equally correct and the residual is reduction order, not layout. The
-# interleave itself is proved separately and bitwise by
-# _assert_qkv_roundtrip. Do not widen a gate without that evidence.
-_PARITY_GATE = {"normal": 2e-2, "huge": 5e-2}
 
 
 def rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -188,8 +186,8 @@ def main() -> None:
         type=float,
         default=None,
         help=(
-            "logit rel_l2 ceiling; defaults to the shape's entry in "
-            "_PARITY_GATE (normal 2e-2, huge 5e-2)"
+            "logit rel_l2 ceiling; defaults to the shape's own parity_gate "
+            "in piper1b/model_shape.py (normal 2e-2, huge 5e-2)"
         ),
     )
     parser.add_argument(
@@ -207,7 +205,7 @@ def main() -> None:
 
     shape = shape_by_name(args.model_size)
     if args.gate is None:
-        args.gate = _PARITY_GATE[shape.name]
+        args.gate = shape.parity_gate
     print(
         f"model size: {shape.name} (dim {shape.dim}, {shape.n_layers} layers)"
         f"  gate: {args.gate:.0e}"

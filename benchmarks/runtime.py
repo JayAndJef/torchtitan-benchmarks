@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Mapping
 
 from benchmarks.scenarios import Arm, Workload
-from piper1b.model_shape import resolve_config_name
 
 
 BENCH_DIR = Path(__file__).resolve().parent.parent
@@ -138,7 +137,12 @@ def command_for_arm(
         "--module",
         workload.module,
         "--config",
-        resolve_config_name(arm.config or workload.config, model_size),
+        arm.config or workload.config,
+        # The fork's ConfigManager forwards --config-arg pairs as keyword
+        # arguments to the config function, which resolves the name through
+        # piper1b.model_shape.shape_by_name.
+        "--config-arg",
+        f"size={model_size}",
         "--training.seq-len",
         str(workload.seq_len),
         "--training.steps",

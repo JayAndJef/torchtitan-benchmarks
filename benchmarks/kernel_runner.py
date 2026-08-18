@@ -25,10 +25,11 @@ from benchmarks.kernel_results import (
 )
 from benchmarks.kernels import (
     KernelScenario,
-    Piper1BSpec,
+    KernelWorkload,
     kernel_scenario_by_name,
+    resolve_shape_and_workload,
+    routing_divides_evenly,
     shape_summary,
-    spec_with_overrides,
 )
 from benchmarks.runner import BENCH_DIR, EventHandler, RunEvent, run_timestamp
 from benchmarks.runtime import (
@@ -38,9 +39,12 @@ from benchmarks.runtime import (
     resolve_cpu_pinning,
     runtime_environment,
 )
+from piper1b.model_shape import PiperShape
 
 
-KERNEL_MANIFEST_SCHEMA_VERSION = 1
+# 2: the single flat shape record was replaced by model_size + model_shape
+# (the same describe() the e2e manifest records) plus the workload.
+KERNEL_MANIFEST_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class KernelRunRequest:
     n: int = 200
     warmup: int = 30
     burst: bool = False
+    model_size: str = "normal"
     batch: int | None = None
     seq_len: int | None = None
     max_seq_len: int | None = None
@@ -81,7 +86,8 @@ def _emit(handler: EventHandler | None, kind: str, message: str) -> None:
 
 def kernel_manifest_data(
     scenario: KernelScenario,
-    spec: Piper1BSpec,
+    shape: PiperShape,
+    workload: KernelWorkload,
     request: KernelRunRequest,
     command: list[str],
     hardware: str,
@@ -92,8 +98,12 @@ def kernel_manifest_data(
         "kind": "kernel",
         "scenario": scenario.name,
         "description": scenario.description,
-        "spec": asdict(spec),
-        "shapes": shape_summary(scenario.name, spec),
+        "model_size": request.model_size,
+        # The same record the e2e manifest writes, so both systems state
+        # model identity identically.
+        "model_shape": shape.describe(seq_len=workload.seq_len),
+        "workload": asdict(workload),
+        "shapes": shape_summary(scenario.name, shape, workload),
         "arms": [asdict(arm) for arm in scenario.arms],
         "baseline_arm": scenario.baseline_arm,
         "n": request.n,
@@ -128,7 +138,8 @@ def execute_kernel_run(
         compiler_env=request.compiler_env,
         environment=host_environment,
     )
-    spec = spec_with_overrides(
+    shape, workload = resolve_shape_and_workload(
+        model_size=request.model_size,
         batch=request.batch,
         seq_len=request.seq_len,
         max_seq_len=request.max_seq_len,
@@ -168,6 +179,26 @@ def execute_kernel_run(
             )
             continue
 
+        if scenario.requires_balanced_routing and not routing_divides_evenly(
+            shape, workload
+        ):
+            # Loudly skipped rather than quietly rounded: an unbalanced split
+            # would silently measure a different workload per expert.
+            rows = workload.batch * workload.seq_len * shape.top_k
+            outcome = KernelScenarioOutcome(
+                scenario=name,
+                out_dir=out_dir,
+                result=None,
+                error=(
+                    f"{name}: {rows} routed rows (batch {workload.batch} x "
+                    f"seq {workload.seq_len} x top_k {shape.top_k}) do not "
+                    f"divide evenly among {shape.num_experts} experts"
+                ),
+            )
+            _emit(event_handler, "error", f"ERROR {outcome.error}")
+            outcomes.append(outcome)
+            continue
+
         out_dir.mkdir(parents=True, exist_ok=False)
         command = list(pinning.prefix) + [
             sys.executable,
@@ -185,6 +216,10 @@ def execute_kernel_run(
             str(request.warmup),
             "--seed",
             str(request.seed),
+            # Unconditional, unlike the overrides below: the run always has a
+            # model size, and the worker must not fall back to its own default.
+            "--model-size",
+            request.model_size,
         ]
         if request.burst:
             command.append("--burst")
@@ -198,7 +233,7 @@ def execute_kernel_run(
         atomic_write_json(
             out_dir / "manifest.json",
             kernel_manifest_data(
-                scenario, spec, request, command, hardware, metadata
+                scenario, shape, workload, request, command, hardware, metadata
             ),
         )
         scenario_environment = base_environment

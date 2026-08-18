@@ -12,7 +12,10 @@ from benchmarks.artifacts import atomic_write_json
 from benchmarks.metrics import SampleSummary
 
 
-KERNEL_RESULTS_SCHEMA_VERSION = 1
+# 2: the single flat shape record was split into the model geometry
+# (model_size / model_shape) and the workload run through it, so schema-1
+# files carry no equivalent of either field and are rejected outright.
+KERNEL_RESULTS_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -51,7 +54,9 @@ class CorrectnessResult:
 class KernelScenarioResult:
     scenario: str
     hardware: str
-    spec: dict[str, Any]
+    model_size: str
+    model_shape: dict[str, Any]
+    workload: dict[str, Any]
     shapes: dict[str, Any]
     n: int
     warmup: int
@@ -70,7 +75,9 @@ class KernelScenarioResult:
             "kind": "kernel",
             "scenario": self.scenario,
             "hardware": self.hardware,
-            "spec": self.spec,
+            "model_size": self.model_size,
+            "model_shape": self.model_shape,
+            "workload": self.workload,
             "shapes": self.shapes,
             "n": self.n,
             "warmup": self.warmup,
@@ -126,7 +133,9 @@ class KernelScenarioResult:
         return cls(
             scenario=value["scenario"],
             hardware=value["hardware"],
-            spec=value["spec"],
+            model_size=value["model_size"],
+            model_shape=value["model_shape"],
+            workload=value["workload"],
             shapes=value["shapes"],
             n=value["n"],
             warmup=value["warmup"],

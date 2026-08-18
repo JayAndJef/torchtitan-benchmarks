@@ -141,9 +141,10 @@ def piper_block_regions(
     multi-layer model produces a count unique to the block graphs. At one
     layer the block graph would also run 5 times and
     ``pooled_window_metrics`` could not tell it from the loss- and
-    embedding-side partitions -- which is why PiperShape.huge sets
-    ``supports_block_regions=False`` and the run declares no regions rather
-    than adding a tiebreak that would weaken validation rule 7.
+    embedding-side partitions -- which is why ``supports_block_regions`` is
+    derived as ``n_layers > 1`` (False at huge) and such a run declares no
+    regions rather than adding a tiebreak that would weaken validation
+    rule 7.
     """
     invocations = n_layers * profiler_active
     return (

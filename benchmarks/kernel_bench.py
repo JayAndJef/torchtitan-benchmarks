@@ -31,11 +31,13 @@ from benchmarks.kernel_stats import (
 from benchmarks.kernels import (
     CorrectnessCheck,
     KernelScenario,
+    KernelWorkload,
     MODES,
-    Piper1BSpec,
+    routing_divides_evenly,
     shape_summary,
 )
 from benchmarks.metrics import summarize
+from piper1b.model_shape import PiperShape
 
 
 @dataclass
@@ -350,10 +352,26 @@ def _heaviest_mode(arm: BuiltArm) -> str:
 
 def run_kernel_scenario(
     scenario: KernelScenario,
-    spec: Piper1BSpec,
+    shape: PiperShape,
+    workload: KernelWorkload,
     options: RunOptions,
     hardware: str,
 ) -> KernelScenarioResult:
+    # Asserted here as well as in the runner, and before the device check so
+    # it holds on any host: the runner's loud skip is the friendly path, not
+    # the guard. `python -m benchmarks.kernel_worker` and direct callers reach
+    # this function without passing through it, and an unbalanced split is the
+    # violation that can measure rather than fail -- swiglu_inputs hands every
+    # expert an equal slice that does not cover the rows it just built.
+    if scenario.requires_balanced_routing and not routing_divides_evenly(
+        shape, workload
+    ):
+        rows = workload.batch * workload.seq_len * shape.top_k
+        raise ValueError(
+            f"{scenario.name}: {rows} routed rows (batch {workload.batch} x "
+            f"seq {workload.seq_len} x top_k {shape.top_k}) do not divide "
+            f"evenly among {shape.num_experts} experts"
+        )
     if not torch.cuda.is_available():
         raise RuntimeError("kernel benchmarks require a CUDA device")
     device = torch.device("cuda")
@@ -361,13 +379,15 @@ def run_kernel_scenario(
     generator = torch.Generator(device=device)
     generator.manual_seed(options.seed)
 
-    inputs = resolve_symbol(scenario.inputs_builder)(spec, device, generator)
+    inputs = resolve_symbol(scenario.inputs_builder)(
+        shape, workload, device, generator
+    )
     built = {
-        arm.name: resolve_symbol(arm.builder)(spec, inputs)
+        arm.name: resolve_symbol(arm.builder)(shape, workload, inputs)
         for arm in scenario.arms
     }
     fp64_reference = (
-        resolve_symbol(scenario.reference_builder)(spec, inputs)
+        resolve_symbol(scenario.reference_builder)(shape, workload, inputs)
         if scenario.reference_builder
         else None
     )
@@ -455,8 +475,10 @@ def run_kernel_scenario(
     return KernelScenarioResult(
         scenario=scenario.name,
         hardware=hardware,
-        spec=asdict(spec),
-        shapes=shape_summary(scenario.name, spec),
+        model_size=shape.name,
+        model_shape=shape.describe(seq_len=workload.seq_len),
+        workload=asdict(workload),
+        shapes=shape_summary(scenario.name, shape, workload),
         n=options.n,
         warmup=options.warmup,
         seed=options.seed,

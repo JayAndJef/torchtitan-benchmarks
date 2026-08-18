@@ -35,16 +35,10 @@ from dataclasses import replace
 from piper1b.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_full_logits,
-    qwen3_piper_1b_full_logits_huge,
     qwen3_piper_1b_fused_linear_ce,
-    qwen3_piper_1b_fused_linear_ce_huge,
-    qwen3_piper_1b_huge,
     qwen3_piper_1b_piper_optimized_te_ce,
-    qwen3_piper_1b_piper_optimized_te_ce_huge,
     qwen3_piper_1b_te_fused_ce,
-    qwen3_piper_1b_te_fused_ce_huge,
     qwen3_piper_1b_unfused_qkv,
-    qwen3_piper_1b_unfused_qkv_huge,
 )
 from piper1b.lm_head.losses import (
     FusedLinearCrossEntropyLoss,
@@ -227,19 +221,14 @@ class ParallelizeTests(unittest.TestCase):
             qwen3_piper_1b_fused_linear_ce,
             qwen3_piper_1b_te_fused_ce,
             qwen3_piper_1b_piper_optimized_te_ce,
-            qwen3_piper_1b_huge,
-            qwen3_piper_1b_unfused_qkv_huge,
-            qwen3_piper_1b_full_logits_huge,
-            qwen3_piper_1b_fused_linear_ce_huge,
-            qwen3_piper_1b_te_fused_ce_huge,
-            qwen3_piper_1b_piper_optimized_te_ce_huge,
         ):
-            with self.subTest(config=factory.__name__):
-                config = factory()
-                self.assertIs(
-                    config.model_spec.parallelize_fn, parallelize_piper1b
-                )
-                self.assertEqual(config.training.dtype, "bfloat16")
+            for size in PIPER_SHAPES:
+                with self.subTest(config=factory.__name__, size=size):
+                    config = factory(size=size)
+                    self.assertIs(
+                        config.model_spec.parallelize_fn, parallelize_piper1b
+                    )
+                    self.assertEqual(config.training.dtype, "bfloat16")
 
     def test_parallelize_rejects_multi_gpu_and_non_bf16(self) -> None:
         # Both guards fire before the model is touched, so dummies suffice.
@@ -295,6 +284,28 @@ class CommandTests(unittest.TestCase):
             "qwen3_piper_1b_unfused_qkv",
         )
         self.assertEqual(baseline[baseline.index("--debug.seed") + 1], "42")
+
+    def test_the_model_size_rides_as_a_config_argument(self) -> None:
+        # The config name never carries the size: it is delivered as a keyword
+        # argument to the config function via the fork's --config-arg.
+        for size in PIPER_SHAPES:
+            with self.subTest(size=size):
+                command = command_for_arm(
+                    PIPER_1B_QKV.workload,
+                    PIPER_1B_QKV.arm("fused_qkv"),
+                    Path("/out/fused_qkv"),
+                    [],
+                    model_size=size,
+                )
+                self.assertEqual(
+                    command[command.index("--config") + 1], "qwen3_piper_1b"
+                )
+                self.assertEqual(
+                    command[command.index("--config-arg") + 1], f"size={size}"
+                )
+                self.assertFalse(
+                    [token for token in command if token.endswith(f"_{size}")]
+                )
 
     def test_command_adds_only_the_arm_override_and_dump_folder(self) -> None:
         arm = PIPER_1B_SWIGLU.arm("piper_optimized_triton")
