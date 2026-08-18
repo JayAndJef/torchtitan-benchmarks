@@ -16,8 +16,8 @@ from benchmarks.artifacts.summaries import SampleSummary
 # (model_size / model_shape) and the workload run through it, so schema-1
 # files carry no equivalent of either field and are rejected outright.
 #
-# 3: the measurand changed from a round-robin wall median to burst-amortized
-# per-call device time. ``n`` and ``warmup`` counted interleaved *cycles* and
+# 3: the measurand changed from a round-robin wall median to a burst-amortized
+# per-call time. ``n`` and ``warmup`` counted interleaved *cycles* and
 # were printed as such, so they are **replaced** by ``replicates`` /
 # ``samples_per_replicate`` / ``burst_k`` / ``warmup_calls`` rather than
 # reinterpreted -- a repurposed field would put a false statement in every

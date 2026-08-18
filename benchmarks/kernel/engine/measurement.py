@@ -14,15 +14,39 @@ each with its own reason to change:
   fixes one ``k``, this sweeps 1/4/16/64 in one mode, so a reader can see how
   much dispatch cost the chosen ``k`` amortized away.
 
-**Why the measurand is burst-amortized device time.** The previous primary
-pass timed one call per arm per cycle and reported the wall median, which on
-this host-bound workload is mostly host dispatch: the rope arms are 90%+
-dispatch, with device work of ~11-13 us inside 131-286 us walls. Dispatch
-cost is real end-to-end, but in an *isolated* benchmark it is the harness,
-not the kernel, and it swamped the quantity these scenarios exist to compare.
-A burst of ``k`` back-to-back calls is also what a component looks like
+**What the number is, and what it is not.** It is the per-call cost of one
+arm under back-to-back dispatch. It is **not** device time. A CUDA event
+pair measures an interval on the stream, and the host has to keep that
+stream fed. Where the host cannot enqueue faster than the device drains,
+the interval holds the host stalls as well, and no ``k`` removes them: a
+burst amortizes the fixed per-burst synchronize, not the per-call dispatch.
+
+The number equals device time only where the arm is device-bound, and the
+ladder is the evidence. Measured on an H200 at the normal shape, rope
+forward, us per call at k = 1/4/16/64::
+
+    copy_floor     27.66   16.16   13.43   13.18
+    baseline      125.49   88.96   76.91   73.10
+    helion        301.23  256.53  234.87  226.01
+    te            186.64  138.87  122.60  114.40
+
+``copy_floor`` converges onto the ~11-13 us of device work these shapes
+carry, so the method works where an arm is device-bound. The three module
+arms sit 6-19x above that floor and are still falling at k=64, so roughly
+85% of each published rope number is host dispatch.
+
+**A dispatch-bound arm carries a k-dependent ratio.** ``helion`` against
+``baseline`` is 2.40x at k=1, 3.05x at k=16 and 3.09x at k=64. A ratio that
+moves with a harness parameter is not a property of the two kernels. Run
+``--burst``, read the ``burst_residual`` column the merge derives from the
+ladder, and report a flagged row as a comparison of dispatch cost. A
+kernel-speed claim needs profiler-summed device time, which this module
+does not measure.
+
+A burst of ``k`` back-to-back calls is still what a component looks like
 inside a steady-state training step, where the same kernel runs on every
-layer of every iteration.
+layer of every iteration. That is what makes the number worth reporting. It
+is not what would make it device time.
 
 **Why one ``k`` for every arm in a scenario.** A ``k`` chosen per arm makes
 arms incomparable -- a k=64 arm overlaps 64 launches with device work and a

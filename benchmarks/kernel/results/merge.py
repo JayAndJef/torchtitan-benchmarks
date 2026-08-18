@@ -72,11 +72,29 @@ from benchmarks.kernel.schema import (
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
+# An arm whose per-call time falls by more than this across the ladder's top
+# two rungs has not amortized its dispatch cost away at the chosen ``k``. The
+# value separates the measured rope arms (3.9-7.2%) from ``copy_floor``, the
+# one arm there that is genuinely device-bound (1.9%).
+BURST_RESIDUAL_FLAG = 0.02
+
+
 # How the numbers were produced. The rationale for each entry lives in
 # ``benchmarks.kernel.engine.measurement``'s docstring; recorded here because
 # the parent is what assembles the file that publishes them.
 KERNEL_MEASUREMENT_METHODOLOGY = {
-    "measurand": "burst_amortized_per_call_device_time",
+    "measurand": "burst_amortized_per_call_time",
+    "measurand_note": (
+        "the per-call cost under back-to-back dispatch, not device time: a "
+        "CUDA event pair measures an interval on the stream, so where the "
+        "host cannot enqueue faster than the device drains, the interval "
+        "holds the host stalls too. It equals device time only where the arm "
+        "is device-bound. Run --burst; burst_residual is the fraction by "
+        "which per-call time still falls across the ladder's top two rungs, "
+        "and an arm above burst_residual_flag_threshold has a burst_k-"
+        "dependent ratio that is not a kernel-speed claim."
+    ),
+    "burst_residual_flag_threshold": BURST_RESIDUAL_FLAG,
     "arm_isolation": "one_process_per_arm_replicate",
     "l2_flush": False,
     "l2_flush_rationale": (
@@ -143,6 +161,31 @@ def _mode_samples(
                 for fragment in ordered
             ]
     return samples
+
+
+def _burst_residual(
+    ladders: dict[str, dict[str, float]] | None, mode: str
+) -> float | None:
+    """How far per-call time still falls across the ladder's top two rungs.
+
+    This is the only evidence in the file that says whether a number is
+    device time or dispatch cost. The primary pass fixes one ``k``, so it
+    cannot tell the two apart on its own: a device-bound arm and a
+    dispatch-bound arm both report a single per-call figure. An arm still
+    falling at the top of the ladder has host stalls inside its measured
+    interval, and its ratio against another arm moves with ``k``.
+
+    Returns ``None`` when the ``--burst`` ladder did not run for this mode,
+    which is the default. Absent evidence reads as absent, never as zero.
+    """
+    rungs = (ladders or {}).get(mode) or {}
+    if len(rungs) < 2:
+        return None
+    sizes = sorted(rungs, key=int)
+    penultimate, last = rungs[sizes[-2]], rungs[sizes[-1]]
+    if last <= 0:
+        return None
+    return (penultimate - last) / last
 
 
 def merge_kernel_fragments(
@@ -287,6 +330,9 @@ def merge_kernel_fragments(
                 derived["gbps"] = bytes_moved / (mode_median * 1e-6) / 1e9
             if mode in floor_medians and not is_floor and floor_medians[mode]:
                 derived["x_floor"] = mode_median / floor_medians[mode]
+            residual = _burst_residual(first["burst_us_per_call"], mode)
+            if residual is not None:
+                derived["burst_residual"] = residual
             modes[mode] = ModeResult(
                 summary=summarize(pooled),
                 replicates_us=tuple(

@@ -190,8 +190,11 @@ the compiler fuses the graph around it.
 | `lm_head` | full logits vs fused linear-CE vs TE and Piper-optimized cross entropy |
 | `attention` | inner attention only: FlexAttention vs FlashAttention-3 varlen vs FlexAttention lowered to FlashAttention-4 |
 
-Each number is burst-amortized per-call device time, repeated over replicate
-sweeps so drift affects every arm equally. Every arm is *timed* in its own
+Each number is the burst-amortized per-call cost under back-to-back dispatch,
+repeated over replicate sweeps so drift affects every arm equally. It is not
+device time: where the host cannot keep the stream fed, the measured interval
+holds host stalls as well, and such an arm's ratio moves with the burst size.
+Run `--burst` to see which arms those are. Every arm is *timed* in its own
 process, so one arm's dependencies never reach another's during measurement;
 the parent merges the per-worker fragments into the results file. The
 correctness pass is the exception: it builds the whole roster in one process,

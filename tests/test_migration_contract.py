@@ -746,8 +746,11 @@ TEST_CENSUS = {
     "test_kernel_merge": 4,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
-    # CI is taken over, and a flat sample list cannot express them.
-    "test_kernel_results": 5,
+    # CI is taken over, and a flat sample list cannot express them. +3 for
+    # the burst residual: that it marks a flagged arm beside its ratio, that
+    # an absent ladder reads as unknown rather than as converged, and that
+    # the threshold still splits the measured rope arms from copy_floor.
+    "test_kernel_results": 8,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
     # scenario's rejection of a mode name MODES does not hold, +1 for
@@ -769,7 +772,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 203
+TEST_CENSUS_TOTAL = 206
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

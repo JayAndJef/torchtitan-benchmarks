@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from benchmarks.artifacts.summaries import _pvalue, _value
+from benchmarks.kernel.results.merge import BURST_RESIDUAL_FLAG
 from benchmarks.kernel.results.schema import KernelScenarioResult
 from benchmarks.kernel.schema import MODES
 
@@ -15,6 +16,20 @@ def _ratio_ci(row: dict | None) -> str:
     if low is None or high is None:
         return "-"
     return f"[{low:.4f},{high:.4f}]"
+
+
+def _residual(derived: dict, width: int) -> str:
+    """The ladder residual as a percentage, with ``!`` when it is flagged.
+
+    ``!`` says the row above it is a dispatch comparison rather than a
+    kernel comparison, so it sits in the timing table beside the ratio it
+    qualifies rather than under the ladder further down.
+    """
+    value = derived.get("burst_residual")
+    if value is None:
+        return f"{'-':>{width}s}"
+    mark = "!" if value > BURST_RESIDUAL_FLAG else " "
+    return f"{value * 100:>{width - 1}.1f}{mark}"
 
 
 def render_kernel_results(result: KernelScenarioResult) -> str:
@@ -63,7 +78,8 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
                 "  "
                 + f"{'arm':22s} {'median us':>10s} {'sd':>8s} {'vs':>18s} "
                 + f"{'ratio':>7s} {'95% CI':>17s} {'GB/s':>8s} "
-                + f"{'x floor':>8s} {'Welch p':>9s} {'MWU p':>9s} {'d':>6s}",
+                + f"{'x floor':>8s} {'resid %':>8s} "
+                + f"{'Welch p':>9s} {'MWU p':>9s} {'d':>6s}",
             ]
         )
         for name in arms:
@@ -79,6 +95,7 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
                 f"{_ratio_ci(row):>17s} "
                 f"{_value(derived.get('gbps'), 8, 1)} "
                 f"{_value(derived.get('x_floor'), 8, 2)} "
+                f"{_residual(derived, 8)} "
                 f"{_pvalue(row['welch_p'] if row else None, 9)} "
                 f"{_pvalue(row['mwu_p'] if row else None, 9)} "
                 f"{_value(row['cohens_d'] if row else None, 6, 2)}"
@@ -128,7 +145,14 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
                 )
         lines.append(
             f"  Per-call time still falling at the top means burst k="
-            f"{result.burst_k} is too small for that arm."
+            f"{result.burst_k} is too small for that arm. The 'resid %'"
+        )
+        lines.append(
+            f"  column above is that fall, and '!' marks it above "
+            f"{BURST_RESIDUAL_FLAG * 100:g}%: those rows compare dispatch"
+        )
+        lines.append(
+            "  cost, not kernel speed, and their ratios move with burst k."
         )
 
     lines.extend(["", "correctness:"])
@@ -153,8 +177,11 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
     lines.extend(
         [
             "",
-            "Each number is burst-amortized per-call device time, not a wall",
-            "median. The ratio is estimated once per replicate and",
+            "Each number is the per-call cost under back-to-back dispatch.",
+            "It is not device time: where the host cannot keep the stream",
+            "fed, the interval holds host stalls too. Run --burst and read",
+            "the residual column; a flagged arm has a k-dependent ratio.",
+            "The ratio is estimated once per replicate and",
             "bootstrapped across replicates, so the CI is the statistic to",
             "read; Welch, MWU and d describe the pooled sample distribution",
             "only, and their independence assumption is not met. These are",
