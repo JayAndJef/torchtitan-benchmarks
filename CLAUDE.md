@@ -107,7 +107,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 
 ### Provenance boundary: artifacts written before the restructure
 
-The layout above landed as a single flag-day commit, `<flagday sha>`. It
+The layout above landed as a single flag-day commit, `9f6a69b`. It
 retired three top-level packages -- `piper1b`, `megatron_baseline` and
 `analysis` -- into `benchmarks/` and `tools/`, and flattened the old
 `benchmarks.kernel_*` modules into `benchmarks/kernel/`. **This section is the
@@ -130,7 +130,7 @@ run directory therefore still **decodes** -- `load_manifest`, `load_run` and
 
 What an old directory is **not** is **resumable**. `run-all --resume` aborts on
 a changed `benchmarks_git_rev`, and the flag day changes it -- so a run started
-before `<flagday sha>` cannot be continued after it, by design. Nothing here
+before `9f6a69b` cannot be continued after it, by design. Nothing here
 makes the old *numbers* wrong; a pure file move changes no measurement. It makes
 them a separate `benchmarks_git_rev`, which was already a comparability
 boundary.
