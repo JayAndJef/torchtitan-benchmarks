@@ -1,8 +1,11 @@
 """Benchmark scenario definitions and the global run axes.
 
-Scenarios describe what differs between arms. The runner owns command
-construction, provenance collection, and validation, so new ablations do not
-need to duplicate the training harness.
+Scenarios describe what differs between arms, and nothing else: command
+construction (``benchmarks.e2e.launch``), provenance collection
+(``benchmarks.execution.environment``), and validation
+(``benchmarks.e2e.validation``) each live in their own module and read these
+declarations. That is what lets a new ablation be a registry entry rather
+than a new copy of the training harness.
 
 The compile-mode, activation-checkpointing, and execution-model constants
 live here too: they are per-run axes of a scenario execution, consumed by

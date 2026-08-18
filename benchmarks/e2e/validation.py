@@ -4,7 +4,9 @@
 published. Engine differences live in the ``VALIDATION_PROFILES`` registry,
 selected by ``Arm.validation``; the structural rules -- trace-window count,
 kernel markers, ``cudaGraphLaunch`` under cuda-graph mode, override counting,
-the parameter-count line, and compiled-region structure -- are shared.
+and the parameter-count line -- are shared. Compiled-region structure is
+*not*: it is a per-profile field (``check_regions``), because the megatron
+arm has no Inductor graph annotations to match.
 """
 
 from __future__ import annotations

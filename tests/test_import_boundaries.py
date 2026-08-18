@@ -382,8 +382,8 @@ class CanonicalImportRootsTest(unittest.TestCase):
         """Every intra-repo import targets ``CANONICAL_ROOTS``.
 
         A file may additionally import its own root, which is what lets the
-        script directories (``analysis/``, ``tools/``) and this test package
-        refer to their own siblings without being library code.
+        ``tools/`` scripts and this test package refer to their own siblings
+        without being library code.
         """
         violations = []
         for path in tracked_python_files():

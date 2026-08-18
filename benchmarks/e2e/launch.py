@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from benchmarks.e2e.registry import Arm, Workload
+from benchmarks.e2e.registry import TORCH_COMPILE_MODE, Arm, Workload
 
 
 def command_for_arm(
@@ -35,13 +35,6 @@ def command_for_arm(
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
-    # benchmarks.e2e.registry imports nothing from this module, so the cycle
-    # this local import once avoided (back when the constant lived in the old
-    # benchmarks.artifacts) no longer exists and module scope would be
-    # correct. Kept local so the restructure changes no import timing;
-    # hoisting it is a follow-up.
-    from benchmarks.e2e.registry import TORCH_COMPILE_MODE
-
     args = [
         "./run_train.sh",
         "--module",

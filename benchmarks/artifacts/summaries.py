@@ -2,9 +2,11 @@
 
 Deliberately dependency-light: ``dataclasses`` and ``statistics`` only. Both
 measurement systems summarize samples the same way and render them into the
-same fixed-width columns, so these live below both rather than inside either
--- ``benchmarks.e2e.results`` and ``benchmarks.kernel.results.*`` each import
-from here and neither imports from the other.
+same fixed-width columns, so these live below both rather than inside either.
+``benchmarks.e2e.results`` imports from here, as do four kernel modules
+spanning two subpackages -- ``kernel.engine.run``, ``kernel.engine.statistics``,
+``kernel.results.schema`` and ``kernel.results.reporting`` -- and neither
+measurement system imports the other.
 """
 
 from __future__ import annotations

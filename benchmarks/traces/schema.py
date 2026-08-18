@@ -2,8 +2,13 @@
 
 ``Region`` is the contract between a scenario (which declares the regions it
 expects) and the extraction code (which finds them in a trace). It is
-deliberately free of first-party imports so that both the end-to-end and the
-kernel packages can depend on it without depending on each other.
+deliberately free of first-party imports: it sits below every package that
+names a region -- ``benchmarks.e2e.registry`` declares them,
+``benchmarks.traces.extraction`` finds them, ``benchmarks.e2e.results`` and
+``benchmarks.e2e.validation`` consume them, and
+``benchmarks.artifacts.manifests`` serializes them -- so none of those has to
+import another to spell the type. Nothing under ``benchmarks.kernel``
+references regions at all; kernel-isolation runs write no traces.
 """
 
 from dataclasses import dataclass
