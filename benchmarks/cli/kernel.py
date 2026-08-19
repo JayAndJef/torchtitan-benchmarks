@@ -1,11 +1,13 @@
 """The ``kernel-bench`` command: the kernel-isolation family, on its own.
 
-One command and its thirteen options. With the end-to-end family it shares
-the group, the event renderer and the model-shape registry, and nothing else
--- different request type, different runner, different results schema,
-different reporter -- so its option stack no longer sits two hundred lines
-below ``_execution_options``, an eleven-option block that never applied to
-it.
+One command and its own option stack. The option count that used to open this
+paragraph is gone: it was stale two commits after it was written, and a
+reader can list the options from the file below. With the end-to-end family
+the command shares the group, the event renderer and the model-shape
+registry, and nothing else -- different request type, different runner,
+different results schema, different reporter -- so its options no longer sit
+two hundred lines below ``_execution_options``, an eleven-option block that
+never applied to it.
 
 **Environment variables are declined here on purpose.** Only ``--cache-root``
 and ``--compiler-env`` read one; ``--out``, ``--seq-len``, ``--batch`` and

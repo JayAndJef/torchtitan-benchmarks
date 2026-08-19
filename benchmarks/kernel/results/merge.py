@@ -1,9 +1,11 @@
 """Assemble one scenario's results from the fragments its workers wrote.
 
 Per-arm process isolation means no single process ever holds the whole
-scenario: one worker gates every arm for correctness, and one worker per
-(arm, replicate) times exactly one arm. Each writes a small JSON fragment.
-This module is what turns that pile back into a ``KernelScenarioResult``.
+scenario: one worker gates every arm for correctness, and each timing worker
+times exactly one arm -- one replicate of it at the default, a block of
+consecutive replicates above ``replicates_per_process`` 1, and never a second
+arm at any value. Each writes a small JSON fragment, one per replicate. This
+module is what turns that pile back into a ``KernelScenarioResult``.
 
 It runs in the **parent**, and it is torch-free. That is not incidental --
 the parent is the only process that sees every fragment, so it is the only

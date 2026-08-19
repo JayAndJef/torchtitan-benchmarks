@@ -8,8 +8,10 @@ unlike the e2e sweep the parent continues past a failing scenario and reports
 all outcomes.
 
 **One process per pass, not one per scenario.** A scenario is a correctness
-worker followed by ``replicates x arms`` timing workers, each building a
-single arm. That is what keeps one arm's dependencies out of another arm's
+worker followed by ``blocks x arms`` timing workers, each building a single
+arm. A block is ``replicates_per_process`` consecutive replicates, so at the
+default of 1 there are ``replicates x arms`` of them. That is what keeps one
+arm's dependencies out of another arm's
 interpreter -- FA3 and TransformerEngine cannot share a process at all (a
 cuDNN soname collision, see CLAUDE.md) -- and it is why the parent, not a
 worker, writes ``results.json``: only the parent sees every fragment.
@@ -92,7 +94,12 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # 6: "replicates_per_process" records how many of an arm's replicates shared
 # a worker. A schema-5 manifest was always 1 -- the field did not exist
 # because the choice did not -- so its absence is unambiguous, and the bump
-# is labelling again rather than a reinterpretation.
+# is labelling again rather than a reinterpretation. The timing entries of
+# "commands" also change shape here, from "--fragment <path>" to
+# "--fragments-dir <dir>": a worker that measures a block writes a file per
+# replicate, so it is handed the directory. Nothing reads the field, but a
+# reader diffing a schema-5 manifest against a schema-6 one meets the change
+# and this is where it is explained.
 KERNEL_MANIFEST_SCHEMA_VERSION = 6
 
 
@@ -210,7 +217,8 @@ def worker_command(
     )
     command += [
         # Neither worker pass reads --replicates. The parent owns the sweep,
-        # and a timing worker measures the one replicate --replicate names.
+        # and a timing worker measures the block --replicate and
+        # --replicate-count name, which is one replicate at the default.
         # It is forwarded as provenance: the manifest publishes this argv as
         # the record of the run, so each command states the whole request it
         # came from, and the worker's own default of 5 never stands in for a
