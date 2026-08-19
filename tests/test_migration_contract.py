@@ -73,6 +73,7 @@ KERNEL_ARMS_MODULES = {
     "qk_norm": "benchmarks.kernel.operations.qk_norm",
     "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
+    "final_norm": "benchmarks.kernel.operations.final_norm",
 }
 
 # Third-party roots override paths are allowed to name, so the "did this move
@@ -130,6 +131,7 @@ KERNEL_INVENTORY = {
     # bound it. The two arms are the whole roster.
     "attn_out_proj": ("mcore/base", "titan"),
     "ffn_norm": ("copy_floor", "mcore/base", "titan"),
+    "final_norm": ("copy_floor", "mcore/base", "titan"),
 }
 
 KERNEL_BASELINE_ARMS = {
@@ -148,6 +150,7 @@ KERNEL_BASELINE_ARMS = {
     "qk_norm": "mcore/base",
     "attn_out_proj": "mcore/base",
     "ffn_norm": "mcore/base",
+    "final_norm": "mcore/base",
 }
 
 # Arm names deliberately match across the two registries wherever the same
@@ -788,6 +791,11 @@ TEST_CENSUS = {
     # arm honest -- an epsilon the two engines do not share, and a module
     # whose forward returns the residual tuple the fused variant produces.
     "test_kernel_ffn_norm": 18,
+    # Scenario 14: 22 covering the shared inputs, the fp64 reference, the
+    # floor's traffic and both arm closures -- plus the titan extraction,
+    # which is one config read here because the norm is a model-level module
+    # and not a per-layer one.
+    "test_kernel_final_norm": 22,
     "test_kernel_results": 9,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
@@ -835,7 +843,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 308
+TEST_CENSUS_TOTAL = 330
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -434,4 +434,14 @@ def shape_summary(
             "rows": batch * seq,
             "row_width": shape.dim,
         }
+    if scenario_name == "final_norm":
+        return {
+            "x": [batch, seq, shape.dim],
+            "weight": [shape.dim],
+            # The reduction is over the last dimension, so the leading
+            # dimensions are a row count and nothing else. This is why the
+            # scenario charges no layout conversion to either engine.
+            "rows": batch * seq,
+            "reduction_length": shape.dim,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

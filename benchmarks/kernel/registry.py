@@ -755,6 +755,133 @@ FFN_NORM = KernelScenario(
 )
 
 
+FINAL_NORM = KernelScenario(
+    name="final_norm",
+    description=(
+        "The norm after the last transformer block (titan Decoder.norm vs "
+        "megatron decoder.final_layernorm): torch.nn.RMSNorm against "
+        "TransformerEngine RMSNorm. Both arms are EAGER, which is the "
+        "production treatment on both engines -- apply_compile reaches only "
+        "the children of model.layers and Decoder.norm is a sibling of them. "
+        "TE norms run through the cuDNN backend on this host "
+        "(NVTE_NORM_FWD_USE_CUDNN/NVTE_NORM_BWD_USE_CUDNN=1), so this is not "
+        "megatron's native norm kernel. A norm may be at memory bandwidth, so "
+        "copy_floor measures the same traffic and the x_floor column decides "
+        "whether the ratio is a kernel claim at all. The floor declares "
+        "forward only, so forward_backward carries no x_floor column."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.final_norm:final_norm_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.final_norm:final_norm_reference"
+    ),
+    baseline_arm="mcore/base",
+    arms=(
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "One read of the hidden state and one write: the bandwidth "
+                "floor for this shape"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.final_norm:"
+                "build_final_norm_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a copy "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron decoder.final_layernorm: TransformerEngine RMSNorm "
+                "(cuDNN norm backend on this host), eager as megatron runs it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.final_norm:"
+                "build_final_norm_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so every TE "
+                "module it builds runs eager end to end; compiling this one "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="fp64",
+                    outputs=("out", "x_grad", "weight_grad"),
+                    # A norm is a reduction, so rel_l2 is the only safe metric
+                    # (CLAUDE.md, "Choosing a correctness metric"). Measured on
+                    # CPU bf16 at the default workload: out 1.67e-3, x_grad
+                    # 1.66e-3, weight_grad 1.70e-3. The gate holds ~12x.
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan Decoder.norm: torch.nn.RMSNorm, eager -- "
+                "apply_compile reaches only the children of model.layers, and "
+                "Decoder.norm is a sibling of them, so production runs this "
+                "norm eager on both engines"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.final_norm:"
+                "build_final_norm_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            # The one titan module arm in the registry that is not compiled,
+            # and the reason is fidelity rather than convenience.
+            # ``apply_compile`` walks ``model.layers.named_children()`` alone
+            # (``distributed/compile.py:57-58``), and ``Decoder.__init__``
+            # builds ``tok_embeddings``, ``norm`` and ``lm_head`` as siblings
+            # of ``layers`` (``models/common/decoder.py:234,236,240-241``), so
+            # this norm sits outside every compiled region in production.
+            eager_reason=(
+                "Decoder.norm sits outside every compiled region: "
+                "apply_compile walks model.layers.named_children() alone, and "
+                "the norm is a sibling of layers rather than a child of it, "
+                "so compiling it here would measure a treatment production "
+                "never applies to it"
+            ),
+            correctness=(
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="fp64",
+                    outputs=("out", "x_grad", "weight_grad"),
+                    max_rel_l2=2e-2,
+                ),
+                # The cross-engine agreement, recorded and not enforced. The
+                # two fp64 gates above are the enforcement and they are
+                # stronger: each arm is right in absolute terms, which bounds
+                # the distance between them. An enforced arm-vs-arm gate could
+                # only fail a run for a reason the fp64 gates already allow.
+                # It sits on the non-anchor arm on purpose: resolve_arm_skips
+                # closes the skip set over correctness references, so a check
+                # pointing the other way would let a skipped titan arm take
+                # the anchor with it.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("out", "x_grad", "weight_grad"),
+                    max_rel_l2=2e-2,
+                    informational=True,
+                ),
+            ),
+        ),
+    ),
+    # comparisons left at None: the derived set is exactly the one row this
+    # scenario publishes, titan against mcore/base, with the floor excluded.
+)
+
+
 KERNEL_SCENARIOS = {
     scenario.name: scenario
     for scenario in (
@@ -766,6 +893,7 @@ KERNEL_SCENARIOS = {
         QK_NORM,
         ATTN_OUT_PROJ,
         FFN_NORM,
+        FINAL_NORM,
     )
 }
 
