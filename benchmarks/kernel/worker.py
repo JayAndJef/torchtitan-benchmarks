@@ -165,11 +165,9 @@ def main(argv: list[str] | None = None) -> int:
     with phases.phase("import_engine"):
         from benchmarks.artifacts.layout import atomic_write_json
         from benchmarks.kernel.engine.run import (
-            arm_extras,
-            build_timing_arm,
             RunOptions,
             run_correctness_pass,
-            time_replicate,
+            time_replicate_block,
         )
         from benchmarks.kernel.schema import timing_fragment_path
 
@@ -189,24 +187,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             written.append((args.fragment, fragment))
         else:
-            declaration, built = build_timing_arm(
-                scenario, args.arm, shape, workload, options
+            # The build, the replicate loop and the rule that the per-arm
+            # extras attach to replicate 0 all live in the engine, in one
+            # function. At --replicate-count 1 it is the order the
+            # single-replicate pass has always used, because
+            # run_timing_pass is now the same function's count=1 case.
+            fragments = time_replicate_block(
+                scenario,
+                args.arm,
+                args.replicate,
+                args.replicate_count,
+                shape,
+                workload,
+                options,
             )
-            fragments = {
-                replicate: time_replicate(
-                    scenario, declaration, built, replicate, options
-                )
-                for replicate in range(
-                    args.replicate, args.replicate + args.replicate_count
-                )
-            }
-            # After every replicate, never between two of them: the memory
-            # pass and the burst ladder are per-arm measurements, and running
-            # them mid-batch would give replicate N+1 a warm-up its unbatched
-            # twin never had. At --replicate-count 1 this is the order the
-            # single-replicate pass has always used.
-            if 0 in fragments:
-                fragments[0].update(arm_extras(declaration, built, options))
             written.extend(
                 (
                     timing_fragment_path(

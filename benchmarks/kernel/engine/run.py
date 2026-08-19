@@ -6,11 +6,15 @@ worker process:
 * ``run_correctness_pass`` gates every arm against the others and against
   the fp64 reference. It runs first, and once per scenario. It builds the
   arms **one at a time**, keeping each arm's outputs and dropping the arm.
-* ``run_timing_pass`` builds **one** arm and times it for one replicate. It
-  runs once per (arm, replicate). It is a composition of three smaller
-  functions -- ``build_timing_arm``, ``time_replicate`` and ``arm_extras`` --
-  because the build is the expensive half and a replicate is the cheap one,
-  so a caller may build once and measure several times.
+* ``time_replicate_block`` builds **one** arm and times a block of
+  consecutive replicates of it. It runs once per (arm, block). It is a
+  composition of three smaller functions -- ``build_timing_arm``,
+  ``time_replicate`` and ``arm_extras`` -- because the build is the expensive
+  half and a replicate is the cheap one, so one build serves several
+  measurements. ``run_timing_pass`` is its single-replicate case and composes
+  nothing of its own: the ordering and the "extras belong to replicate 0"
+  rule are written once, so the worker's path and the in-process path cannot
+  drift apart.
 
 Each returns a JSON-ready fragment rather than a result. The parent merges
 the fragments (``benchmarks.kernel.results.merge``), because the parent is
@@ -453,6 +457,55 @@ def arm_extras(
     return extras
 
 
+def time_replicate_block(
+    scenario: KernelScenario,
+    arm_name: str,
+    first: int,
+    count: int,
+    shape: PiperShape,
+    workload: KernelWorkload,
+    options: RunOptions,
+) -> dict[int, dict[str, Any]]:
+    """Build one arm and time ``count`` consecutive replicates of it.
+
+    The composition of the three functions above, and the **only** one. It
+    holds both invariants the split would otherwise let a caller re-encode:
+    the build-then-measure order, and the rule that the per-arm extras attach
+    to replicate 0 alone. The worker and ``run_timing_pass`` each wrote their
+    own copy of that pair, so a change to one would have diverged silently
+    from the other -- and ``run_kernel_scenario`` is the in-process
+    composition CLAUDE.md advertises as the real passes minus the process
+    boundaries, so the divergence would have been invisible until a GPU smoke
+    test disagreed with a real run.
+
+    The extras run after every replicate, never between two of them. They are
+    a memory pass and a burst ladder, and running them mid-block would give
+    replicate N+1 a warm-up its unbatched twin never had.
+    """
+    if count < 1:
+        # Asserted here as well as in the worker's argument parser, for the
+        # same reason ``_prepare`` re-asserts the routing invariant: the
+        # parser is the friendly path, not the guard. An empty block writes
+        # no fragment and the merge would report the arm as lost, naming the
+        # replicates rather than the count that was zero.
+        raise ValueError(
+            f"{arm_name}: a replicate block covers at least one replicate, "
+            f"got {count}"
+        )
+    declaration, arm = build_timing_arm(
+        scenario, arm_name, shape, workload, options
+    )
+    fragments = {
+        replicate: time_replicate(
+            scenario, declaration, arm, replicate, options
+        )
+        for replicate in range(first, first + count)
+    }
+    if 0 in fragments:
+        fragments[0].update(arm_extras(declaration, arm, options))
+    return fragments
+
+
 def run_timing_pass(
     scenario: KernelScenario,
     arm_name: str,
@@ -463,17 +516,13 @@ def run_timing_pass(
 ) -> dict[str, Any]:
     """Build one arm and time it for one replicate, in this process.
 
-    The one-replicate composition of the three functions above, kept for
-    ``run_kernel_scenario`` and for direct callers. The worker runs the same
-    three, with the middle one repeated.
+    The single-replicate case of ``time_replicate_block``, kept for
+    ``run_kernel_scenario`` and for direct callers. It composes nothing of its
+    own, so the two paths cannot drift.
     """
-    declaration, arm = build_timing_arm(
-        scenario, arm_name, shape, workload, options
-    )
-    fragment = time_replicate(scenario, declaration, arm, replicate, options)
-    if replicate == 0:
-        fragment.update(arm_extras(declaration, arm, options))
-    return fragment
+    return time_replicate_block(
+        scenario, arm_name, replicate, 1, shape, workload, options
+    )[replicate]
 
 
 def run_kernel_scenario(
