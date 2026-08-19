@@ -260,7 +260,16 @@ def _exit_now(code: int) -> None:
     * **The fragment survives.** ``atomic_write_json`` writes a temporary
       file, closes it and renames it, all before ``main`` returns. Page-cache
       data outlives ``_exit``; only unflushed *process* buffers do not, which
-      is what the two flushes below are for.
+      is what the three flushes below are for. There are three because
+      Python owns two of the process's buffers and libc owns the rest: a
+      normal ``exit()`` flushes libc's streams and ``os._exit`` does not, and
+      the parent redirects this process's stdout to a file, so libc's
+      ``stdout`` is block-buffered rather than line-buffered. Any C or C++
+      extension that prints through ``printf`` or ``std::cout`` -- CUDA,
+      cuDNN and TransformerEngine all can -- would otherwise lose its output.
+      That output is never a measurement, but it is diagnostic, and the exit
+      codes it matters most for are 1 and 3, whose whole report to the
+      operator is a tail of this log.
     * **The compile caches survive.** Both Inductor and Triton write their
       artifacts when the kernel is compiled, not at exit. A cold-cache pass
       run both ways left 13 inductor files and 65 triton files either way,
@@ -287,9 +296,32 @@ def _exit_now(code: int) -> None:
     average 28-81 from concurrent agents, so each is uncitable and pending
     re-measurement on an idle box.** The reason to do this is the causal
     argument above, not the size of the number.
+
+    **Two limits on the four facts, so the next reader does not inherit them
+    as unconditional.**
+
+    * The facts are scoped to today's torch. The exit skips ``atexit``
+      *unconditionally*, so anything a later torch registers there is skipped
+      too. Re-check the compile-cache fact after a torch bump.
+    * **Do not copy this into the e2e training driver.** That process writes
+      profiler traces, and a trace is written by machinery this argument has
+      not been checked against. The cache check above was run for Inductor
+      and Triton only.
     """
     sys.stdout.flush()
     sys.stderr.flush()
+    # libc's own streams, which the two flushes above do not reach and
+    # ``os._exit`` does not flush. ``fflush(NULL)`` flushes every open output
+    # stream. Deferred rather than imported at module scope, so an argument
+    # error still returns without paying for it, and guarded because a
+    # failure to flush a diagnostic must never change the exit code the
+    # parent reads.
+    try:
+        import ctypes
+
+        ctypes.CDLL(None).fflush(None)
+    except (OSError, AttributeError):
+        pass
     os._exit(code)
 
 

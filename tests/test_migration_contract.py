@@ -869,7 +869,9 @@ TEST_CENSUS = {
     # that it closes when the block raises, that the exit hook runs inside it,
     # that a span nothing timed can still be recorded, and that the offset
     # from process exec is a plausible age.
-    "test_kernels": 40,
+    # +1 with the libc flush: os._exit skips libc's own exit, so a C
+    # extension's output would be lost from the log the parent tails.
+    "test_kernels": 41,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against
     # a frozen literal (including the cuda-graph branch the parity check
@@ -903,7 +905,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 472
+TEST_CENSUS_TOTAL = 473
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

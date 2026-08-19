@@ -758,5 +758,46 @@ class PhaseTableTests(unittest.TestCase):
         self.assertLess(offset, 24 * 3600)
 
 
+class WorkerExitTests(unittest.TestCase):
+    """``_exit_now`` ends the process, so it owns every buffer in it.
+
+    ``os._exit`` skips the interpreter unwind, which is the whole point: it
+    also skips libc's ``exit()``, and with it the flush of libc's own output
+    streams. Python's two flushes do not reach them. The parent redirects a
+    worker's stdout to a file, so libc's stdout is block-buffered, and any C
+    extension that printed through it would lose its output at the exit codes
+    whose only report to the operator is a tail of that log.
+    """
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux"), "libc.so.6 is Linux-specific"
+    )
+    def test_c_level_output_survives_the_exit(self) -> None:
+        import subprocess
+
+        root = str(Path(__file__).resolve().parent.parent)
+        script = "\n".join(
+            [
+                "import ctypes, sys",
+                f"sys.path.insert(0, {root!r})",
+                "from benchmarks.kernel.worker import _exit_now",
+                'ctypes.CDLL("libc.so.6").printf(b"LIBC-LINE\\n")',
+                'sys.stdout.write("PYTHON-LINE\\n")',
+                "_exit_now(0)",
+            ]
+        )
+        # capture_output gives the child a pipe, which is block-buffered
+        # exactly as the run's log file is.
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("PYTHON-LINE", completed.stdout)
+        self.assertIn("LIBC-LINE", completed.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
