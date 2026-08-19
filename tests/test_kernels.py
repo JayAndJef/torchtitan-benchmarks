@@ -374,6 +374,106 @@ _stub_forward_only = _stub_builder(("forward",))
 _stub_forward_and_backward = _stub_builder(("forward", "backward"))
 
 
+# Residency probe. ``_residency_builder`` records, at each build, how many
+# arms it handed back earlier are still alive. The gate loop must leave that
+# count at zero for every build after the first.
+_RESIDENT: list = []
+_STILL_ALIVE: list[int] = []
+
+
+def _residency_builder(shape, workload, inputs):
+    import gc
+    import weakref
+
+    import torch
+
+    from benchmarks.kernel.engine.arm import BuiltArm
+
+    gc.collect()
+    _STILL_ALIVE.append(sum(1 for ref in _RESIDENT if ref() is not None))
+    built = BuiltArm(
+        name="stub",
+        calls={"forward": (lambda: None)},
+        # A real arm's outputs carry a grad_fn, and the graph behind one
+        # holds everything backward saved. The gate loop detaches for that
+        # reason, so the probe returns a tensor that needs detaching too.
+        correctness_outputs=lambda: {
+            "out": torch.zeros(1, requires_grad=True) * 2
+        },
+    )
+    _RESIDENT.append(weakref.ref(built))
+    return built
+
+
+class CorrectnessResidencyTests(unittest.TestCase):
+    """One arm is resident at a time, and the pass keeps only the outputs.
+
+    ``swiglu`` at the huge shape exhausted a 139 GiB device in the gate pass
+    while each of its three arms fits alone. The pass held every arm at once;
+    a check only ever needs two output *tensors*. This pins the fix, because
+    the failure it prevents needs a GPU and a 10 B-parameter shape to
+    reproduce and would otherwise be untested.
+    """
+
+    def _scenario(self, arms: int):
+        from benchmarks.kernel.schema import KernelArm, KernelScenario
+
+        return KernelScenario(
+            name="residency",
+            description="stub",
+            inputs_builder=f"{__name__}:_residency_builder",
+            reference_builder=None,
+            baseline_arm="arm0",
+            arms=tuple(
+                KernelArm(
+                    name=f"arm{index}",
+                    description="stub",
+                    builder=f"{__name__}:_residency_builder",
+                    modes=("forward",),
+                )
+                for index in range(arms)
+            ),
+        )
+
+    def _run(self, arms: int, skip=frozenset()):
+        from benchmarks.kernel.engine.run import gate_outputs
+
+        _RESIDENT.clear()
+        _STILL_ALIVE.clear()
+        shape, workload = resolve_shape_and_workload()
+        return gate_outputs(
+            self._scenario(arms), shape, workload, {}, 0, skip
+        )
+
+    def test_no_earlier_arm_survives_the_next_build(self) -> None:
+        outputs = self._run(4)
+        self.assertEqual(sorted(outputs), ["arm0", "arm1", "arm2", "arm3"])
+        self.assertEqual(
+            _STILL_ALIVE,
+            [0, 0, 0, 0],
+            "an earlier arm was still alive when the next one was built; "
+            "peak memory is then the sum of the arms, not the largest one",
+        )
+
+    def test_the_outputs_outlive_the_arms_that_made_them(self) -> None:
+        outputs = self._run(2)
+        for name, tensors in outputs.items():
+            self.assertEqual(sorted(tensors), ["out"], name)
+            self.assertEqual(tensors["out"].shape, (1,))
+
+    def test_every_kept_tensor_is_detached(self) -> None:
+        """A live graph would keep the activations the arm allocated."""
+        for name, tensors in self._run(2).items():
+            for output, tensor in tensors.items():
+                self.assertIsNone(tensor.grad_fn, f"{name}/{output}")
+                self.assertFalse(tensor.requires_grad, f"{name}/{output}")
+
+    def test_a_skipped_arm_is_never_built(self) -> None:
+        outputs = self._run(3, skip=frozenset({"arm1"}))
+        self.assertEqual(sorted(outputs), ["arm0", "arm2"])
+        self.assertEqual(len(_STILL_ALIVE), 2)
+
+
 class SeededBuildContractTests(unittest.TestCase):
     """Where ``KernelArm`` becomes the authority over ``BuiltArm``.
 

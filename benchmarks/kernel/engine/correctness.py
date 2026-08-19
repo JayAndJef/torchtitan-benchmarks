@@ -175,10 +175,21 @@ def _check_rows(
 
 def run_correctness(
     scenario: KernelScenario,
-    built: dict[str, BuiltArm],
+    arm_outputs: dict[str, dict[str, torch.Tensor]],
     fp64_reference: dict[str, torch.Tensor] | None,
 ) -> tuple[list[CorrectnessResult], bool]:
-    outputs_cache: dict[str, dict[str, torch.Tensor]] = {}
+    """Gate every arm from tensors, not from modules.
+
+    This takes each arm's *outputs*, not its ``BuiltArm``. A gate never needs
+    a module -- it subtracts one named tensor from another -- so the caller
+    builds an arm, takes its outputs, and frees it before building the next.
+    Holding every arm at once is what made ``swiglu`` at the huge shape
+    exhaust a 139 GiB device in this pass while each arm alone fits.
+
+    The separation was already half here: the old signature took the arms and
+    then cached exactly these dictionaries. Taking the dictionaries directly
+    is what lets the module behind one go.
+    """
 
     def outputs_for(name: str) -> dict[str, torch.Tensor]:
         if name == "fp64":
@@ -188,18 +199,16 @@ def run_correctness(
                     f"scenario declares no reference_builder"
                 )
             return fp64_reference
-        if name not in outputs_cache:
-            outputs_cache[name] = built[name].correctness_outputs()
-        return outputs_cache[name]
+        return arm_outputs[name]
 
     rows: list[CorrectnessResult] = []
     for arm in scenario.arms:
-        if arm.name not in built:
+        if arm.name not in arm_outputs:
             # Skipped by the caller: this host cannot run it. Its own gates
             # go with it.
             continue
         for check in arm.correctness:
-            if check.reference != "fp64" and check.reference not in built:
+            if check.reference != "fp64" and check.reference not in arm_outputs:
                 # Never dropped quietly. The parent closes its skip set over
                 # correctness references precisely so this cannot happen, so
                 # reaching it means an arm would be timed with nothing

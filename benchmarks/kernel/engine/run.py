@@ -3,8 +3,9 @@
 Every kernel measurement is one of exactly two passes, and each is a whole
 worker process:
 
-* ``run_correctness_pass`` builds **every** arm and gates them against each
-  other and against the fp64 reference. It runs first, and once per scenario.
+* ``run_correctness_pass`` gates every arm against the others and against
+  the fp64 reference. It runs first, and once per scenario. It builds the
+  arms **one at a time**, keeping each arm's outputs and dropping the arm.
 * ``run_timing_pass`` builds **one** arm and times it for one replicate. It
   runs once per (arm, replicate).
 
@@ -13,12 +14,19 @@ the fragments (``benchmarks.kernel.results.merge``), because the parent is
 the only process that sees them all -- floor ratios and anchor comparisons
 are cross-arm work, and no timing worker holds more than one arm.
 
-**Why correctness is one process and timing is many.** ``run_correctness``
-materializes both sides of a check at once, and ten of the sixteen arms name
-another arm as their reference, so gating cannot be split per arm without
-splitting the checks themselves. That split lands with the first genuinely
-incompatible pair, where it also first gets exercised. Timing has no such
-coupling: an arm's samples depend on nothing but that arm.
+**Why correctness is one process and timing is many.** Half the arms name
+another arm as their correctness reference, so a check needs both sides at
+once and gating cannot be split per arm without splitting the checks
+themselves. That split lands with the first genuinely incompatible pair,
+where it also first gets exercised. Timing has no such coupling: an arm's
+samples depend on nothing but that arm.
+
+**One process is not one resident arm.** A check compares *tensors*, so this
+pass keeps each arm's outputs and frees the arm itself before building the
+next. Isolation and residency are separate questions, and only the first one
+needs a process. Memory is therefore bounded by the largest single arm plus
+every arm's outputs, not by the sum of the arms -- which is what a scenario
+whose arms do not fit together in one device needs.
 
 **Re-seeding is per arm build, not per process.** Inputs are rebuilt in
 every worker from the same seed and are bit-identical, because the inputs
@@ -62,6 +70,7 @@ be able to measure an expert split that does not cover the rows it built.
 
 from __future__ import annotations
 
+import gc
 import importlib
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
@@ -205,6 +214,65 @@ def _seeded_build(
     return built
 
 
+def _detached(
+    outputs: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """The same tensors, with no autograd graph behind them.
+
+    ``correctness_outputs`` returns activations that still carry a
+    ``grad_fn``, and a graph holds every tensor its backward saved. Dropping
+    the arm would then free the module and keep the activations, which is
+    most of what the arm allocated. Detaching breaks that edge. It shares
+    storage, so it copies nothing, and a gate reads values only.
+    """
+    return {name: tensor.detach() for name, tensor in outputs.items()}
+
+
+def _release() -> None:
+    """Return one arm's memory to the allocator before the next is built.
+
+    ``del`` drops the reference; a reference cycle through the module keeps
+    the storage until ``gc`` runs, and a freed block stays in torch's caching
+    allocator until it is emptied. Both matter here: the next build asks for
+    a block of the same size, and at the huge shape there is no headroom to
+    hold two.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def gate_outputs(
+    scenario: KernelScenario,
+    shape: PiperShape,
+    workload: KernelWorkload,
+    inputs: dict[str, Any],
+    seed: int,
+    skip: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Every arm's correctness outputs, with one arm resident at a time.
+
+    Separate from ``run_correctness_pass`` because that function needs a CUDA
+    device before it reaches this loop, and the residency property this loop
+    exists for is testable without one.
+
+    The invariant: when arm N is built, arms 1..N-1 are already collected.
+    Only their output tensors survive, and those are a small fraction of what
+    an arm allocates -- at the huge shape a swiglu arm holds an 11.8 GiB bf16
+    expert copy and grows a weight gradient of the same size, against
+    activations measured in tens of MiB.
+    """
+    outputs: dict[str, dict[str, torch.Tensor]] = {}
+    for arm in scenario.arms:
+        if arm.name in skip:
+            continue
+        built = _seeded_build(arm, shape, workload, inputs, seed)
+        outputs[arm.name] = _detached(built.correctness_outputs())
+        del built
+        _release()
+    return outputs
+
+
 def _environment() -> dict[str, Any]:
     return {
         "device": torch.cuda.get_device_name(0),
@@ -224,19 +292,30 @@ def run_correctness_pass(
     ``skip`` names the arms this host cannot run, so they are neither built
     nor gated. The parent decides the set and closes it over correctness
     references, so a *built* arm always has its reference beside it.
+
+    **One arm is resident at a time.** A gate compares tensors, not modules,
+    so each arm is built, asked for its outputs, and dropped before the next
+    one is built. The pass held every arm at once until this changed, and
+    ``swiglu`` at the huge shape exhausted a 139 GiB device here while each
+    of its three arms fits alone: three bf16 expert copies of about 11.8 GiB,
+    plus a weight gradient of the same size per arm.
+
+    This does not remove the reason a *pair* of arms may still need separate
+    processes. TransformerEngine and the FA3 varlen path cannot share an
+    interpreter at all -- a cuDNN soname collision -- and freeing memory does
+    not make an import succeed. That split lands with the first scenario that
+    declares such a pair.
     """
     inputs = _prepare(scenario, shape, workload, options)
-    built = {
-        arm.name: _seeded_build(arm, shape, workload, inputs, options.seed)
-        for arm in scenario.arms
-        if arm.name not in skip
-    }
     fp64_reference = (
         resolve_symbol(scenario.reference_builder)(shape, workload, inputs)
         if scenario.reference_builder
         else None
     )
-    rows, all_passed = run_correctness(scenario, built, fp64_reference)
+    arm_outputs = gate_outputs(
+        scenario, shape, workload, inputs, options.seed, skip
+    )
+    rows, all_passed = run_correctness(scenario, arm_outputs, fp64_reference)
     return {
         "kind": CORRECTNESS_FRAGMENT_KIND,
         "scenario": scenario.name,

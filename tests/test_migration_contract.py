@@ -759,7 +759,10 @@ TEST_CENSUS = {
     # _seeded_build's builder-vs-declaration gate.
     # +3 with fragment_stem: a slash never reaches a filename, two arms may
     # not collide after the substitution, and no declared arm does today.
-    "test_kernels": 31,
+    # +4 with the correctness residency loop: no earlier arm survives the
+    # next build, the outputs outlive the arms, every kept tensor is
+    # detached, and a skipped arm is never built.
+    "test_kernels": 35,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against
     # a frozen literal (including the cuda-graph branch the parity check
@@ -793,7 +796,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 248
+TEST_CENSUS_TOTAL = 252
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
