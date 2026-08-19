@@ -466,4 +466,35 @@ def shape_summary(
             "grad_out": [batch, seq, shape.dim],
             "rows_gathered": tokens,
         }
+    if scenario_name == "qkv_prep":
+        # ``x_thd`` is recorded next to ``x`` because the two engines consume
+        # different leading dimensions of the same matrix: our megatron driver
+        # runs THD, so hidden_states reaches ``linear_qkv`` as (t, 1, h). Both
+        # flatten to [batch*seq, dim] inside the linear, so this is a label and
+        # not a measured difference.
+        #
+        # All four weight shapes are recorded, not just the one each arm holds.
+        # The three unfused matrices are what the inputs builder draws and what
+        # the unfused titan arm loads; ``wqkv`` is their grouped interleave and
+        # is what both the fused titan arm and megatron hold. A reader who sees
+        # only one of the two forms cannot tell which arm a weight belongs to.
+        #
+        # q, k and v are recorded because the scenario's boundary is where it
+        # ends, not only where it starts: the split and the layout work that
+        # produces these three tensors are inside the timed region on both
+        # engines.
+        kv_out = shape.n_kv_heads * shape.head_dim
+        return {
+            "x": [batch, seq, shape.dim],
+            "x_thd": [batch * seq, 1, shape.dim],
+            "norm_weight": [shape.dim],
+            "wq": [shape.n_heads * shape.head_dim, shape.dim],
+            "wk": [kv_out, shape.dim],
+            "wv": [kv_out, shape.dim],
+            "wqkv": [shape.qkv_out_features, shape.dim],
+            "q": [batch, seq, shape.n_heads, shape.head_dim],
+            "k": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            "v": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            "tokens": batch * seq,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

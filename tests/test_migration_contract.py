@@ -71,6 +71,7 @@ KERNEL_ARMS_MODULES = {
     "lm_head": "benchmarks.kernel.operations.lm_head",
     "attention": "benchmarks.kernel.operations.attention",
     "embedding_stage": "benchmarks.kernel.operations.embedding_stage",
+    "qkv_prep": "benchmarks.kernel.operations.qkv_prep",
     "qk_norm": "benchmarks.kernel.operations.qk_norm",
     "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
@@ -129,6 +130,9 @@ KERNEL_INVENTORY = {
     # engine/profile, and the anchor is the megatron side throughout -- see
     # KERNEL_BASELINE_ARMS.
     "embedding_stage": ("copy_floor", "mcore/base", "titan"),
+    # No floor: a GEMM is compute-bound. The third arm is titan's own fusion
+    # question and is not an upstream configuration.
+    "qkv_prep": ("mcore/base", "titan", "titan/unfused_qkv"),
     "qk_norm": ("copy_floor", "mcore/base", "titan"),
     # No floor: a GEMM is compute-bound, and a bandwidth number would not
     # bound it. The two arms are the whole roster.
@@ -151,6 +155,7 @@ KERNEL_BASELINE_ARMS = {
     # baseline. The cost is accepted and recorded: the anchor's loss costs the
     # whole scenario, and TransformerEngine is the more fragile side.
     "embedding_stage": "mcore/base",
+    "qkv_prep": "mcore/base",
     "qk_norm": "mcore/base",
     "attn_out_proj": "mcore/base",
     "ffn_norm": "mcore/base",
@@ -810,6 +815,13 @@ TEST_CENSUS = {
     # tensor-parallel group, and the one weight transfer that joins the two
     # embeddings.
     "test_kernel_embedding_stage": 55,
+    # Scenario 2: 40 covering the shared inputs and both weight layouts, the
+    # fp64 reference, all three arm builders, and the guards that refuse an
+    # mcore module of the wrong class, with the wrong epsilon, or above one
+    # rank. A block of them pins the materialization asymmetry the scenario
+    # declares rather than equalizes -- which arm copies q, k and v, and which
+    # hands on a strided view.
+    "test_kernel_qkv_prep": 40,
     "test_kernel_results": 9,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
@@ -857,7 +869,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 385
+TEST_CENSUS_TOTAL = 425
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

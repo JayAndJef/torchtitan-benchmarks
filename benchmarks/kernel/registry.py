@@ -575,6 +575,220 @@ EMBEDDING_STAGE = KernelScenario(
 )
 
 
+# The gate every arm faces. Six outputs, each producing its own row in
+# results.json, at the tolerance CLAUDE.md sets for a bf16 kernel.
+#
+# ``max_rel_l2`` is the only safe metric here, and the reason is not stylistic:
+# both halves of this cut are reductions. The RMSNorm reduces over ``dim`` and
+# each projection is a dot product over ``dim``, so cancellation drives
+# individual outputs toward zero, and a max or ULP metric divides a negligible
+# absolute error by that tiny magnitude and reports thousands of ULPs for a
+# numerically perfect kernel -- including the stock one (CLAUDE.md, "Choosing a
+# correctness metric").
+#
+# ``qkv_weight_grad`` is reported in megatron's grouped interleave, which is
+# also titan's fused layout. Two arms produce it by conversion and two hold it
+# natively: ``titan/unfused_qkv`` and the fp64 reference call
+# ``benchmarks.models.piper_qwen3.megatron_weights.grouped_qkv``, which proves
+# its own inverse bitwise on every call; ``mcore/base`` and ``titan`` read the
+# gradient of their own fused parameter and convert nothing.
+#
+# So **two** implementations of the interleave meet in this gate, not one. The
+# first-party ``grouped_qkv`` puts the reference and the unfused arm in that
+# layout, and torchtitan's own ``FusedQKVLinear._merge_qkv_on_load``
+# (``models/common/attention.py:871-895``) is what puts ``titan``'s ``wqkv`` in
+# it at load. They are the same cat and reshape written twice, once here and
+# once upstream, and this gate is what holds them together at run time: a
+# divergence moves ``qkv_weight_grad`` on the fused arms alone and fails them.
+QKV_PREP_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=(
+        "q_out",
+        "k_out",
+        "v_out",
+        "x_grad",
+        "qkv_weight_grad",
+        "norm_weight_grad",
+    ),
+    max_rel_l2=2e-2,
+)
+
+
+QKV_PREP = KernelScenario(
+    name="qkv_prep",
+    description=(
+        "The attention-input norm, the QKV projection and the split that "
+        "follows it, cross-engine: megatron-core's fused "
+        "TELayerNormColumnParallelLinear plus get_query_key_value_tensors "
+        "against TorchTitan's attention_norm plus FusedQKVLinear. Both titan "
+        "arms are compiled (fullgraph=True) and the megatron arm is eager, "
+        "which is how each engine runs it. THE NORM IS INSIDE THE SCENARIO ON "
+        "BOTH ENGINES, because megatron fuses it into linear_qkv and exposes "
+        "no way to time either half alone -- so these numbers are NOT "
+        "comparable to the qkv scenario's, whose arms are the same projections "
+        "without a norm. The cut ends at three separate [B, L, N, H] tensors, "
+        "so titan's split and megatron's view/SplitAlongDim/reshape are both "
+        "timed. THE TWO ENGINES COMPUTE THE SAME FUNCTION BUT DO NOT "
+        "MATERIALIZE THE SAME TENSORS: SplitAlongDim is torch.split off the "
+        "FP8 path and returns views, and megatron reshapes only the query, so "
+        "it hands k and v on as non-contiguous strided views while titan "
+        "materializes all three. At batch 4 / seq 1024 / normal / bf16 that is "
+        "8 MiB of forward copy for mcore/base, 16 MiB for titan and none for "
+        "titan/unfused_qkv, whose three GEMMs write contiguous outputs "
+        "already. This is real engine behaviour on both sides and is "
+        "deliberately NOT equalized, but megatron does not avoid the cost -- it "
+        "defers it to whoever consumes the strided views, which is the "
+        "attention_core scenario for megatron and nowhere for titan. The "
+        "scenarios therefore sum correctly, and this row read alone overstates "
+        "titan's projection cost by roughly that traffic. The qk norms are "
+        "excluded on both sides: scenario qk_norm owns them, and the megatron "
+        "arm sets q_layernorm/k_layernorm to None, which is megatron's own "
+        "representation of a model built without them."
+    ),
+    inputs_builder="benchmarks.kernel.operations.qkv_prep:qkv_prep_inputs",
+    reference_builder=(
+        "benchmarks.kernel.operations.qkv_prep:qkv_prep_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit, and deliberately not the set the default derivation would
+    # produce. The derivation would put titan/unfused_qkv against mcore/base,
+    # and that row would change two things at once: the engine and the QKV
+    # fusion. Fused against unfused is a titan-internal question, so its honest
+    # opponent is titan. The first row is the cross-engine one and is anchored
+    # on megatron, matching the e2e piper1b_megatron scenario and every other
+    # cross-engine scenario in this partition.
+    comparisons=(
+        ("titan", "mcore/base"),
+        ("titan/unfused_qkv", "titan"),
+    ),
+    arms=(
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "Megatron-core self_attention: TE "
+                "TELayerNormColumnParallelLinear with the RMSNorm fused into "
+                "the GEMM prologue, then get_query_key_value_tensors; eager, "
+                "tp_size 1, qk norms removed"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.qkv_prep"
+                ":build_qkv_prep_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so every TE "
+                "module it builds runs eager end to end; compiling this one "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(QKV_PREP_GATE,),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan attention_norm plus FusedQKVLinear -- upstream "
+                "qwen3's own default, since _build_qwen3_moe_layers takes "
+                "fuse_qkv=True -- under torch.compile(fullgraph=True)"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.qkv_prep:build_qkv_prep_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                QKV_PREP_GATE,
+                # The cross-engine gate, and the only enforcing check that
+                # states the scenario's claim directly: the two engines compute
+                # the same function of the same parameters, so a ratio between
+                # them is a ratio of implementations and not of arithmetic.
+                # Declared on ``titan`` and referencing ``mcore/base`` rather
+                # than the reverse, because ``resolve_arm_skips`` closes the
+                # skip set over correctness references: a check pointing the
+                # other way would make the anchor's survival depend on a titan
+                # arm.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=(
+                        "q_out",
+                        "k_out",
+                        "v_out",
+                        "x_grad",
+                        "qkv_weight_grad",
+                        "norm_weight_grad",
+                    ),
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan/unfused_qkv",
+            description=(
+                "TorchTitan attention_norm plus QKVLinear: three separate "
+                "wq/wk/wv GEMMs, under torch.compile(fullgraph=True). NOT an "
+                "upstream configuration -- fuse_qkv defaults to True in both "
+                "qwen3 layer builders, every registered flavor passes True "
+                "explicitly, and only _debugmodel_non_fused_qkv turns it off -- "
+                "so this arm answers a fusion question, not a question about "
+                "how TorchTitan ships"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.qkv_prep"
+                ":build_qkv_prep_titan_unfused_qkv"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                QKV_PREP_GATE,
+                # The enforcing arm-to-arm check, matching what the existing
+                # qkv scenario gives its own fused arm. The fp64 gate alone does
+                # not cover this: it bounds each arm against the truth at 2e-2,
+                # which bounds the *pair* only transitively, at 4e-2 -- and the
+                # pair is exactly what the published ("titan/unfused_qkv",
+                # "titan") row is a ratio of. Direction follows the same rule as
+                # the cross-engine check: the reference is the row's opponent,
+                # so ``resolve_arm_skips`` never removes an arm that another
+                # arm's row depends on. The references now chain --
+                # titan/unfused_qkv -> titan -> mcore/base -- and the closure is
+                # a fixed point, so losing the anchor skips all three rather
+                # than leaving a dangling row. That is the anchor cost
+                # KERNEL_BASELINE_ARMS already records for every cross-engine
+                # scenario, not a new one.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="titan",
+                    outputs=(
+                        "q_out",
+                        "k_out",
+                        "v_out",
+                        "x_grad",
+                        "qkv_weight_grad",
+                        "norm_weight_grad",
+                    ),
+                    max_rel_l2=2e-2,
+                ),
+                # Informational, not enforcing, and carried for exactly the
+                # reason the qkv scenario carries its own: with identical
+                # weights the fused and unfused paths *should* agree bitwise,
+                # and for a while they did, until compiled GEMM epilogues broke
+                # bit-identity. Recording the difference without failing the run
+                # keeps a change that restores or further degrades exact
+                # agreement visible in results.json instead of invisible. The
+                # enforcing check above is what bounds the pair; this one only
+                # reports how much better than that bound the two actually
+                # agree.
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="titan",
+                    outputs=("q_out", "k_out", "v_out"),
+                    informational=True,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 QK_NORM = KernelScenario(
     name="qk_norm",
     description=(
@@ -1073,6 +1287,7 @@ KERNEL_SCENARIOS = {
         LM_HEAD,
         ATTENTION,
         EMBEDDING_STAGE,
+        QKV_PREP,
         QK_NORM,
         ATTN_OUT_PROJ,
         FFN_NORM,
