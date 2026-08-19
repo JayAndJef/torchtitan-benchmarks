@@ -137,29 +137,52 @@ def _isolation(replicates_per_process: int) -> dict[str, Any]:
             "sweep would give. The arms also move apart in time as the block "
             "grows, so drift between two arms' blocks lands in the point "
             "estimate instead of cancelling. One arm per process still holds. "
-            "The interval is therefore published as "
-            "within_process_ratio_ci_low/high, never as ratio_ci_low/high."
+            "Every statistic derived from the per-replicate log-ratios is "
+            "therefore published under a within_process_ name -- "
+            "within_process_ratio_ci_low/high and "
+            "within_process_replicate_ratio_spread -- and never under the "
+            "honest one."
         ),
     }
 
 
+# Every field ``bootstrap_ratio_ci`` derives from the per-replicate
+# log-ratios, and therefore every field a shared process degrades. The
+# interval is the obvious one. ``replicate_ratio_spread`` is the same
+# quantity read a second way -- ``exp(max) - exp(min)`` over those same
+# ratios -- so it is arguably the *most* degraded field in the row: it is
+# literally the round-to-round spread the note below says does not improve.
+# Naming them in one tuple is what keeps a later addition to
+# ``bootstrap_ratio_ci`` from shipping under an honest name by omission.
+_DEGRADED_BY_A_SHARED_PROCESS = (
+    "ratio_ci_low",
+    "ratio_ci_high",
+    "replicate_ratio_spread",
+)
+
+
 def _rename_degraded_ci(row: dict[str, Any]) -> dict[str, Any]:
-    """Publish a within-process interval under its own field names.
+    """Publish the within-process statistics under their own field names.
 
     The bootstrap runs on per-replicate log-ratios, and above one replicate
     per process those replicates are consecutive measurements of one build in
-    one interpreter rather than independent processes. Measured on ``qkv``,
-    the interval narrows 26-48% while the point estimate's round-to-round
-    spread does not improve, which makes it a lower bound on the true one.
+    one interpreter rather than independent processes. The interval narrows
+    while the point estimate's round-to-round spread does not improve, which
+    makes it a lower bound on the true one.
 
-    It is renamed rather than reinterpreted, exactly as the schema history
-    renames every field whose meaning changes: anything reading
+    Each field is renamed rather than reinterpreted, exactly as the schema
+    history renames every field whose meaning changes: anything reading
     ``ratio_ci_low`` gets nothing instead of a narrower number under the
-    honest name, and a reader who wants the degraded interval has to ask for
+    honest name, and a reader who wants the degraded statistic has to ask for
     it by a name that says what it is.
+
+    A missing key raises, as ``_require_kind`` does above and for the same
+    reason: ``bootstrap_ratio_ci`` returns all three on every path, so an
+    absent one is a wiring bug rather than a data condition, and swallowing
+    it would leave the honest name in the row.
     """
-    row["within_process_ratio_ci_low"] = row.pop("ratio_ci_low", None)
-    row["within_process_ratio_ci_high"] = row.pop("ratio_ci_high", None)
+    for field_name in _DEGRADED_BY_A_SHARED_PROCESS:
+        row[f"within_process_{field_name}"] = row.pop(field_name)
     return row
 
 

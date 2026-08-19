@@ -32,15 +32,18 @@ from benchmarks.artifacts.summaries import SampleSummary
 # short roster from a complete one. An arm that did not measure has empty
 # ``modes`` and a ``status_reason`` saying why.
 #
-# 5: a run at ``replicates_per_process > 1`` publishes its interval as
-# ``within_process_ratio_ci_low``/``_high`` instead of
-# ``ratio_ci_low``/``_high``, and ``methodology`` gains
-# ``replicates_per_process``. Renamed rather than reinterpreted: those
-# replicates are consecutive measurements of one build in one interpreter, so
-# the interval is a lower bound, and anything reading the honest name must
-# find nothing rather than a narrower number. A schema-4 comparison row always
-# carried ``ratio_ci_low``; after this a row may not, which is a change to the
-# shape of the file and therefore a bump rather than an addition.
+# 5: a run at ``replicates_per_process > 1`` publishes every statistic taken
+# over the per-replicate log-ratios under a ``within_process_`` name --
+# ``within_process_ratio_ci_low``/``_high`` and
+# ``within_process_replicate_ratio_spread`` -- instead of the honest ones, and
+# ``methodology`` gains ``replicates_per_process``. Renamed rather than
+# reinterpreted: those replicates are consecutive measurements of one build in
+# one interpreter, so the interval is a lower bound and the spread is the
+# round-to-round spread that sharing a process removes, and anything reading
+# an honest name must find nothing rather than a narrower number. A schema-4
+# comparison row always carried ``ratio_ci_low``; after this a row may not,
+# which is a change to the shape of the file and therefore a bump rather than
+# an addition.
 KERNEL_RESULTS_SCHEMA_VERSION = 5
 
 # ``ok`` measured. ``skipped`` was never launched, because this host cannot

@@ -189,15 +189,15 @@ class FragmentKindTests(unittest.TestCase):
 
 
 class WithinProcessIntervalTests(unittest.TestCase):
-    """A degraded interval never ships under the honest field name.
+    """No degraded statistic ships under an honest field name.
 
     Above one replicate per process an arm's replicates are consecutive
-    measurements of one build in one interpreter, so the bootstrap over them
-    is an interval within a process rather than across them. It narrows
-    without the ratio having become better known. The merge therefore renames
-    it, exactly as the schema history renames every field whose meaning
-    changes: a downstream reader of ``ratio_ci_low`` must find nothing rather
-    than a narrower number.
+    measurements of one build in one interpreter, so every statistic taken
+    over them describes one process rather than several. The interval narrows
+    and the spread narrows, without the ratio having become better known. The
+    merge therefore renames each of them, exactly as the schema history
+    renames every field whose meaning changes: a downstream reader of
+    ``ratio_ci_low`` must find nothing rather than a narrower number.
     """
 
     def test_one_replicate_per_process_keeps_the_honest_names(self) -> None:
@@ -232,6 +232,25 @@ class WithinProcessIntervalTests(unittest.TestCase):
         # changed.
         self.assertEqual(
             row["median_ratio"], honest.comparisons[0]["median_ratio"]
+        )
+
+    def test_the_replicate_spread_is_renamed_with_the_interval(self) -> None:
+        """The spread is degraded by the same mechanism, so it moves too.
+
+        ``replicate_ratio_spread`` is ``exp(max) - exp(min)`` over the same
+        per-replicate log-ratios the interval bootstraps, which makes it the
+        round-to-round spread the note says a shared process does not
+        improve. Left behind by the rename it would publish a narrowed
+        number under a name that says nothing about the process boundary --
+        the exact failure the rename exists to prevent.
+        """
+        honest = merge(every_fragment(), replicates_per_process=1)
+        batched = merge(every_fragment(), replicates_per_process=3)
+        row = batched.comparisons[0]
+        self.assertNotIn("replicate_ratio_spread", row)
+        self.assertEqual(
+            row["within_process_replicate_ratio_spread"],
+            honest.comparisons[0]["replicate_ratio_spread"],
         )
 
     def test_a_batched_run_says_so_in_the_methodology(self) -> None:

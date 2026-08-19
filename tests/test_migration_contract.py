@@ -793,7 +793,9 @@ TEST_CENSUS = {
     # +3 with the within-process interval: that one replicate per process
     # keeps the honest field names, that a batched run renames the interval
     # rather than dropping it, and that the methodology says so.
-    "test_kernel_merge": 7,
+    # +1 for the replicate spread, which is derived from the same
+    # per-replicate log-ratios and was left behind by that rename.
+    "test_kernel_merge": 8,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them. +3 for
@@ -901,7 +903,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 471
+TEST_CENSUS_TOTAL = 472
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
