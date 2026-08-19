@@ -85,7 +85,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
 | `benchmarks/kernel/registry.py` | The five kernel scenarios themselves, declared with those types |
 | `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness |
-| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration) and `statistics.py` |
+| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the three-way split of the timing pass into `build_timing_arm`/`time_replicate`/`arm_extras`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py` |
 | `benchmarks/kernel/operations/` | Arm builders, one module per kernel family (`rope.py`, `swiglu.py`, `qkv.py`, `attention.py`, `lm_head.py`) plus `common.py` |
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments) and `reporting.py` |
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
@@ -649,6 +649,7 @@ even absent, once Inductor fuses the surrounding graph).
 |---|---|---|
 | `--scenario` (repeatable) | all five | subset of kernel scenarios |
 | `--replicates` | 5 | sweeps of every arm; the unit the CI is taken over |
+| `--replicates-per-process` | 1 | consecutive replicates of one arm per worker; above 1 the CI is renamed (see "Startup cost") |
 | `--samples-per-replicate` | 40 | timed bursts per arm per mode, per replicate |
 | `--burst-k` | 16 | calls per timed burst; one value for every arm |
 | `--warmup-calls` | 30 | untimed calls per arm per mode, before each replicate |
@@ -851,7 +852,10 @@ own family module.
 - **Every arm is timed in its own process. The gates still build them all in
   one.** A scenario is one correctness worker plus `replicates x arms` timing
   workers, spawned sequentially by `benchmarks/kernel/runner.py` in
-  replicate-major order. Each worker writes a JSON fragment under
+  replicate-major order. (Above `--replicates-per-process 1` the sweep is
+  block-major instead, and there are `blocks x arms` workers; see "Startup
+  cost". No value of that flag ever puts two arms in one process.) Each
+  worker writes a JSON fragment per replicate under
   `fragments/`, and the parent merges them
   (`benchmarks/kernel/results/merge.py`). The timing split is what keeps one
   arm's dependencies out of another arm's interpreter during measurement, and
@@ -901,6 +905,93 @@ own family module.
   simply absent, so a reader could not tell a short roster from a complete
   one. The skip of an *anchor* is the exception that costs the scenario.
 
+### Startup cost
+
+**Every timing number in this section was measured on a contended box**
+(load average 28 to 81, several agents on the same host). They are the
+record of what was tried. **None of them is a confirmed result**, and none
+may be cited. Re-measure on an idle box before you quote any of them.
+
+Per-arm process isolation is not free. A timing worker pays about 15.7 s
+before the arm it measures exists: process start, the torch import, the
+engine import, and the arm build. At the default settings a scenario pays
+that once per (arm, replicate). Three mechanisms were built against it and
+one was dropped; what survives is the phase table, the exit path, and
+`--replicates-per-process`.
+
+**The phase table** (`benchmarks/kernel/engine/phases.py`) attributes a
+worker's wall clock to named spans, and every fragment carries the table of
+the process that wrote it. It is stdlib-only, it adds no synchronize, and it
+touches neither the CUDA events nor the arithmetic, so the published samples
+are the same numbers between the same two points. `process_start_offset()`
+reads `/proc/self/stat` field 22 against `/proc/uptime`, which is what makes
+`process_startup` -- the time before `main()` ran at all -- measurable from
+inside the worker. Use the table to decide where a slow run spends its time;
+do not read it as a measurement of the kernel.
+
+**The exit path.** `benchmarks/kernel/worker.py` ends at `_exit_now(code)`,
+which flushes both streams and calls `os._exit`. This skips the interpreter's
+unwind, whose cost is dominated by joining Inductor's 32 compile
+subprocesses. Four facts make it safe, and `_exit_now`'s docstring records
+them: no measurement remains at that point; the fragment is already on disk,
+because `atomic_write_json` writes and renames before the exit; the compile
+caches are already on disk, which was checked by comparing the cache trees
+byte for byte both ways (13 Inductor and 65 Triton files either way); and the
+compile workers are not orphaned, because each takes `--parent` and exits when
+it is reparented. `main()` still returns a code, so an importer decides its
+own exit.
+
+**`--replicates-per-process`** lets one worker measure a block of consecutive
+replicates of one arm. It defaults to 1, and **1 is the value for anything
+published**.
+
+The reason is the statistic. One replicate is a sweep in time, so drift that
+moves a whole replicate moves the arm and the anchor together and cancels in
+the ratio. Replicates inside one process are consecutive measurements of one
+build in one interpreter, so that cancellation is gone. The interval narrows
+without the ratio becoming better known. Above 1, therefore:
+
+- `results.json` publishes `within_process_ratio_ci_low`/`_high` and carries
+  no `ratio_ci_low`/`_high`. The field is renamed, not reinterpreted, so a
+  reader of the honest name finds nothing rather than a narrower number.
+- `methodology.arm_isolation` reads `one_process_per_arm_replicate_block`,
+  and `methodology.replicates_per_process` records the value.
+- The printed table states the isolation on every run, marks the interval
+  with `~`, and prints a warning that names the renamed fields.
+
+**Its acceptance gate is outstanding.** The flag lives on one condition: more
+than a 2x end-to-end speedup on an idle box. If the verified speedup is under
+2x, remove the flag.
+
+**Two architectural claims are contested, and the contest is unsettled.** One
+agent reported that a fresh process does not reduce the spread of a
+measurement, and that replicate-major pairing cancels nothing -- it measured
+a paired-ratio coefficient of variation above each arm's own in all three
+modes. Both measurements were taken at load average 28 to 81, and heavy
+contention is exactly the condition that decorrelates two arms' medians and
+inflates a paired CV. **Record both as pending, not as refuted.** An idle box
+settles them.
+
+**Rejected, each for a stated reason:**
+
+- **A fork pool of pre-warmed interpreters.** Its author could not
+  demonstrate timing neutrality: `rope/te/backward` read 12% high pooled in
+  one experiment and 2% low in another, and two dispatch-bound measurements
+  that disagree about the sign are not a result. It was never run on
+  `attention` (the scenario whose isolation matters most, holding both FA3
+  and FA4) or on `lm_head`. It targets the same wall clock
+  `--replicates-per-process` removes, and it costs a second launch path.
+- **A fork server**, for the same reasons and a fortiori: it never landed,
+  and its own author called it not ready.
+- **`compile_threads=1`.** It removes the 32-worker pool and most of the
+  teardown, but it is **not measurement-neutral**: the sample standard
+  deviation fell 3x to 11x on dispatch-bound arms. A knob that changes the
+  spread of the measurand cannot be set for speed.
+- **Building an arm ahead of the previous arm's measurement.** The overlap
+  shifted the measurand by 4% to 9%.
+- **Caching a built arm on disk.** Same objection as the pool, with a larger
+  surface.
+
 ### Choosing a correctness metric
 
 - **`max_rel_l2`** (`||a-b|| / ||b||`) is the default and the only safe choice
@@ -937,13 +1028,19 @@ arm measuring the baseline under an FA4 label.
 
 ```
 out/<timestamp>/kernels/<scenario>/<hardware>/
-  manifest.json      # schema 5: model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/burst_k/warmup_calls/seed, commands, provenance
-  results.json       # schema 4: every declared arm with a status, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
+  manifest.json      # schema 6: model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/replicates_per_process/burst_k/warmup_calls/seed, commands, provenance
+  results.json       # schema 5: every declared arm with a status, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
   kernel_bench.log   # every worker's stdout+stderr, in spawn order
   fragments/
     correctness.json         # the gate pass
     timing__<arm>__r<N>.json # one per (arm, replicate)
 ```
+
+Every fragment also carries a `phases` table: the named wall-clock spans of
+the process that wrote it. A worker that measures several replicates writes
+one fragment per replicate, and each of them carries that process's table, so
+the same table appears more than once. It is provenance about the run, not
+about the kernel.
 
 Raw per-replicate samples are kept in `results.json` so a run can be
 re-analyzed without re-measuring, and the fragments are kept so a merge can
@@ -965,7 +1062,17 @@ host could not run was absent, which is indistinguishable from an arm the
 registry never declared. The manifest alone went 4 -> 5 when `skipped_arms`
 arrived: `arms` is the registry roster, so it names arms the host never
 launched, and a manifest-only reader had to diff it against `commands` to
-find them. The results loader enforces exact schema equality,
+find them. The manifest alone went 5 -> 6 when `replicates_per_process`
+arrived, because a manifest that does not state it cannot say whether its
+run's intervals are across processes or within one. The results file went
+4 -> 5 for the other half of the same change: above one replicate per
+process a comparison row carries
+`within_process_ratio_ci_low`/`_high` and **no** `ratio_ci_low`/`_high`, so
+the shape of the file itself changes and a bump is required rather than an
+addition. The rename is the point -- those replicates share a build and an
+interpreter, so the interval is a lower bound, and a reader of the honest
+name must find nothing rather than a narrower number. The results loader
+enforces exact schema equality,
 so older files are rejected rather than half-read; the manifest is
 write-only provenance and has no loader.
 
