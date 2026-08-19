@@ -757,7 +757,9 @@ TEST_CENSUS = {
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
     # scenario's rejection of a mode name MODES does not hold, +1 for
     # _seeded_build's builder-vs-declaration gate.
-    "test_kernels": 28,
+    # +3 with fragment_stem: a slash never reaches a filename, two arms may
+    # not collide after the substitution, and no declared arm does today.
+    "test_kernels": 31,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against
     # a frozen literal (including the cuda-graph branch the parity check
@@ -791,7 +793,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 245
+TEST_CENSUS_TOTAL = 248
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

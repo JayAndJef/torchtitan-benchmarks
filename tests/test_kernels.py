@@ -13,6 +13,7 @@ from benchmarks.kernel.registry import KERNEL_SCENARIOS, kernel_scenario_by_name
 from benchmarks.kernel.schema import (
     KernelWorkload,
     MODES,
+    fragment_stem,
     resolve_shape_and_workload,
     routing_divides_evenly,
     shape_summary,
@@ -491,6 +492,53 @@ class KernelComparisonTests(unittest.TestCase):
         ) ** 0.5
         expected = (statistics.mean(arm) - statistics.mean(base)) / pooled
         self.assertAlmostEqual(row["cohens_d"], expected)
+
+
+class FragmentNameTests(unittest.TestCase):
+    """An arm name becomes a filename exactly once, and must survive it.
+
+    The cross-engine roster spells an arm ``mcore/base``. Without the
+    substitution a fragment path nests into a directory nothing creates, the
+    worker fails to write, and the arm reaches the results as ``failed`` with
+    no recoverable cause.
+    """
+
+    def test_a_slash_never_reaches_the_filename(self) -> None:
+        from benchmarks.kernel.runner import fragment_path
+        from benchmarks.kernel.schema import fragment_stem
+
+        self.assertEqual(fragment_stem("mcore/base"), "mcore-base")
+        self.assertEqual(fragment_stem("titan"), "titan")
+        path = fragment_path(Path("/tmp/fragments"), "mcore/base", 0)
+        self.assertEqual(path.parent, Path("/tmp/fragments"))
+        self.assertEqual(path.name, "timing__mcore-base__r0.json")
+
+    def test_colliding_stems_are_refused_at_declaration(self) -> None:
+        from benchmarks.kernel.schema import KernelArm, KernelScenario
+
+        def arm(name: str) -> KernelArm:
+            return KernelArm(
+                name=name,
+                description="d",
+                builder="m:f",
+                modes=("forward",),
+            )
+
+        with self.assertRaises(ValueError) as caught:
+            KernelScenario(
+                name="clash",
+                description="d",
+                inputs_builder="m:i",
+                reference_builder=None,
+                arms=(arm("mcore/base"), arm("mcore-base")),
+                baseline_arm="mcore/base",
+            )
+        self.assertIn("overwrite", str(caught.exception))
+
+    def test_every_declared_arm_has_a_distinct_stem(self) -> None:
+        for scenario in KERNEL_SCENARIOS.values():
+            stems = [fragment_stem(a.name) for a in scenario.arms]
+            self.assertEqual(len(stems), len(set(stems)), scenario.name)
 
 
 if __name__ == "__main__":

@@ -52,6 +52,32 @@ MODES = ("forward", "backward", "forward_backward")
 CORRECTNESS_FRAGMENT_KIND = "kernel_correctness_fragment"
 TIMING_FRAGMENT_KIND = "kernel_timing_fragment"
 
+# The character an arm name may not carry into a filename, and what replaces
+# it. Cross-engine scenarios spell the engine and the profile as one name --
+# ``mcore/base`` against ``titan`` -- and a fragment file is named after the
+# arm that wrote it.
+_FRAGMENT_SEPARATOR = "/"
+_FRAGMENT_REPLACEMENT = "-"
+
+
+def fragment_stem(arm_name: str) -> str:
+    """The filename component for one arm, with no path separator left in it.
+
+    ``Path("fragments") / "timing__mcore/base__r0.json"`` is a file inside a
+    ``timing__mcore`` **directory**, not a file with a slash in its name. No
+    writer creates that directory, so the timing worker fails to write its
+    fragment, the parent reads none, and the arm lands as ``failed`` with a
+    cause no reader of the results can recover. Every cross-engine scenario in
+    the partition would hit it.
+
+    The separator is replaced here, in the one place a name becomes a file, so
+    the roster keeps the ``engine/profile`` spelling that makes an arm
+    self-describing. ``KernelScenario.__post_init__`` refuses two arms whose
+    stems collide, which is the failure this substitution could otherwise
+    introduce.
+    """
+    return arm_name.replace(_FRAGMENT_SEPARATOR, _FRAGMENT_REPLACEMENT)
+
 
 @dataclass(frozen=True)
 class KernelWorkload:
@@ -239,6 +265,20 @@ class KernelScenario:
         # ``_heaviest_mode``; a floor skips the memory pass and says nothing
         # at all, and reaches the merge with no samples. An empty tuple is the
         # same failure spelled differently.
+        # Two arms whose fragment stems collide would overwrite each other's
+        # timing file, and the second would be published under the first's
+        # samples. Checked at import, because the alternative is to discover it
+        # after a GPU has measured both.
+        stems: dict[str, str] = {}
+        for arm in self.arms:
+            stem = fragment_stem(arm.name)
+            if stem in stems:
+                raise ValueError(
+                    f"{self.name}: arms {stems[stem]!r} and {arm.name!r} both "
+                    f"name the fragment file {stem!r}; one would overwrite the "
+                    "other's samples"
+                )
+            stems[stem] = arm.name
         for arm in self.arms:
             if not arm.modes:
                 raise ValueError(

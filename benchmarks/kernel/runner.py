@@ -58,6 +58,7 @@ from benchmarks.kernel.results.schema import (
 from benchmarks.kernel.schema import (
     KernelScenario,
     KernelWorkload,
+    fragment_stem,
     resolve_shape_and_workload,
     routing_divides_evenly,
     shape_summary,
@@ -197,7 +198,11 @@ def worker_command(
 
 
 def fragment_path(fragments_dir: Path, arm: str, replicate: int) -> Path:
-    return fragments_dir / f"timing__{arm}__r{replicate}.json"
+    # fragment_stem, not the raw name: a cross-engine arm is spelled
+    # "mcore/base", and Path would read that slash as a directory nobody
+    # creates. See benchmarks/kernel/schema.py for why the substitution lives
+    # there rather than here.
+    return fragments_dir / f"timing__{fragment_stem(arm)}__r{replicate}.json"
 
 
 def resolve_arm_skips(
