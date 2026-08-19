@@ -49,8 +49,6 @@ imports the one arm it builds, and the mcore arm alone needs megatron on
 from __future__ import annotations
 
 import gc
-import os
-import socket
 from dataclasses import dataclass
 
 import torch
@@ -63,6 +61,7 @@ from benchmarks.kernel.operations.common import (
     _randn,
     _randn_like,
     _reset_grads,
+    initialize_megatron_single_rank,
 )
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
@@ -382,67 +381,6 @@ def build_qk_norm_titan(
     )
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("", 0))
-        return int(sock.getsockname()[1])
-
-
-def _bootstrap_megatron() -> None:
-    """Install the process-global state a megatron-core model needs.
-
-    Megatron wants three things before a ``GPTModel`` builds: itself on
-    ``sys.path``, a torch.distributed process group, and an initialized
-    ``parallel_state`` with a seeded CUDA RNG tracker. The megatron driver
-    does the same three steps (``benchmarks/e2e/megatron/train.py``, the block
-    around ``init_process_group`` and ``initialize_model_parallel``).
-    ``configure_te_environment`` runs first, because it must set the TE
-    environment variables before anything imports TransformerEngine.
-
-    Each step is guarded, so the call is idempotent. The correctness pass
-    builds every arm of a scenario in one interpreter and reaches this once
-    per mcore arm.
-    """
-    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-        add_megatron_to_path,
-        configure_te_environment,
-    )
-
-    add_megatron_to_path()
-    configure_te_environment()
-
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", str(_free_port()))
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend="nccl", rank=0, world_size=1
-        )
-    torch.cuda.set_device(0)
-
-    from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import (
-        model_parallel_cuda_manual_seed,
-    )
-
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel()
-    # Megatron draws its own weight initialization from this tracker. The arm
-    # overwrites both norm weights from the shared inputs afterwards, so the
-    # seed decides nothing this scenario measures. The tracker must exist, or
-    # the GPTModel build raises.
-    #
-    # Outside the guard above, deliberately. Every arm is timed alone in its
-    # own process, so a timing worker always takes the branch and seeds. The
-    # correctness pass builds every arm in one interpreter, so the second
-    # mcore arm skips the branch -- and if the seed were inside it, that arm
-    # would draw its weights from a tracker the first arm's build had already
-    # advanced, and so differ from the arm the timing worker measures.
-    # ``model_parallel_cuda_manual_seed`` calls ``_CUDA_RNG_STATE_TRACKER.
-    # reset()`` before it adds any state (``tensor_parallel/random.py``), so
-    # repeating it is safe.
-    model_parallel_cuda_manual_seed(torch.initial_seed() % (2**31))
-
-
 def _assert_te_rmsnorm(module, attribute: str, shape: PiperShape) -> None:
     """Refuse to time a module that is not TE's RMSNorm.
 
@@ -522,7 +460,7 @@ def build_qk_norm_mcore_base(
     parameters would make the mcore arm look expensive for a reason that has
     nothing to do with the norm.
     """
-    _bootstrap_megatron()
+    initialize_megatron_single_rank(torch.initial_seed() % (2**31))
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
     before = torch.cuda.memory_allocated()

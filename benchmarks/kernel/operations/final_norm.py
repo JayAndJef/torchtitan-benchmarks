@@ -81,8 +81,6 @@ titan arm pays for torchtitan, and neither pays for the other.
 
 from __future__ import annotations
 
-import os
-import socket
 from dataclasses import dataclass
 
 import torch
@@ -93,6 +91,7 @@ from benchmarks.kernel.operations.common import (
     _randn,
     _randn_like,
     _reset_grads,
+    initialize_megatron_single_rank,
 )
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.shape import PiperShape
@@ -282,63 +281,6 @@ def build_final_norm_titan(
     return _final_norm_arm("titan", module, weight, inputs)
 
 
-def _free_port() -> int:
-    """A port nobody holds, for the single-rank process group."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _bootstrap_megatron() -> None:
-    """Install megatron's process-global state. Idempotent, once per process.
-
-    Megatron needs a process group and ``parallel_state`` before a model
-    builds, and both are global. The correctness pass builds every arm of the
-    scenario in one interpreter, so this function must be safe to call twice;
-    each step therefore checks first. ``configure_te_environment`` runs before
-    anything imports TE, which is what routes the norms through the cuDNN
-    backend on this host.
-    """
-    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-        add_megatron_to_path,
-        configure_te_environment,
-    )
-
-    add_megatron_to_path()
-    configure_te_environment()
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", str(_free_port()))
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend="nccl", rank=0, world_size=1
-        )
-    torch.cuda.set_device(0)
-
-    from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import (
-        model_parallel_cuda_manual_seed,
-    )
-
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel()
-    # ``_seeded_build`` re-seeds the global generator with the run's seed
-    # immediately before this builder runs, so this reads that value back
-    # rather than inventing a second one. Megatron's weight init draws from
-    # this tracker; the norm gain is overwritten below in any case, but the
-    # correctness pass and the timing pass must build the same arm.
-    #
-    # Outside the guard above, deliberately. Every arm is timed alone in its
-    # own process, so a timing worker always takes the branch and seeds. The
-    # correctness pass builds every arm in one interpreter, so the second
-    # mcore arm skips the branch -- and if the seed were inside it, that arm
-    # would draw its weights from a tracker the first arm's build had already
-    # advanced, and so differ from the arm the timing worker measures.
-    # ``model_parallel_cuda_manual_seed`` calls ``_CUDA_RNG_STATE_TRACKER.
-    # reset()`` before it adds any state (``tensor_parallel/random.py``), so
-    # repeating it is safe.
-    model_parallel_cuda_manual_seed(torch.initial_seed())
-
-
 def _assert_te_rmsnorm(module, eps: float) -> None:
     """Refuse to time a final norm that is not TE's RMSNorm.
 
@@ -377,7 +319,7 @@ def build_final_norm_mcore_base(
     from benchmarks.models.piper_qwen3.mcore_profiles import BASE
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
-    _bootstrap_megatron()
+    initialize_megatron_single_rank(torch.initial_seed())
     model = build_model(seq_len=workload.seq_len, shape=shape, profile=BASE)
     module = model.decoder.final_layernorm
     if module is None:

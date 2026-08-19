@@ -62,8 +62,6 @@ norm epsilon from it.
 from __future__ import annotations
 
 import gc
-import os
-import socket
 from dataclasses import dataclass
 
 import torch
@@ -75,6 +73,7 @@ from benchmarks.kernel.operations.common import (
     _randn,
     _randn_like,
     _reset_grads,
+    initialize_megatron_single_rank,
 )
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
@@ -93,11 +92,6 @@ NORM_EPS = float(BASE.config_overrides["layernorm_epsilon"])
 # module class at ``moe_layer_freq=1``, so the index is arbitrary and is fixed
 # here so the provenance line names it.
 MCORE_LAYER = 0
-
-# The seed the megatron RNG tracker takes before the model builds. The arm
-# overwrites the norm gain from the shared inputs, so this value reaches no
-# measured tensor; megatron requires a seeded tracker to initialize at all.
-MCORE_INIT_SEED = 42
 
 
 @dataclass
@@ -324,50 +318,6 @@ def build_ffn_norm_titan(
     # arm runs eager, because megatron compiles no whole layer; the ratio
     # between them is a comparison of two treatments, and every table says so.
     return _norm_arm("titan", _compile_module(module), weight, inputs)
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def initialize_megatron_single_rank(seed: int = MCORE_INIT_SEED) -> None:
-    """Put megatron's process-global state in place, once per process.
-
-    Megatron needs its checkout on ``sys.path``, a process group, a
-    model-parallel state and a seeded CUDA RNG tracker before a ``GPTModel``
-    builds; ``benchmarks/e2e/megatron/train.py:137-163`` does the same steps
-    for the e2e arm. Each step is guarded, so a second mcore arm in the same
-    interpreter -- which the correctness pass builds -- does not repeat it.
-    ``model_parallel_cuda_manual_seed`` resets the tracker itself
-    (``tensor_parallel/random.py:494``), so it is safe to repeat.
-
-    ``configure_te_environment`` runs before any TransformerEngine import,
-    which is what routes the norms through cuDNN on this box.
-
-    NOTE for the registry merge: four Part C scenarios need this function, and
-    each currently carries its own copy. Hoist it into one shared module.
-    """
-    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-        add_megatron_to_path,
-        configure_te_environment,
-    )
-
-    add_megatron_to_path()
-    configure_te_environment()
-
-    from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-
-    if not torch.distributed.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", str(_free_port()))
-        torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
-    torch.cuda.set_device(0)
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel()
-    model_parallel_cuda_manual_seed(seed)
 
 
 def build_ffn_norm_mcore_base(

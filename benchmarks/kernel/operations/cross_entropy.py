@@ -244,15 +244,16 @@ one arm must not import the other's stack.
 from __future__ import annotations
 
 import gc
-import os
-import socket
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
-from benchmarks.kernel.operations.common import _randn
+from benchmarks.kernel.operations.common import (
+    _randn,
+    initialize_megatron_single_rank,
+)
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE, McoreProfile, derive
 from benchmarks.models.piper_qwen3.shape import PiperShape
@@ -272,11 +273,6 @@ TITAN_FULL_LOGITS_ARM = "titan/full_logits"
 TITAN_TE_FUSED_CE_ARM = "titan/te_fused_ce"
 TITAN_PIPER_ARM = "titan/piper_optimized_te_ce"
 
-# The seed the megatron RNG tracker takes before a model builds. No measured
-# tensor here comes from megatron's weight initialization -- the logits are
-# synthetic and the loss holds no parameters -- but megatron refuses to
-# initialize without a seeded tracker.
-MCORE_INIT_SEED = 42
 
 # Rows of the fp64 reference computed at once. 256 rows of 151936 fp64
 # elements is 296.75 MiB per temporary (311.16 MB), and the loop holds at most
@@ -651,62 +647,6 @@ def build_cross_entropy_titan_piper_optimized_te_ce(
 # ---------------------------------------------------------------------------
 # Megatron-core arms
 # ---------------------------------------------------------------------------
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def initialize_megatron_single_rank(seed: int = MCORE_INIT_SEED) -> None:
-    """Put megatron's process-global state in place, once per process.
-
-    Megatron needs its checkout on ``sys.path``, a process group, a
-    model-parallel state and a seeded CUDA RNG tracker before a ``GPTModel``
-    builds; ``benchmarks/e2e/megatron/train.py:137-163`` does the same steps
-    for the e2e arm. Each step is guarded, so a second mcore arm in the same
-    interpreter -- which the correctness pass builds, and this scenario has
-    three of -- does not repeat it. ``model_parallel_cuda_manual_seed`` resets
-    the tracker itself (``tensor_parallel/random.py:494``), so it is safe to
-    repeat.
-
-    ``configure_te_environment`` runs before any TransformerEngine import,
-    which is what routes the norms through cuDNN on this box.
-
-    The **body** below is copied character for character from
-    ``benchmarks/kernel/operations/ffn_norm.py:335-370``, together with
-    ``_free_port`` from ``:329-333``; only this docstring differs.
-
-    NOTE for the registry merge, and it is not a delete-the-duplicates job:
-    five Part C scenarios install this state under **three different names**.
-    ``ffn_norm.py`` and this module call it
-    ``initialize_megatron_single_rank``; ``final_norm.py:292`` and
-    ``qk_norm.py:394`` call it ``_bootstrap_megatron`` and structure it
-    differently; ``attn_out_proj.py:340`` calls it ``_initialize_megatron``.
-    All five carry their own ``_free_port``. The hoist has to reconcile three
-    variants into one function and check that each caller's guarantees survive
-    -- the seed argument is the one this module depends on.
-    """
-    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-        add_megatron_to_path,
-        configure_te_environment,
-    )
-
-    add_megatron_to_path()
-    configure_te_environment()
-
-    from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-
-    if not torch.distributed.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", str(_free_port()))
-        torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
-    torch.cuda.set_device(0)
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel()
-    model_parallel_cuda_manual_seed(seed)
 
 
 def _assert_profile_took(profile: McoreProfile, config: Any) -> None:

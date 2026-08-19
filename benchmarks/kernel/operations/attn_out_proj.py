@@ -86,8 +86,6 @@ process that measures one arm never imports the other arm's stack.
 from __future__ import annotations
 
 import gc
-import os
-import socket
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -101,6 +99,7 @@ from benchmarks.kernel.operations.common import (
     _compile_module,
     _randn,
     _reset_grads,
+    initialize_megatron_single_rank,
 )
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.shape import PiperShape
@@ -138,12 +137,6 @@ MCORE_WEIGHT_COMPONENT = "attn_out"
 # in this system overclaim "TE"; this one is TE, and the guard is what lets a
 # published table say so.
 MCORE_MODULE_CLASS = "TERowParallelLinear"
-
-# Megatron needs a seeded CUDA RNG tracker before a TE module initializes its
-# weights. The value is irrelevant here -- the weight is overwritten -- but
-# the tracker must exist, so it matches what the driver and the parity check
-# already pass.
-MEGATRON_SEED = 42
 
 
 def mcore_module_path(layer: int = MCORE_LAYER) -> str:
@@ -324,73 +317,6 @@ def build_attn_out_proj_titan(
     )
 
 
-def _free_port() -> int:
-    """A port the rendezvous store can bind, chosen the way the driver does.
-
-    Copied from ``benchmarks/e2e/megatron/train.py:97`` rather than imported,
-    because an ``operations`` module must not pull the e2e driver into a
-    kernel worker. Timing workers run one after another, so a fixed port
-    would eventually meet its own predecessor in TIME_WAIT.
-    """
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def _initialize_megatron() -> None:
-    """Install the process-global state megatron needs before it builds.
-
-    Megatron cannot build a module without a torch process group, a
-    ``parallel_state`` model-parallel group and a seeded CUDA RNG tracker.
-    All three are process-global, which is why an mcore arm gets its own
-    worker. The order matters twice: ``add_megatron_to_path`` must run before
-    any megatron import, and ``configure_te_environment`` must run before
-    TransformerEngine is imported, because it sets the ``NVTE_NORM_*`` and
-    cuDNN-frontend variables TE reads at import.
-
-    Idempotent, because the correctness pass builds every arm of a scenario in
-    one interpreter and may reach this more than once.
-    """
-    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-        add_megatron_to_path,
-        configure_te_environment,
-    )
-
-    add_megatron_to_path()
-    configure_te_environment()
-
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", str(_free_port()))
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend="nccl", rank=0, world_size=1
-        )
-    # Device 0, matching benchmarks/e2e/megatron/train.py:149 and
-    # tools/megatron_parity_check.py:135. The worker runs under
-    # CUDA_VISIBLE_DEVICES=<gpu> (benchmarks/execution/environment.py:61), so
-    # index 0 is the requested GPU and is also what engine/run.py's
-    # torch.device("cuda") resolves to.
-    torch.cuda.set_device(0)
-
-    from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import (
-        model_parallel_cuda_manual_seed,
-    )
-
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel()
-    # Outside the guard above, deliberately. Every arm is timed alone in its
-    # own process, so a timing worker always takes the branch and seeds. The
-    # correctness pass builds every arm in one interpreter, so the second
-    # mcore arm skips the branch -- and if the seed were inside it, that arm
-    # would draw its weights from a tracker the first arm's build had already
-    # advanced, and so differ from the arm the timing worker measures.
-    # ``model_parallel_cuda_manual_seed`` calls ``_CUDA_RNG_STATE_TRACKER.
-    # reset()`` before it adds any state (``tensor_parallel/random.py``), so
-    # repeating it is safe.
-    model_parallel_cuda_manual_seed(MEGATRON_SEED)
-
-
 def _assert_mcore_linear_proj(module: object, shape: PiperShape) -> dict[str, Any]:
     """Refuse to time a module that is not the one the scenario claims.
 
@@ -487,7 +413,7 @@ def build_attn_out_proj_mcore_base(
     the process. Whatever that first call does extra, it does once, from the
     seeded weight, and the warmup absorbs it before any burst is timed.
     """
-    _initialize_megatron()
+    initialize_megatron_single_rank()
 
     from benchmarks.models.piper_qwen3.mcore_profiles import BASE
     from benchmarks.models.piper_qwen3.megatron_model import build_model

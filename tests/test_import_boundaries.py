@@ -577,6 +577,16 @@ DECLARATION_MODULES = ("benchmarks.kernel.schema", "benchmarks.kernel.registry")
 #
 # The rule is per *scope*, not per module: these names are welcome inside a
 # builder body, and ``all_imports`` is deliberately not used here.
+#
+# The last two entries are first-party and reach the stack one step further
+# out, which is why they are named rather than left to the third-party roots
+# above. ``config_registry`` imports torchtitan at module scope (it is on
+# WORKER_SIDE_MODULES), and ``megatron_model`` puts Megatron on ``sys.path``
+# and builds a ``GPTModel``, so an operations module that imported either at
+# module scope would pay the same price under a first-party spelling. Naming
+# them also keeps the positive control below honest: a family module whose
+# only route to the stack runs through one of these -- ``embedding_stage``
+# does -- would otherwise look like a module that defers nothing.
 OPERATIONS_DIRECTORY = "benchmarks/kernel/operations/"
 OPERATIONS_DEFERRED_IMPORTS = (
     "torchtitan",
@@ -587,6 +597,8 @@ OPERATIONS_DEFERRED_IMPORTS = (
     "triton",
     "helion",
     "benchmarks.models.piper_qwen3.components",
+    "benchmarks.models.piper_qwen3.config_registry",
+    "benchmarks.models.piper_qwen3.megatron_model",
 )
 
 

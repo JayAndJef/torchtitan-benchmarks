@@ -128,8 +128,6 @@ nothing heavier.
 from __future__ import annotations
 
 import gc
-import os
-import socket
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -143,6 +141,7 @@ from benchmarks.kernel.operations.common import (
     _compile_module,
     _randn,
     _reset_grads,
+    initialize_megatron_single_rank,
 )
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
@@ -166,11 +165,6 @@ TITAN_UNFUSED_ARM_NAME = "titan/unfused_qkv"
 # provenance line can name it.
 MCORE_LAYER = 0
 
-# The seed megatron's CUDA RNG tracker takes before the model builds. Every
-# parameter this arm measures is overwritten afterwards, so the value reaches
-# no measured tensor; megatron cannot initialize a TE module without a seeded
-# tracker at all.
-MCORE_INIT_SEED = 42
 
 # The epsilon both engines use, read from the mcore profile rather than
 # retyped. ``build_qkv_prep_titan`` and its unfused twin refuse to build when
@@ -684,54 +678,6 @@ def build_qkv_prep_titan_unfused_qkv(
             "upstream_default": False,
         },
     )
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def initialize_megatron_single_rank(seed: int = MCORE_INIT_SEED) -> None:
-    """Put megatron's process-global state in place, once per process.
-
-    Megatron needs its checkout on ``sys.path``, a process group, a
-    model-parallel state and a seeded CUDA RNG tracker before a ``GPTModel``
-    builds; ``benchmarks/e2e/megatron/train.py:137-163`` does the same steps
-    for the e2e arm. Each step is guarded, so a second mcore arm in the same
-    interpreter -- which the correctness pass builds -- does not repeat it.
-    ``model_parallel_cuda_manual_seed`` resets the tracker itself
-    (``tensor_parallel/random.py:494``), so it is safe to repeat.
-
-    ``configure_te_environment`` runs before any TransformerEngine import,
-    which is what routes the norms through cuDNN on this box.
-
-    NOTE for the registry merge: several Part C scenarios need this function,
-    and each currently carries its own copy. This one is verbatim from
-    ``ffn_norm.py`` -- but ``final_norm.py`` and ``qk_norm.py`` carry a
-    differently named ``_bootstrap_megatron`` that seeds only when it
-    initializes model parallel. The hoist must therefore **choose** a seeding
-    behaviour and recheck every arm against it, not merge identical text.
-    """
-    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-        add_megatron_to_path,
-        configure_te_environment,
-    )
-
-    add_megatron_to_path()
-    configure_te_environment()
-
-    from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-
-    if not torch.distributed.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", str(_free_port()))
-        torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
-    torch.cuda.set_device(0)
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel()
-    model_parallel_cuda_manual_seed(seed)
 
 
 def _assert_mcore_qkv_prep(
