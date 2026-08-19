@@ -4,8 +4,17 @@ The kernel analog of ``e2e/registry.py``: each scenario names the arms that
 compete head-to-head on one kernel family, how each arm is built, which arm
 it is compared against, and which correctness gates it must pass. The
 declaration types live next door in ``benchmarks.kernel.schema``; this module
-is nothing but the five instances of them. Torch-free like the schema, so the
-CLI can list scenarios without CUDA.
+is nothing but instances of them. Torch-free like the schema, so the CLI can
+list scenarios without CUDA.
+
+Two kinds of scenario live here and they answer different questions. A
+**single-engine** scenario ranks TorchTitan implementations of one kernel
+against each other. A **cross-engine** scenario puts megatron-core's
+implementation of one model component beside TorchTitan's, and its arms are
+named ``engine/profile`` -- ``mcore/base`` against ``titan``. A cross-engine
+ratio is a comparison of two *treatments* as much as two kernels, because
+one side is compiled and the other is eager by design, so each arm states
+its treatment and every eager arm states why.
 
 Builders are dotted ``module:function`` strings, one module per kernel
 family (``benchmarks.kernel.operations.rope`` for the rope scenario, and so
@@ -384,9 +393,150 @@ ATTENTION = KernelScenario(
 )
 
 
+QK_NORM = KernelScenario(
+    name="qk_norm",
+    description=(
+        "Per-head QK RMSNorm on q and k before RoPE (titan "
+        "GQAttention.q_norm/k_norm vs megatron self_attention."
+        "q_layernorm/k_layernorm): torch.nn.RMSNorm under torch.compile "
+        "against TransformerEngine RMSNorm run eager. TE norms run through "
+        "the cuDNN backend on this host (NVTE_NORM_FWD_USE_CUDNN and "
+        "NVTE_NORM_BWD_USE_CUDNN=1), so this is not megatron's native norm "
+        "kernel. A norm may be at memory bandwidth, so copy_floor moves the "
+        "same bytes and the x_floor column decides whether the ratio is a "
+        "kernel claim at all; the floor declares forward only, so "
+        "forward_backward carries no x_floor column. This number holds NO "
+        "host serialization on either side (plan rule 5): neither path calls "
+        ".cpu(), .item() or synchronize inside a timed closure. Measured on "
+        "CUDA, Inductor writes one kernel per norm for the titan pair, so the "
+        "row is two kernels against the mcore arm's two eager TE calls."
+    ),
+    inputs_builder="benchmarks.kernel.operations.qk_norm:qk_norm_inputs",
+    reference_builder=(
+        "benchmarks.kernel.operations.qk_norm:qk_norm_reference"
+    ),
+    baseline_arm="mcore/base",
+    arms=(
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "One read and one write of q and k: the bandwidth floor for "
+                "this shape"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.qk_norm:"
+                "build_qk_norm_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a pair "
+                "of copies would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron self_attention.q_layernorm and k_layernorm: "
+                "TransformerEngine RMSNorm (cuDNN norm backend on this host), "
+                "eager as megatron runs it, on SBHD tensors"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.qk_norm:"
+                "build_qk_norm_mcore_base"
+            ),
+            # No isolated backward. TE's operation fuser clears its saved
+            # tensors while it runs backward (ops/fuser.py:225,258) and TE's
+            # RMSNorm calls clear_tensor_data on both of them at the end of
+            # op_backward, so the retained-graph re-run rope and qkv use
+            # raises here. Both arms drop the mode and stay comparable;
+            # backward cost is forward_backward minus forward.
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so every TE "
+                "module it builds runs eager end to end; compiling this one "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="fp64",
+                    outputs=(
+                        "q_out",
+                        "k_out",
+                        "dq",
+                        "dk",
+                        "q_weight_grad",
+                        "k_weight_grad",
+                    ),
+                    # A norm is a reduction, so rel_l2 is the only safe metric
+                    # (CLAUDE.md, "Choosing a correctness metric"). One value
+                    # covers the weight gradients too: the reduction runs over
+                    # 65,536 rows but the weight holds only head_dim = 64
+                    # values, and torch accumulates that sum in fp32. Measured
+                    # on CPU bf16 at the real normal shape: 1.66e-3 on the four
+                    # activations, 1.36e-3 and 1.64e-3 on the two weight
+                    # gradients.
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan GQAttention q_norm and k_norm: torch.nn.RMSNorm "
+                "under torch.compile(fullgraph=True), as the per-block "
+                "compile gives them end to end, on BSHD tensors"
+            ),
+            builder="benchmarks.kernel.operations.qk_norm:build_qk_norm_titan",
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="fp64",
+                    outputs=(
+                        "q_out",
+                        "k_out",
+                        "dq",
+                        "dk",
+                        "q_weight_grad",
+                        "k_weight_grad",
+                    ),
+                    max_rel_l2=2e-2,
+                ),
+                # Informational, and pointed this way round on purpose. The
+                # two fp64 gates already enforce, and they are stronger: each
+                # arm is right in absolute terms, which bounds the distance
+                # between them. ``resolve_arm_skips`` closes the skip set over
+                # correctness references, so a check pointing from the anchor
+                # at ``titan`` would let a skipped titan arm take the anchor
+                # down with it, and the anchor's loss costs the scenario.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=(
+                        "q_out",
+                        "k_out",
+                        "dq",
+                        "dk",
+                        "q_weight_grad",
+                        "k_weight_grad",
+                    ),
+                    max_rel_l2=2e-2,
+                    informational=True,
+                ),
+            ),
+        ),
+    ),
+    # comparisons left at None: the derived set is exactly the one row this
+    # scenario publishes, titan against mcore/base, with the floor excluded.
+)
+
+
 KERNEL_SCENARIOS = {
     scenario.name: scenario
-    for scenario in (ROPE, SWIGLU, QKV, LM_HEAD, ATTENTION)
+    for scenario in (ROPE, SWIGLU, QKV, LM_HEAD, ATTENTION, QK_NORM)
 }
 
 

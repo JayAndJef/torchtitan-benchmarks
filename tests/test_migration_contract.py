@@ -70,6 +70,7 @@ KERNEL_ARMS_MODULES = {
     "qkv": "benchmarks.kernel.operations.qkv",
     "lm_head": "benchmarks.kernel.operations.lm_head",
     "attention": "benchmarks.kernel.operations.attention",
+    "qk_norm": "benchmarks.kernel.operations.qk_norm",
 }
 
 # Third-party roots override paths are allowed to name, so the "did this move
@@ -120,6 +121,9 @@ KERNEL_INVENTORY = {
         "piper_optimized_te_ce",
     ),
     "attention": ("baseline", "flex_flash", "flash_attention_3"),
+    # Cross-engine from here down. The arms are named engine/profile, and the
+    # anchor is the megatron side throughout -- see KERNEL_BASELINE_ARMS.
+    "qk_norm": ("copy_floor", "mcore/base", "titan"),
 }
 
 KERNEL_BASELINE_ARMS = {
@@ -128,6 +132,14 @@ KERNEL_BASELINE_ARMS = {
     "qkv": "baseline",
     "lm_head": "baseline",
     "attention": "baseline",
+    # The anchor is mcore/base at every cross-engine scenario. Seven of the
+    # sixteen hold mcore-only variant arms that can compare against nothing
+    # else, so an anchor on the titan side would make the derived set compare
+    # a megatron fusion delta against the other engine and conflate the two.
+    # It also matches e2e, where piper1b_megatron makes the megatron arm the
+    # baseline. The cost is accepted and recorded: the anchor's loss costs the
+    # whole scenario, and TransformerEngine is the more fragile side.
+    "qk_norm": "mcore/base",
 }
 
 # Arm names deliberately match across the two registries wherever the same
@@ -752,6 +764,11 @@ TEST_CENSUS = {
     # the threshold still splits the measured rope arms from copy_floor.
     # +1 for the one-sidedness -- a flat ladder is not a device-bound
     # verdict, which rope backward demonstrates.
+    # Scenario 3 of the cross-engine partition, and the first module here
+    # to build both engines: 17 covering the shared inputs, the two layouts,
+    # the fp64 reference, both arm builders and the guards that refuse a norm
+    # the spec resolved to something other than a real one.
+    "test_kernel_qk_norm": 17,
     "test_kernel_results": 9,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
@@ -799,7 +816,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 252
+TEST_CENSUS_TOTAL = 269
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

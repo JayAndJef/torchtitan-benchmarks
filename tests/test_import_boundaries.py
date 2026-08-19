@@ -133,6 +133,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.operations.attention",
     "benchmarks.kernel.operations.common",
     "benchmarks.kernel.operations.lm_head",
+    "benchmarks.kernel.operations.qk_norm",
     "benchmarks.kernel.operations.qkv",
     "benchmarks.kernel.operations.rope",
     "benchmarks.kernel.operations.swiglu",

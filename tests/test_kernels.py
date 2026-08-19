@@ -21,11 +21,12 @@ from benchmarks.kernel.schema import (
 
 
 class RegistryTests(unittest.TestCase):
-    def test_expected_scenarios_and_baselines(self) -> None:
-        self.assertEqual(
-            list(KERNEL_SCENARIOS),
-            ["rope", "swiglu", "qkv", "lm_head", "attention"],
-        )
+    def test_every_scenario_is_internally_consistent(self) -> None:
+        """The roster itself is pinned in ``tests/test_migration_contract.py``,
+        which owns the stable-id inventory; a literal list here would be the
+        same pin written twice and edited sixteen times. What this checks is
+        the shape of each declaration: the anchor is one of the arms, every
+        mode is a real mode, and every correctness reference resolves."""
         for scenario in KERNEL_SCENARIOS.values():
             self.assertIn(
                 scenario.baseline_arm, [arm.name for arm in scenario.arms]

@@ -380,6 +380,22 @@ def shape_summary(
             "weight": [shape.vocab_size, shape.dim],
             "tokens": batch * seq,
         }
+    if scenario_name == "qk_norm":
+        return {
+            # Both layouts, because both are materialized and each engine
+            # reads its own. They hold the same rows in a different order.
+            "q_titan_BLNH": [batch, seq, shape.n_heads, shape.head_dim],
+            "k_titan_BLNH": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            "q_mcore_SBNH": [seq, batch, shape.n_heads, shape.head_dim],
+            "k_mcore_SBNH": [seq, batch, shape.n_kv_heads, shape.head_dim],
+            "weight": [shape.head_dim],
+            # The reduction runs over the last dimension alone, so every
+            # leading dimension is a row count. This is the number that says
+            # q and k are not the same size, and therefore why the scenario
+            # times a pair rather than one module twice.
+            "rows": batch * seq * (shape.n_heads + shape.n_kv_heads),
+            "reduction_length": shape.head_dim,
+        }
     if scenario_name == "attention":
         return {
             "q": [batch, seq, shape.n_heads, shape.head_dim],
