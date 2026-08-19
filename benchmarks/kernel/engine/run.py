@@ -7,7 +7,10 @@ worker process:
   the fp64 reference. It runs first, and once per scenario. It builds the
   arms **one at a time**, keeping each arm's outputs and dropping the arm.
 * ``run_timing_pass`` builds **one** arm and times it for one replicate. It
-  runs once per (arm, replicate).
+  runs once per (arm, replicate). It is a composition of three smaller
+  functions -- ``build_timing_arm``, ``time_replicate`` and ``arm_extras`` --
+  because the build is the expensive half and a replicate is the cheap one,
+  so a caller may build once and measure several times.
 
 Each returns a JSON-ready fragment rather than a result. The parent merges
 the fragments (``benchmarks.kernel.results.merge``), because the parent is
@@ -348,25 +351,46 @@ def run_correctness_pass(
     }
 
 
-def run_timing_pass(
+def build_timing_arm(
     scenario: KernelScenario,
     arm_name: str,
-    replicate: int,
     shape: PiperShape,
     workload: KernelWorkload,
     options: RunOptions,
-) -> dict[str, Any]:
-    """Time one arm for one replicate. One process, once per (arm, replicate).
+) -> tuple[KernelArm, BuiltArm]:
+    """The shared inputs and one built arm, ready to be timed.
 
-    ``peak_memory_gib`` and the ``--burst`` ladder are properties of the arm
-    rather than of a replicate, so replicate 0 measures them and every later
-    replicate reports ``None``. The merge reads them from replicate 0 alone.
+    Split from the measurement below because the build is the expensive half
+    and a replicate is the cheap one: a worker that measures several
+    replicates of one arm calls this once and ``time_replicate`` once per
+    replicate. Nothing here depends on the replicate index, which is what
+    makes that reuse legitimate rather than a shortcut.
     """
     inputs = _prepare(scenario, shape, workload, options)
     declaration = scenario.arm(arm_name)
     with phase("arm_build", torch.cuda.synchronize):
-        arm = _seeded_build(declaration, shape, workload, inputs, options.seed)
+        return declaration, _seeded_build(
+            declaration, shape, workload, inputs, options.seed
+        )
 
+
+def time_replicate(
+    scenario: KernelScenario,
+    declaration: KernelArm,
+    arm: BuiltArm,
+    replicate: int,
+    options: RunOptions,
+) -> dict[str, Any]:
+    """One replicate's samples for one already-built arm.
+
+    ``peak_memory_gib`` and the ``--burst`` ladder are **not** measured here.
+    They are properties of the arm rather than of a replicate, so
+    ``arm_extras`` measures them once and the caller attaches them to
+    replicate 0's fragment. Keeping them out of this function is what lets
+    every replicate in a batch get the identical treatment: were they inline,
+    replicate 1 of a batched worker would be preceded by a memory pass and a
+    burst ladder that replicate 1 of an unbatched worker never sees.
+    """
     modes: dict[str, list[float]] = {}
     for mode in MODES:
         values = burst_samples(
@@ -379,10 +403,10 @@ def run_timing_pass(
         if values:
             modes[mode] = values
 
-    fragment: dict[str, Any] = {
+    return {
         "kind": TIMING_FRAGMENT_KIND,
         "scenario": scenario.name,
-        "arm": arm_name,
+        "arm": declaration.name,
         "replicate": replicate,
         "modes": modes,
         # The one arm property the parent needs and cannot read from the
@@ -392,25 +416,63 @@ def run_timing_pass(
         "peak_memory_gib": None,
         "burst_us_per_call": None,
     }
-    if replicate == 0:
-        if not declaration.is_floor:
-            with phase("memory_pass"):
-                fragment["peak_memory_gib"] = memory_pass(
-                    arm, _heaviest_mode(arm), options.memory_iters
+
+
+def arm_extras(
+    declaration: KernelArm, arm: BuiltArm, options: RunOptions
+) -> dict[str, Any]:
+    """The two per-arm measurements replicate 0's fragment carries.
+
+    Measured once per arm, never once per replicate: peak allocation and the
+    burst ladder describe the implementation, and repeating them per replicate
+    would cost the same again for a number the merge reads from replicate 0
+    alone.
+    """
+    extras: dict[str, Any] = {
+        "peak_memory_gib": None,
+        "burst_us_per_call": None,
+    }
+    if not declaration.is_floor:
+        with phase("memory_pass"):
+            extras["peak_memory_gib"] = memory_pass(
+                arm, _heaviest_mode(arm), options.memory_iters
+            )
+    if options.burst:
+        # Every declared mode, not just "forward". The old pass read
+        # arm.calls["forward"] directly, which left lm_head -- whose arms
+        # declare forward_backward only -- with no way to run the
+        # diagnostic at all.
+        with phase("burst_ladder"):
+            extras["burst_us_per_call"] = {
+                mode: burst_ladder(
+                    arm, mode, options.bursts, options.burst_iters
                 )
-        if options.burst:
-            # Every declared mode, not just "forward". The old pass read
-            # arm.calls["forward"] directly, which left lm_head -- whose arms
-            # declare forward_backward only -- with no way to run the
-            # diagnostic at all.
-            with phase("burst_ladder"):
-                fragment["burst_us_per_call"] = {
-                    mode: burst_ladder(
-                        arm, mode, options.bursts, options.burst_iters
-                    )
-                    for mode in MODES
-                    if mode in arm.calls
-                }
+                for mode in MODES
+                if mode in arm.calls
+            }
+    return extras
+
+
+def run_timing_pass(
+    scenario: KernelScenario,
+    arm_name: str,
+    replicate: int,
+    shape: PiperShape,
+    workload: KernelWorkload,
+    options: RunOptions,
+) -> dict[str, Any]:
+    """Build one arm and time it for one replicate, in this process.
+
+    The one-replicate composition of the three functions above, kept for
+    ``run_kernel_scenario`` and for direct callers. The worker runs the same
+    three, with the middle one repeated.
+    """
+    declaration, arm = build_timing_arm(
+        scenario, arm_name, shape, workload, options
+    )
+    fragment = time_replicate(scenario, declaration, arm, replicate, options)
+    if replicate == 0:
+        fragment.update(arm_extras(declaration, arm, options))
     return fragment
 
 
