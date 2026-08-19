@@ -85,7 +85,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
 | `benchmarks/kernel/registry.py` | The five kernel scenarios themselves, declared with those types |
 | `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness |
-| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the three-way split of the timing pass into `build_timing_arm`/`time_replicate`/`arm_extras`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py` |
+| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py` |
 | `benchmarks/kernel/operations/` | Arm builders, one module per kernel family (`rope.py`, `swiglu.py`, `qkv.py`, `attention.py`, `lm_head.py`) plus `common.py` |
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments) and `reporting.py` |
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
@@ -1039,7 +1039,9 @@ out/<timestamp>/kernels/<scenario>/<hardware>/
 Every fragment also carries a `phases` table: the named wall-clock spans of
 the process that wrote it. A worker that measures several replicates writes
 one fragment per replicate, and each of them carries that process's table, so
-the same table appears more than once. It is provenance about the run, not
+the same table appears more than once. Inside one table the timing spans
+carry the replicate index (`samples:r0:forward`), so a batched worker's
+repeated groups stay distinguishable. It is provenance about the run, not
 about the kernel.
 
 Raw per-replicate samples are kept in `results.json` so a run can be

@@ -109,21 +109,35 @@ def _gc_paused():
 
 
 def burst_samples(
-    arm: BuiltArm, mode: str, k: int, n: int, warmup_calls: int
+    arm: BuiltArm,
+    mode: str,
+    k: int,
+    n: int,
+    warmup_calls: int,
+    phase_label: str | None = None,
 ) -> list[float]:
     """``n`` burst-amortized per-call microsecond samples for one arm+mode.
 
     Returns an empty list when the arm does not declare ``mode``.
+
+    ``phase_label`` names the two spans this pass records, and defaults to
+    the mode. The caller supplies it because the caller is what knows how
+    many times this function runs in one process: a worker measuring a block
+    of replicates calls it once per (mode, replicate), and a table of
+    identically named groups cannot say which replicate any span belongs to.
+    The phase table is provenance and no number depends on the name, but a
+    table that cannot answer "where did the time go" answers nothing.
     """
     if mode not in arm.calls:
         return []
     if k < 1:
         raise ValueError(f"burst k must be >= 1, got {k}")
+    label = phase_label or mode
     call = arm.calls[mode]
     # The two phases wrap the warmup and the sample loop from outside; they
     # add no synchronize and touch neither the events nor the arithmetic, so
     # the published samples are the same numbers between the same two points.
-    with phase(f"warmup:{mode}"):
+    with phase(f"warmup:{label}"):
         for _ in range(warmup_calls):
             call()
         torch.cuda.synchronize()
@@ -131,7 +145,7 @@ def burst_samples(
     # after the warmup synchronize, so the first burst cannot overlap host
     # dispatch with device work and reads systematically high.
     samples: list[float] = []
-    with phase(f"samples:{mode}"), _gc_paused():
+    with phase(f"samples:{label}"), _gc_paused():
         for _ in range(n + 1):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)

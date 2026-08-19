@@ -403,6 +403,14 @@ def time_replicate(
             options.burst_k,
             options.samples_per_replicate,
             options.warmup_calls,
+            # The replicate index is in the phase name, always and not only
+            # when a block holds more than one. A worker that measures five
+            # replicates of three modes records thirty spans, and without the
+            # index they arrive as five identically named groups that no
+            # reader can tell apart. Spelling it unconditionally means a
+            # reader never has to know replicates_per_process to parse the
+            # table.
+            phase_label=f"r{replicate}:{mode}",
         )
         if values:
             modes[mode] = values
