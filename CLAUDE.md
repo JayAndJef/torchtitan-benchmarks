@@ -821,6 +821,32 @@ own family module.
   1.9% then 4.8%, and `te` at 7.2% then 14.2% -- so read a value near the
   2% threshold as undecided. **A kernel-speed claim needs profiler-summed
   device time, which nothing in this repo currently measures.**
+- **OPEN QUESTION: 32 Inductor compile-worker processes run during the
+  timed region, and nobody has ruled out that they contaminate every kernel
+  number in this repo.** `torch._inductor.config.compile_threads` defaults to
+  32 on this box with `worker_start_method="subprocess"`, so the first
+  `torch.compile` in a worker starts 32 subprocesses that each `import
+  torch`. They spawn during `arm_build` and are still importing torch when
+  the shorter arms reach their timed region, and this workload is
+  host-dispatch bound, so host jitter lands inside the measured interval.
+  Setting `compile_threads=1` removes the pool. Measured at n=3, median
+  us/call with the per-run standard deviation: `qkv/fused_qkv/forward`
+  248.68 +/- **9.42** against 233.37 +/- **0.82**; `rope/helion/forward`
+  261.27 +/- **29.07** against 244.64 +/- **6.47**. The standard deviation
+  falls 3x to 11x on the dispatch-bound arms and the device-bound arm is
+  unmoved -- which is what 32 concurrent `import torch` processes would do.
+  The medians move in both directions at n=3, so **only the variance change
+  is claimed**. **This is unresolved, and it is not resolvable by argument.**
+  Three repeats is not enough, and every number above was taken on a box at
+  load average 28 to 81, which is itself a source of the jitter under test.
+  If the effect is real it reaches every kernel number this repo has ever
+  published, because every one of them was taken with the pool running.
+  **What would settle it**: a full replicate count on an **idle** box, the
+  same scenario measured with the pool and without it, reporting the spread
+  and not only the median. Until somebody runs that, treat the spread of any
+  kernel number here as partly a property of the harness. Note that
+  `compile_threads=1` is separately *rejected as a speed change* -- see
+  "Startup cost" -- and that rejection is not an answer to this question.
 - **One `--burst-k` for every arm in a scenario.** A per-arm k makes arms
   incomparable: a k=64 arm overlaps 64 launches with device work and a k=4
   arm overlaps 4, and the residual bias runs in the same direction as the
@@ -964,13 +990,26 @@ than a 2x end-to-end speedup on an idle box. If the verified speedup is under
 2x, remove the flag.
 
 **Two architectural claims are contested, and the contest is unsettled.** One
-agent reported that a fresh process does not reduce the spread of a
-measurement, and that replicate-major pairing cancels nothing -- it measured
-a paired-ratio coefficient of variation above each arm's own in all three
-modes. Both measurements were taken at load average 28 to 81, and heavy
-contention is exactly the condition that decorrelates two arms' medians and
-inflates a paired CV. **Record both as pending, not as refuted.** An idle box
-settles them.
+agent measured that a fresh process does not reduce the spread of a
+measurement, and that replicate-major pairing cancels nothing -- the
+paired-ratio coefficient of variation sat above each arm's own in all three
+modes, which is what independent noise predicts, because variances add.
+
+**That is a measurement, and what follows is not.** Its own author states the
+limit that makes it provisional: *"40 replicates on one arm pair in one
+scenario at one shape is not enough evidence to change the default that
+published numbers are taken at."* That limit needs no counter-argument and
+cannot be disputed. It is the reason to record the claims as pending.
+
+One hypothesis, labelled as one: heavy contention may also decorrelate two
+arms' medians and inflate a paired CV, and both measurements were taken at
+load average 28 to 81. **That mechanism is untested here**, and the same
+agent's only *measured* load effect runs the other way -- an 8-replicate
+sweep taken while host load fell monotonically gave correlations of +0.34 to
++0.82, so a monotone load trend *creates* common-mode correlation rather than
+destroying it.
+
+**Record both claims as pending, not as refuted.** An idle box settles them.
 
 **Rejected, each for a stated reason:**
 
@@ -986,7 +1025,11 @@ settles them.
 - **`compile_threads=1`.** It removes the 32-worker pool and most of the
   teardown, but it is **not measurement-neutral**: the sample standard
   deviation fell 3x to 11x on dispatch-bound arms. A knob that changes the
-  spread of the measurand cannot be set for speed.
+  spread of the measurand cannot be set for speed. **Rejecting it as a
+  speedup settles nothing about the numbers already published.** The same
+  measurement is evidence about the status quo, where the pool runs during
+  every timed region; that reading is an open question and lives in "Method"
+  above.
 - **Building an arm ahead of the previous arm's measurement.** The overlap
   shifted the measurand by 4% to 9%.
 - **Caching a built arm on disk.** Same objection as the pool, with a larger
