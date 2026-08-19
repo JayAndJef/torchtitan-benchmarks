@@ -314,14 +314,12 @@ def resolve_arm_skips(
             return skipped
 
 
-def planned_commands(
+def timing_passes(
     scenario: KernelScenario,
     request: KernelRunRequest,
-    fragments_dir: Path,
-    prefix: Sequence[str],
     skipped: Mapping[str, str] = MappingProxyType({}),
-) -> list[list[str]]:
-    """Every worker argv this scenario will issue, in the order it issues it.
+) -> tuple[tuple[str, int, int], ...]:
+    """The ``(arm, first replicate, count)`` of every timing pass, in order.
 
     **Block-major**: the outer loop walks the replicate blocks and the inner
     loop walks the arms, so every arm is measured once before any arm is
@@ -332,11 +330,43 @@ def planned_commands(
     adjacency coarsens; ``KernelRunRequest.replicates_per_process`` states
     what it costs.
 
-    A skipped arm is spawned in neither pass, and the manifest therefore
-    lists what the run really does rather than what a fully-equipped host
-    would have done.
+    A skipped arm appears in no pass, and the manifest therefore lists what
+    the run really does rather than what a fully-equipped host would have
+    done.
+
+    The sweep is described here, once, because two callers need it: the
+    manifest writer turns each triple into an argv, and the spawn loop needs
+    the same triple back to know which fragments to look for. The spawn loop
+    used to recover it by parsing the argv it had just generated -- which
+    tested ``"--replicate-count" in command`` over the whole list, so a
+    *value* equal to that string would have matched as readily as the flag.
+    A worker must not learn a convention by string surgery on what it was
+    handed (``benchmarks.kernel.schema.timing_fragment_path``), and neither
+    must the parent.
     """
-    commands = [
+    return tuple(
+        (arm.name, first, count)
+        for first, count in replicate_blocks(
+            request.replicates, request.replicates_per_process
+        )
+        for arm in scenario.arms
+        if arm.name not in skipped
+    )
+
+
+def planned_commands(
+    scenario: KernelScenario,
+    request: KernelRunRequest,
+    fragments_dir: Path,
+    prefix: Sequence[str],
+    skipped: Mapping[str, str] = MappingProxyType({}),
+) -> list[list[str]]:
+    """Every worker argv this scenario will issue, in the order it issues it.
+
+    The correctness pass first, then one argv per entry of
+    ``timing_passes``, which is where the order is decided.
+    """
+    return [
         worker_command(
             scenario.name,
             fragments_dir,
@@ -344,27 +374,21 @@ def planned_commands(
             prefix,
             mode="correctness",
             skip_arms=[arm.name for arm in scenario.arms if arm.name in skipped],
-        )
-    ]
-    for first, count in replicate_blocks(
-        request.replicates, request.replicates_per_process
-    ):
-        for arm in scenario.arms:
-            if arm.name in skipped:
-                continue
-            commands.append(
-                worker_command(
-                    scenario.name,
-                    fragments_dir,
-                    request,
-                    prefix,
-                    mode="timing",
-                    arm=arm.name,
-                    replicate=first,
-                    replicate_count=count,
-                )
+        ),
+        *(
+            worker_command(
+                scenario.name,
+                fragments_dir,
+                request,
+                prefix,
+                mode="timing",
+                arm=arm,
+                replicate=first,
+                replicate_count=count,
             )
-    return commands
+            for arm, first, count in timing_passes(scenario, request, skipped)
+        ),
+    ]
 
 
 def kernel_manifest_data(
@@ -627,14 +651,15 @@ def execute_kernel_run(
                     "timed. See the report below",
                 )
             else:
-                for command in commands[1:]:
-                    arm = command[command.index("--arm") + 1]
-                    first = int(command[command.index("--replicate") + 1])
-                    count = (
-                        int(command[command.index("--replicate-count") + 1])
-                        if "--replicate-count" in command
-                        else 1
-                    )
+                # In lockstep with commands[1:], which planned_commands built
+                # from this same sequence. The pass is read from the plan, not
+                # parsed back out of the argv the plan produced.
+                # strict, so a plan and a sweep of different lengths raise
+                # rather than silently dropping the tail of the longer one.
+                passes = timing_passes(scenario, request, skipped)
+                for (arm, first, count), command in zip(
+                    passes, commands[1:], strict=True
+                ):
                     code = spawn(command)
                     # One worker, one fragment per replicate it covered. A
                     # batched worker that died mid-block leaves some of them
