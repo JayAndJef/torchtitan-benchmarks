@@ -382,9 +382,6 @@ def build_qk_norm_titan(
     )
 
 
-_MEGATRON_READY = False
-
-
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("", 0))
@@ -402,14 +399,10 @@ def _bootstrap_megatron() -> None:
     ``configure_te_environment`` runs first, because it must set the TE
     environment variables before anything imports TransformerEngine.
 
-    The module flag makes the call idempotent. The correctness pass builds
-    every arm of a scenario in one interpreter, and
-    ``model_parallel_cuda_manual_seed`` refuses a second seed of the same
-    name.
+    Each step is guarded, so the call is idempotent. The correctness pass
+    builds every arm of a scenario in one interpreter and reaches this once
+    per mcore arm.
     """
-    global _MEGATRON_READY
-    if _MEGATRON_READY:
-        return
     from benchmarks.models.piper_qwen3.megatron_bootstrap import (
         add_megatron_to_path,
         configure_te_environment,
@@ -437,8 +430,17 @@ def _bootstrap_megatron() -> None:
     # overwrites both norm weights from the shared inputs afterwards, so the
     # seed decides nothing this scenario measures. The tracker must exist, or
     # the GPTModel build raises.
+    #
+    # Outside the guard above, deliberately. Every arm is timed alone in its
+    # own process, so a timing worker always takes the branch and seeds. The
+    # correctness pass builds every arm in one interpreter, so the second
+    # mcore arm skips the branch -- and if the seed were inside it, that arm
+    # would draw its weights from a tracker the first arm's build had already
+    # advanced, and so differ from the arm the timing worker measures.
+    # ``model_parallel_cuda_manual_seed`` calls ``_CUDA_RNG_STATE_TRACKER.
+    # reset()`` before it adds any state (``tensor_parallel/random.py``), so
+    # repeating it is safe.
     model_parallel_cuda_manual_seed(torch.initial_seed() % (2**31))
-    _MEGATRON_READY = True
 
 
 def _assert_te_rmsnorm(module, attribute: str, shape: PiperShape) -> None:

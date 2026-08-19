@@ -321,13 +321,22 @@ def _bootstrap_megatron() -> None:
 
     if not parallel_state.model_parallel_is_initialized():
         parallel_state.initialize_model_parallel()
-        # ``_seeded_build`` re-seeds the global generator with the run's seed
-        # immediately before this builder runs, so this reads that value back
-        # rather than inventing a second one. Megatron's weight init draws
-        # from this tracker; the norm gain is overwritten below in any case,
-        # but the correctness pass and the timing pass must build the same
-        # arm.
-        model_parallel_cuda_manual_seed(torch.initial_seed())
+    # ``_seeded_build`` re-seeds the global generator with the run's seed
+    # immediately before this builder runs, so this reads that value back
+    # rather than inventing a second one. Megatron's weight init draws from
+    # this tracker; the norm gain is overwritten below in any case, but the
+    # correctness pass and the timing pass must build the same arm.
+    #
+    # Outside the guard above, deliberately. Every arm is timed alone in its
+    # own process, so a timing worker always takes the branch and seeds. The
+    # correctness pass builds every arm in one interpreter, so the second
+    # mcore arm skips the branch -- and if the seed were inside it, that arm
+    # would draw its weights from a tracker the first arm's build had already
+    # advanced, and so differ from the arm the timing worker measures.
+    # ``model_parallel_cuda_manual_seed`` calls ``_CUDA_RNG_STATE_TRACKER.
+    # reset()`` before it adds any state (``tensor_parallel/random.py``), so
+    # repeating it is safe.
+    model_parallel_cuda_manual_seed(torch.initial_seed())
 
 
 def _assert_te_rmsnorm(module, eps: float) -> None:

@@ -379,7 +379,16 @@ def _initialize_megatron() -> None:
 
     if not parallel_state.model_parallel_is_initialized():
         parallel_state.initialize_model_parallel()
-        model_parallel_cuda_manual_seed(MEGATRON_SEED)
+    # Outside the guard above, deliberately. Every arm is timed alone in its
+    # own process, so a timing worker always takes the branch and seeds. The
+    # correctness pass builds every arm in one interpreter, so the second
+    # mcore arm skips the branch -- and if the seed were inside it, that arm
+    # would draw its weights from a tracker the first arm's build had already
+    # advanced, and so differ from the arm the timing worker measures.
+    # ``model_parallel_cuda_manual_seed`` calls ``_CUDA_RNG_STATE_TRACKER.
+    # reset()`` before it adds any state (``tensor_parallel/random.py``), so
+    # repeating it is safe.
+    model_parallel_cuda_manual_seed(MEGATRON_SEED)
 
 
 def _assert_mcore_linear_proj(module: object, shape: PiperShape) -> dict[str, Any]:
