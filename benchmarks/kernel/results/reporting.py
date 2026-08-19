@@ -64,16 +64,21 @@ def _isolation_lines(result: KernelScenarioResult) -> list[str]:
         "per process)"
     ]
     if per_process > 1:
+        # No figure. The one that stood here -- 26-48% narrower -- was taken
+        # on a box carrying load average 28 to 81, on qkv alone, two arms, one
+        # of them the anchor. CLAUDE.md says none of that work's numbers may
+        # be cited, and this line printed one as an operational fact on every
+        # degraded run. The qualitative statement carries the whole message,
+        # and the last line already says what to do about it.
         lines.extend(
             [
                 "WARNING: an arm's replicates shared a process, so they do not"
                 " sample process-to-process",
                 "  variation. The interval in the '95% CI' column is marked"
                 " '~' and is a WITHIN-PROCESS",
-                "  interval -- a lower bound on the true one, measured 26-48%"
-                " narrower on qkv while the",
-                "  point estimate's reproducibility did not improve. Do not"
-                " publish a number from this run.",
+                "  interval -- a lower bound on the true one, narrower without"
+                " the ratio having become",
+                "  better known. Do not publish a number from this run.",
             ]
         )
     return lines

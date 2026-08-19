@@ -123,11 +123,16 @@ class KernelRunRequest:
     one process, separated by milliseconds rather than by a rebuild. Two
     things follow, and both are costs. The replicates stop sampling
     process-to-process variation, so the CI narrows without the underlying
-    quantity having become better known -- measured at 26-48% narrower on
-    ``qkv`` while the point estimate's round-to-round spread did not improve.
-    And the arms move apart in time -- at the extreme, arm A's whole block
-    runs, then arm B's -- so drift between the blocks lands in the point
-    estimate instead of cancelling. The results file renames the interval
+    quantity having become better known -- measured at 26-48% narrower while
+    the point estimate's round-to-round spread did not improve, **on a box at
+    load average 28 to 81, on ``qkv`` alone, two arms, one of them the
+    anchor**. That figure is the record of what was tried and may not be
+    cited. And the arms move apart in time -- at the extreme, arm A's whole
+    block runs, then arm B's -- so drift between the blocks lands in the point
+    estimate instead of cancelling. The same measurement could only have
+    resolved a shift in the point estimate larger than 4.2-6.3%, and
+    ``backward`` moved -4.78%, so a bias of a few percent in the noisiest mode
+    is not ruled out. The results file renames every degraded statistic
     accordingly; see ``benchmarks.kernel.results.merge``.
 
     Raise it to buy wall-clock, and say in the report that you did. Use 1 for

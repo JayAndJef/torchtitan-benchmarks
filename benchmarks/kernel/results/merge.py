@@ -143,7 +143,13 @@ def _isolation(replicates_per_process: int) -> dict[str, Any]:
             "therefore published under a within_process_ name -- "
             "within_process_ratio_ci_low/high and "
             "within_process_replicate_ratio_spread -- and never under the "
-            "honest one."
+            "honest one. The point estimate keeps its honest name because "
+            "no shift in it was detected, but the measurement that looked "
+            "for one could only have resolved a shift larger than 4.2-6.3%, "
+            "and one mode moved -4.78%: a bias of a few percent in the "
+            "noisiest mode is NOT ruled out. That measurement ran on a "
+            "contended box, on one scenario, two arms, one shape, so it is "
+            "the record of what was tried and may not be cited."
         ),
     }
 
