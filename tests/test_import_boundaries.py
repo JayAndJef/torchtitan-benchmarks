@@ -981,7 +981,10 @@ class KernelWorkerImportCostTest(unittest.TestCase):
         roots = {imported.split(".")[0] for imported, _ in module_scope_imports(path)}
         self.assertEqual(
             roots - {"__future__"},
-            {"argparse", "sys", "traceback", "pathlib"},
+            # ``os`` is here for ``_exit_now`` alone, which ends the process
+            # once the fragment is written rather than joining Inductor's
+            # compile-worker pool. Stdlib and free, like the other four.
+            {"argparse", "os", "sys", "traceback", "pathlib"},
             f"{path} grew a module-scope import outside the stdlib argument-"
             "parsing set; keep it inside main()",
         )

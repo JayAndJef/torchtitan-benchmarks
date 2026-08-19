@@ -26,6 +26,10 @@ written); 2 bad arguments; 1 build or environment failure.
 Module scope stays stdlib-only, so ``--help`` and an argument error return
 without paying for torch. ``tests/test_import_boundaries.py`` pins that.
 
+**The process is ended, not unwound** -- see ``_exit_now``. A worker is one
+pass and its whole product is the fragment; a graceful interpreter shutdown
+after that costs several seconds and buys nothing.
+
 Every fragment carries a **phase table** -- named wall-clock spans from
 process exec to the end of the pass. It is provenance, not a result: the
 merge reads no phase and ``results.json`` carries none. It rides in the
@@ -37,6 +41,7 @@ produced it.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -167,5 +172,60 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _exit_now(code: int) -> None:
+    """End the process at ``code`` without unwinding the interpreter.
+
+    A worker's whole product is the fragment, and ``main`` has written it
+    before this runs. What a graceful shutdown does after that is release
+    state the kernel is about to reclaim anyway: a compiled graph, its Triton
+    modules, the device allocations, the CUDA context, and above all
+    Inductor's compile-worker pool. The first ``torch.compile`` in the
+    process starts 32 ``compile_worker`` subprocesses, each of which imports
+    torch, and an ``atexit`` handler joins them. Measured on an H200,
+    rope/baseline: the worker reaches the end of ``main`` at 11.0 s, finishes
+    its ``atexit`` handlers at 16.6 s and exits at 18.3 s.
+
+    Ending the process instead is safe here for four separate reasons, and
+    each was checked rather than assumed:
+
+    * **It cannot move a number.** Every sample is taken, every gate is run
+      and the fragment is on disk before this line. There is no measurement
+      left to disturb.
+    * **The fragment survives.** ``atomic_write_json`` writes a temporary
+      file, closes it and renames it, all before ``main`` returns. Page-cache
+      data outlives ``_exit``; only unflushed *process* buffers do not, which
+      is what the two flushes below are for.
+    * **The compile caches survive.** Both Inductor and Triton write their
+      artifacts when the kernel is compiled, not at exit. A cold-cache pass
+      run both ways left 13 inductor files and 65 triton files either way,
+      1,168,648 against 1,168,632 bytes.
+    * **The compile pool is not orphaned.** Each of those subprocesses is
+      given ``--parent`` and exits when it is reparented. Counted on the
+      hardware: the ``compile_worker`` processes of one worktree rise to 15
+      during a helion build and are back to the pre-run count within two
+      seconds of the worker ending.
+
+    ``main`` itself only *returns* the code, so a caller that imports this
+    module decides its own exit and is unaffected.
+
+    The alternative -- ``torch._inductor.config.compile_threads = 1``, so
+    there is no pool to join -- saves the same seconds and is *not*
+    equivalent: it also removes those 32 subprocesses from the host during
+    the timed region, and this workload is host-dispatch bound. Measured at
+    n=3 it cut the per-run standard deviation 3-11x on the dispatch-bound
+    arms while the medians moved in both directions. That is a change to the
+    measurement and needs a re-baseline. This one does not.
+
+    The saving: 4.5-6 s of a 12-18 s worker across seven arms A/B'd back to
+    back. **Every one of those numbers was measured on a box carrying load
+    average 28-81 from concurrent agents, so each is uncitable and pending
+    re-measurement on an idle box.** The reason to do this is the causal
+    argument above, not the size of the number.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _exit_now(main())
