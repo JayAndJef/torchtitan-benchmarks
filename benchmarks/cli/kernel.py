@@ -73,6 +73,20 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
     help="Sweeps of every arm; the repetition unit the CI is taken over.",
 )
 @click.option(
+    "--replicates-per-process",
+    default=1,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help=(
+        "Consecutive replicates of one arm per worker process. 1 rebuilds the "
+        "arm for every replicate and keeps the replicate-major sweep; higher "
+        "values buy wall-clock and cost the drift cancellation the ratio "
+        "relies on, so the results file publishes the interval as "
+        "within_process_ratio_ci_* instead. Two arms never share a process at "
+        "any value. Use 1 for anything published."
+    ),
+)
+@click.option(
     "--samples-per-replicate",
     default=40,
     show_default=True,

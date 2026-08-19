@@ -99,7 +99,6 @@ KERNEL_MEASUREMENT_METHODOLOGY = {
         "carries their noise, so a value near the threshold is undecided."
     ),
     "burst_residual_flag_threshold": BURST_RESIDUAL_FLAG,
-    "arm_isolation": "one_process_per_arm_replicate",
     "l2_flush": False,
     "l2_flush_rationale": (
         "no flush, and no equalization is claimed: one arm is timed at a "
@@ -110,6 +109,58 @@ KERNEL_MEASUREMENT_METHODOLOGY = {
     "first_burst_discarded": True,
     "units": "microseconds",
 }
+
+
+def _isolation(replicates_per_process: int) -> dict[str, Any]:
+    """How the run mapped replicates onto processes, said in the file.
+
+    Two arms never share a timing process, at any value: that is the split
+    the cuDNN soname collision makes non-negotiable. What the value changes
+    is whether an arm's replicates are independent processes, which is what
+    the per-replicate log-ratio treats them as. A reader who does not know
+    the value cannot tell a CI narrowed by evidence from one narrowed by
+    removing a source of variation, so the file says it rather than leaving
+    it in the manifest.
+    """
+    if replicates_per_process <= 1:
+        return {
+            "arm_isolation": "one_process_per_arm_replicate",
+            "replicates_per_process": 1,
+        }
+    return {
+        "arm_isolation": "one_process_per_arm_replicate_block",
+        "replicates_per_process": replicates_per_process,
+        "replicates_per_process_note": (
+            "consecutive replicates of one arm shared a process, so they do "
+            "not sample process-to-process variation and the bootstrap CI on "
+            "the per-replicate log-ratios is narrower than a fresh-process "
+            "sweep would give. The arms also move apart in time as the block "
+            "grows, so drift between two arms' blocks lands in the point "
+            "estimate instead of cancelling. One arm per process still holds. "
+            "The interval is therefore published as "
+            "within_process_ratio_ci_low/high, never as ratio_ci_low/high."
+        ),
+    }
+
+
+def _rename_degraded_ci(row: dict[str, Any]) -> dict[str, Any]:
+    """Publish a within-process interval under its own field names.
+
+    The bootstrap runs on per-replicate log-ratios, and above one replicate
+    per process those replicates are consecutive measurements of one build in
+    one interpreter rather than independent processes. Measured on ``qkv``,
+    the interval narrows 26-48% while the point estimate's round-to-round
+    spread does not improve, which makes it a lower bound on the true one.
+
+    It is renamed rather than reinterpreted, exactly as the schema history
+    renames every field whose meaning changes: anything reading
+    ``ratio_ci_low`` gets nothing instead of a narrower number under the
+    honest name, and a reader who wants the degraded interval has to ask for
+    it by a name that says what it is.
+    """
+    row["within_process_ratio_ci_low"] = row.pop("ratio_ci_low", None)
+    row["within_process_ratio_ci_high"] = row.pop("ratio_ci_high", None)
+    return row
 
 
 def _require_kind(fragment: dict[str, Any], expected: str) -> None:
@@ -207,6 +258,7 @@ def merge_kernel_fragments(
     timings: Sequence[dict[str, Any]],
     timings_ran: bool = True,
     skipped: Mapping[str, str] = MappingProxyType({}),
+    replicates_per_process: int = 1,
 ) -> KernelScenarioResult:
     """Build the scenario result from one correctness and N timing fragments.
 
@@ -385,6 +437,8 @@ def merge_kernel_fragments(
             row.update(
                 kernel_comparison(samples[opponent][mode], samples[arm_name][mode])
             )
+            if replicates_per_process > 1:
+                _rename_degraded_ci(row)
             comparisons.append(row)
 
     return KernelScenarioResult(
@@ -408,6 +462,7 @@ def merge_kernel_fragments(
         methodology={
             **KERNEL_SIGNIFICANCE_METHODOLOGY,
             **KERNEL_MEASUREMENT_METHODOLOGY,
+            **_isolation(replicates_per_process),
         },
         environment=dict(correctness["environment"]),
         warnings=tuple(warnings),

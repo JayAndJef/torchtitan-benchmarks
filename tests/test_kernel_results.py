@@ -88,10 +88,11 @@ def sample_result() -> KernelScenarioResult:
 
 
 class KernelResultsTests(unittest.TestCase):
-    def test_schema_four_records_the_burst_parameters_and_statuses(self) -> None:
+    def test_schema_five_records_the_burst_parameters_and_statuses(self) -> None:
         """Schema 3 replaced n/warmup; reusing either name is the bug.
-        Schema 4 added the per-arm status."""
-        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 4)
+        Schema 4 added the per-arm status. Schema 5 renamed the interval a
+        batched run publishes."""
+        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 5)
         payload = sample_result().to_dict()
         # Schema 2's model/workload split, still asserted.
         self.assertNotIn("spec", payload)
@@ -323,6 +324,79 @@ class KernelResultsTests(unittest.TestCase):
                 path.write_text(json.dumps(payload))
                 with self.assertRaisesRegex(ValueError, "unsupported"):
                     load_kernel_results(path)
+
+
+class IsolationReportingTests(unittest.TestCase):
+    """The printed table confesses as much as the file does.
+
+    ``results.json`` records how replicates were mapped onto processes, and
+    for a while the printed report did not: the ``95% CI`` heading was the
+    same whether the interval was taken across processes or inside one. A
+    reader of the terminal is the reader most likely to quote a number.
+    """
+
+    def _rendered(self, replicates_per_process: int) -> str:
+        result = sample_result()
+        methodology = dict(result.methodology)
+        methodology["replicates_per_process"] = replicates_per_process
+        methodology["arm_isolation"] = (
+            "one_process_per_arm_replicate"
+            if replicates_per_process == 1
+            else "one_process_per_arm_replicate_block"
+        )
+        comparisons = [dict(row) for row in result.comparisons]
+        if replicates_per_process > 1:
+            for row in comparisons:
+                row["within_process_ratio_ci_low"] = row.pop("ratio_ci_low")
+                row["within_process_ratio_ci_high"] = row.pop("ratio_ci_high")
+        # The sample result compares an arm it does not carry, and the table
+        # prints a row per arm rather than per comparison. Give the compared
+        # arm a body so its interval reaches the table at all.
+        arms = dict(result.arms)
+        arms["piper_optimized_triton"] = replace(
+            arms["baseline"], name="piper_optimized_triton"
+        )
+        return render_kernel_results(
+            replace(
+                result,
+                arms=arms,
+                methodology=methodology,
+                comparisons=comparisons,
+            )
+        )
+
+    def test_the_honest_state_is_printed_too(self) -> None:
+        """Printed always, so the honest case is stated and not inferred."""
+        rendered = self._rendered(1)
+        self.assertIn(
+            "arm isolation: one_process_per_arm_replicate (1 replicate per "
+            "process)",
+            rendered,
+        )
+        self.assertNotIn("WITHIN-PROCESS", rendered)
+
+    def test_a_batched_run_is_marked_above_the_table(self) -> None:
+        rendered = self._rendered(3)
+        self.assertIn(
+            "arm isolation: one_process_per_arm_replicate_block "
+            "(3 replicates per process)",
+            rendered,
+        )
+        self.assertIn("WITHIN-PROCESS", rendered)
+        self.assertIn("lower bound", rendered)
+
+    def test_a_within_process_interval_is_marked_in_the_row(self) -> None:
+        """It is printed, not suppressed, and never printed unmarked.
+
+        Suppressing it would leave the column empty, which reads as an
+        interval that could not be computed rather than one that must not be
+        quoted.
+        """
+        honest = self._rendered(1)
+        batched = self._rendered(3)
+        self.assertIn("[1.0100,1.0900]", honest)
+        self.assertNotIn("~[", honest)
+        self.assertIn("~[1.0100,1.0900]", batched)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ already share, not a model package.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
@@ -77,6 +78,21 @@ def fragment_stem(arm_name: str) -> str:
     introduce.
     """
     return arm_name.replace(_FRAGMENT_SEPARATOR, _FRAGMENT_REPLACEMENT)
+
+
+def timing_fragment_path(
+    fragments_dir: Path, arm_name: str, replicate: int
+) -> Path:
+    """Where one (arm, replicate)'s timing fragment lives.
+
+    Here rather than in the parent because both sides now compute it. The
+    parent plans and reads the files; a worker that measures several
+    replicates of one arm writes several of them, and it must not learn the
+    convention by string surgery on a path it was handed.
+    """
+    return (
+        fragments_dir / f"timing__{fragment_stem(arm_name)}__r{replicate}.json"
+    )
 
 
 @dataclass(frozen=True)

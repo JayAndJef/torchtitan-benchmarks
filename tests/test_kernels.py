@@ -649,8 +649,10 @@ class FragmentNameTests(unittest.TestCase):
     """
 
     def test_a_slash_never_reaches_the_filename(self) -> None:
-        from benchmarks.kernel.runner import fragment_path
-        from benchmarks.kernel.schema import fragment_stem
+        from benchmarks.kernel.schema import (
+            fragment_stem,
+            timing_fragment_path as fragment_path,
+        )
 
         self.assertEqual(fragment_stem("mcore/base"), "mcore-base")
         self.assertEqual(fragment_stem("titan"), "titan")

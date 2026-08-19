@@ -26,6 +26,7 @@ from benchmarks.kernel.schema import (
     KernelArm,
     KernelScenario,
     TIMING_FRAGMENT_KIND,
+    timing_fragment_path,
 )
 from tests.test_kernel_results import sample_result
 
@@ -146,8 +147,8 @@ def fragment_writer(
     def fake_process(command, **kwargs):
         scenario = command[command.index("--scenario") + 1]
         mode = command[command.index("--mode") + 1]
-        fragment = Path(command[command.index("--fragment") + 1])
         if mode == "correctness":
+            fragment = Path(command[command.index("--fragment") + 1])
             if scenario in codes:
                 kwargs["stdout"].write("boom: build failed\n")
                 return SimpleNamespace(returncode=codes[scenario])
@@ -157,23 +158,35 @@ def fragment_writer(
             if correctness_exit is not None:
                 return SimpleNamespace(returncode=correctness_exit)
             return SimpleNamespace(returncode=0 if correctness_passes else 3)
+        fragments_dir = Path(command[command.index("--fragments-dir") + 1])
         arm = command[command.index("--arm") + 1]
-        replicate = int(command[command.index("--replicate") + 1])
-        if (scenario, arm, replicate) in skip_timing:
-            kwargs["stdout"].write(f"boom: {arm} r{replicate}\n")
+        first = int(command[command.index("--replicate") + 1])
+        count = (
+            int(command[command.index("--replicate-count") + 1])
+            if "--replicate-count" in command
+            else 1
+        )
+        # A batched worker writes one fragment per replicate it covered, and
+        # a crashed one writes none of them -- so a skip_timing entry
+        # anywhere in the block costs the whole block, exactly as a real
+        # worker's traceback does.
+        block = range(first, first + count)
+        if any((scenario, arm, replicate) in skip_timing for replicate in block):
+            kwargs["stdout"].write(f"boom: {arm} r{first}+{count}\n")
             return SimpleNamespace(returncode=1)
-        fragment.write_text(
-            json.dumps(
-                timing_fragment(
-                    scenario,
-                    arm,
-                    replicate,
-                    measured=arm not in empty_arms,
-                    bytes_moved=bytes_moved,
-                    scale=scales.get(arm, 1.0),
+        for replicate in block:
+            timing_fragment_path(fragments_dir, arm, replicate).write_text(
+                json.dumps(
+                    timing_fragment(
+                        scenario,
+                        arm,
+                        replicate,
+                        measured=arm not in empty_arms,
+                        bytes_moved=bytes_moved,
+                        scale=scales.get(arm, 1.0),
+                    )
                 )
             )
-        )
         return SimpleNamespace(returncode=timing_exit)
 
     return fake_process
@@ -455,7 +468,7 @@ class KernelRunnerTests(unittest.TestCase):
         # The manifest says so on its own. "arms" is the registry roster and
         # still lists te, so without this a reader must diff it against
         # "commands" to learn that the arm never ran.
-        self.assertEqual(manifest["schema_version"], 5)
+        self.assertEqual(manifest["schema_version"], 6)
         self.assertEqual(list(manifest["skipped_arms"]), ["te"])
         self.assertIn("compiler environment", manifest["skipped_arms"]["te"])
         self.assertIn("te", [arm["name"] for arm in manifest["arms"]])
@@ -519,7 +532,7 @@ class KernelRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(manifest["kind"], "kernel")
-        self.assertEqual(manifest["schema_version"], 5)
+        self.assertEqual(manifest["schema_version"], 6)
         self.assertEqual(manifest["skipped_arms"], {})
         self.assertEqual(manifest["scenario"], "swiglu")
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
@@ -530,6 +543,7 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["workload"], {"batch": 4, "seq_len": 1024})
         self.assertEqual(manifest["shapes"]["x"], [8192, 1024])
         self.assertEqual(manifest["replicates"], 2)
+        self.assertEqual(manifest["replicates_per_process"], 1)
         self.assertEqual(manifest["burst_k"], 8)
         self.assertNotIn("n", manifest)
         # Every argv the run will issue, not just the first.
@@ -541,6 +555,108 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(len(outcomes), 1)
         self.assertFalse(outcomes[0].failed)
         self.assertIsNotNone(outcomes[0].result)
+
+    def test_replicates_per_process_batches_without_mixing_arms(self) -> None:
+        """A batched sweep spawns one worker per (arm, block) and still reads
+        every replicate back.
+
+        The two properties that must survive the batch: no worker names two
+        arms -- the isolation the cuDNN soname collision makes
+        non-negotiable -- and the outer loop is still the block, so every arm
+        is measured once before any arm is measured again.
+        """
+        captured = []
+
+        def recording(command, **kwargs):
+            captured.append(list(command))
+            return fragment_writer()(command, **kwargs)
+
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            out_dir = Path(temporary) / "kernels"
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("qkv",),
+                    replicates=5,
+                    replicates_per_process=2,
+                    out_dir=out_dir,
+                ),
+                process_runner=recording,
+                environment={"PATH": "/usr/bin"},
+            )
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+
+        arms = [arm.name for arm in kernel_scenario_by_name("qkv").arms]
+        timing = [
+            (
+                argv[argv.index("--arm") + 1],
+                int(argv[argv.index("--replicate") + 1]),
+                int(argv[argv.index("--replicate-count") + 1])
+                if "--replicate-count" in argv
+                else 1,
+            )
+            for argv in captured[1:]
+        ]
+        # Blocks of two, the last one short, and the arms alternate inside
+        # each block rather than one arm running its whole ladder first.
+        self.assertEqual(
+            timing,
+            [
+                (arm, first, count)
+                for first, count in ((0, 2), (2, 2), (4, 1))
+                for arm in arms
+            ],
+        )
+        for argv in captured[1:]:
+            self.assertEqual(argv.count("--arm"), 1)
+        self.assertEqual(manifest["replicates_per_process"], 2)
+
+        result = outcomes[0].result
+        self.assertFalse(outcomes[0].failed)
+        for arm in arms:
+            self.assertEqual(result.arms[arm].status, "ok")
+            forward = result.arms[arm].modes["forward"]
+            self.assertEqual(len(forward.replicates_us), 5)
+        self.assertEqual(result.methodology["replicates_per_process"], 2)
+        self.assertEqual(
+            result.methodology["arm_isolation"],
+            "one_process_per_arm_replicate_block",
+        )
+
+    def test_a_batched_worker_that_dies_costs_every_replicate_it_owed(
+        self,
+    ) -> None:
+        """The merge counts replicates, not workers.
+
+        One crashed batched worker takes several replicates with it, and each
+        missing one is named: an arm short of a replicate is incomplete
+        however few processes lost it.
+        """
+        fake_process = fragment_writer(
+            skip_timing=(("qkv", "fused_qkv", 3),)
+        )
+        events = []
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("qkv",),
+                    replicates=4,
+                    replicates_per_process=2,
+                    out_dir=Path(temporary) / "kernels",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+                event_handler=events.append,
+            )
+        self.assertTrue(outcomes[0].failed)
+        self.assertEqual(
+            outcomes[0].failed_passes, ("fused_qkv r2", "fused_qkv r3")
+        )
+        self.assertEqual(outcomes[0].result.arms["fused_qkv"].status, "failed")
+        self.assertEqual(outcomes[0].result.arms["baseline"].status, "ok")
 
     def test_the_compiler_environment_is_resolved_once_per_run(self) -> None:
         """It shells out to bash, and the answer cannot change between two
@@ -766,7 +882,7 @@ class KernelRunnerTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "wrote its fragment and then exited with 9" in event.message
+                "wrote its fragments and then exited with 9" in event.message
                 for event in events
             ),
             [event.message for event in events],

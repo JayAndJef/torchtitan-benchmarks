@@ -74,7 +74,11 @@ def timing_fragment(
     }
 
 
-def merge(timings: list[dict], correctness: dict | None = None):
+def merge(
+    timings: list[dict],
+    correctness: dict | None = None,
+    replicates_per_process: int = 1,
+):
     shape, workload = resolve_shape_and_workload()
     return merge_kernel_fragments(
         scenario=kernel_scenario_by_name(SCENARIO),
@@ -88,7 +92,17 @@ def merge(timings: list[dict], correctness: dict | None = None):
         seed=0,
         correctness=correctness or correctness_fragment(),
         timings=timings,
+        replicates_per_process=replicates_per_process,
     )
+
+
+def every_fragment() -> list[dict]:
+    """A complete, well-paired set: both arms, every replicate."""
+    return [
+        timing_fragment(arm, replicate, 100.0 + replicate)
+        for replicate in range(REPLICATES)
+        for arm in (ANCHOR, ARM)
+    ]
 
 
 class ReplicatePairingTests(unittest.TestCase):
@@ -172,6 +186,65 @@ class FragmentKindTests(unittest.TestCase):
             merge(
                 [timing_fragment(ANCHOR, 0, 10.0, CORRECTNESS_FRAGMENT_KIND)]
             )
+
+
+class WithinProcessIntervalTests(unittest.TestCase):
+    """A degraded interval never ships under the honest field name.
+
+    Above one replicate per process an arm's replicates are consecutive
+    measurements of one build in one interpreter, so the bootstrap over them
+    is an interval within a process rather than across them. It narrows
+    without the ratio having become better known. The merge therefore renames
+    it, exactly as the schema history renames every field whose meaning
+    changes: a downstream reader of ``ratio_ci_low`` must find nothing rather
+    than a narrower number.
+    """
+
+    def test_one_replicate_per_process_keeps_the_honest_names(self) -> None:
+        result = merge(every_fragment(), replicates_per_process=1)
+        row = result.comparisons[0]
+        self.assertIn("ratio_ci_low", row)
+        self.assertIn("ratio_ci_high", row)
+        self.assertNotIn("within_process_ratio_ci_low", row)
+        self.assertEqual(
+            result.methodology["arm_isolation"],
+            "one_process_per_arm_replicate",
+        )
+        self.assertEqual(result.methodology["replicates_per_process"], 1)
+
+    def test_a_batched_run_renames_the_interval(self) -> None:
+        honest = merge(every_fragment(), replicates_per_process=1)
+        batched = merge(every_fragment(), replicates_per_process=3)
+        row = batched.comparisons[0]
+        self.assertNotIn("ratio_ci_low", row)
+        self.assertNotIn("ratio_ci_high", row)
+        # The interval is renamed, not discarded: the same numbers, under a
+        # name that says what they are.
+        self.assertEqual(
+            row["within_process_ratio_ci_low"],
+            honest.comparisons[0]["ratio_ci_low"],
+        )
+        self.assertEqual(
+            row["within_process_ratio_ci_high"],
+            honest.comparisons[0]["ratio_ci_high"],
+        )
+        # The point estimate is unaffected -- only the interval's meaning
+        # changed.
+        self.assertEqual(
+            row["median_ratio"], honest.comparisons[0]["median_ratio"]
+        )
+
+    def test_a_batched_run_says_so_in_the_methodology(self) -> None:
+        result = merge(every_fragment(), replicates_per_process=3)
+        self.assertEqual(
+            result.methodology["arm_isolation"],
+            "one_process_per_arm_replicate_block",
+        )
+        self.assertEqual(result.methodology["replicates_per_process"], 3)
+        self.assertIn(
+            "within_process_ratio_ci_low",
+            result.methodology["replicates_per_process_note"],
+        )
 
 
 if __name__ == "__main__":

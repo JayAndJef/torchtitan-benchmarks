@@ -9,13 +9,26 @@ from benchmarks.kernel.schema import MODES
 
 
 def _ratio_ci(row: dict | None) -> str:
-    """The bootstrap interval on per-replicate log-ratios, as ``[lo, hi]``."""
+    """The bootstrap interval on per-replicate log-ratios, as ``[lo, hi]``.
+
+    ``~`` marks a within-process interval. Above one replicate per process the
+    merge publishes the interval under ``within_process_ratio_ci_*``, because
+    those replicates are consecutive measurements of one build rather than
+    independent processes and the interval is a lower bound. This function
+    reads that name too, so the degradation reaches the printed table instead
+    of showing as an empty column -- but it never prints a degraded interval
+    unmarked.
+    """
     if not row:
         return "-"
     low, high = row.get("ratio_ci_low"), row.get("ratio_ci_high")
+    if low is not None and high is not None:
+        return f"[{low:.4f},{high:.4f}]"
+    low = row.get("within_process_ratio_ci_low")
+    high = row.get("within_process_ratio_ci_high")
     if low is None or high is None:
         return "-"
-    return f"[{low:.4f},{high:.4f}]"
+    return f"~[{low:.4f},{high:.4f}]"
 
 
 def _residual(derived: dict, width: int) -> str:
@@ -32,6 +45,40 @@ def _residual(derived: dict, width: int) -> str:
     return f"{value * 100:>{width - 1}.1f}{mark}"
 
 
+def _isolation_lines(result: KernelScenarioResult) -> list[str]:
+    """State how replicates were mapped onto processes, above the table.
+
+    ``results.json`` has said this since the flag arrived, and a reader of the
+    printed output learned nothing: the ``95% CI`` column kept its heading
+    whether the interval was taken across processes or inside one. Printed
+    always, never only in the degraded case -- a reader must not have to infer
+    the honest state from the absence of a warning.
+    """
+    per_process = result.methodology.get("replicates_per_process", 1)
+    isolation = result.methodology.get(
+        "arm_isolation", "one_process_per_arm_replicate"
+    )
+    lines = [
+        f"arm isolation: {isolation} "
+        f"({per_process} replicate{'' if per_process == 1 else 's'} "
+        "per process)"
+    ]
+    if per_process > 1:
+        lines.extend(
+            [
+                "WARNING: an arm's replicates shared a process, so they do not"
+                " sample process-to-process",
+                "  variation. The interval in the '95% CI' column is marked"
+                " '~' and is a WITHIN-PROCESS",
+                "  interval -- a lower bound on the true one, measured 26-48%"
+                " narrower on qkv while the",
+                "  point estimate's reproducibility did not improve. Do not"
+                " publish a number from this run.",
+            ]
+        )
+    return lines
+
+
 def render_kernel_results(result: KernelScenarioResult) -> str:
     """Render one kernel scenario: per-mode timings and correctness gates."""
     shapes = "  ".join(
@@ -44,6 +91,7 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
         f"{result.replicates} replicates x {result.samples_per_replicate} "
         f"samples, burst k={result.burst_k}, "
         f"warmup={result.warmup_calls} calls, seed={result.seed}",
+        *_isolation_lines(result),
     ]
     lines.extend(f"WARNING: {warning}" for warning in result.warnings)
 

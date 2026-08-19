@@ -781,13 +781,19 @@ TEST_CENSUS = {
     # after it writes. +2 more for the arm that measured nothing, as a
     # non-anchor and as the anchor. +1 for the three counts that refuse zero,
     # and +1 for the two derived columns the parent alone can compute.
-    "test_kernel_cli": 25,
+    # +2 with --replicates-per-process: that a batched worker owns
+    # consecutive replicates of one arm and never a second arm, and that a
+    # batched worker which dies costs every replicate of its block.
+    "test_kernel_cli": 27,
     "test_kernel_gpu_smoke": 4,
     # Added when the merge got a direct caller: every other merge assertion
     # reaches it through execute_kernel_run, which spawns replicate-major and
     # therefore never hands _ordered_replicates the arrival order it exists
     # to reject.
-    "test_kernel_merge": 4,
+    # +3 with the within-process interval: that one replicate per process
+    # keeps the honest field names, that a batched run renames the interval
+    # rather than dropping it, and that the methodology says so.
+    "test_kernel_merge": 7,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them. +3 for
@@ -841,7 +847,10 @@ TEST_CENSUS = {
     # so no timed sample runs on the declared logits, and that megatron as
     # NVIDIA ships it is mcore/no_ce_fusion rather than mcore/ce_native.
     "test_kernel_cross_entropy": 33,
-    "test_kernel_results": 9,
+    # +3 with the isolation report: that the honest state reaches the reader,
+    # that a batched run is marked above the table, and that a renamed
+    # interval still prints, with a mark that says it is a lower bound.
+    "test_kernel_results": 12,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
     # scenario's rejection of a mode name MODES does not hold, +1 for
@@ -892,7 +901,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 463
+TEST_CENSUS_TOTAL = 471
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

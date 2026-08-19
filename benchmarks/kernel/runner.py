@@ -14,10 +14,14 @@ interpreter -- FA3 and TransformerEngine cannot share a process at all (a
 cuDNN soname collision, see CLAUDE.md) -- and it is why the parent, not a
 worker, writes ``results.json``: only the parent sees every fragment.
 
-**The sweep is replicate-major.** One replicate spawns every arm once, in
-declaration order, and the replicate is repeated. Drift is therefore shared
-across arms rather than charged to whichever arm happened to be running, and
-the anchor sits in every replicate slot.
+**The sweep is block-major.** A block is ``replicates_per_process``
+consecutive replicates of one arm; the outer loop walks the blocks and the
+inner loop walks the arms. At the default of one replicate per process a
+block is one replicate and this is the replicate-major sweep it has always
+been: drift is shared across arms rather than charged to whichever arm
+happened to be running, and the anchor sits in every replicate slot. Raising
+it trades that adjacency for the arm builds it stops repeating; the trade is
+stated on ``KernelRunRequest``.
 
 **Workers run strictly sequentially.** A shared GPU invalidates timings
 (CLAUDE.md operating rules), so the parent never has two in flight.
@@ -58,10 +62,10 @@ from benchmarks.kernel.results.schema import (
 from benchmarks.kernel.schema import (
     KernelScenario,
     KernelWorkload,
-    fragment_stem,
     resolve_shape_and_workload,
     routing_divides_evenly,
     shape_summary,
+    timing_fragment_path,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
@@ -84,14 +88,49 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # would read a schema-4 manifest written after this change identically to
 # one written before it. This file is write-only provenance, so the bump is
 # labelling, exactly as 3 was.
-KERNEL_MANIFEST_SCHEMA_VERSION = 5
+#
+# 6: "replicates_per_process" records how many of an arm's replicates shared
+# a worker. A schema-5 manifest was always 1 -- the field did not exist
+# because the choice did not -- so its absence is unambiguous, and the bump
+# is labelling again rather than a reinterpretation.
+KERNEL_MANIFEST_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
 class KernelRunRequest:
+    """One kernel-bench invocation.
+
+    ``replicates_per_process`` is the one field here that is a methodology
+    choice rather than a workload one. It says how many consecutive
+    replicates of an arm share a worker process, and it trades measurement
+    cost against the property the replicate exists for.
+
+    At ``1`` every replicate is a fresh process and the sweep is
+    replicate-major: an arm's five replicates are spread across the run, each
+    within seconds of every other arm's matching replicate, so drift that
+    moves a whole replicate cancels in the per-replicate log-ratio the
+    bootstrap runs on. That is what makes the CI an honest statement about
+    the ratio.
+
+    Above ``1`` an arm's replicates become consecutive measurements inside
+    one process, separated by milliseconds rather than by a rebuild. Two
+    things follow, and both are costs. The replicates stop sampling
+    process-to-process variation, so the CI narrows without the underlying
+    quantity having become better known -- measured at 26-48% narrower on
+    ``qkv`` while the point estimate's round-to-round spread did not improve.
+    And the arms move apart in time -- at the extreme, arm A's whole block
+    runs, then arm B's -- so drift between the blocks lands in the point
+    estimate instead of cancelling. The results file renames the interval
+    accordingly; see ``benchmarks.kernel.results.merge``.
+
+    Raise it to buy wall-clock, and say in the report that you did. Use 1 for
+    anything published.
+    """
+
     gpu: str
     scenario_names: tuple[str, ...]
     replicates: int = 5
+    replicates_per_process: int = 1
     samples_per_replicate: int = 40
     burst_k: int = 16
     warmup_calls: int = 30
@@ -138,17 +177,23 @@ class KernelScenarioOutcome:
 
 def worker_command(
     scenario_name: str,
-    fragment: Path,
+    fragments_dir: Path,
     request: KernelRunRequest,
     prefix: Sequence[str],
     *,
     mode: str,
     arm: str | None = None,
     replicate: int | None = None,
+    replicate_count: int = 1,
     skip_arms: Sequence[str] = (),
 ) -> list[str]:
     """The argv for one worker pass. Deterministic, so the manifest can list
-    every command the run will issue before the first one starts."""
+    every command the run will issue before the first one starts.
+
+    A timing worker is handed the fragments directory rather than a path,
+    because a batched one writes a file per replicate. The correctness worker
+    writes exactly one file and is still handed it by name.
+    """
     command = list(prefix) + [
         sys.executable,
         "-m",
@@ -157,8 +202,13 @@ def worker_command(
         scenario_name,
         "--mode",
         mode,
-        "--fragment",
-        str(fragment),
+    ]
+    command += (
+        ["--fragments-dir", str(fragments_dir)]
+        if mode == "timing"
+        else ["--fragment", str(fragments_dir / "correctness.json")]
+    )
+    command += [
         # Neither worker pass reads --replicates. The parent owns the sweep,
         # and a timing worker measures the one replicate --replicate names.
         # It is forwarded as provenance: the manifest publishes this argv as
@@ -184,6 +234,8 @@ def worker_command(
         command.extend(("--arm", arm))
     if replicate is not None:
         command.extend(("--replicate", str(replicate)))
+    if replicate_count != 1:
+        command.extend(("--replicate-count", str(replicate_count)))
     for name in skip_arms:
         command.extend(("--skip-arm", name))
     if request.burst:
@@ -197,12 +249,20 @@ def worker_command(
     return command
 
 
-def fragment_path(fragments_dir: Path, arm: str, replicate: int) -> Path:
-    # fragment_stem, not the raw name: a cross-engine arm is spelled
-    # "mcore/base", and Path would read that slash as a directory nobody
-    # creates. See benchmarks/kernel/schema.py for why the substitution lives
-    # there rather than here.
-    return fragments_dir / f"timing__{fragment_stem(arm)}__r{replicate}.json"
+def replicate_blocks(
+    replicates: int, replicates_per_process: int
+) -> tuple[tuple[int, int], ...]:
+    """The (first replicate, count) pairs one arm's timing workers cover.
+
+    The blocks tile ``range(replicates)`` in order, and only the last one is
+    short. ``replicates_per_process=1`` gives one block per replicate, which
+    is the historical sweep.
+    """
+    size = max(1, replicates_per_process)
+    return tuple(
+        (start, min(size, replicates - start))
+        for start in range(0, replicates, size)
+    )
 
 
 def resolve_arm_skips(
@@ -255,34 +315,45 @@ def planned_commands(
 ) -> list[list[str]]:
     """Every worker argv this scenario will issue, in the order it issues it.
 
-    Replicate-major, matching the sweep: one replicate spawns every arm once
-    in declaration order, and the replicate repeats. A skipped arm is spawned
-    in neither pass, and the manifest therefore lists what the run really
-    does rather than what a fully-equipped host would have done.
+    **Block-major**: the outer loop walks the replicate blocks and the inner
+    loop walks the arms, so every arm is measured once before any arm is
+    measured again. At ``replicates_per_process=1`` a block is one replicate
+    and this is exactly the replicate-major sweep -- every arm is timed
+    within seconds of every other, and drift that moves a whole replicate
+    cancels in the ratio. At a larger value the blocks get longer and that
+    adjacency coarsens; ``KernelRunRequest.replicates_per_process`` states
+    what it costs.
+
+    A skipped arm is spawned in neither pass, and the manifest therefore
+    lists what the run really does rather than what a fully-equipped host
+    would have done.
     """
     commands = [
         worker_command(
             scenario.name,
-            fragments_dir / "correctness.json",
+            fragments_dir,
             request,
             prefix,
             mode="correctness",
             skip_arms=[arm.name for arm in scenario.arms if arm.name in skipped],
         )
     ]
-    for replicate in range(request.replicates):
+    for first, count in replicate_blocks(
+        request.replicates, request.replicates_per_process
+    ):
         for arm in scenario.arms:
             if arm.name in skipped:
                 continue
             commands.append(
                 worker_command(
                     scenario.name,
-                    fragment_path(fragments_dir, arm.name, replicate),
+                    fragments_dir,
                     request,
                     prefix,
                     mode="timing",
                     arm=arm.name,
-                    replicate=replicate,
+                    replicate=first,
+                    replicate_count=count,
                 )
             )
     return commands
@@ -317,6 +388,11 @@ def kernel_manifest_data(
         "skipped_arms": dict(skipped),
         "baseline_arm": scenario.baseline_arm,
         "replicates": request.replicates,
+        # How many of them shared a process. A reader comparing two runs
+        # needs it: at 1 the sweep is replicate-major and the per-replicate
+        # ratios cancel drift, and above 1 they do so less. It is not
+        # derivable from "commands" without parsing every argv.
+        "replicates_per_process": request.replicates_per_process,
         "samples_per_replicate": request.samples_per_replicate,
         "burst_k": request.burst_k,
         "warmup_calls": request.warmup_calls,
@@ -545,37 +621,59 @@ def execute_kernel_run(
             else:
                 for command in commands[1:]:
                     arm = command[command.index("--arm") + 1]
-                    replicate = int(command[command.index("--replicate") + 1])
-                    code = spawn(command)
-                    fragment = _read_fragment(
-                        fragment_path(fragments_dir, arm, replicate)
+                    first = int(command[command.index("--replicate") + 1])
+                    count = (
+                        int(command[command.index("--replicate-count") + 1])
+                        if "--replicate-count" in command
+                        else 1
                     )
-                    if fragment is None:
-                        label = f"{arm} r{replicate}"
-                        failed_passes.append(label)
-                        # Reported as it happens rather than at the end: the
-                        # sweep continues, and an operator watching a long run
-                        # should not learn about the first crash last.
-                        _emit(
-                            event_handler,
-                            "error",
-                            f"ERROR {name}: timing worker {label} exited "
-                            f"with {code} and wrote no fragment",
+                    code = spawn(command)
+                    # One worker, one fragment per replicate it covered. A
+                    # batched worker that died mid-block leaves some of them
+                    # missing, and each missing one is reported on its own:
+                    # the merge counts replicates, not workers, and an arm
+                    # short of one is incomplete however few processes lost
+                    # it.
+                    missing = False
+                    for replicate in range(first, first + count):
+                        fragment = _read_fragment(
+                            timing_fragment_path(fragments_dir, arm, replicate)
                         )
+                        if fragment is None:
+                            missing = True
+                            label = f"{arm} r{replicate}"
+                            failed_passes.append(label)
+                            # Reported as it happens rather than at the end:
+                            # the sweep continues, and an operator watching a
+                            # long run should not learn about the first crash
+                            # last.
+                            _emit(
+                                event_handler,
+                                "error",
+                                f"ERROR {name}: timing worker {label} exited "
+                                f"with {code} and wrote no fragment",
+                            )
+                            continue
+                        timings.append(fragment)
+                    if missing:
                         continue
                     if code != 0:
-                        # The samples stand -- the worker writes the fragment
+                        # The samples stand -- the worker writes its fragments
                         # before it returns -- so this costs the arm nothing.
                         # It is still said out loud: the code reports a death
                         # after the write, and a discarded exit code is how a
                         # silent failure starts.
+                        block = (
+                            f"r{first}"
+                            if count == 1
+                            else f"r{first}-{first + count - 1}"
+                        )
                         _emit(
                             event_handler,
                             "error",
-                            f"WARNING {name}: timing worker {arm} r{replicate} "
-                            f"wrote its fragment and then exited with {code}",
+                            f"WARNING {name}: timing worker {arm} {block} "
+                            f"wrote its fragments and then exited with {code}",
                         )
-                    timings.append(fragment)
 
         result = None
         error = None
@@ -594,6 +692,7 @@ def execute_kernel_run(
                 timings=timings,
                 timings_ran=not gates_failed,
                 skipped=skipped,
+                replicates_per_process=request.replicates_per_process,
             )
         except (ValueError, KeyError) as merge_error:
             error = f"{name}: {merge_error}"

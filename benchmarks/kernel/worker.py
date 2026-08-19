@@ -12,13 +12,22 @@ Two modes, matching the two passes:
   removes an arm this host cannot run, so a missing compiler costs the TE arm
   and not the whole scenario.
 * ``--mode timing --arm NAME --replicate N`` builds that one arm and times it
-  for that one replicate.
+  for replicates ``N`` through ``N + --replicate-count - 1``, writing one
+  fragment per replicate under ``--fragments-dir``.
 
-The timing mode is why this file exists in this shape. One arm per process is
-what keeps an arm's dependencies out of every other arm's interpreter: FA3
+The timing mode is why this file exists in this shape. **One arm per process**
+is what keeps an arm's dependencies out of every other arm's interpreter: FA3
 and TransformerEngine cannot share a process at all (a cuDNN soname
 collision, see CLAUDE.md), and a build failure or a leaked CUDA context in
-one arm cannot reach another.
+one arm cannot reach another. ``--replicate-count`` moves replicates into
+that process and never a second arm, so the isolation the split exists for is
+untouched by it. What it does cost is stated where the parent chooses the
+value: ``benchmarks.kernel.runner``.
+
+The batch is written at the end rather than replicate by replicate. A worker
+that dies mid-batch costs the arm either way -- the merge requires a complete
+replicate set and fails the arm without one -- so there is nothing for a
+partial write to save.
 
 Exit codes: 0 success; 3 correctness gates failed (the fragment is still
 written); 2 bad arguments; 1 build or environment failure.
@@ -51,10 +60,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="benchmarks.kernel.worker")
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--mode", required=True, choices=("correctness", "timing"))
-    parser.add_argument("--fragment", required=True, type=Path)
+    parser.add_argument(
+        "--fragment", default=None, type=Path, help="correctness mode only"
+    )
+    parser.add_argument(
+        "--fragments-dir",
+        default=None,
+        type=Path,
+        help=(
+            "timing mode only: the directory the run's fragments live in. A "
+            "batched worker writes one file per replicate, so it is handed "
+            "the directory rather than a path."
+        ),
+    )
     parser.add_argument("--arm", default=None, help="timing mode only")
     parser.add_argument(
         "--replicate", type=int, default=None, help="timing mode only"
+    )
+    parser.add_argument(
+        "--replicate-count",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "timing mode only: how many consecutive replicates this process "
+            "measures, starting at --replicate. The arm is built once and "
+            "reused, which is the whole saving."
+        ),
     )
     parser.add_argument(
         "--skip-arm",
@@ -77,8 +109,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-seq-len", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
-    if args.mode == "timing" and (args.arm is None or args.replicate is None):
-        parser.error("--mode timing requires --arm and --replicate")
+    if args.mode == "timing":
+        if args.arm is None or args.replicate is None:
+            parser.error("--mode timing requires --arm and --replicate")
+        if args.fragments_dir is None:
+            parser.error("--mode timing requires --fragments-dir")
+        if args.replicate_count < 1:
+            parser.error("--replicate-count must be >= 1")
+    elif args.fragment is None:
+        parser.error("--mode correctness requires --fragment")
     return args
 
 
@@ -126,10 +165,13 @@ def main(argv: list[str] | None = None) -> int:
     with phases.phase("import_engine"):
         from benchmarks.artifacts.layout import atomic_write_json
         from benchmarks.kernel.engine.run import (
+            arm_extras,
+            build_timing_arm,
             RunOptions,
             run_correctness_pass,
-            run_timing_pass,
+            time_replicate,
         )
+        from benchmarks.kernel.schema import timing_fragment_path
 
     options = RunOptions(
         replicates=args.replicates,
@@ -139,25 +181,55 @@ def main(argv: list[str] | None = None) -> int:
         burst=args.burst,
         seed=args.seed,
     )
+    written: list[tuple[Path, dict]] = []
     try:
         if args.mode == "correctness":
             fragment = run_correctness_pass(
                 scenario, shape, workload, options, frozenset(args.skip_arm)
             )
+            written.append((args.fragment, fragment))
         else:
-            fragment = run_timing_pass(
-                scenario, args.arm, args.replicate, shape, workload, options
+            declaration, built = build_timing_arm(
+                scenario, args.arm, shape, workload, options
+            )
+            fragments = {
+                replicate: time_replicate(
+                    scenario, declaration, built, replicate, options
+                )
+                for replicate in range(
+                    args.replicate, args.replicate + args.replicate_count
+                )
+            }
+            # After every replicate, never between two of them: the memory
+            # pass and the burst ladder are per-arm measurements, and running
+            # them mid-batch would give replicate N+1 a warm-up its unbatched
+            # twin never had. At --replicate-count 1 this is the order the
+            # single-replicate pass has always used.
+            if 0 in fragments:
+                fragments[0].update(arm_extras(declaration, built, options))
+            written.extend(
+                (
+                    timing_fragment_path(
+                        args.fragments_dir, args.arm, replicate
+                    ),
+                    payload,
+                )
+                for replicate, payload in fragments.items()
             )
     except Exception:
         traceback.print_exc()
         return 1
 
     # Provenance, not a result: the merge reads no phase and results.json
-    # carries none. See this module's docstring.
-    fragment["phases"] = phases.phases()
-    atomic_write_json(args.fragment, fragment)
-    print(f"fragment: {args.fragment}")
-    for entry in fragment["phases"]:
+    # carries none. See this module's docstring. The table describes the
+    # *process*, so every fragment a batched worker writes carries the same
+    # one.
+    table = phases.phases()
+    for path, payload in written:
+        payload["phases"] = table
+        atomic_write_json(path, payload)
+        print(f"fragment: {path}")
+    for entry in table:
         print(f"phase {entry['phase']}: {entry['seconds']:.3f}s")
 
     if args.mode == "correctness" and not fragment["all_passed"]:
