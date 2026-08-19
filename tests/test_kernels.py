@@ -1,6 +1,8 @@
 """CPU-only tests for the kernel-benchmark registry and statistics."""
 
+import contextlib
 import importlib
+import io
 import sys
 import unittest
 from dataclasses import replace
@@ -797,6 +799,81 @@ class WorkerExitTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("PYTHON-LINE", completed.stdout)
         self.assertIn("LIBC-LINE", completed.stdout)
+
+
+class WorkerArgumentTests(unittest.TestCase):
+    """The worker's own argument guards, which no other test reaches.
+
+    Every runner test drives a fake process, so the real parser runs only on
+    the hardware. ``--fragment`` was unconditionally required until the timing
+    pass started writing a file per replicate; it is now conditional, and
+    these branches are the only thing between a mis-wired parent and a
+    ``None`` path. Each guard is checked by its message, so a branch that
+    fires for the wrong reason fails here rather than passing as "some error".
+    """
+
+    def error_for(self, *argv: str) -> str:
+        """Parse ``argv`` and return the message argparse exits with."""
+        from benchmarks.kernel.worker import parse_args
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                parse_args(list(argv))
+        self.assertEqual(caught.exception.code, 2)
+        return stderr.getvalue()
+
+    def test_a_timing_pass_needs_a_fragments_directory(self) -> None:
+        message = self.error_for(
+            "--scenario", "qkv",
+            "--mode", "timing",
+            "--arm", "baseline",
+            "--replicate", "0",
+        )
+        self.assertIn("--mode timing requires --fragments-dir", message)
+
+    def test_a_timing_pass_needs_an_arm_and_a_replicate(self) -> None:
+        message = self.error_for(
+            "--scenario", "qkv",
+            "--mode", "timing",
+            "--fragments-dir", "/tmp/fragments",
+        )
+        self.assertIn("--mode timing requires --arm and --replicate", message)
+
+    def test_a_block_covers_at_least_one_replicate(self) -> None:
+        message = self.error_for(
+            "--scenario", "qkv",
+            "--mode", "timing",
+            "--arm", "baseline",
+            "--replicate", "0",
+            "--fragments-dir", "/tmp/fragments",
+            "--replicate-count", "0",
+        )
+        self.assertIn("--replicate-count must be >= 1", message)
+
+    def test_a_correctness_pass_needs_a_fragment_path(self) -> None:
+        message = self.error_for("--scenario", "qkv", "--mode", "correctness")
+        self.assertIn("--mode correctness requires --fragment", message)
+
+    def test_a_well_formed_timing_argv_is_accepted(self) -> None:
+        """The control. Without it a parser that refused everything would
+        satisfy all four guards above."""
+        from benchmarks.kernel.worker import parse_args
+
+        args = parse_args(
+            [
+                "--scenario", "qkv",
+                "--mode", "timing",
+                "--arm", "baseline",
+                "--replicate", "2",
+                "--replicate-count", "3",
+                "--fragments-dir", "/tmp/fragments",
+            ]
+        )
+        self.assertEqual(args.arm, "baseline")
+        self.assertEqual(args.replicate, 2)
+        self.assertEqual(args.replicate_count, 3)
+        self.assertEqual(args.fragments_dir, Path("/tmp/fragments"))
 
 
 if __name__ == "__main__":

@@ -314,9 +314,12 @@ class KernelResultsTests(unittest.TestCase):
         self.assertIn("NOT thereby device-bound", rendered)
 
     def test_unsupported_schema_rejected(self) -> None:
-        # 1 is the pre-split schema and 2 the pre-burst one; rejecting
-        # both is the point of each bump.
-        for version in (1, 2, 99):
+        # Every retired version, plus one that never existed. The loader
+        # enforces exact equality, so an older file is refused rather than
+        # half-read, and each bump owes this list its predecessor: 1 is the
+        # pre-split schema, 2 the pre-burst one, 3 the one without a per-arm
+        # status, and 4 the one before the isolation fields.
+        for version in (1, 2, 3, 4, 99):
             with tempfile.TemporaryDirectory() as temporary:
                 path = Path(temporary) / "results.json"
                 payload = sample_result().to_dict()

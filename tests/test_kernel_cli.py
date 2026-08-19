@@ -657,6 +657,17 @@ class KernelRunnerTests(unittest.TestCase):
         )
         self.assertEqual(outcomes[0].result.arms["fused_qkv"].status, "failed")
         self.assertEqual(outcomes[0].result.arms["baseline"].status, "ok")
+        # Each one is also named as it happens. The outcome above is what the
+        # merge reads; this is what the operator watching a long run sees, and
+        # the docstring's claim is about the second.
+        lost = [
+            event.message
+            for event in events
+            if "wrote no fragment" in event.message
+        ]
+        self.assertEqual(len(lost), 2)
+        self.assertTrue(any("fused_qkv r2" in message for message in lost))
+        self.assertTrue(any("fused_qkv r3" in message for message in lost))
 
     def test_the_compiler_environment_is_resolved_once_per_run(self) -> None:
         """It shells out to bash, and the answer cannot change between two
