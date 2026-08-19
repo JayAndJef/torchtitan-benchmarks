@@ -854,7 +854,11 @@ TEST_CENSUS = {
     # Net 0 with eager_reason: the assertion that only rope/copy_floor is
     # eager became one that an eager arm with no reason is refused at
     # import, which is what an mcore arm makes unavoidable.
-    "test_kernels": 35,
+    # +5 with the worker phase table: that a span is recorded under its name,
+    # that it closes when the block raises, that the exit hook runs inside it,
+    # that a span nothing timed can still be recorded, and that the offset
+    # from process exec is a plausible age.
+    "test_kernels": 40,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against
     # a frozen literal (including the cuda-graph branch the parity check
@@ -888,7 +892,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 458
+TEST_CENSUS_TOTAL = 463
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

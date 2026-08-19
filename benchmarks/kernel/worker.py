@@ -25,6 +25,13 @@ written); 2 bad arguments; 1 build or environment failure.
 
 Module scope stays stdlib-only, so ``--help`` and an argument error return
 without paying for torch. ``tests/test_import_boundaries.py`` pins that.
+
+Every fragment carries a **phase table** -- named wall-clock spans from
+process exec to the end of the pass. It is provenance, not a result: the
+merge reads no phase and ``results.json`` carries none. It rides in the
+fragment because the fragment is the one artifact a worker already writes,
+and a phase table is worth nothing unless it survives the process that
+produced it.
 """
 
 from __future__ import annotations
@@ -72,8 +79,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    from benchmarks.kernel.registry import kernel_scenario_by_name
-    from benchmarks.kernel.schema import resolve_shape_and_workload
+    from benchmarks.kernel.engine import phases
+
+    startup = phases.process_start_offset()
+    if startup is not None:
+        # Interpreter startup plus this module's stdlib imports plus argument
+        # parsing. Not timed from inside, because it begins before any of our
+        # Python runs.
+        phases.record("process_startup", startup)
+
+    with phases.phase("import_registry"):
+        from benchmarks.kernel.registry import kernel_scenario_by_name
+        from benchmarks.kernel.schema import resolve_shape_and_workload
 
     try:
         scenario = kernel_scenario_by_name(args.scenario)
@@ -91,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    from torch._functorch import config as functorch_config
+    with phases.phase("import_torch"):
+        from torch._functorch import config as functorch_config
 
     # Backward-mode timing re-runs a compiled backward graph with
     # retain_graph=True; AOT autograd's donated-buffer optimization forbids
@@ -100,12 +118,13 @@ def main(argv: list[str] | None = None) -> int:
     # generated kernels, and applies to every arm alike.
     functorch_config.donated_buffer = False
 
-    from benchmarks.artifacts.layout import atomic_write_json
-    from benchmarks.kernel.engine.run import (
-        RunOptions,
-        run_correctness_pass,
-        run_timing_pass,
-    )
+    with phases.phase("import_engine"):
+        from benchmarks.artifacts.layout import atomic_write_json
+        from benchmarks.kernel.engine.run import (
+            RunOptions,
+            run_correctness_pass,
+            run_timing_pass,
+        )
 
     options = RunOptions(
         replicates=args.replicates,
@@ -128,8 +147,13 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         return 1
 
+    # Provenance, not a result: the merge reads no phase and results.json
+    # carries none. See this module's docstring.
+    fragment["phases"] = phases.phases()
     atomic_write_json(args.fragment, fragment)
     print(f"fragment: {args.fragment}")
+    for entry in fragment["phases"]:
+        print(f"phase {entry['phase']}: {entry['seconds']:.3f}s")
 
     if args.mode == "correctness" and not fragment["all_passed"]:
         failed = [

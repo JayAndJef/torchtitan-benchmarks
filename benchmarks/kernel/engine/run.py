@@ -84,6 +84,7 @@ from benchmarks.kernel.engine.measurement import (
     burst_samples,
     memory_pass,
 )
+from benchmarks.kernel.engine.phases import phase
 from benchmarks.kernel.results.schema import KernelScenarioResult
 from benchmarks.kernel.schema import (
     CORRECTNESS_FRAGMENT_KIND,
@@ -176,12 +177,18 @@ def _prepare(
     if not torch.cuda.is_available():
         raise RuntimeError("kernel benchmarks require a CUDA device")
     device = torch.device("cuda")
-    torch.manual_seed(options.seed)
-    generator = torch.Generator(device=device)
-    generator.manual_seed(options.seed)
-    return resolve_symbol(scenario.inputs_builder)(
-        shape, workload, device, generator
-    )
+    # Split from the build below because they are different costs with
+    # different fixes: this one is the driver handing the process a context,
+    # and it is paid once per process no matter what the process then does.
+    with phase("cuda_init", torch.cuda.synchronize):
+        torch.cuda.init()
+    with phase("inputs_build", torch.cuda.synchronize):
+        torch.manual_seed(options.seed)
+        generator = torch.Generator(device=device)
+        generator.manual_seed(options.seed)
+        return resolve_symbol(scenario.inputs_builder)(
+            shape, workload, device, generator
+        )
 
 
 def _seeded_build(
@@ -228,6 +235,16 @@ def _detached(
     return {name: tensor.detach() for name, tensor in outputs.items()}
 
 
+def _sync() -> None:
+    """Close a phase boundary on the device as well as on the host.
+
+    Guarded, because ``gate_outputs`` is deliberately runnable without a CUDA
+    device and a phase boundary must not be what makes it require one.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
 def _release() -> None:
     """Return one arm's memory to the allocator before the next is built.
 
@@ -266,10 +283,11 @@ def gate_outputs(
     for arm in scenario.arms:
         if arm.name in skip:
             continue
-        built = _seeded_build(arm, shape, workload, inputs, seed)
-        outputs[arm.name] = _detached(built.correctness_outputs())
-        del built
-        _release()
+        with phase(f"gate_build:{arm.name}", _sync):
+            built = _seeded_build(arm, shape, workload, inputs, seed)
+            outputs[arm.name] = _detached(built.correctness_outputs())
+            del built
+            _release()
     return outputs
 
 
@@ -307,15 +325,19 @@ def run_correctness_pass(
     declares such a pair.
     """
     inputs = _prepare(scenario, shape, workload, options)
-    fp64_reference = (
-        resolve_symbol(scenario.reference_builder)(shape, workload, inputs)
-        if scenario.reference_builder
-        else None
-    )
+    with phase("reference_build", _sync):
+        fp64_reference = (
+            resolve_symbol(scenario.reference_builder)(shape, workload, inputs)
+            if scenario.reference_builder
+            else None
+        )
     arm_outputs = gate_outputs(
         scenario, shape, workload, inputs, options.seed, skip
     )
-    rows, all_passed = run_correctness(scenario, arm_outputs, fp64_reference)
+    with phase("gates", _sync):
+        rows, all_passed = run_correctness(
+            scenario, arm_outputs, fp64_reference
+        )
     return {
         "kind": CORRECTNESS_FRAGMENT_KIND,
         "scenario": scenario.name,
@@ -342,7 +364,8 @@ def run_timing_pass(
     """
     inputs = _prepare(scenario, shape, workload, options)
     declaration = scenario.arm(arm_name)
-    arm = _seeded_build(declaration, shape, workload, inputs, options.seed)
+    with phase("arm_build", torch.cuda.synchronize):
+        arm = _seeded_build(declaration, shape, workload, inputs, options.seed)
 
     modes: dict[str, list[float]] = {}
     for mode in MODES:
@@ -371,21 +394,23 @@ def run_timing_pass(
     }
     if replicate == 0:
         if not declaration.is_floor:
-            fragment["peak_memory_gib"] = memory_pass(
-                arm, _heaviest_mode(arm), options.memory_iters
-            )
+            with phase("memory_pass"):
+                fragment["peak_memory_gib"] = memory_pass(
+                    arm, _heaviest_mode(arm), options.memory_iters
+                )
         if options.burst:
             # Every declared mode, not just "forward". The old pass read
             # arm.calls["forward"] directly, which left lm_head -- whose arms
             # declare forward_backward only -- with no way to run the
             # diagnostic at all.
-            fragment["burst_us_per_call"] = {
-                mode: burst_ladder(
-                    arm, mode, options.bursts, options.burst_iters
-                )
-                for mode in MODES
-                if mode in arm.calls
-            }
+            with phase("burst_ladder"):
+                fragment["burst_us_per_call"] = {
+                    mode: burst_ladder(
+                        arm, mode, options.bursts, options.burst_iters
+                    )
+                    for mode in MODES
+                    if mode in arm.calls
+                }
     return fragment
 
 

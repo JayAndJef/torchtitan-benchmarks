@@ -687,5 +687,74 @@ class FragmentNameTests(unittest.TestCase):
             self.assertEqual(len(stems), len(set(stems)), scenario.name)
 
 
+class PhaseTableTests(unittest.TestCase):
+    """The worker's wall-clock attribution, which is stdlib-only by design.
+
+    A phase table costs nothing and explains where a worker's twenty seconds
+    go. What it must never do is need a device or a torch import to record a
+    span, because the first span it records ends at the first torch import.
+    """
+
+    def setUp(self) -> None:
+        from benchmarks.kernel.engine import phases
+
+        self.phases = phases
+        phases.reset()
+        self.addCleanup(phases.reset)
+
+    def test_a_span_is_recorded_under_its_name(self) -> None:
+        with self.phases.phase("first"):
+            pass
+        with self.phases.phase("second"):
+            pass
+        self.assertEqual(
+            [entry["phase"] for entry in self.phases.phases()],
+            ["first", "second"],
+        )
+        for entry in self.phases.phases():
+            self.assertGreaterEqual(entry["seconds"], 0.0)
+
+    def test_a_span_closes_even_when_the_block_raises(self) -> None:
+        """A failed build must still leave its own cost attributed.
+
+        Without this the phase table of every worker that died would be the
+        table of a worker that never got started, which is the case a reader
+        most wants to see.
+        """
+        with self.assertRaises(RuntimeError):
+            with self.phases.phase("failed"):
+                raise RuntimeError("boom")
+        self.assertEqual(
+            [entry["phase"] for entry in self.phases.phases()], ["failed"]
+        )
+
+    def test_the_exit_hook_runs_inside_the_span(self) -> None:
+        """The synchronize a setup boundary passes is charged to that phase.
+
+        Kernel launches are asynchronous, so a boundary that closed before the
+        device caught up would charge one phase's device work to the next --
+        usually the arm build, which is the number the table exists to
+        attribute.
+        """
+        seen: list[str] = []
+        with self.phases.phase("boundary", lambda: seen.append("hook")):
+            seen.append("body")
+        self.assertEqual(seen, ["body", "hook"])
+        self.assertEqual(len(self.phases.phases()), 1)
+
+    def test_a_span_this_module_did_not_time_can_be_recorded(self) -> None:
+        self.phases.record("process_startup", 1.25)
+        self.assertEqual(
+            self.phases.phases(), [{"phase": "process_startup", "seconds": 1.25}]
+        )
+
+    def test_the_process_start_offset_is_a_plausible_age(self) -> None:
+        offset = self.phases.process_start_offset()
+        if offset is None:
+            self.skipTest("no /proc on this platform")
+        self.assertGreater(offset, 0.0)
+        self.assertLess(offset, 24 * 3600)
+
+
 if __name__ == "__main__":
     unittest.main()

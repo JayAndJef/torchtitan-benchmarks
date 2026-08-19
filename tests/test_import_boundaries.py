@@ -91,6 +91,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.kernel.schema",
     "benchmarks.kernel.worker",
     "benchmarks.kernel.engine.statistics",
+    # Stdlib only, and it has to be: the worker imports it before it imports
+    # torch, because the interval from process exec to the first torch import
+    # is one of the phases it records.
+    "benchmarks.kernel.engine.phases",
     "benchmarks.kernel.results.schema",
     "benchmarks.kernel.results.merge",
     "benchmarks.kernel.results.reporting",

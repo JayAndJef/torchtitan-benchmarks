@@ -85,6 +85,7 @@ from statistics import median
 import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
+from benchmarks.kernel.engine.phases import phase
 
 
 @contextlib.contextmanager
@@ -119,14 +120,18 @@ def burst_samples(
     if k < 1:
         raise ValueError(f"burst k must be >= 1, got {k}")
     call = arm.calls[mode]
-    for _ in range(warmup_calls):
-        call()
-    torch.cuda.synchronize()
+    # The two phases wrap the warmup and the sample loop from outside; they
+    # add no synchronize and touch neither the events nor the arithmetic, so
+    # the published samples are the same numbers between the same two points.
+    with phase(f"warmup:{mode}"):
+        for _ in range(warmup_calls):
+            call()
+        torch.cuda.synchronize()
     # One extra burst absorbs the post-sync cold start: the queue is empty
     # after the warmup synchronize, so the first burst cannot overlap host
     # dispatch with device work and reads systematically high.
     samples: list[float] = []
-    with _gc_paused():
+    with phase(f"samples:{mode}"), _gc_paused():
         for _ in range(n + 1):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
