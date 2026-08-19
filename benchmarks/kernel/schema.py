@@ -497,4 +497,30 @@ def shape_summary(
             "v": [batch, seq, shape.n_kv_heads, shape.head_dim],
             "tokens": batch * seq,
         }
+    if scenario_name == "cross_entropy":
+        # Both logit layouts are recorded because the two engines really do
+        # consume different ones and the manifest should say so rather than
+        # leave a reader to assume a shared tensor. The inputs builder holds
+        # the canonical [B, L, V] and each mcore arm materializes its [L, B, V]
+        # copy at build time -- megatron runs SBHD, and a transpose inside a
+        # timed closure would charge one engine for the harness's storage
+        # order.
+        #
+        # ``labels`` is [B, L] on BOTH sides. Megatron's method takes (b, s)
+        # and transposes it itself (``language_module.py:164,172``), and the
+        # titan arms are charged the same preparation, so there is one label
+        # shape and not two.
+        #
+        # ``vocab_size`` is spelled out next to ``tokens`` because the logit
+        # tensor is the largest object in this scenario by three orders of
+        # magnitude -- 1.16 GiB of bf16 at the default workload against 32 KiB
+        # of labels -- and every memory number the scenario publishes is read
+        # against it.
+        return {
+            "logits_titan_BLV": [batch, seq, shape.vocab_size],
+            "logits_mcore_SBV": [seq, batch, shape.vocab_size],
+            "labels": [batch, seq],
+            "tokens": batch * seq,
+            "vocab_size": shape.vocab_size,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

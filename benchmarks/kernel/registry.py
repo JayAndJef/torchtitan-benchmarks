@@ -1278,6 +1278,310 @@ FINAL_NORM = KernelScenario(
 )
 
 
+# One shared fp64 gate for all six arms, at the tolerance every bf16 reduction
+# in this repo uses. ``max_rel_l2`` only: cross-entropy is a reduction over the
+# vocabulary, and CLAUDE.md forbids a max/ULP metric on one -- cancellation
+# drives individual gradient entries toward zero, so dividing a negligible
+# absolute error by that magnitude reports thousands of ULPs for a perfect
+# kernel.
+#
+# The six arms round the gradient to bf16 a different number of times, and the
+# gate is deliberately not per-arm, because they all round exactly once at this
+# workload: ``mcore/base`` stores in bf16 and rescales in bf16, but the scale is
+# 1/4096 = 2**-12 exactly, which is a power of two and therefore exact;
+# ``mcore/ce_native`` casts once (``fusions/fused_cross_entropy.py:82``, and
+# unconditionally, regardless of the model dtype); ``mcore/no_ce_fusion``
+# returns fp32 and autograd casts once; ``titan/full_logits`` and
+# ``titan/te_fused_ce`` keep an fp32 buffer and round once; and
+# ``titan/piper_optimized_te_ce`` applies its scale in fp32 inside the kernel
+# before a single bf16 store. A workload whose ``batch * seq_len`` is not a
+# power of two would make ``mcore/base`` round twice, which is a widened gate
+# rather than a bug -- measure before widening.
+CROSS_ENTROPY_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("loss", "logits_grad"),
+    max_rel_l2=2e-2,
+)
+
+
+CROSS_ENTROPY = KernelScenario(
+    name="cross_entropy",
+    description=(
+        "The loss and only the loss, cross-engine: megatron-core's "
+        "compute_language_model_loss against TorchTitan's CrossEntropyLoss and "
+        "the two fused losses this repo runs, over one shared set of "
+        "materialized logits. The LM-head projection is scenario 15 and is "
+        "excluded here, so no number is comparable to the lm_head scenario, "
+        "which measures the projection and the loss together. Megatron's "
+        "method materializes a transposed label copy before the kernel "
+        "(language_module.py:172) and transposes the per-token loss back "
+        "(:205); the titan arms are charged the same label preparation, so "
+        "both engines pay two small layout kernels per call and the ratio is "
+        "not a report of megatron's own layout. The three titan arms are "
+        "compiled with the production CompileConfig(components=['loss']) and "
+        "the three megatron arms are eager, which is how each engine runs this "
+        "code. READ THE forward_backward ROW, not the forward row: the arms "
+        "divide the work differently across that boundary, because mcore/base, "
+        "titan/te_fused_ce and titan/piper_optimized_te_ce write the whole "
+        "gradient inside forward, while titan/full_logits, mcore/ce_native and "
+        "mcore/no_ce_fusion compute only a softmax or a log-softmax there and "
+        "build the gradient in backward. A forward row therefore compares "
+        "operations that are not the same operation. Note also that mcore/base "
+        "and titan/te_fused_ce are the SAME TransformerEngine Triton kernel "
+        "from two sources -- installed TE 2.17.1 for the megatron arm, our "
+        "vendored snapshot under components/lm_head/ for the titan arm, and the "
+        "snapshot writes its gradient into a separate fp32 buffer where "
+        "installed TE overwrites and returns the caller's bf16 logits -- so "
+        "this scenario publishes no ratio between them. Finally, megatron as "
+        "NVIDIA ships it is mcore/no_ce_fusion, not mcore/ce_native: the tree's "
+        "only default is cross_entropy_loss_fusion=False."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.cross_entropy:cross_entropy_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.cross_entropy:cross_entropy_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit and exhaustive, because the derived set is wrong here twice
+    # over: it would compare the two megatron variants against megatron (right)
+    # and all three titan arms against megatron (wrong for two of them). Each
+    # row below states the one question it answers.
+    comparisons=(
+        # The scenario's reason to exist: TorchTitan's own loss against
+        # megatron's, at the fastest CE megatron can reach. Two different
+        # implementations of the same function, so the ratio is a real
+        # cross-engine kernel comparison.
+        ("titan/full_logits", "mcore/base"),
+        # Within megatron: what megatron's own fused non-TE CE costs against
+        # TE's. This is the fastest CE megatron's own training entrypoint
+        # permits, because it refuses the TE fusion outright
+        # (arguments.py:1631-1634) -- it is NOT "megatron as NVIDIA ships it",
+        # which is the row below.
+        ("mcore/ce_native", "mcore/base"),
+        # Within megatron: megatron as NVIDIA ships it -- fusion off is the
+        # tree's only default -- against megatron's fastest available CE. It is
+        # also the floor for the row above, and the only row that isolates the
+        # fusion itself rather than the choice of fused implementation.
+        ("mcore/no_ce_fusion", "mcore/base"),
+        # Within titan: what the vendored TE kernel buys over the bare torch
+        # loss. The titan-side mirror of the ce_native row.
+        ("titan/te_fused_ce", "titan/full_logits"),
+        # Plan section C.5: the Piper arm against the snapshot it modifies, and
+        # against nothing else. It is a rework of the vendored TE kernel, so
+        # comparing it to titan/full_logits or to mcore/base would credit it
+        # with the whole TE gain -- which is TE's. A reader who wants Piper
+        # against the bare loss chains this row with the one above it, which is
+        # the honest way to say it.
+        ("titan/piper_optimized_te_ce", "titan/te_fused_ce"),
+        #
+        # DECLINED, and recorded so nobody re-adds it:
+        # ("titan/te_fused_ce", "mcore/base").
+        #
+        # An earlier draft published it with the caption "version drift plus
+        # our wrapper", arguing that a reader can compute the ratio from the two
+        # absolute numbers anyway. That argument would justify every row this
+        # mechanism exists to suppress, and CLAUDE.md describes the mechanism
+        # for exactly this case: the empty tuple "declares a scenario that
+        # publishes no ratio at all, which a scenario whose two sides are not a
+        # like-for-like cut must be able to say."
+        #
+        # The two sides are one TransformerEngine kernel from two sources,
+        # differing by the fp32 gradient buffer and our wrapper -- not a
+        # like-for-like cut. And the caption cannot ship: results.json has
+        # nowhere to put one, so the row would land with the same visual status
+        # as the genuine cross-engine row above it. Promoting a ratio to a
+        # published row is an editorial act, and this one would assert a cut
+        # that does not exist.
+    ),
+    arms=(
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "Megatron compute_language_model_loss with "
+                "cross_entropy_fusion_impl='te': INSTALLED TransformerEngine "
+                "2.17.1's Triton cross-entropy, megatron's fastest available "
+                "loss path and not the one a stock pretrain_gpt.py user gets "
+                "(that is mcore/no_ce_fusion). Eager. THIS ARM DESTROYS ITS "
+                "INPUT: installed TE writes the bf16 gradient into the caller's "
+                "logit buffer and returns it, so the 30 warmup calls overwrite "
+                "the logits before the first timed sample and NO TIMED SAMPLE "
+                "RUNS ON THE DECLARED INPUT. Every sample runs on the "
+                "near-constant fixed point the kernel converges to (about 1/V "
+                "per element, one entry near -1 per row), which no training "
+                "step produces. The kernel work per call is unchanged by this "
+                "-- fixed trip count, label-only branching, identical traffic, "
+                "no denormals -- but a near-constant bf16 buffer is a "
+                "memory-access pattern the original ~N(0,1) data is not, and "
+                "whether that changes achieved bandwidth on an H200 is "
+                "UNMEASURED"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.cross_entropy"
+                ":build_cross_entropy_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=False,
+            eager_reason=(
+                "megatron compiles no whole layer, and "
+                "compute_language_model_loss is a plain method with no compile "
+                "on it; the work is inside TE's hand-written Triton kernel, "
+                "which is what NVIDIA ships instead of a compiled region"
+            ),
+            correctness=(CROSS_ENTROPY_GATE,),
+        ),
+        KernelArm(
+            name="mcore/ce_native",
+            description=(
+                "The same method with cross_entropy_fusion_impl='native': "
+                "megatron's own fused non-TE cross-entropy, which is what "
+                "fusion selects once TE is declined and the only fused path "
+                "megatron's own training entrypoint permits. NOT megatron as "
+                "NVIDIA ships it -- that is mcore/no_ce_fusion, because "
+                "cross_entropy_loss_fusion defaults to False. Upcasts the whole "
+                "[tokens, vocab] tensor to fp32, makes ~6 full-tensor "
+                "traversals, and keeps that fp32 softmax resident for backward, "
+                "where it then builds the gradient"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.cross_entropy"
+                ":build_cross_entropy_mcore_ce_native"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=False,
+            eager_reason=(
+                "eager at the method level, as every megatron arm is -- but not "
+                "eager inside it: fused_cross_entropy.py's four helpers (:12, "
+                ":25, :47, :64) carry @jit_fuser, jit_fuser is rebound to "
+                "torch.compile on torch >= 2.2 by enable_jit_fuser "
+                "(megatron/core/jit.py:16-25), and jit.py:33 calls it at "
+                "import, so the rebinding is unconditional here. This arm's "
+                "kernels come from Inductor and its dispatch does not, which is "
+                "precisely what 'eager megatron' means"
+            ),
+            correctness=(CROSS_ENTROPY_GATE,),
+        ),
+        KernelArm(
+            name="mcore/no_ce_fusion",
+            description=(
+                "The same method with cross_entropy_loss_fusion=False: MEGATRON "
+                "AS NVIDIA SHIPS IT, since that is the tree's only default "
+                "(model_parallel_config.py:320) and this rev's arguments.py "
+                "declares no flag to change it. The plain vocab-parallel "
+                "cross-entropy, same arithmetic as ce_native with no @jit_fuser "
+                "on any of it and one more all_reduce. Eager throughout, and "
+                "the within-engine floor the fused paths are measured against"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.cross_entropy"
+                ":build_cross_entropy_mcore_no_ce_fusion"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=False,
+            eager_reason=(
+                "the arm IS megatron's unfused path: turning the fusion off is "
+                "the treatment under test, so compiling it would erase the "
+                "difference between this arm and ce_native"
+            ),
+            # is_floor stays False because this is a real megatron code path,
+            # not a synthetic bandwidth bound like rope/copy_floor. It is NOT
+            # because a floor would lose its comparison row: with an explicit
+            # ``comparisons`` tuple, ``comparison_pairs()`` returns it verbatim
+            # and consults ``is_floor`` only in the derived branch. What
+            # ``is_floor`` would actually do here is suppress this arm's
+            # ``peak_memory_gib`` and add an x-floor column -- and peak memory
+            # is one of the two things this scenario measures.
+            correctness=(CROSS_ENTROPY_GATE,),
+        ),
+        KernelArm(
+            name="titan/full_logits",
+            description=(
+                "TorchTitan's CrossEntropyLoss over materialized logits, under "
+                "the production CompileConfig(components=['loss']). This is OUR "
+                "benchmark baseline and not TorchTitan's default: all twelve "
+                "upstream qwen3 configs wrap the same loss in "
+                "ChunkedLossWrapper, which owns the LM head and so spans "
+                "scenarios 15 and 16. Bare, it is the like-for-like cut against "
+                "megatron's method. Upcasts the whole [tokens, vocab] tensor to "
+                "fp32 before F.cross_entropy, and defers the gradient to "
+                "backward rather than writing it in forward"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.cross_entropy"
+                ":build_cross_entropy_titan_full_logits"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                CROSS_ENTROPY_GATE,
+                # The one enforcing cross-engine gate, and it is declared on the
+                # titan side deliberately. ``resolve_arm_skips`` closes the skip
+                # set over correctness references, so a gate pointing AT
+                # mcore/base costs only this arm if megatron is unavailable,
+                # while a gate declared ON mcore/base pointing at a titan arm
+                # would take the anchor with it and cost the whole scenario.
+                #
+                # This arm is the right side to carry it: it shares no code with
+                # the TE path, so the check is a genuine agreement between two
+                # independent implementations rather than an implementation
+                # against a near-copy of itself, which is what a
+                # titan/te_fused_ce-vs-mcore/base gate would be.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("loss", "logits_grad"),
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan/te_fused_ce",
+            description=(
+                "TECrossEntropyLoss over our VENDORED snapshot of TE's Triton "
+                "cross-entropy (components/lm_head/te_cross_entropy.py), "
+                "compiled with CompileConfig(components=['loss']). The name "
+                "says TE and the code is ours: the snapshot writes its gradient "
+                "into a separate fp32 buffer where installed TE 2.17.1 -- which "
+                "mcore/base reaches -- overwrites and returns the caller's bf16 "
+                "logits. Diffed against installed 2.17.1, that buffer is the "
+                "ONLY substantive difference, so this arm is TE with one "
+                "change; the scenario therefore publishes no ratio against "
+                "mcore/base. tests/test_lm_head_losses.py pins the snapshot by "
+                "SHA-256, which guards our drift and not a TE upgrade "
+                "underneath mcore/base"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.cross_entropy"
+                ":build_cross_entropy_titan_te_fused_ce"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(CROSS_ENTROPY_GATE,),
+        ),
+        KernelArm(
+            name="titan/piper_optimized_te_ce",
+            description=(
+                "Piper's rework of that same vendored snapshot, compiled with "
+                "CompileConfig(components=['loss']). It takes the normalization "
+                "scale in forward and applies it in fp32 before its single bf16 "
+                "store, so backward returns the saved tensor untouched instead "
+                "of rescaling the whole [tokens, vocab] buffer. Its declared "
+                "opponent is titan/te_fused_ce, the snapshot it modifies -- not "
+                "the scenario anchor"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.cross_entropy"
+                ":build_cross_entropy_titan_piper_optimized_te_ce"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(CROSS_ENTROPY_GATE,),
+        ),
+    ),
+)
+
+
 KERNEL_SCENARIOS = {
     scenario.name: scenario
     for scenario in (
@@ -1292,6 +1596,7 @@ KERNEL_SCENARIOS = {
         ATTN_OUT_PROJ,
         FFN_NORM,
         FINAL_NORM,
+        CROSS_ENTROPY,
     )
 }
 

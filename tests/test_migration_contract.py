@@ -76,6 +76,7 @@ KERNEL_ARMS_MODULES = {
     "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
     "final_norm": "benchmarks.kernel.operations.final_norm",
+    "cross_entropy": "benchmarks.kernel.operations.cross_entropy",
 }
 
 # Third-party roots override paths are allowed to name, so the "did this move
@@ -139,6 +140,16 @@ KERNEL_INVENTORY = {
     "attn_out_proj": ("mcore/base", "titan"),
     "ffn_norm": ("copy_floor", "mcore/base", "titan"),
     "final_norm": ("copy_floor", "mcore/base", "titan"),
+    # Six arms: three megatron CE variants and the three titan losses re-homed
+    # from lm_head, which measured the projection and the loss together.
+    "cross_entropy": (
+        "mcore/base",
+        "mcore/ce_native",
+        "mcore/no_ce_fusion",
+        "titan/full_logits",
+        "titan/te_fused_ce",
+        "titan/piper_optimized_te_ce",
+    ),
 }
 
 KERNEL_BASELINE_ARMS = {
@@ -160,6 +171,7 @@ KERNEL_BASELINE_ARMS = {
     "attn_out_proj": "mcore/base",
     "ffn_norm": "mcore/base",
     "final_norm": "mcore/base",
+    "cross_entropy": "mcore/base",
 }
 
 # Arm names deliberately match across the two registries wherever the same
@@ -822,6 +834,13 @@ TEST_CENSUS = {
     # declares rather than equalizes -- which arm copies q, k and v, and which
     # hands on a strided view.
     "test_kernel_qkv_prep": 40,
+    # Scenario 16: 33 covering the shared logits and both layouts, the fp64
+    # reference, all six arm builders and the label preparation both engines
+    # are charged. A block of them pins the two claims a reader would
+    # otherwise have to take on trust -- that mcore/base destroys its input,
+    # so no timed sample runs on the declared logits, and that megatron as
+    # NVIDIA ships it is mcore/no_ce_fusion rather than mcore/ce_native.
+    "test_kernel_cross_entropy": 33,
     "test_kernel_results": 9,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
@@ -869,7 +888,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 425
+TEST_CENSUS_TOTAL = 458
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

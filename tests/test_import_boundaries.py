@@ -133,6 +133,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.operations.attention",
     "benchmarks.kernel.operations.attn_out_proj",
     "benchmarks.kernel.operations.common",
+    "benchmarks.kernel.operations.cross_entropy",
     "benchmarks.kernel.operations.embedding_stage",
     "benchmarks.kernel.operations.ffn_norm",
     "benchmarks.kernel.operations.final_norm",
