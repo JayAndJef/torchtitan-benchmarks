@@ -197,7 +197,19 @@ class KernelArm:
     worker; the function receives (shape, workload, inputs) and returns a
     BuiltArm whose per-mode closures are the timed operations.
     ``compiled`` records that the builder runs the arm under torch.compile,
-    as production does; raw-kernel arms and floors stay eager on purpose.
+    as production does.
+
+    **An eager arm states why it is eager.** ``compiled=False`` requires an
+    ``eager_reason``, and ``compiled=True`` forbids one. The reasons are not
+    interchangeable, and a reader who cannot tell them apart will misread the
+    row: ``rope/copy_floor`` is eager because a bandwidth floor is not an
+    implementation, while a megatron-core arm is eager because megatron
+    compiles no whole layer end to end, and a TorchTitan module that sits
+    outside every compiled region -- ``Decoder.norm`` and its siblings, which
+    ``apply_compile`` never reaches -- is eager for the mirror image of that
+    reason. The first is a harness choice. The other two are fidelity to what
+    the engine does in production, and compiling either would be an arbitrary
+    asymmetry the published ratio absorbs silently.
 
     **This declaration is the authority, and the builder must agree with
     it.** ``modes`` says which operations the arm exposes and ``is_floor``
@@ -220,6 +232,7 @@ class KernelArm:
     requires_gcc_toolset: bool = False
     is_floor: bool = False
     compiled: bool = False
+    eager_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -291,6 +304,22 @@ class KernelScenario:
                     f"{self.name}/{arm.name} declares unknown mode(s) "
                     f"{', '.join(sorted(unknown))}; expected one of "
                     f"{', '.join(MODES)}"
+                )
+            # Both directions, because both are wrong in the same way: a
+            # treatment nobody stated. An unexplained eager arm reads as an
+            # oversight when it is usually fidelity, and a reason attached to
+            # a compiled arm describes a treatment the arm did not receive.
+            if not arm.compiled and not (arm.eager_reason or "").strip():
+                raise ValueError(
+                    f"{self.name}/{arm.name} is eager but declares no "
+                    "eager_reason; a cross-engine ratio is a comparison of "
+                    "two compile treatments, so each side must say what its "
+                    "treatment is and why"
+                )
+            if arm.compiled and arm.eager_reason is not None:
+                raise ValueError(
+                    f"{self.name}/{arm.name} is compiled but declares "
+                    f"eager_reason {arm.eager_reason!r}"
                 )
 
     def arm(self, name: str) -> KernelArm:

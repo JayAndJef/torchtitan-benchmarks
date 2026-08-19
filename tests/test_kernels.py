@@ -128,16 +128,33 @@ class RegistryTests(unittest.TestCase):
                 self.assertEqual(module, expected)
                 self.assertTrue(function.isidentifier(), reference)
 
-    def test_only_raw_kernels_and_floors_stay_eager(self) -> None:
-        """Eager arms are deliberate: ``rope/copy_floor`` is a bandwidth
-        floor, not an implementation."""
-        eager = {
-            (scenario.name, arm.name)
-            for scenario in KERNEL_SCENARIOS.values()
-            for arm in scenario.arms
-            if not arm.compiled
-        }
-        self.assertEqual(eager, {("rope", "copy_floor")})
+    def test_an_unexplained_eager_arm_is_refused_at_import(self) -> None:
+        """This replaces an assertion that the eager set was exactly
+        ``{("rope", "copy_floor")}``. That set was true while every arm was
+        TorchTitan's, and it is false the moment a megatron-core arm exists:
+        megatron compiles no whole layer, so an mcore arm is eager by design
+        and there will be one in every cross-engine scenario. Widening the
+        literal to name them would encode the roster in a test and say
+        nothing about why any of them is eager.
+
+        The property worth keeping is that no arm is eager by accident, and
+        the place to keep it is the declaration -- so a new arm cannot reach
+        a GPU without a reason, rather than reaching one and failing a test
+        afterwards. A companion test that walked the registry asserting the
+        same thing would never fail: an offending arm cannot be imported."""
+        rope = kernel_scenario_by_name("rope")
+        floor, compiled = rope.arm("copy_floor"), rope.arm("baseline")
+        # The anchor stays in both tuples: __post_init__ resolves it first,
+        # so dropping it would raise "Unknown arm" and the assertion below
+        # would pass for the wrong reason.
+        with self.assertRaisesRegex(ValueError, "declares no eager_reason"):
+            replace(
+                rope, arms=(replace(floor, eager_reason=None), compiled)
+            )
+        with self.assertRaisesRegex(ValueError, "is compiled but declares"):
+            replace(
+                rope, arms=(floor, replace(compiled, eager_reason="because"))
+            )
 
     def test_every_arm_has_a_description(self) -> None:
         from benchmarks.e2e.registry import SCENARIOS
@@ -430,6 +447,7 @@ class CorrectnessResidencyTests(unittest.TestCase):
                     description="stub",
                     builder=f"{__name__}:_residency_builder",
                     modes=("forward",),
+                    eager_reason="a stub, not an implementation",
                 )
                 for index in range(arms)
             ),
@@ -493,6 +511,7 @@ class SeededBuildContractTests(unittest.TestCase):
             description="stub",
             builder=f"{__name__}:{builder}",
             modes=modes,
+            eager_reason="a stub, not an implementation",
         )
 
     def _build(self, arm):
@@ -622,6 +641,7 @@ class FragmentNameTests(unittest.TestCase):
                 description="d",
                 builder="m:f",
                 modes=("forward",),
+                eager_reason="a stub, not an implementation",
             )
 
         with self.assertRaises(ValueError) as caught:

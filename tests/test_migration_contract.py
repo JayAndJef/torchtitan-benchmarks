@@ -762,6 +762,9 @@ TEST_CENSUS = {
     # +4 with the correctness residency loop: no earlier arm survives the
     # next build, the outputs outlive the arms, every kept tensor is
     # detached, and a skipped arm is never built.
+    # Net 0 with eager_reason: the assertion that only rope/copy_floor is
+    # eager became one that an eager arm with no reason is refused at
+    # import, which is what an mcore arm makes unavoidable.
     "test_kernels": 35,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against

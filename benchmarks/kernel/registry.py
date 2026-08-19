@@ -49,6 +49,11 @@ ROPE = KernelScenario(
             builder="benchmarks.kernel.operations.rope:build_rope_copy_floor",
             modes=("forward",),
             is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: it measures what "
+                "the memory traffic alone costs, and compiling a pair of "
+                "copies would measure Inductor instead"
+            ),
         ),
         KernelArm(
             name="baseline",

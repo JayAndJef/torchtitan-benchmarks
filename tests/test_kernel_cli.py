@@ -348,6 +348,7 @@ class KernelRunnerTests(unittest.TestCase):
                 builder=f"benchmarks.kernel.operations.rope:build_{name}",
                 modes=("forward",),
                 requires_gcc_toolset=requires_gcc,
+                eager_reason="a stub, not an implementation",
                 correctness=(
                     ()
                     if reference is None
