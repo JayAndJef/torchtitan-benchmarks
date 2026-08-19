@@ -393,6 +393,188 @@ ATTENTION = KernelScenario(
 )
 
 
+# The gate both arms face. ``out`` is a gather, so it is not a reduction and an
+# exact metric would be defensible there -- measured on CPU at a tiny shape the
+# titan arm's rel_l2 against fp64 is exactly 0.0, because a gather copies bf16
+# rows and promoting them afterwards loses nothing. The gradient is a reduction
+# over batch*seq_len rows, so max and ULP metrics report garbage wherever
+# cancellation drives an output toward zero, and rel_l2 is the only safe metric
+# for it (CLAUDE.md, "Choosing a correctness metric"). One gate at one tolerance
+# covers both rather than splitting a formality from a real check.
+#
+# ``weight_grad_rows`` is the gradient restricted to the rows the tokens
+# touched. An fp64 reference for the whole [vocab_size, dim] gradient is
+# 1.16 GiB at ``normal`` and 13.9 GiB at ``huge``, in a process that also holds a
+# whole GPTModel.
+#
+# ``weight_grad_norm`` is a scalar over the *entire* table, and it is weak
+# evidence rather than a proof. It bounds a gross write outside the touched rows
+# and nothing finer: a Frobenius norm over U touched rows moves by
+# sqrt(1 + k/U) - 1 when k further rows are contaminated, which at U ~ 4041 is
+# 1.2e-4 for one stray row and needs about 163 of them to reach this gate.
+# Nothing in this scenario bounds a small stray write.
+EMBEDDING_STAGE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "weight_grad_rows", "weight_grad_norm"),
+    max_rel_l2=2e-2,
+)
+
+
+EMBEDDING_STAGE = KernelScenario(
+    name="embedding_stage",
+    description=(
+        "The token-embedding lookup at the top of the model, cross-engine: "
+        "megatron-core's LanguageModelEmbedding against TorchTitan's "
+        "tok_embeddings. NEITHER arm is charged a layout conversion, and that "
+        "is a measurement, not an omission: megatron's "
+        "transpose(0,1).contiguous() (language_model_embedding.py:124) is "
+        "entered every run, but our driver packs THD as [1, batch*seq_len] "
+        "(e2e/megatron/data.py:54), so the transposed view carries a size-1 "
+        "dimension, is already contiguous, and .contiguous() returns self. "
+        "Backward is free for the same reason. So the two arms differ in the "
+        "lookup and in dispatch alone. The mcore arm does pay a wrapper titan "
+        "has none of: an @nvtx_decorator that wraps unconditionally (the "
+        "_nvtx_enabled check is inside the pushed range, utils.py:2712), a "
+        "second nn.Module.__call__, and a Dropout that ATen short-circuits at "
+        "p=0 -- sub-microsecond each, and this scenario is dispatch-bound. "
+        "BOTH arms are EAGER, which is the production treatment on both "
+        "engines: megatron compiles no whole layer, and apply_compile reaches "
+        "only the children of model.layers while tok_embeddings is a sibling "
+        "of them. The stage performs zero FLOPs, so every microsecond is bytes "
+        "or dispatch and the x_floor column decides whether the ratio is a "
+        "kernel claim at all. Token ids are drawn uniformly over the full "
+        "151936-row vocabulary, which is the worst case for the gather: a real "
+        "c4_test run touches ~2020 rows and keeps them in L2, so read the "
+        "absolute number as an upper bound -- and note the uniform draw "
+        "dilutes the ratio toward 1.0, because both arms gather the same rows "
+        "through the same F.embedding call. The RoPE-state handoff is excluded "
+        "on both sides; megatron's per-step rotary_pos_emb build belongs to the "
+        "rope scenario's provenance."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.embedding_stage:embedding_stage_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.embedding_stage"
+        ":embedding_stage_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit, and exhaustive: this scenario publishes exactly one ratio. The
+    # derived set would give the same pair today, but a cross-engine scenario
+    # states which row it publishes rather than inheriting it, and the direction
+    # matches the e2e piper1b_megatron scenario, where megatron is also the
+    # anchor.
+    comparisons=(("titan", "mcore/base"),),
+    arms=(
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "One read and one write of a [batch, seq_len, dim] bf16 "
+                "tensor: the bandwidth floor for the gather's traffic at this "
+                "shape"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.embedding_stage:"
+                "build_embedding_stage_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a copy "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron GPTModel.embedding off a real model: "
+                "VocabParallelEmbedding's F.embedding at tp_size 1, plus the "
+                "module's own transpose(0,1).contiguous(), which is a free "
+                "view at the THD packing this repo runs -- proved on a probe "
+                "call, not assumed. Eager, as megatron runs it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.embedding_stage:"
+                "build_embedding_stage_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so every module "
+                "GPTModel builds runs eager end to end; compiling this one "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(EMBEDDING_STAGE_GATE,),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan Decoder.tok_embeddings: F.embedding from the "
+                "production config node, BSD throughout with no layout "
+                "conversion -- eager, because apply_compile reaches only the "
+                "children of model.layers and tok_embeddings is a sibling of "
+                "them"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.embedding_stage:"
+                "build_embedding_stage_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            # The second titan module arm in the registry that is not compiled,
+            # and the reason is fidelity rather than convenience.
+            # ``apply_compile`` walks ``model.layers.named_children()`` alone
+            # (``distributed/compile.py:57-58``), and ``Decoder.__init__``
+            # builds ``tok_embeddings`` at ``models/common/decoder.py:234``
+            # against ``self.layers`` at ``:236``, so the embedding sits outside
+            # every compiled region in production. ``final_norm`` carries the
+            # same correction for the same structural reason.
+            eager_reason=(
+                "Decoder.tok_embeddings sits outside every compiled region: "
+                "apply_compile walks model.layers.named_children() alone and "
+                "the embedding is built as a sibling of layers, so a "
+                "torch.compile here would time a treatment no run of this model "
+                "applies to the lookup"
+            ),
+            correctness=(
+                EMBEDDING_STAGE_GATE,
+                # The cross-engine gate, enforced. It is what makes the ratio a
+                # comparison of two implementations of one function: both arms
+                # gather the same rows of the same table, so a disagreement here
+                # means they no longer compute the same thing. It sits on the
+                # non-anchor arm on purpose: ``resolve_arm_skips`` closes the
+                # skip set over correctness references, so a check pointing from
+                # the anchor at ``titan`` would let a skipped titan arm take the
+                # anchor -- and the whole scenario -- down with it.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("out", "weight_grad_rows", "weight_grad_norm"),
+                    max_rel_l2=2e-2,
+                ),
+                # Recorded, not enforced, exactly as the qkv scenario records
+                # its bitwise row. A gather is a copy: both engines call
+                # F.embedding on the same bf16 table with the same ids, so the
+                # forward outputs should be bit-identical, and this states that
+                # claim in the results rather than leaving it implied by a
+                # tolerance. Informational because the enforcement above is
+                # already sufficient, and a future change that made the two
+                # forwards differ in the last bit -- an fp8 cast, a fused
+                # epilogue -- should show up as a recorded fact rather than
+                # abort a measured run. The gradient is deliberately absent: it
+                # is a scatter-add whose accumulation order neither engine
+                # fixes, so bit-identity there is not even expected.
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("out",),
+                    informational=True,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 QK_NORM = KernelScenario(
     name="qk_norm",
     description=(
@@ -890,6 +1072,7 @@ KERNEL_SCENARIOS = {
         QKV,
         LM_HEAD,
         ATTENTION,
+        EMBEDDING_STAGE,
         QK_NORM,
         ATTN_OUT_PROJ,
         FFN_NORM,

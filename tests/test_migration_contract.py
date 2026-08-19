@@ -70,6 +70,7 @@ KERNEL_ARMS_MODULES = {
     "qkv": "benchmarks.kernel.operations.qkv",
     "lm_head": "benchmarks.kernel.operations.lm_head",
     "attention": "benchmarks.kernel.operations.attention",
+    "embedding_stage": "benchmarks.kernel.operations.embedding_stage",
     "qk_norm": "benchmarks.kernel.operations.qk_norm",
     "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
@@ -124,8 +125,10 @@ KERNEL_INVENTORY = {
         "piper_optimized_te_ce",
     ),
     "attention": ("baseline", "flex_flash", "flash_attention_3"),
-    # Cross-engine from here down. The arms are named engine/profile, and the
-    # anchor is the megatron side throughout -- see KERNEL_BASELINE_ARMS.
+    # Cross-engine from here down, in partition order. The arms are named
+    # engine/profile, and the anchor is the megatron side throughout -- see
+    # KERNEL_BASELINE_ARMS.
+    "embedding_stage": ("copy_floor", "mcore/base", "titan"),
     "qk_norm": ("copy_floor", "mcore/base", "titan"),
     # No floor: a GEMM is compute-bound, and a bandwidth number would not
     # bound it. The two arms are the whole roster.
@@ -147,6 +150,7 @@ KERNEL_BASELINE_ARMS = {
     # It also matches e2e, where piper1b_megatron makes the megatron arm the
     # baseline. The cost is accepted and recorded: the anchor's loss costs the
     # whole scenario, and TransformerEngine is the more fragile side.
+    "embedding_stage": "mcore/base",
     "qk_norm": "mcore/base",
     "attn_out_proj": "mcore/base",
     "ffn_norm": "mcore/base",
@@ -796,6 +800,16 @@ TEST_CENSUS = {
     # which is one config read here because the norm is a model-level module
     # and not a per-layer one.
     "test_kernel_final_norm": 22,
+    # Scenario 1, and the widest module here at 55, because the scenario's
+    # claim is a negative one: the layout conversion megatron enters is free
+    # at our THD packing, so a large part of the module proves that -- both
+    # directions of the transpose, the probe the builder runs, and the
+    # absence of the charge an earlier revision put on the titan arm. The
+    # rest covers the shared inputs, the fp64 reference, the floor, both arm
+    # builders, the guards that refuse a module of the wrong class or with a
+    # tensor-parallel group, and the one weight transfer that joins the two
+    # embeddings.
+    "test_kernel_embedding_stage": 55,
     "test_kernel_results": 9,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
@@ -843,7 +857,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 330
+TEST_CENSUS_TOTAL = 385
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

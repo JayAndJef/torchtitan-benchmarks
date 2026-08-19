@@ -444,4 +444,26 @@ def shape_summary(
             "rows": batch * seq,
             "reduction_length": shape.dim,
         }
+    if scenario_name == "embedding_stage":
+        # Both native output layouts are recorded, because both are
+        # materialized and each engine reads its own. Megatron's driver packs
+        # tokens as [1, batch*seq_len] (``benchmarks/e2e/megatron/data.py:54``,
+        # THD), so its embedding returns [batch*seq_len, 1, dim] after a
+        # transpose the size-1 leading dimension makes free; titan consumes
+        # [batch, seq_len] and returns [batch, seq_len, dim]. The two hold the
+        # same rows in the same order once both are put back into the canonical
+        # shape, so -- as the ``attn_out_proj`` branch above already says of the
+        # identical [T, 1, .] reshape -- this is a label and not a measured
+        # difference. There is no ``layout_copy_bytes`` key because there is no
+        # layout copy on either side.
+        tokens = batch * seq
+        return {
+            "tokens": [batch, seq],
+            "tokens_thd": [1, tokens],
+            "weight": [shape.vocab_size, shape.dim],
+            "out_titan_BLD": [batch, seq, shape.dim],
+            "out_mcore_TBD": [tokens, 1, shape.dim],
+            "grad_out": [batch, seq, shape.dim],
+            "rows_gathered": tokens,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")
