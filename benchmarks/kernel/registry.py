@@ -625,6 +625,136 @@ ATTN_OUT_PROJ = KernelScenario(
 )
 
 
+# The gate both engines face, and the one the cross-engine row rests on.
+# RMSNorm is a reduction over the last dimension, so max and ULP metrics report
+# garbage wherever cancellation drives an output toward zero; rel_l2 is the only
+# safe metric here (CLAUDE.md, "Choosing a correctness metric").
+FFN_NORM_ACTIVATION_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "x_grad"),
+    max_rel_l2=2e-2,
+)
+
+# Separate, so a gain-gradient failure is legible on its own, but at the same
+# tolerance. The gain gradient is not a different kind of number here: both
+# engines accumulate it in fp32, so the row count does not widen the error.
+# Measured at the default workload against the fp64 reference: out 1.661e-3,
+# x_grad 1.663e-3, weight_grad 1.671e-3. All three sit at CLAUDE.md's ~2e-3 for
+# a bf16 kernel, so all three take CLAUDE.md's 2e-2 gate.
+FFN_NORM_GAIN_GRADIENT_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("weight_grad",),
+    max_rel_l2=2e-2,
+)
+
+
+FFN_NORM = KernelScenario(
+    name="ffn_norm",
+    description=(
+        "The norm in front of the MoE block: TorchTitan's ffn_norm against "
+        "megatron-core's pre_mlp_layernorm. TE norms via the cuDNN backend -- "
+        "NVTE_NORM_FWD_USE_CUDNN/NVTE_NORM_BWD_USE_CUDNN are set because TE's "
+        "native RMSNorm kernels fail to launch on this box, so this is not "
+        "TE's fastest norm and the number is not 'megatron's norm'. The titan "
+        "arm is compiled and the mcore arm is eager, which is what each engine "
+        "does end to end. copy_floor is the bandwidth reference: a norm at "
+        "these shapes may be at memory bandwidth, and the x_floor column is "
+        "what separates a slow kernel from a saturated bus. The mcore number "
+        "also holds TE's per-call Python dispatch, which builds a fresh "
+        "OperationFuser every call, so read the --burst residual before you "
+        "rank the two kernels."
+    ),
+    inputs_builder="benchmarks.kernel.operations.ffn_norm:ffn_norm_inputs",
+    reference_builder=(
+        "benchmarks.kernel.operations.ffn_norm:ffn_norm_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit, and exhaustive: this scenario publishes exactly one ratio. The
+    # derived set would give the same pair today, but a cross-engine scenario
+    # states which row it publishes rather than inheriting it.
+    comparisons=(("titan", "mcore/base"),),
+    arms=(
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "One read of x and one write of y: the bandwidth floor for "
+                "the forward traffic at this shape"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.ffn_norm:"
+                "build_ffn_norm_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a copy "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron-core pre_mlp_layernorm off a real GPTModel: "
+                "transformer_engine.pytorch.RMSNorm through the cuDNN norm "
+                "backend, eager, as megatron runs it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.ffn_norm:"
+                "build_ffn_norm_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so every TE "
+                "module it builds runs eager end to end; compiling this one "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(
+                FFN_NORM_ACTIVATION_GATE,
+                FFN_NORM_GAIN_GRADIENT_GATE,
+            ),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan ffn_norm: torch.nn.RMSNorm from the production "
+                "_qwen3_norm config node, under torch.compile(fullgraph=True)"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.ffn_norm:build_ffn_norm_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                FFN_NORM_ACTIVATION_GATE,
+                FFN_NORM_GAIN_GRADIENT_GATE,
+                # The cross-engine gates. They are what make the ratio a
+                # comparison of two implementations of one function: both arms
+                # load the same gain and normalize with the same epsilon, so a
+                # disagreement here means they no longer compute the same
+                # thing. They sit on the non-anchor arm because
+                # ``resolve_arm_skips`` closes the skip set over correctness
+                # references, so a check pointing from the anchor at ``titan``
+                # would let a skipped titan arm take the anchor down with it.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("out", "x_grad"),
+                    max_rel_l2=2e-2,
+                ),
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("weight_grad",),
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 KERNEL_SCENARIOS = {
     scenario.name: scenario
     for scenario in (
@@ -635,6 +765,7 @@ KERNEL_SCENARIOS = {
         ATTENTION,
         QK_NORM,
         ATTN_OUT_PROJ,
+        FFN_NORM,
     )
 }
 

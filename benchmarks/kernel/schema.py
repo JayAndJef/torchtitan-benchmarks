@@ -425,4 +425,13 @@ def shape_summary(
             "grad_out": [batch, seq, shape.dim],
             "tokens": batch * seq,
         }
+    if scenario_name == "ffn_norm":
+        return {
+            "x": [batch, seq, shape.dim],
+            "weight": [shape.dim],
+            # What the kernel actually sees. Both engines flatten the leading
+            # dimensions, so the layout order does not reach the kernel.
+            "rows": batch * seq,
+            "row_width": shape.dim,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")
