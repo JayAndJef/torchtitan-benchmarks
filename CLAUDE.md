@@ -1095,18 +1095,31 @@ model definition sits under `models/` and an execution driver under `e2e/`.
 
 **Configuration is data.** `build_model` takes a `PiperShape` for the
 geometry and an `McoreProfile` for the behaviour, and adds nothing of its
-own. A profile is a `(config_overrides, spec_kwargs)` pair, because
-`moe_grouped_gemm` and `qk_layernorm` reach the model through *both* the
-config and the layer spec: the expert and qk-norm module classes come from
-the spec, so a profile that set only the config field would build the
-grouped kernel and publish it under an ungrouped label. `McoreProfile`
-refuses that profile. No correctness gate could catch it -- both
-implementations are numerically right. The registry is torch-free and
-encodes torch values as names (`"silu"`, `"bfloat16"`), so the parent can
-name, record and diff a profile without the ML stack. Both `build_model`
-arguments are required, for the same reason: an omitted one builds the
-default under another arm's label, which is a wrong number rather than a
-missing one.
+own. A profile is one flat dict of `TransformerConfig` values. The registry
+is torch-free and encodes torch values as names (`"silu"`, `"bfloat16"`), so
+the parent can name, record and diff a profile without the ML stack. Both
+`build_model` arguments are required: an omitted one builds the default
+under another arm's label, which is a wrong number rather than a missing
+one.
+
+**The layer spec is derived, never written.** `build_model` hands the built
+config to `get_gpt_decoder_block_spec`, which is megatron's own
+config-to-spec derivation and the path its training entrypoint takes. That
+function reads `num_moe_experts`, `moe_grouped_gemm` and `qk_layernorm` off
+the config and turns each into a module-class choice
+(`gpt_layer_specs.py:592-594`), so every setting is written once.
+
+Do **not** go back to calling the inner factory
+`get_gpt_layer_with_transformer_engine_spec` directly. It receives no config,
+so those three settings must then be written a second time and kept in
+agreement by hand -- which the profile used to do with a `spec_kwargs`
+mapping and a `DUAL_DELIVERY_FIELDS` guard, both now deleted. Megatron
+checks the agreement for `qk_layernorm` (`attention.py:1711` raises) but for
+`moe_grouped_gemm` **nowhere**: both disagreement directions are silent, and
+each builds one expert implementation and publishes it under the other's
+label. No correctness gate can catch that, because both are numerically
+right. A layer spec is a generated artifact; hand-writing it is what created
+the hazard.
 
 The harness connects only through `Arm(launcher="megatron",
 validation="megatron")` and

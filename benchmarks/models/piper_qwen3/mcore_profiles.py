@@ -5,14 +5,22 @@
 cross-entropy" inexpressible: there was no name for the variant and no way to
 hand one to the builder. A profile is that name plus that delta.
 
-**A profile is a pair, not a flat flag dict.** ``config_overrides`` goes to
-``TransformerConfig``; ``spec_kwargs`` goes to
-``get_gpt_layer_with_transformer_engine_spec``. Two settings are delivered
-through *both* -- ``moe_grouped_gemm`` and ``qk_layernorm`` (see
-``DUAL_DELIVERY_FIELDS``) -- because the expert and qk-norm module classes
-come from the layer spec rather than from the config. A profile that set only
-``config.moe_grouped_gemm = False`` would build the grouped kernel and publish
-it under an ungrouped label, so ``__post_init__`` refuses that profile instead.
+**A profile is one flat dict of ``TransformerConfig`` values, and that is the
+only surface.** ``megatron_model.build_model`` hands the built config to
+``get_gpt_decoder_block_spec``, megatron's own config-to-spec derivation. That
+function reads ``num_moe_experts``, ``moe_grouped_gemm`` and ``qk_layernorm``
+off the config and turns each into a module-class choice
+(``gpt_layer_specs.py:592-594``). So every setting is written once, here.
+
+**Do not reintroduce a hand-built layer spec.** This module used to carry a
+second ``spec_kwargs`` mapping, because the builder called the inner factory
+``get_gpt_layer_with_transformer_engine_spec`` directly. That factory takes no
+config, so ``moe_grouped_gemm`` and ``qk_layernorm`` had to be typed twice and
+kept in agreement by hand. Megatron polices that agreement for ``qk_layernorm``
+(``attention.py:1711`` raises) but for ``moe_grouped_gemm`` nowhere -- both
+disagreement directions are silent there, and both publish one implementation
+under the other's label. A layer spec is a generated artifact; writing it by
+hand is what created the duplication, and the guard rail that went with it.
 
 **A profile carries no geometry.** Every shape knob comes from
 ``benchmarks.models.piper_qwen3.shape.PiperShape``, which is the single source
@@ -46,10 +54,6 @@ DTYPES = ("bfloat16", "float16", "float32")
 ACTIVATION_FUNC_FIELDS = ("activation_func",)
 DTYPE_FIELDS = ("params_dtype", "pipeline_dtype")
 
-# Settings the layer spec reads as a constructor argument rather than off the
-# config. Both sides must agree, or the built module contradicts the label.
-DUAL_DELIVERY_FIELDS = ("moe_grouped_gemm", "qk_layernorm")
-
 # The fields a run reports and checks against what its profile declares.
 # Megatron's real defaults live in its argparse layer, which constructing
 # TransformerConfig directly bypasses, so a flag left unset silently takes the
@@ -75,22 +79,17 @@ class McoreProfile:
     name: str
     description: str
     config_overrides: dict[str, Any] = field(default_factory=dict)
-    spec_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for label, mapping in (
-            ("config_overrides", self.config_overrides),
-            ("spec_kwargs", self.spec_kwargs),
-        ):
-            try:
-                json.dumps(mapping)
-            except TypeError as error:
-                raise ValueError(
-                    f"profile {self.name!r}: {label} must be JSON-safe, so "
-                    "encode a torch value as its name (activation_func="
-                    '"silu", params_dtype="bfloat16"). This module is '
-                    f"parent-side and imports no torch. {error}"
-                ) from error
+        try:
+            json.dumps(self.config_overrides)
+        except TypeError as error:
+            raise ValueError(
+                f"profile {self.name!r}: config_overrides must be JSON-safe, "
+                "so encode a torch value as its name (activation_func="
+                '"silu", params_dtype="bfloat16"). This module is '
+                f"parent-side and imports no torch. {error}"
+            ) from error
         for name in ACTIVATION_FUNC_FIELDS:
             value = self.config_overrides.get(name)
             if value is not None and value not in ACTIVATION_FUNCS:
@@ -105,35 +104,12 @@ class McoreProfile:
                     f"profile {self.name!r}: {name}={value!r} is not a known "
                     f"dtype name. Available: {', '.join(DTYPES)}"
                 )
-        for name in DUAL_DELIVERY_FIELDS:
-            in_config = name in self.config_overrides
-            in_spec = name in self.spec_kwargs
-            if in_config != in_spec:
-                raise ValueError(
-                    f"profile {self.name!r}: {name} is delivered through both "
-                    "the config and the layer spec, so set it in both "
-                    f"(config_overrides has it: {in_config}, spec_kwargs has "
-                    f"it: {in_spec}). Setting only the config field is inert "
-                    "for the module class and would measure the other "
-                    "implementation under this profile's label."
-                )
-            if in_config and self.config_overrides[name] != self.spec_kwargs[name]:
-                raise ValueError(
-                    f"profile {self.name!r}: {name} disagrees between the "
-                    f"config ({self.config_overrides[name]!r}) and the layer "
-                    f"spec ({self.spec_kwargs[name]!r}), so set it to the "
-                    "same value in both. This is the usual shape of the "
-                    "error for a derived profile, where the base already "
-                    "sets both sides and the delta moved only one."
-                )
-
     def describe(self) -> dict[str, Any]:
         """Flat JSON-safe provenance record for the manifest."""
         return {
             "name": self.name,
             "description": self.description,
             "config_overrides": dict(self.config_overrides),
-            "spec_kwargs": dict(self.spec_kwargs),
         }
 
 
@@ -143,20 +119,18 @@ def derive(
     name: str,
     description: str,
     config_overrides: dict[str, Any] | None = None,
-    spec_kwargs: dict[str, Any] | None = None,
 ) -> McoreProfile:
     """A new profile: ``base`` with these keys replaced.
 
     A delta names only what it changes, so a reader sees the difference and
     not a second copy of 28 flags. ``McoreProfile.__post_init__`` still
-    validates the merged result, which is what catches a delta that sets one
-    half of a dual-delivery field.
+    validates the merged result, so a delta cannot smuggle in a torch value or
+    an unknown encoded name.
     """
     return McoreProfile(
         name=name,
         description=description,
         config_overrides={**base.config_overrides, **(config_overrides or {})},
-        spec_kwargs={**base.spec_kwargs, **(spec_kwargs or {})},
     )
 
 
@@ -193,6 +167,12 @@ BASE = McoreProfile(
         "moe_router_enable_expert_bias": False,
         "moe_router_dtype": "fp32",
         "moe_token_dispatcher_type": "allgather",
+        # This one and qk_layernorm above are read TWICE by megatron: the
+        # derivation turns each into a module-class choice (TEGroupedMLP vs
+        # the per-expert MLP; a real norm vs IdentityOp), and other code reads
+        # the same field at run time. Both reads come off this one value, so
+        # they cannot disagree -- which is exactly what a hand-built layer
+        # spec used to make possible.
         "moe_grouped_gemm": True,
         "apply_rope_fusion": True,
         # TransformerConfig's dataclass defaults are NOT megatron's defaults:
@@ -240,10 +220,6 @@ BASE = McoreProfile(
         # path needs apex-style main_grad buffers no DDP wrapper provides
         # here, so a bare backward would never populate .grad.
         "gradient_accumulation_fusion": False,
-    },
-    spec_kwargs={
-        "moe_grouped_gemm": True,
-        "qk_layernorm": True,
     },
 )
 
@@ -337,14 +313,3 @@ def transformer_config_kwargs(
         # graphs; its own tracker is the supported one.
         kwargs["use_te_rng_tracker"] = True
     return kwargs
-
-
-def layer_spec_kwargs(
-    *, shape: PiperShape, profile: McoreProfile
-) -> dict[str, Any]:
-    """Every ``get_gpt_layer_with_transformer_engine_spec`` keyword.
-
-    ``num_experts`` here is a *separate* argument from the ``num_moe_experts``
-    config field (it selects the MoE submodule spec); both move with the shape.
-    """
-    return {"num_experts": shape.num_experts, **profile.spec_kwargs}

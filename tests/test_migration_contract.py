@@ -765,7 +765,7 @@ TEST_CENSUS = {
     # dual-delivery field set on one side only is refused -- 5 for the
     # driver's declared-state check, and 1 that the builder takes no default
     # profile.
-    "test_mcore_profiles": 20,
+    "test_mcore_profiles": 18,
     "test_megatron_data": 5,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
@@ -791,7 +791,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 247
+TEST_CENSUS_TOTAL = 245
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

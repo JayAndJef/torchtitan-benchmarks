@@ -11,8 +11,17 @@ Behaviour comes from an ``McoreProfile``
 (``benchmarks/models/piper_qwen3/mcore_profiles.py``). Every flag this module
 used to write inline lives there, so a variant -- megatron with the native
 cross-entropy, with a fusion off, with the per-expert GEMMs -- is a named
-profile rather than an edit here. Read that module for why a profile is a
-``(config_overrides, spec_kwargs)`` pair and not a flat dict.
+profile rather than an edit here.
+
+**The layer spec is derived, not written.** ``get_gpt_decoder_block_spec``
+reads the built config and turns ``num_moe_experts``, ``moe_grouped_gemm`` and
+``qk_layernorm`` into module-class choices (``gpt_layer_specs.py:592-594``),
+which is the path megatron's own entrypoint takes. This module used to call the
+inner factory ``get_gpt_layer_with_transformer_engine_spec`` instead. That
+factory receives no config, so those three settings had to be written a second
+time and kept in agreement by hand -- and for ``moe_grouped_gemm`` megatron
+checks the agreement nowhere, so a disagreement built one implementation and
+labelled it the other. Do not go back to the inner factory.
 
 ``BASE`` mirrors the qwen3_piper_1b TorchTitan config (the parity contract in
 the scenario docs): RMSNorm eps 1e-6, no biases, SwiGLU; MoE on every layer
@@ -41,7 +50,6 @@ from benchmarks.models.piper_qwen3.mcore_profiles import (
     DTYPE_FIELDS,
     DTYPES,
     McoreProfile,
-    layer_spec_kwargs,
     transformer_config_kwargs,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
@@ -81,9 +89,7 @@ def build_model(
     import torch
     import torch.nn.functional as F
     from megatron.core.models.gpt import GPTModel
-    from megatron.core.models.gpt.gpt_layer_specs import (
-        get_gpt_layer_with_transformer_engine_spec,
-    )
+    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
     from megatron.core.transformer.transformer_config import TransformerConfig
 
     activations = {"silu": F.silu, "gelu": F.gelu}
@@ -117,9 +123,11 @@ def build_model(
             kwargs[name] = _resolve(dtypes, name, kwargs[name])
 
     config = TransformerConfig(**kwargs)
-    spec = get_gpt_layer_with_transformer_engine_spec(
-        **layer_spec_kwargs(shape=shape, profile=profile)
-    )
+    # Megatron derives the layer spec from the config it was just handed. That
+    # derivation is what keeps num_moe_experts, moe_grouped_gemm and
+    # qk_layernorm single-valued: the module-class choice and the run-time
+    # reads both come off one field, so they cannot contradict each other.
+    spec = get_gpt_decoder_block_spec(config, use_transformer_engine=True)
     if cuda_graph_impl == "local":
         # The stock GPT specs build plain TransformerLayer, whose local-impl
         # manager can only capture the WHOLE layer forward -- impossible for
@@ -127,9 +135,16 @@ def build_model(
         # capture (router + preprocess graphed, expert dispatch and attention
         # eager at this rev) lives in MoETransformerLayer, selected the same
         # way megatron's own modelopt/hybrid specs do.
+        #
+        # A block spec holds one entry per layer. At moe_layer_freq=1 every
+        # entry is the SAME object (gpt_layer_specs.py:668 appends
+        # moe_layer_spec itself), so this assigns to one spec repeatedly --
+        # harmless, and it stays correct if a shape ever mixes dense and MoE
+        # layers, which a single assignment would not.
         from megatron.core.transformer.transformer_layer import MoETransformerLayer
 
-        spec.module = MoETransformerLayer
+        for layer_spec in spec.layer_specs:
+            layer_spec.module = MoETransformerLayer
     model = GPTModel(
         config=config,
         transformer_layer_spec=spec,

@@ -26,7 +26,6 @@ from benchmarks.models.piper_qwen3.mcore_profiles import (
     McoreProfile,
     declared_mismatches,
     derive,
-    layer_spec_kwargs,
     profile_by_name,
     transformer_config_kwargs,
 )
@@ -166,83 +165,59 @@ class BaseProfileExtractionTests(unittest.TestCase):
         self.assertEqual(second, BASE_KWARGS_AT_NORMAL)
         self.assertEqual(BASE.config_overrides["activation_func"], "silu")
 
-    def test_the_layer_spec_takes_the_geometry_and_the_profile(self) -> None:
-        """num_experts is a separate argument from the num_moe_experts field.
+    def test_the_layer_spec_derivation_inputs_are_all_on_the_config(
+        self,
+    ) -> None:
+        """megatron builds the layer spec by reading exactly these fields.
 
-        Both select part of the MoE build, and both must move with the shape.
+        ``get_gpt_decoder_block_spec`` turns ``num_moe_experts``,
+        ``moe_grouped_gemm`` and ``qk_layernorm`` into module-class choices
+        (``gpt_layer_specs.py:592-594``). Dropping ``num_moe_experts`` would
+        not raise -- the derivation would take its dense branch and build a
+        model with no experts at all, under the MoE label.
         """
+        at_normal = transformer_config_kwargs(shape=NORMAL, profile=BASE)
+        self.assertEqual(at_normal["num_moe_experts"], NORMAL.num_experts)
+        self.assertTrue(at_normal["moe_grouped_gemm"])
+        self.assertTrue(at_normal["qk_layernorm"])
+        # moe_layer_freq drives the dense/MoE pattern; 1 means every layer.
+        self.assertEqual(at_normal["moe_layer_freq"], 1)
         self.assertEqual(
-            layer_spec_kwargs(shape=NORMAL, profile=BASE),
-            {
-                "num_experts": 4,
-                "moe_grouped_gemm": True,
-                "qk_layernorm": True,
-            },
-        )
-        self.assertEqual(
-            layer_spec_kwargs(shape=HUGE, profile=BASE)["num_experts"],
+            transformer_config_kwargs(shape=HUGE, profile=BASE)[
+                "num_moe_experts"
+            ],
             HUGE.num_experts,
         )
 
 
 class ProfileValidationTests(unittest.TestCase):
-    def test_a_dual_delivery_field_set_on_one_side_only_is_refused(
-        self,
-    ) -> None:
-        """This is the defect the pair shape exists to prevent.
+    def test_a_class_selecting_delta_is_one_field(self) -> None:
+        """The delta that used to need two halves kept in agreement by hand.
 
-        The expert class comes from the layer spec, so a profile that sets
-        only ``config.moe_grouped_gemm = False`` builds the grouped kernel and
-        publishes it under an ungrouped label. No correctness gate can catch
-        that: both implementations are numerically right.
-
-        The rule bites through two branches, because the base already sets
-        both sides. A *derived* one-sided delta reaches the disagreement
-        branch; only a profile built from scratch leaves a side absent.
+        ``moe_grouped_gemm`` picks the expert module class. While the builder
+        wrote its own layer spec, this profile had to set the value twice, and
+        setting it once built the grouped kernel under the ungrouped label --
+        which no correctness gate can catch, because both implementations are
+        numerically right. The derivation reads one field, so the two cannot
+        disagree and there is nothing left to enforce.
         """
-        with self.assertRaisesRegex(ValueError, "disagrees between"):
-            derive(
-                BASE,
-                name="no_grouped_gemm",
-                description="per-expert GEMMs",
-                config_overrides={"moe_grouped_gemm": False},
-            )
-        with self.assertRaisesRegex(ValueError, "delivered through both"):
-            McoreProfile(
-                name="spec_only",
-                description="x",
-                spec_kwargs={"qk_layernorm": False},
-            )
-
-    def test_a_dual_delivery_field_that_disagrees_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "disagrees between"):
-            derive(
-                BASE,
-                name="contradictory",
-                description="x",
-                config_overrides={"moe_grouped_gemm": False},
-                spec_kwargs={"moe_grouped_gemm": True},
-            )
-
-    def test_setting_both_sides_together_is_accepted(self) -> None:
-        """The delta the two tests above refuse, spelled correctly."""
         profile = derive(
             BASE,
             name="no_grouped_gemm",
             description="per-expert GEMMs instead of the grouped kernel",
             config_overrides={"moe_grouped_gemm": False},
-            spec_kwargs={"moe_grouped_gemm": False},
         )
         self.assertFalse(
             transformer_config_kwargs(shape=NORMAL, profile=profile)[
                 "moe_grouped_gemm"
             ]
         )
-        self.assertFalse(
-            layer_spec_kwargs(shape=NORMAL, profile=profile)[
-                "moe_grouped_gemm"
-            ]
-        )
+        changed = {
+            key
+            for key in profile.config_overrides
+            if profile.config_overrides[key] != BASE.config_overrides[key]
+        }
+        self.assertEqual(changed, {"moe_grouped_gemm"})
 
     def test_a_torch_value_in_a_profile_is_refused(self) -> None:
         """The registry is parent-side, so its values must survive json.
@@ -302,7 +277,11 @@ class ProfileValidationTests(unittest.TestCase):
         self.assertEqual(
             payload["config_overrides"]["cross_entropy_fusion_impl"], "te"
         )
-        self.assertEqual(payload["spec_kwargs"]["qk_layernorm"], True)
+        # One surface. A second mapping here would mean the builder went back
+        # to writing its own layer spec, and the duplication with it.
+        self.assertEqual(
+            set(payload), {"name", "description", "config_overrides"}
+        )
         # A copy, so a manifest writer cannot edit the registry.
         payload["config_overrides"]["bf16"] = False
         self.assertTrue(BASE.config_overrides["bf16"])
