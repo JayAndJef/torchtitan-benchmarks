@@ -131,6 +131,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron.data",
     "benchmarks.kernel.operations.attention",
+    "benchmarks.kernel.operations.attn_out_proj",
     "benchmarks.kernel.operations.common",
     "benchmarks.kernel.operations.lm_head",
     "benchmarks.kernel.operations.qk_norm",

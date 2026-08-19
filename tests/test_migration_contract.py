@@ -71,6 +71,7 @@ KERNEL_ARMS_MODULES = {
     "lm_head": "benchmarks.kernel.operations.lm_head",
     "attention": "benchmarks.kernel.operations.attention",
     "qk_norm": "benchmarks.kernel.operations.qk_norm",
+    "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
 }
 
 # Third-party roots override paths are allowed to name, so the "did this move
@@ -124,6 +125,9 @@ KERNEL_INVENTORY = {
     # Cross-engine from here down. The arms are named engine/profile, and the
     # anchor is the megatron side throughout -- see KERNEL_BASELINE_ARMS.
     "qk_norm": ("copy_floor", "mcore/base", "titan"),
+    # No floor: a GEMM is compute-bound, and a bandwidth number would not
+    # bound it. The two arms are the whole roster.
+    "attn_out_proj": ("mcore/base", "titan"),
 }
 
 KERNEL_BASELINE_ARMS = {
@@ -140,6 +144,7 @@ KERNEL_BASELINE_ARMS = {
     # baseline. The cost is accepted and recorded: the anchor's loss costs the
     # whole scenario, and TransformerEngine is the more fragile side.
     "qk_norm": "mcore/base",
+    "attn_out_proj": "mcore/base",
 }
 
 # Arm names deliberately match across the two registries wherever the same
@@ -769,6 +774,12 @@ TEST_CENSUS = {
     # the fp64 reference, both arm builders and the guards that refuse a norm
     # the spec resolved to something other than a real one.
     "test_kernel_qk_norm": 17,
+    # Scenario 6, the first cross-engine GEMM: 21 covering the shared inputs
+    # and their two native layouts, the fp64 reference, both arm builders, and
+    # the guards that refuse an mcore module of the wrong class, the wrong
+    # shape or more than one rank -- the last being what would make the arm
+    # inert rather than wrong.
+    "test_kernel_attn_out_proj": 21,
     "test_kernel_results": 9,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
@@ -816,7 +827,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 269
+TEST_CENSUS_TOTAL = 290
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

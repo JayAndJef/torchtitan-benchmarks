@@ -534,9 +534,108 @@ QK_NORM = KernelScenario(
 )
 
 
+# One GEMM and two gradients, at the tolerance the qkv scenario already uses
+# for the same class of operation.
+ATTN_OUT_PROJ_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "x_grad", "weight_grad"),
+    max_rel_l2=2e-2,
+)
+
+
+ATTN_OUT_PROJ = KernelScenario(
+    name="attn_out_proj",
+    description=(
+        "The attention output projection, cross-engine: megatron-core's "
+        "TERowParallelLinear against TorchTitan's nn.Linear, over one shared "
+        "weight. The titan arm is compiled (fullgraph=True) and the megatron "
+        "arm is eager, which is how each engine runs it. The mcore arm also "
+        "dispatches through TransformerEngine's own torch.autograd.Function "
+        "with quantizer bookkeeping, where titan calls F.linear; at these "
+        "shapes that host cost is a real part of the gap. The layout op "
+        "before the projection is excluded on both sides, but the two "
+        "excluded ops are NOT the same object: titan's is a materializing "
+        "contiguous() copy of B*L*dim bf16 elements (8.4 MiB at the default "
+        "workload, about a third of the GEMM's own device cost) because "
+        "FlexAttention returns a transposed view, and megatron's is a free "
+        "reshape. A cross-engine sum over the scenarios is short by that "
+        "copy on the titan side until scenario 5 adopts it."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.attn_out_proj:attn_out_proj_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.attn_out_proj:attn_out_proj_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit, and it is the same pair the default derivation would produce.
+    # Writing it down is what makes the direction of the published ratio a
+    # declaration: this scenario reports titan against megatron, matching the
+    # e2e piper1b_megatron scenario, where megatron is also the anchor.
+    comparisons=(("titan", "mcore/base"),),
+    arms=(
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "Megatron-core self_attention.linear_proj: TE "
+                "TERowParallelLinear, eager, tp_size 1 so no row-parallel "
+                "reduce runs"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attn_out_proj"
+                ":build_attn_out_proj_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so every TE "
+                "module it builds runs eager end to end; compiling this one "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(ATTN_OUT_PROJ_GATE,),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan attention.wo: nn.Linear without a bias, under "
+                "torch.compile(fullgraph=True)"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attn_out_proj"
+                ":build_attn_out_proj_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                ATTN_OUT_PROJ_GATE,
+                # The cross-engine gate. Both arms already agree with fp64, so
+                # this one is close to implied -- but it is the check that
+                # states the scenario's claim directly: the two engines compute
+                # the same function of the same weight, so a ratio between them
+                # is a ratio of implementations and not of arithmetic.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("out", "x_grad", "weight_grad"),
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 KERNEL_SCENARIOS = {
     scenario.name: scenario
-    for scenario in (ROPE, SWIGLU, QKV, LM_HEAD, ATTENTION, QK_NORM)
+    for scenario in (
+        ROPE,
+        SWIGLU,
+        QKV,
+        LM_HEAD,
+        ATTENTION,
+        QK_NORM,
+        ATTN_OUT_PROJ,
+    )
 }
 
 

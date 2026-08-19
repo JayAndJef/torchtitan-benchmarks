@@ -405,4 +405,24 @@ def shape_summary(
             "packed_tokens": batch * seq,
             "max_seq_len": shape.max_seq_len,
         }
+    if scenario_name == "attn_out_proj":
+        # Spelled as the product rather than as ``shape.dim``. The two are
+        # equal at every representable PiperShape -- ``n_heads`` is
+        # ``dim // head_dim`` -- but megatron calls this quantity
+        # ``query_projection_size`` and titan builds ``wo`` from the same
+        # product, so the manifest records what both engines compute.
+        in_features = shape.n_heads * shape.head_dim
+        return {
+            "x": [batch, seq, in_features],
+            # Recorded next to ``x`` because the two arms consume different
+            # leading dimensions of the same matrix: megatron reshapes the
+            # core-attention output to (t, 1, h) before ``linear_proj`` and our
+            # driver runs THD. Both flatten to [batch*seq, in_features] inside
+            # the linear, so this is a label and not a measured difference --
+            # and the manifest says so rather than leaving a reader to assume.
+            "x_thd": [batch * seq, 1, in_features],
+            "weight": [shape.dim, in_features],
+            "grad_out": [batch, seq, shape.dim],
+            "tokens": batch * seq,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

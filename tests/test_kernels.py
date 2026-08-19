@@ -56,15 +56,40 @@ class RegistryTests(unittest.TestCase):
                     f"{scenario.name}: {arm_name} vs {opponent}",
                 )
 
-    def test_the_five_scenarios_derive_their_comparisons(self) -> None:
-        """None of the five declares an explicit set, so every non-floor arm
-        faces the anchor. Part C's cross-engine scenarios are what the
-        explicit form exists for."""
-        for scenario in KERNEL_SCENARIOS.values():
-            self.assertIsNone(scenario.comparisons, scenario.name)
+    def test_a_scenario_derives_its_comparisons_or_declares_them(self) -> None:
+        """This replaces an assertion that *every* scenario left
+        ``comparisons`` at ``None``. That was true of the five single-engine
+        scenarios and stopped being true at ``attn_out_proj``, which declares
+        its one row so that the direction of a cross-engine ratio is stated
+        rather than inherited. The universal was never the property worth
+        keeping; the two branches of ``comparison_pairs`` are.
+
+        So each branch is checked against a scenario that takes it. ``rope``
+        derives: every arm faces the anchor, the anchor is not compared with
+        itself, and the floor is left out. ``attn_out_proj`` declares: the
+        published rows are its tuple, verbatim and in order."""
+        rope = kernel_scenario_by_name("rope")
+        self.assertIsNone(rope.comparisons)
         self.assertEqual(
-            kernel_scenario_by_name("rope").comparison_pairs(),
+            rope.comparison_pairs(),
             (("helion", "baseline"), ("te", "baseline")),
+        )
+
+        cross_engine = kernel_scenario_by_name("attn_out_proj")
+        self.assertEqual(
+            cross_engine.comparisons, (("titan", "mcore/base"),)
+        )
+        self.assertEqual(
+            cross_engine.comparison_pairs(), cross_engine.comparisons
+        )
+
+        # The explicit form is exhaustive, not additive: a declared tuple is
+        # the whole published set, so the derivation must not run beside it.
+        # Written against rope, where the derived set has two rows and this
+        # one has none of them.
+        self.assertEqual(
+            replace(rope, comparisons=(("te", "helion"),)).comparison_pairs(),
+            (("te", "helion"),),
         )
 
     def test_a_scenario_may_declare_that_it_publishes_no_ratio(self) -> None:
