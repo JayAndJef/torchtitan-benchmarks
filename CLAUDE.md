@@ -1352,7 +1352,18 @@ Faithfulness guarantees, all verified:
   shapes for graph capture without changing the computation).
 - **Same precision**: plain bf16 params/grads/optimizer states, no fp32
   masters, no autocast, no fp8. No recompute ever (`--ac` never affects
-  this arm).
+  this arm). **One exception, and it is symmetric: the MoE router runs
+  fp32 on both engines.** Megatron asks for it explicitly
+  (`moe_router_dtype="fp32"`, `mcore_profiles.py`); titan gets it from
+  upstream's `torch.autocast(dtype=float32)` around the gate
+  (`models/common/moe.py:292`). The precision matches. The **cost** does
+  not: autocast converts its arguments, so titan materializes an fp32 copy
+  of the `[B, L, D]` hidden state, while megatron's
+  `RouterGatingLinearFunction` hands TE bf16 operands and asks only for an
+  fp32 output (`moe/moe_utils.py:1348-1391`, written for that purpose).
+  Read "no autocast" here as a statement about the *wrapper*, never about
+  the model -- three passages in this file previously said it the loose way
+  and one of them sent a plan to the wrong conclusion.
 - **Megatron at its own best**: every fusion megatron's training entrypoint
   would enable is enabled explicitly. This matters because building
   `TransformerConfig` directly bypasses `megatron/training/arguments.py`,
