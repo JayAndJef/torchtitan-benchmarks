@@ -53,28 +53,45 @@ and the titan arms read exactly that. **The megatron arms do not read a
 reshape of it**, and that difference is deliberate.
 
 Megatron's QKV GEMM writes one fused ``[T, G, (Q + 2) * H]`` tensor, and
-``get_query_key_value_tensors`` reshapes only the query. So
-``core_attention`` receives a contiguous query and two **non-contiguous
-strided views** of that buffer. Megatron adds no ``.contiguous()`` before
-the call. TE then classifies the three tensors in ``get_qkv_layout``, does
-not recognize the layout, and forces ``.contiguous()`` on all three
-(``dot_product_attention/utils.py:2428-2431``). That copy is 8 MiB per
-forward at the default workload, and it runs inside every timed megatron
-call here.
+``get_query_key_value_tensors`` splits it into three strided views. Two of
+them stop being views before this cut and one does not:
+
+* the query is reshaped, normed and rotated;
+* the key is normed and rotated (``BASE`` sets ``qk_layernorm: True``, so
+  ``k_layernorm`` is a real norm);
+* **the value gets neither**, and megatron's own comment records that
+  choice (``attention.py:1534``).
+
+So ``core_attention`` receives a contiguous query, a contiguous key, and
+**one non-contiguous strided view** -- the value. TE then classifies the
+three tensors in ``get_qkv_layout``, does not recognize the layout, and
+forces ``.contiguous()`` (``dot_product_attention/utils.py:2428-2431``).
+Only the value moves: **4 MiB per forward** at batch 4 / seq 1024 /
+``normal``. It runs inside every timed megatron call here, because
+``get_qkv_layout`` is called unconditionally at
+``dot_product_attention.py:1453``, before the backend is chosen, so cuDNN,
+FA3 and the unfused path all pay it.
 
 This scenario therefore builds the fused buffer and hands each megatron arm
-megatron's own three tensors. The sibling scenario ``qkv_prep`` states in
-its own description that megatron **defers** this copy to the arm that
-consumes the views, and names this scenario as that arm. Handing megatron
-contiguous tensors instead would measure a layout megatron never produces,
-and would leave real engine traffic measured in no scenario at all.
+those three tensors. The sibling scenario ``qkv_prep`` states in its own
+description that megatron **defers** this copy to the arm that consumes the
+views, and names this scenario as that arm. Handing megatron three
+contiguous tensors instead would measure a layout megatron never produces.
+
+**One half of the deferred copy lands in no scenario, and it is not this
+one.** In the engine the key's 4 MiB is absorbed by ``k_layernorm``, which
+belongs to the ``qk_norm`` scenario -- and that scenario feeds its megatron
+arm a contiguous key (``operations/qk_norm.py``), so nothing times it. This
+scenario declines to double-book it. Fixing it means giving ``qk_norm``'s
+megatron arm a strided key, which is that scenario's change to make.
 
 Verified on CPU, because strides and TE's classifier need no device:
-``torch.split`` of the fused buffer gives ``k`` and ``v`` the strides
-``(G*R, R, 1)``; ``get_qkv_layout`` returns ``thd_thd_thd`` only **after**
-copying both; and ``Tensor.clone()`` of such a view returns a contiguous
-tensor. The last fact is why ``_Layout.make_leaves`` exists and why no leaf
-set here is built with ``clone``.
+``torch.split`` of the fused buffer gives the value the strides
+``(G*R, R, 1)`` at offset ``(Q + 1) * H``; ``get_qkv_layout`` returns
+``thd_thd_thd`` only **after** copying it; and ``Tensor.clone()`` of such a
+view returns a contiguous tensor. The last fact is why
+``_Layout.make_leaves`` exists and why no leaf set here is built with
+``clone``.
 
 The output canonicalization runs OUTSIDE the timed closures, in
 ``correctness_outputs``: megatron's ``[T, N*H]`` becomes ``[B, L, N, H]``
@@ -453,21 +470,21 @@ class AttentionCoreInputs:
     **Megatron does not, and this scenario reproduces that.** Megatron's QKV
     GEMM writes one fused ``[T, G, (Q + 2) * H]`` tensor, where ``G`` counts
     the key/value groups and ``Q`` the query heads per group.
-    ``get_query_key_value_tensors`` splits it and reshapes **only** the
-    query, so the query arrives contiguous and the key and the value arrive
-    as non-contiguous strided views of that buffer. Megatron adds no
-    ``.contiguous()`` of its own on this path. ``qkv_fused_TGR`` is the
-    buffer, and ``k_TNH``/``v_TNH`` are those views.
+    ``qkv_fused_TGR`` is that buffer.
+    ``get_query_key_value_tensors`` splits it into three strided views, and
+    the query and the key are then normed and rotated, which writes a fresh
+    contiguous tensor for each. **The value is neither normed nor rotated**,
+    so ``v_TNH`` alone stays a view of the buffer.
 
-    **The strides are part of the measurand.** TE's ``get_qkv_layout``
+    **That stride is part of the measurand.** TE's ``get_qkv_layout``
     classifies the three tensors, does not recognize this layout, and then
-    forces ``.contiguous()`` on all three
-    (``dot_product_attention/utils.py:2428-2431``), which runs inside every
-    timed megatron call here. The sibling scenario ``qkv_prep`` states that
-    megatron **defers** this copy to the arm that consumes the views; this
-    scenario is that arm. Handing megatron contiguous tensors instead would
-    measure a layout megatron never produces, and 8 MiB per forward of real
-    engine traffic at the default workload would be measured nowhere.
+    forces ``.contiguous()``
+    (``dot_product_attention/utils.py:2428-2431``). Only the value moves:
+    4 MiB per forward at the default workload, inside every timed megatron
+    call. The sibling scenario ``qkv_prep`` states that megatron **defers**
+    this copy to the arm that consumes the views; this scenario is that arm
+    for the value. See the module docstring for the key's half, which
+    ``qk_norm`` measures nowhere today.
     """
 
     q_BLNH: torch.Tensor
@@ -516,24 +533,41 @@ def _packed_positions(
     return torch.tensor(rows, device=device, dtype=torch.int32)
 
 
-def _split_megatron_qkv(
+def _megatron_core_attention_inputs(
     shape: PiperShape, fused: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Megatron's own split of the fused QKV buffer.
+    """The three tensors megatron's ``core_attention`` really receives.
 
-    This is ``get_query_key_value_tensors`` without the norms: one
-    ``torch.split`` along the last dimension, then a reshape of the query
-    alone (``transformer/attention.py``). The reshape copies, because its
-    source is a strided view, so the query comes back contiguous. The key
-    and the value stay views and keep the buffer's strides.
+    ``get_query_key_value_tensors`` splits the fused buffer with one
+    ``torch.split`` along the last dimension, so all three start as strided
+    views. **Two of them stop being views before the cut, and the third does
+    not**, and this scenario begins after RoPE:
+
+    * The query is reshaped (``attention.py:1908``), then normed
+      (``:1928``), then rotated (``:1500``). Each step writes a fresh
+      tensor.
+    * The key is normed (``:1929``) and rotated (``:1518``). ``BASE`` sets
+      ``qk_layernorm: True``, so ``k_layernorm`` is a real norm and not an
+      ``IdentityOp`` (``gpt_layer_specs.py:148-152``). A norm reading a
+      non-dense view writes a contiguous output.
+    * The value gets neither. Megatron's own comment records the choice
+      (``attention.py:1534``: RoPE is deliberately not applied to value), so
+      the value reaches ``core_attention`` as the original strided view.
+
+    So the layout at this cut is contiguous, contiguous, strided -- and the
+    copy TE then forces is the value alone.
     """
     per_group, head_dim = shape.heads_per_group, shape.head_dim
     query, key, value = torch.split(
         fused, [per_group * head_dim, head_dim, head_dim], dim=2
     )
     return (
+        # Both reshape and contiguous copy here, which is what the norm and
+        # the rotation do in the engine. Those costs belong to the qk_norm
+        # and rope scenarios, so they must happen outside every timed
+        # closure -- and they do, because this runs at build time.
         query.reshape(fused.shape[0], shape.n_heads, head_dim),
-        key,
+        key.contiguous(),
         value,
     )
 
@@ -620,7 +654,7 @@ def attention_core_inputs(
     varlen = create_varlen_metadata_for_document(positions)
 
     fused = _megatron_qkv_buffer(shape, q, k, v)
-    q_mcore, k_mcore, v_mcore = _split_megatron_qkv(shape, fused)
+    q_mcore, k_mcore, v_mcore = _megatron_core_attention_inputs(shape, fused)
 
     return AttentionCoreInputs(
         q_BLNH=q,
@@ -726,11 +760,12 @@ class _Layout:
     timed region.
 
     ``make_leaves`` builds one differentiable leaf set. It exists because
-    ``Tensor.clone()`` **cannot** carry the megatron layout: a strided view
-    of the fused QKV buffer is non-overlapping but not dense, so
-    ``preserve_format`` gives up and returns a contiguous tensor. Cloning
-    the arm's inputs would therefore hand TE a layout it recognizes, and
-    would delete the copy this scenario exists to measure, silently.
+    ``Tensor.clone()`` **cannot** carry the megatron layout: the value is a
+    strided view of the fused QKV buffer, which is non-overlapping but not
+    dense, so ``preserve_format`` gives up and returns a contiguous tensor.
+    Cloning the arm's inputs would therefore hand TE a layout it
+    recognizes, and would delete the copy this scenario exists to measure,
+    silently.
     """
 
     q: torch.Tensor
@@ -784,15 +819,16 @@ def _mcore_layout(
         return tensor.reshape(batch, seq, *tensor.shape[1:])
 
     def make_leaves() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # One buffer per leaf set, split megatron's own way. The key and the
-        # value leaves share that buffer and keep its strides. The query
-        # leaf is contiguous, because megatron's reshape copies it.
-        # ``detach`` is what makes a strided view a leaf; ``clone`` would
-        # make it contiguous instead.
+        # One buffer per leaf set, split megatron's own way. The value leaf
+        # is a view into that buffer and keeps its strides. The query and
+        # the key leaves are contiguous, because the norm and the rotation
+        # write a fresh tensor for each before this cut. ``detach`` is what
+        # makes a strided view a leaf; ``clone`` would make it contiguous
+        # instead.
         fused = inputs.qkv_fused_TGR.clone()
         return tuple(
             tensor.detach().requires_grad_()
-            for tensor in _split_megatron_qkv(shape, fused)
+            for tensor in _megatron_core_attention_inputs(shape, fused)
         )
 
     return _Layout(

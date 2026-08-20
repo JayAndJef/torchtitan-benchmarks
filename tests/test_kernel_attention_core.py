@@ -406,16 +406,17 @@ class InputsTests(unittest.TestCase):
                     )
                 )
 
-    def test_the_key_and_the_value_reach_megatron_as_strided_views(
+    def test_the_value_alone_reaches_megatron_as_a_strided_view(
         self,
     ) -> None:
-        """The measurand, not a detail.
+        """The measurand, not a detail, and it is the value alone.
 
         Megatron's QKV GEMM writes one fused buffer and
-        ``get_query_key_value_tensors`` reshapes only the query, so
-        ``core_attention`` receives two non-contiguous views. TE then copies
-        them inside the timed call. Handing megatron contiguous tensors
-        would delete that copy from every scenario in the partition.
+        ``get_query_key_value_tensors`` splits it into three views. The
+        query and the key then leave the buffer, because the norm and the
+        rotation write fresh tensors. The value gets neither, so
+        ``core_attention`` receives one non-contiguous view and TE copies it
+        inside the timed call.
         """
         inputs = cpu_inputs()
         tokens = TINY_WORKLOAD.batch * TINY_WORKLOAD.seq_len
@@ -424,26 +425,65 @@ class InputsTests(unittest.TestCase):
         self.assertEqual(
             tuple(inputs.qkv_fused_TGR.shape), (tokens, groups, row)
         )
-        for view in (inputs.k_TNH, inputs.v_TNH):
-            with self.subTest(shape=tuple(view.shape)):
-                self.assertFalse(view.is_contiguous())
-                self.assertEqual(view.stride(), (groups * row, row, 1))
-                self.assertEqual(
-                    view.untyped_storage().data_ptr(),
+        self.assertFalse(inputs.v_TNH.is_contiguous())
+        self.assertEqual(inputs.v_TNH.stride(), (groups * row, row, 1))
+        self.assertEqual(
+            inputs.v_TNH.untyped_storage().data_ptr(),
+            inputs.qkv_fused_TGR.untyped_storage().data_ptr(),
+        )
+        # The value sits after the query block and the key block.
+        self.assertEqual(
+            inputs.v_TNH.storage_offset(),
+            (TINY.heads_per_group + 1) * head_dim,
+        )
+
+    def test_the_query_and_the_key_reach_megatron_contiguous(self) -> None:
+        """Both leave the fused buffer before this cut, and that is engine.
+
+        The query is reshaped, normed and rotated; the key is normed and
+        rotated. Each step writes a fresh tensor, and those costs belong to
+        ``qkv_prep``, ``qk_norm`` and ``rope``. They must not happen again
+        inside a timed closure here.
+        """
+        inputs = cpu_inputs()
+        for tensor in (inputs.q_TNH, inputs.k_TNH):
+            with self.subTest(shape=tuple(tensor.shape)):
+                self.assertTrue(tensor.is_contiguous())
+                self.assertNotEqual(
+                    tensor.untyped_storage().data_ptr(),
                     inputs.qkv_fused_TGR.untyped_storage().data_ptr(),
                 )
 
-    def test_the_query_reaches_megatron_contiguous(self) -> None:
-        """Megatron reshapes the query, and that reshape copies.
+    def test_megatron_still_norms_the_key_and_still_skips_the_value(
+        self,
+    ) -> None:
+        """Why the key is contiguous and the value is not. Self-invalidating.
 
-        ``qkv_prep`` charges ``mcore/base`` for exactly this copy, so it must
-        NOT happen again here.
+        Two facts on the pinned megatron rev decide this layout, and a
+        submodule bump can change either. If ``k_layernorm`` stopped
+        reassigning the key, or the value started taking a rotation, the
+        strides at this cut would move and the inputs builder would be
+        modelling an engine that no longer exists.
         """
-        inputs = cpu_inputs()
-        self.assertTrue(inputs.q_TNH.is_contiguous())
-        self.assertNotEqual(
-            inputs.q_TNH.untyped_storage().data_ptr(),
-            inputs.qkv_fused_TGR.untyped_storage().data_ptr(),
+        require_megatron(self)
+        from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+            megatron_dir,
+        )
+
+        source = (
+            Path(megatron_dir()) / "megatron/core/transformer/attention.py"
+        ).read_text()
+        self.assertIn("key = apply_module(self.k_layernorm)(key)", source)
+        self.assertTrue(
+            BASE.config_overrides["qk_layernorm"],
+            "with qk_layernorm off, k_layernorm is an IdentityOp and the key "
+            "would reach attention as a strided view too",
+        )
+        # Megatron leaves the value alone, and says so in a comment.
+        self.assertNotIn("value = apply_rotary_pos_emb(", source)
+        self.assertIn(
+            "# value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)",
+            source,
         )
 
     def test_transformer_engine_does_not_recognize_the_megatron_layout(
@@ -473,8 +513,9 @@ class InputsTests(unittest.TestCase):
             inputs.q_TNH, inputs.k_TNH, inputs.v_TNH, qkv_format="thd"
         )
         self.assertEqual(layout, "thd_thd_thd")
+        # The value is the only tensor TE has to move.
         self.assertEqual(q.data_ptr(), inputs.q_TNH.data_ptr())
-        self.assertNotEqual(k.data_ptr(), inputs.k_TNH.data_ptr())
+        self.assertEqual(k.data_ptr(), inputs.k_TNH.data_ptr())
         self.assertNotEqual(v.data_ptr(), inputs.v_TNH.data_ptr())
 
     def test_the_shapes_follow_the_geometry(self) -> None:
@@ -705,21 +746,25 @@ class LayoutTests(unittest.TestCase):
         layout = _mcore_layout(TINY, TINY_WORKLOAD, inputs)
         query, key, value = layout.make_leaves()
         self.assertTrue(query.is_contiguous())
-        for leaf, reference in ((key, inputs.k_TNH), (value, inputs.v_TNH)):
+        self.assertTrue(key.is_contiguous())
+        self.assertFalse(value.is_contiguous())
+        self.assertEqual(value.stride(), inputs.v_TNH.stride())
+        self.assertEqual(
+            value.storage_offset(), inputs.v_TNH.storage_offset()
+        )
+        for leaf, reference in (
+            (query, inputs.q_TNH),
+            (key, inputs.k_TNH),
+            (value, inputs.v_TNH),
+        ):
             with self.subTest(shape=tuple(leaf.shape)):
-                self.assertFalse(leaf.is_contiguous())
-                self.assertEqual(leaf.stride(), reference.stride())
                 self.assertTrue(leaf.is_leaf)
                 self.assertTrue(leaf.requires_grad)
                 self.assertTrue(torch.equal(leaf, reference))
-        self.assertEqual(
-            key.untyped_storage().data_ptr(),
-            value.untyped_storage().data_ptr(),
-        )
-        self.assertNotEqual(
-            key.untyped_storage().data_ptr(),
-            inputs.qkv_fused_TGR.untyped_storage().data_ptr(),
-        )
+                self.assertNotEqual(
+                    leaf.untyped_storage().data_ptr(),
+                    reference.untyped_storage().data_ptr(),
+                )
 
     def test_a_titan_leaf_set_is_contiguous_and_independent(self) -> None:
         inputs = cpu_inputs()
@@ -746,8 +791,8 @@ class LayoutTests(unittest.TestCase):
         simplified -- but nothing may rely on ``clone`` until it does.
         """
         inputs = cpu_inputs()
-        self.assertFalse(inputs.k_TNH.is_contiguous())
-        self.assertTrue(inputs.k_TNH.clone().is_contiguous())
+        self.assertFalse(inputs.v_TNH.is_contiguous())
+        self.assertTrue(inputs.v_TNH.clone().is_contiguous())
 
 
 
