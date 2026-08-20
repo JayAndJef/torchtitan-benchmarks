@@ -244,7 +244,9 @@ class RegistryTests(unittest.TestCase):
             for scenario in KERNEL_SCENARIOS.values()
             if scenario.requires_balanced_routing
         }
-        self.assertEqual(balanced, {"swiglu", "dispatch_permute"})
+        self.assertEqual(
+            balanced, {"swiglu", "dispatch_permute", "expert_mlp"}
+        )
 
 
 class ShapeAndWorkloadTests(unittest.TestCase):

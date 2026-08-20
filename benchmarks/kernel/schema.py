@@ -732,4 +732,48 @@ def shape_summary(
             # x_floor column is read against this number.
             "permuted_elements": rows * shape.dim,
         }
+    if scenario_name == "expert_mlp":
+        rows = batch * seq * shape.top_k
+        per_expert = rows // shape.num_experts
+        return {
+            # The permuted rows both engines consume, unchanged. Megatron
+            # flattens [s, b, h] to [s*b, h] before it permutes and titan views
+            # [b, l, d] as [t, d] before it dispatches, so neither engine pays
+            # a layout conversion inside this cut and there is no second layout
+            # to record.
+            "x": [rows, shape.dim],
+            "grad_out": [rows, shape.dim],
+            # Read by the megatron arms ALONE. Titan's inner_experts never sees
+            # the routing probabilities; its dispatcher applies them in
+            # combine. This key is the asymmetry that makes the scenario
+            # within-engine only, so the manifest records it rather than
+            # leaving a reader to infer it from the comparison list.
+            "probs": [rows],
+            # The synthetic even split both engines receive, in place of a real
+            # routing map. Values reach timing only through the probability
+            # multiply, so the counts are what has to match, not the router.
+            "tokens_per_expert": [per_expert] * shape.num_experts,
+            # All four weight forms, because each engine holds only its own and
+            # a reader who sees one cannot tell which arm a weight belongs to.
+            # The three separate matrices are what the inputs builder draws and
+            # what titan's GroupedExperts loads; w13 is the fused layout the
+            # other three titan arms hold; the megatron pair is one gated fc1
+            # and one fc2 per expert, and the map that produces them is
+            # benchmarks/models/piper_qwen3/megatron_weights.py's experts
+            # component.
+            "w1": [shape.num_experts, shape.moe_hidden_dim, shape.dim],
+            "w2": [shape.num_experts, shape.dim, shape.moe_hidden_dim],
+            "w3": [shape.num_experts, shape.moe_hidden_dim, shape.dim],
+            "w13_titan_fused": [
+                shape.num_experts,
+                shape.moe_hidden_dim,
+                2,
+                shape.dim,
+            ],
+            "linear_fc1_mcore_per_expert": [
+                2 * shape.moe_hidden_dim,
+                shape.dim,
+            ],
+            "linear_fc2_mcore_per_expert": [shape.dim, shape.moe_hidden_dim],
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

@@ -2225,6 +2225,416 @@ DISPATCH_PERMUTE = KernelScenario(
 )
 
 
+# The fp64 gate every TorchTitan arm carries. The four titan arms compute the
+# expert MLP WITHOUT the routing probabilities, because titan's dispatcher
+# applies them in combine, so they are gated on the reference's unweighted
+# names.
+#
+# Measured margin, on CPU, over a batched stand-in at the real ``normal``
+# geometry (dim 1024, expert width 3584, 4 experts, 128 routed rows), against
+# this module's own fp64 truth: out 3.90e-3, x_grad 4.22e-3, w1_grad 3.76e-3,
+# w2_grad 3.88e-3, w3_grad 3.90e-3. The gate sits at 2e-2. The worst output is
+# x_grad, so the real headroom is **4.7x**, not the 5x a single 3.9e-3 figure
+# suggests; quote the range rather than one number. **The device kernels have
+# never been run**, so that margin is evidence about the arithmetic of a
+# ``bmm`` stand-in, and not about ``torch._grouped_mm``, TE's grouped GEMM or
+# TE's SwiGLU.
+EXPERT_MLP_TITAN_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
+    max_rel_l2=2e-2,
+)
+
+# The fp64 gate every megatron-core arm carries, over the reference's OTHER
+# branch. The distinct names are a guard and not a convention:
+# ``benchmarks/kernel/engine/correctness.py:43-49`` raises when an arm does not
+# produce an output a check names, so a gate that pointed one engine at the
+# other's truth would fail loudly rather than compare two functions.
+#
+# ``probs_grad_weighted`` is the sharpest of the six. It is identically zero
+# for any implementation that dropped the routing probabilities, which is the
+# one thing that distinguishes megatron's semantics at this cut, and it is the
+# quantity two of the four megatron arms compute with an extra reduction that
+# the fused arm folds away.
+EXPERT_MLP_MCORE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=(
+        "out_weighted",
+        "x_grad_weighted",
+        "probs_grad_weighted",
+        "w1_grad_weighted",
+        "w2_grad_weighted",
+        "w3_grad_weighted",
+    ),
+    max_rel_l2=2e-2,
+)
+
+# The two output rosters, named once so the arm-to-arm checks below cannot
+# drift from the fp64 gates above.
+#
+# Those checks each reference that row's OPPONENT. Direction is not a style
+# choice: ``resolve_arm_skips`` (``benchmarks/kernel/runner.py:281-319``)
+# closes the skip set over correctness references, so a check pointing outward
+# from an arm that another row depends on would take that row down with it.
+# Referencing the opponent makes the closure follow the same edges the
+# comparisons do.
+#
+# They are tighter than the fp64 hub, and that is why they exist beside it.
+# The hub bounds each arm at 2e-2 and therefore bounds a *pair* only
+# transitively, at 4e-2 -- and the pair is exactly what each published row is a
+# ratio of. ``qkv_prep`` makes the same argument for its own arm-to-arm check.
+EXPERT_MLP_TITAN_OUTPUTS = ("out", "x_grad", "w1_grad", "w2_grad", "w3_grad")
+EXPERT_MLP_MCORE_OUTPUTS = (
+    "out_weighted",
+    "x_grad_weighted",
+    "probs_grad_weighted",
+    "w1_grad_weighted",
+    "w2_grad_weighted",
+    "w3_grad_weighted",
+)
+
+
+EXPERT_MLP = KernelScenario(
+    name="expert_mlp",
+    description=(
+        "The routed-expert MLP itself: TorchTitan's inner_experts "
+        "(GroupedExperts) against megatron-core's experts call "
+        "(TEGroupedMLP), plus three megatron variants and three TorchTitan "
+        "ones. THIS SCENARIO PUBLISHES NO CROSS-ENGINE RATIO, AND NO READER "
+        "MAY FORM ONE BY DIVIDING TWO MEDIANS. The routing probabilities are "
+        "applied on opposite sides of this boundary -- megatron folds them "
+        "into the fused activation kernel inside the experts "
+        "(weighted_bias_swiglu_impl), while TorchTitan applies them in "
+        "combine, one scenario later -- so megatron's side of the cut does "
+        "strictly more work and the two engines compute two functions here. "
+        "Every published row therefore has both arms on one engine, the "
+        "correctness output names differ per engine so no gate can cross the "
+        "boundary either, and the cross-engine row belongs to the "
+        "expert_combine span over scenarios 11 and 12, the smallest "
+        "enclosure in which both engines have applied the probabilities "
+        "exactly once. THE PIPER ARMS ARE MEASURED AGAINST TORCHTITAN'S OWN "
+        "W13 FUSION, not against unfused experts: FusedGroupedExperts is "
+        "upstream's fusion of the gate and up projections, with the same "
+        "(E, F, 2, D) parameter, the same single grouped GEMM and the same "
+        "save/load split hooks, so what the two Piper arms buy is the "
+        "combined activation layout and nothing more. THE "
+        "titan/fused_grouped_experts vs titan ROW MOVES TWO AXES AT ONCE AND "
+        "IS NOT A MEASUREMENT OF THE W13 FUSION ALONE: FusedGroupedExperts "
+        "both fuses the two grouped GEMMs into one AND replaces the anchor's "
+        "plain-ops SwiGLU with the silu_and_mul custom op, which is opaque to "
+        "Inductor under fullgraph=True where the anchor's plain ops fuse into "
+        "their neighbours. The two changes push in OPPOSITE directions, so a "
+        "ratio near 1.0 on that row may be a real fusion gain cancelled by a "
+        "lost activation fusion rather than a fusion that bought nothing. "
+        "Read it as upstream's fused expert layer against upstream's unfused "
+        "one, and attribute nothing in it to the GEMM count. The other two "
+        "titan rows move one axis each. THE NUMBER IS DEVICE "
+        "TIME ON BOTH SIDES: megatron's tokens_per_expert.tolist() would be a "
+        "blocking sync on a device tensor, but its allgather dispatcher has "
+        "already moved that tensor to the host, so the inputs builder hands "
+        "megatron a CPU count tensor and titan a device one, as each engine "
+        "receives in production. Neither engine pays a layout conversion "
+        "here; both consume the same (rows, dim) permuted batch. All four "
+        "megatron arms run EAGER, because megatron compiles no whole "
+        "transformer layer, and all four TorchTitan arms run under "
+        "torch.compile(fullgraph=True), because that is what they face end "
+        "to end -- but no published row crosses that difference. This "
+        "scenario SUPERSEDES the swiglu scenario, whose three arms are titan, "
+        "titan/piper_optimized_triton and titan/piper_optimized_inductor "
+        "here, built the same way from the same shared weights."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.expert_mlp:expert_mlp_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.expert_mlp:expert_mlp_reference"
+    ),
+    # The anchor. See merge note 1: this is the one cross-engine scenario that
+    # anchors on the titan side, because it is the one that publishes no
+    # cross-engine row, so the anchor's only remaining job is to decide whose
+    # loss costs the scenario -- and GroupedExperts has neither a megatron nor
+    # a TransformerEngine dependency to lose.
+    baseline_arm="titan",
+    # The synthetic rows are split evenly across the experts, exactly as
+    # swiglu_inputs splits them, so a workload where batch * seq_len * top_k
+    # does not divide by num_experts must fail loudly rather than be capped or
+    # rounded. The inputs builder re-asserts it too, with both numbers named,
+    # for callers that reach it without passing through the runner.
+    requires_balanced_routing=True,
+    # Explicit, exhaustive, and deliberately NOT the derived set. The
+    # derivation would pair every non-anchor arm with ``titan``. All FOUR
+    # mcore arms are non-anchor and none is a floor, so it would publish four
+    # cross-engine rows this scenario has evidence against -- mcore/base,
+    # mcore/no_bias_activation_fusion, mcore/te_activation_func and
+    # mcore/no_grouped_gemm, each against titan. It would also credit both
+    # Piper arms with a w13 fusion TorchTitan already ships. The count is four
+    # and not three: it was checked by constructing the scenario with
+    # comparisons=None and reading comparison_pairs() back.
+    #
+    # Six rows, and every one of them within one engine:
+    #
+    #   * three megatron deltas against the megatron base, which is the
+    #     within-megatron fusion and implementation question; and
+    #   * TorchTitan's own w13 fusion against unfused experts, then each Piper
+    #     layout against that fusion, which is what each of them modified.
+    #
+    # The row swiglu published -- a Piper arm against unfused experts -- is
+    # deliberately absent. It is recoverable from the per-replicate samples
+    # results.json keeps, and the fused-against-unfused row above supplies the
+    # factor the two differ by. It is not declared because the printed table
+    # keys its comparison rows by (arm, mode)
+    # (``benchmarks/kernel/results/reporting.py:113-114``), so a second row for
+    # one arm in one mode would be written to results.json and then silently
+    # dropped from the table.
+    comparisons=(
+        ("mcore/no_bias_activation_fusion", "mcore/base"),
+        ("mcore/te_activation_func", "mcore/base"),
+        ("mcore/no_grouped_gemm", "mcore/base"),
+        ("titan/fused_grouped_experts", "titan"),
+        ("titan/piper_optimized_triton", "titan/fused_grouped_experts"),
+        ("titan/piper_optimized_inductor", "titan/fused_grouped_experts"),
+    ),
+    arms=(
+        # ---- megatron-core -------------------------------------------------
+        #
+        # Every megatron arm declares ("forward", "forward_backward") and no
+        # isolated backward. The retained-graph trick re-runs one backward
+        # graph many times, and TransformerEngine's GroupedLinear backward
+        # calls clear_tensor_data on its saved inputs
+        # (transformer_engine/pytorch/module/grouped_linear.py:1129), so a
+        # second pass would read cleared storage; TE's SwiGLU operation clears
+        # its saved tensors too. Backward cost stays recoverable as
+        # forward_backward minus forward.
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron-core TEGroupedMLP off a real GPTModel: one TE "
+                "grouped GEMM for the doubled fc1, weighted_bias_swiglu_impl "
+                "for the activation -- which folds the routing probabilities "
+                "into the same kernel -- and one TE grouped GEMM for fc2. "
+                "Eager, four local experts, no expert parallelism"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so every TE "
+                "module it builds runs eager end to end; compiling this one "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(EXPERT_MLP_MCORE_GATE,),
+        ),
+        KernelArm(
+            name="mcore/no_bias_activation_fusion",
+            description=(
+                "the same layer with bias_activation_fusion=False: the "
+                "activation falls to megatron's chunk/silu/mul path plus a "
+                "SEPARATE probability multiply with a dtype round trip, so "
+                "four kernels and an extra full-width intermediate where the "
+                "base has one kernel. This is the dataclass-default handicap "
+                "megatron's own argparse layer would have turned on, and it "
+                "once cost 11.9 GPU ms/step end to end"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_mcore_no_bias_activation_fusion"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer; and this arm "
+                "IS the removal of a fusion, so compiling it would let "
+                "Inductor put back what the flag took away"
+            ),
+            correctness=(
+                EXPERT_MLP_MCORE_GATE,
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=EXPERT_MLP_MCORE_OUTPUTS,
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="mcore/te_activation_func",
+            description=(
+                "the same layer running TransformerEngine's own SwiGLU "
+                "operation. A TWO-FLAG delta -- use_te_activation_func=True "
+                "AND bias_activation_fusion=False -- because "
+                "TransformerConfig refuses the pair and the base profile sets "
+                "the second flag on. REPORT THE MECHANISM, NOT ONLY THE "
+                "RATIO: the TE path applies the routing probabilities as a "
+                "SEPARATE multiply where megatron's kernel folds them into "
+                "the activation, so this is a kernel-COUNT difference as much "
+                "as a kernel-speed one. The builder proves the TE module "
+                "actually runs with a forward hook, not merely that "
+                "TEGroupedMLP picked it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_mcore_te_activation_func"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, and this arm "
+                "is TransformerEngine's own operation run the way megatron "
+                "runs it"
+            ),
+            correctness=(
+                EXPERT_MLP_MCORE_GATE,
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=EXPERT_MLP_MCORE_OUTPUTS,
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="mcore/no_grouped_gemm",
+            description=(
+                "the same layer as SequentialMLP: four separate TE linear "
+                "MLPs called in turn instead of one grouped launch. Each of "
+                "them still takes the fused weighted-SwiGLU path, so the arm "
+                "isolates the grouping and nothing else. Delivered by "
+                "config.moe_grouped_gemm, which reaches the layer spec "
+                "through get_gpt_decoder_block_spec on this rev -- and the "
+                "builder proves the EXPERT CLASS changed, because megatron "
+                "polices that agreement nowhere and both disagreement "
+                "directions are numerically correct"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_mcore_no_grouped_gemm"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer; compiling the "
+                "per-expert loop would also let Inductor recover the grouping "
+                "this arm exists to remove"
+            ),
+            correctness=(
+                EXPERT_MLP_MCORE_GATE,
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=EXPERT_MLP_MCORE_OUTPUTS,
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        # ---- TorchTitan ----------------------------------------------------
+        #
+        # Every titan arm declares all three modes. The isolated backward is
+        # kept here and dropped on the megatron side, which is an asymmetry
+        # this scenario can afford precisely because it publishes no
+        # cross-engine row: no table compares a titan backward against a
+        # megatron one, and dropping it from both -- which qkv_prep, ffn_norm
+        # and attn_out_proj do, and must -- would delete the swiglu scenario's
+        # backward numbers and buy nothing.
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan GroupedExperts: separate w1 and w3 grouped GEMMs, "
+                "plain-ops SwiGLU, one grouped GEMM for w2, under "
+                "torch.compile(fullgraph=True). Upstream's own expert layer, "
+                "and this scenario's anchor"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_titan"
+            ),
+            modes=MODES,
+            compiled=True,
+            correctness=(EXPERT_MLP_TITAN_GATE,),
+        ),
+        KernelArm(
+            name="titan/fused_grouped_experts",
+            description=(
+                "TorchTitan's OWN w13 fusion, torchtitan.overrides."
+                "fused_swiglu.FusedGroupedExperts: one (E, F, 2, D) "
+                "parameter, one grouped GEMM for both projections, then an "
+                "unbind into gate and up and torchtitan's own silu_and_mul "
+                "custom op. UPSTREAM CODE, not ours, and the honest opponent "
+                "of both Piper arms -- without it they would be credited with "
+                "a fusion TorchTitan already ships"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_titan_fused_grouped_experts"
+            ),
+            modes=MODES,
+            compiled=True,
+            correctness=(
+                EXPERT_MLP_TITAN_GATE,
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="titan",
+                    outputs=EXPERT_MLP_TITAN_OUTPUTS,
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan/piper_optimized_triton",
+            description=(
+                "the Piper layer that keeps the combined [R, 2F] activation "
+                "tensor: same fused w13 GEMM as titan/fused_grouped_experts, "
+                "and a custom Triton op that consumes the combined tensor "
+                "directly instead of unbinding it, returning one interleaved "
+                "gradient instead of two. Its opponent is that fusion, so its "
+                "ratio is what the combined LAYOUT buys"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_titan_piper_optimized_triton"
+            ),
+            modes=MODES,
+            compiled=True,
+            correctness=(
+                EXPERT_MLP_TITAN_GATE,
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="titan/fused_grouped_experts",
+                    outputs=EXPERT_MLP_TITAN_OUTPUTS,
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan/piper_optimized_inductor",
+            description=(
+                "the Piper layer with the activation left to Inductor: same "
+                "fused w13 GEMM again, and silu(gate) * up written as plain "
+                "ops so Inductor can fuse it into its neighbours. It repeats "
+                "FusedGroupedExperts' own unbind, which is why that fusion is "
+                "its opponent -- the two differ in the activation "
+                "implementation and in nothing else"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.expert_mlp"
+                ":build_expert_mlp_titan_piper_optimized_inductor"
+            ),
+            modes=MODES,
+            compiled=True,
+            correctness=(
+                EXPERT_MLP_TITAN_GATE,
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="titan/fused_grouped_experts",
+                    outputs=EXPERT_MLP_TITAN_OUTPUTS,
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 # The gate every arm faces, and rel_l2 rather than a ULP metric. An add is not
 # a reduction, but the hazard CLAUDE.md's ULP rule names is CANCELLATION, and
 # the reduction is only where that rule met it first. ``residual + x`` on two
@@ -3005,6 +3415,7 @@ KERNEL_SCENARIOS = {
         FFN_NORM,
         MOE_ROUTER,
         DISPATCH_PERMUTE,
+        EXPERT_MLP,
         MOE_RESIDUAL,
         FINAL_NORM,
         LM_HEAD_PROJECTION,

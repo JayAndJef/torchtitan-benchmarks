@@ -78,6 +78,7 @@ KERNEL_ARMS_MODULES = {
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
     "moe_router": "benchmarks.kernel.operations.moe_router",
     "dispatch_permute": "benchmarks.kernel.operations.dispatch_permute",
+    "expert_mlp": "benchmarks.kernel.operations.expert_mlp",
     "moe_residual": "benchmarks.kernel.operations.moe_residual",
     "final_norm": "benchmarks.kernel.operations.final_norm",
     "lm_head_projection": "benchmarks.kernel.operations.lm_head_projection",
@@ -184,6 +185,25 @@ KERNEL_INVENTORY = {
         "mcore/dispatcher_alltoall",
         "titan",
     ),
+    # Scenario 11. Eight arms, six rows, and every row within one engine: at
+    # this cut megatron applies the routing probabilities and titan does not,
+    # so a cross-engine ratio would compare two functions. It is also the one
+    # cross-engine scenario anchored on titan, because it publishes no
+    # cross-engine row and the anchor's only remaining job is to decide whose
+    # loss costs the scenario. No floor: this is a GEMM scenario, and a
+    # bandwidth number would not bound it -- the same reason qkv_prep and
+    # attn_out_proj declare none. No arm declares bytes_moved either, so no
+    # GB/s column is printed.
+    "expert_mlp": (
+        "mcore/base",
+        "mcore/no_bias_activation_fusion",
+        "mcore/te_activation_func",
+        "mcore/no_grouped_gemm",
+        "titan",
+        "titan/fused_grouped_experts",
+        "titan/piper_optimized_triton",
+        "titan/piper_optimized_inductor",
+    ),
     # Scenario 13, the twin of attn_residual at the other bda call site. Four
     # arms, one published row, and the row is within megatron for the same
     # reason.
@@ -217,13 +237,21 @@ KERNEL_BASELINE_ARMS = {
     "qkv": "baseline",
     "lm_head": "baseline",
     "attention": "baseline",
-    # The anchor is mcore/base at every cross-engine scenario. Seven of the
-    # sixteen hold mcore-only variant arms that can compare against nothing
-    # else, so an anchor on the titan side would make the derived set compare
-    # a megatron fusion delta against the other engine and conflate the two.
-    # It also matches e2e, where piper1b_megatron makes the megatron arm the
-    # baseline. The cost is accepted and recorded: the anchor's loss costs the
-    # whole scenario, and TransformerEngine is the more fragile side.
+    # The anchor is mcore/base at every cross-engine scenario that publishes a
+    # cross-engine row. Several of them hold mcore-only variant arms that can
+    # compare against nothing else, so an anchor on the titan side would make
+    # the derived set compare a megatron fusion delta against the other engine
+    # and conflate the two. It also matches e2e, where piper1b_megatron makes
+    # the megatron arm the baseline. The cost is accepted and recorded: the
+    # anchor's loss costs the whole scenario, and TransformerEngine is the
+    # more fragile side.
+    #
+    # expert_mlp is the exception, and it is the exception because it
+    # publishes NO cross-engine row: it declares its comparisons rather than
+    # deriving them, and both arms of every row sit on one engine. So the
+    # derivation argument does not reach it, and the only remaining question
+    # is whose loss the scenario cannot survive. It anchors on titan, the side
+    # with neither a megatron nor a TransformerEngine dependency to lose.
     "embedding_stage": "mcore/base",
     "qkv_prep": "mcore/base",
     "qk_norm": "mcore/base",
@@ -232,6 +260,7 @@ KERNEL_BASELINE_ARMS = {
     "ffn_norm": "mcore/base",
     "moe_router": "mcore/base",
     "dispatch_permute": "mcore/base",
+    "expert_mlp": "titan",
     "moe_residual": "mcore/base",
     "final_norm": "mcore/base",
     "lm_head_projection": "mcore/base",
