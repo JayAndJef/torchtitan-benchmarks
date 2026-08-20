@@ -811,7 +811,12 @@ own family module.
   no `k` removes them. Measured on an H200, rope forward, us per call at
   k=1/4/16/64 -- **on the retired single-engine rope roster**, whose arm
   names the cross-engine replacement no longer uses, and which nothing
-  re-measures:
+  re-measures. **The cross-engine rope arms cannot be compared against these
+  figures**, and not only because the names changed: two corrections reach the
+  measurand. The arms now take packed-document positions where they took
+  `arange`, and their timed closures now run the training graph where they ran
+  an inference graph that saved no activations. Both are fixes, and both move
+  the number:
   `copy_floor` 27.66/16.16/13.43/13.18, `baseline`
   125.49/88.96/76.91/73.10, `helion` 301.23/256.53/234.87/226.01, `te`
   186.64/138.87/122.60/114.40. `copy_floor` converges onto the ~11-13 us of
@@ -821,14 +826,15 @@ own family module.
   host dispatch**. `qkv` is dispatch-heavy in absolute terms too, but both
   its arms are, so the effect largely cancels in the ratio.
 - **A dispatch-bound arm carries a k-dependent ratio, so its ranking is not
-  a kernel result.** `helion` against `baseline` is 2.40x at k=1, 3.05x at
-  k=16 and 3.09x at k=64. Run `--burst`; the merge derives a `residual`
+  a kernel result.** On the same retired rope roster, `helion` against
+  `baseline` is 2.40x at k=1, 3.05x at k=16 and 3.09x at k=64. Run `--burst`; the merge derives a `residual`
   column from the top two rungs of the ladder and flags any arm whose
   per-call time is still falling there. Report a flagged row as a
   comparison of dispatch cost, never as a kernel-speed claim.
 - **That test is one-sided, and an unflagged arm is not device-bound.** A
   ladder can plateau at a dispatch cost bursting cannot amortize. Rope
-  backward does exactly that: `baseline` reads 187/156/157/159 us across
+  backward does exactly that, again on the retired roster: `baseline` reads
+  187/156/157/159 us across
   k=1/4/16/64, flat from k=4 on, against ~12 us of device work. Flat means
   `k` stopped buying amortization, not that the number became device time.
   The residual is also a difference of two medians and carries their
@@ -1087,7 +1093,7 @@ arm measuring the baseline under an FA4 label.
 ```
 out/<timestamp>/kernels/<scenario>/<hardware>/
   manifest.json      # schema 6: model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/replicates_per_process/burst_k/warmup_calls/seed, commands, provenance
-  results.json       # schema 5: every declared arm with a status, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
+  results.json       # schema 6: every declared arm with a status and its declared compile treatment, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
   kernel_bench.log   # every worker's stdout+stderr, in spawn order
   fragments/
     correctness.json         # the gate pass
@@ -1131,8 +1137,17 @@ process a comparison row carries
 the shape of the file itself changes and a bump is required rather than an
 addition. The rename is the point -- those replicates share a build and an
 interpreter, so the interval is a lower bound, and a reader of the honest
-name must find nothing rather than a narrower number. The results loader
-enforces exact schema equality,
+name must find nothing rather than a narrower number. The results file went
+5 -> 6 when it started carrying the **declared compile treatment** of every
+arm (`compiled` and `eager_reason`) and the scenario's own `description`.
+A cross-engine ratio compares two compile treatments and not two kernels --
+every megatron arm runs eager, because megatron compiles no whole layer, and
+every titan module arm runs compiled, because that is what it faces end to
+end. A reader of `results.json` holds no registry, so a row that does not
+name both sides cannot be read. The fields were added to the dataclasses one
+commit before they reached `to_dict`, so a schema-6 file briefly had the
+shape of a schema-5 file; a round-trip test now pins both directions. The
+results loader enforces exact schema equality,
 so older files are rejected rather than half-read; the manifest is
 write-only provenance and has no loader.
 

@@ -284,16 +284,15 @@ def resolve_arm_skips(
     """Which arms this host cannot run, and why, keyed by arm name.
 
     **Requirements belong to the arm, not to the scenario.** Without a C++20
-    host compiler, rope loses ``te`` and still measures ``baseline``,
-    ``helion`` and ``copy_floor``. The scenario-level ``requires_gcc_toolset``
-    is an OR across arms, so using it to decide cost all four; it keeps its
-    one honest use, which is asking whether anything here needs the compiler
-    at all.
+    host compiler, rope loses ``titan/te`` and still measures its other four
+    arms. The scenario-level ``requires_gcc_toolset`` is an OR across arms, so
+    using it to decide cost every arm of the scenario; it keeps its one honest
+    use, which is asking whether anything here needs the compiler at all.
 
     **The set is closed over correctness references.** An arm whose reference
     is skipped is skipped too. The alternative is to time an arm that nothing
     checked, which is the silent wrongness the gates exist to prevent. No
-    scenario produces the case today -- ``te`` is a referrer, never a
+    scenario produces the case today -- ``titan/te`` is a referrer, never a
     reference -- so the closure is a guard against the roster growing into
     it.
     """
