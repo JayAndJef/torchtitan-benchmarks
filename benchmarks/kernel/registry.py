@@ -229,55 +229,6 @@ ROPE = KernelScenario(
 )
 
 
-SWIGLU = KernelScenario(
-    name="swiglu",
-    description="Grouped-expert SwiGLU layer: TorchTitan vs the two Piper variants.",
-    inputs_builder="benchmarks.kernel.operations.swiglu:swiglu_inputs",
-    reference_builder=None,
-    baseline_arm="baseline",
-    requires_balanced_routing=True,
-    arms=(
-        KernelArm(
-            name="baseline",
-            description="TorchTitan modern GroupedExperts: separate w1/w3 GEMMs, plain-ops activation",
-            builder="benchmarks.kernel.operations.swiglu:build_swiglu_baseline",
-            modes=MODES,
-            compiled=True,
-        ),
-        KernelArm(
-            name="piper_optimized_triton",
-            description="Piper layer: fused w13 GEMM + combined [R,2F] custom Triton activation op",
-            builder="benchmarks.kernel.operations.swiglu:build_swiglu_piper_optimized_triton",
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="baseline",
-                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
-                    max_rel_l2=2e-2,
-                ),
-            ),
-        ),
-        KernelArm(
-            name="piper_optimized_inductor",
-            description="Piper layer: fused w13 GEMM, plain-ops SwiGLU left to Inductor",
-            builder="benchmarks.kernel.operations.swiglu:build_swiglu_piper_optimized_inductor",
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="baseline",
-                    outputs=("out", "x_grad", "w1_grad", "w2_grad", "w3_grad"),
-                    max_rel_l2=2e-2,
-                ),
-            ),
-        ),
-    ),
-)
-
-
 LM_HEAD = KernelScenario(
     name="lm_head",
     description="LM head + loss: full logits vs fused and TE-derived CE.",
@@ -1607,7 +1558,8 @@ MOE_ROUTER = KernelScenario(
         ("mcore/router_bf16", "mcore/base"),
     ),
     # NOT requires_balanced_routing, and that is a decision. The flag exists
-    # so swiglu_inputs can hand every expert an equal slice of synthetic rows.
+    # so expert_mlp_inputs can hand every expert an equal slice of synthetic
+    # rows.
     # This scenario materializes no per-expert tensor and hands no expert a
     # slice: the router computes the split itself, and its output is [T, E]
     # whatever the split turns out to be. Declaring the flag would refuse
@@ -1967,9 +1919,9 @@ DISPATCH_PERMUTE = KernelScenario(
     # The synthetic routing decision hands every expert an equal slice of
     # batch * seq_len * top_k. An uneven split must skip this scenario
     # loudly -- named numbers, a recorded error, a nonzero exit -- rather than
-    # be capped or rounded, exactly as swiglu already does. See merge note 2:
-    # this flag is what breaks test_only_swiglu_needs_balanced_routing, and
-    # widening that test is the fix.
+    # be capped or rounded, exactly as expert_mlp already does. The roster of
+    # scenarios that declare the flag is pinned exhaustively by
+    # tests/test_kernels.py, so adding it here is a test edit as well.
     requires_balanced_routing=True,
     # Explicit and exhaustive. It is the same set the schema would derive, and
     # it is written out anyway: a cross-engine scenario states which rows it
@@ -2267,9 +2219,11 @@ EXPERT_MLP = KernelScenario(
         "transformer layer, and all four TorchTitan arms run under "
         "torch.compile(fullgraph=True), because that is what they face end "
         "to end -- but no published row crosses that difference. This "
-        "scenario SUPERSEDES the swiglu scenario, whose three arms are titan, "
-        "titan/piper_optimized_triton and titan/piper_optimized_inductor "
-        "here, built the same way from the same shared weights. THE PRINTED "
+        "scenario REPLACED the retired swiglu scenario, whose three arms are "
+        "titan, titan/piper_optimized_triton and titan/piper_optimized_"
+        "inductor here, built the same way from the same shared weights. A "
+        "swiglu number under out/ is therefore a number about these three "
+        "modules, taken without the expert layer around them. THE PRINTED "
         "MEDIANS ARE THE ONLY CHANNEL BY WHICH THE FORBIDDEN RATIO CAN BE "
         "FORMED, AND THAT IS WHY THE SENTENCE ABOVE IS SHOUTED: this scenario "
         "declares no floor and no arm declares bytes_moved, so no arm here "
@@ -2293,10 +2247,9 @@ EXPERT_MLP = KernelScenario(
     # loss costs the scenario -- and GroupedExperts has neither a megatron nor
     # a TransformerEngine dependency to lose.
     baseline_arm="titan",
-    # The synthetic rows are split evenly across the experts, exactly as
-    # swiglu_inputs splits them, so a workload where batch * seq_len * top_k
-    # does not divide by num_experts must fail loudly rather than be capped or
-    # rounded. The inputs builder re-asserts it too, with both numbers named,
+    # The synthetic rows are split evenly across the experts, so a workload
+    # where batch * seq_len * top_k does not divide by num_experts must fail
+    # loudly rather than be capped or rounded. The inputs builder re-asserts it too, with both numbers named,
     # for callers that reach it without passing through the runner.
     requires_balanced_routing=True,
     # Explicit, exhaustive, and deliberately NOT the derived set. The
@@ -2316,7 +2269,8 @@ EXPERT_MLP = KernelScenario(
     #   * TorchTitan's own w13 fusion against unfused experts, then each Piper
     #     layout against that fusion, which is what each of them modified.
     #
-    # The row swiglu published -- a Piper arm against unfused experts -- is
+    # The row the retired swiglu scenario published -- a Piper arm against
+    # unfused experts -- is
     # deliberately absent. It is recoverable from the per-replicate samples
     # results.json keeps, and the fused-against-unfused row above supplies the
     # factor the two differ by. It is not declared because the printed table
@@ -2470,8 +2424,9 @@ EXPERT_MLP = KernelScenario(
         # this scenario can afford precisely because it publishes no
         # cross-engine row: no table compares a titan backward against a
         # megatron one, and dropping it from both -- which qkv_prep, ffn_norm
-        # and attn_out_proj do, and must -- would delete the swiglu scenario's
-        # backward numbers and buy nothing.
+        # and attn_out_proj do, and must -- would delete the isolated
+        # backward numbers the retired swiglu scenario published, and buy
+        # nothing.
         KernelArm(
             name="titan",
             description=(
@@ -3913,7 +3868,6 @@ KERNEL_SCENARIOS = {
     scenario.name: scenario
     for scenario in (
         ROPE,
-        SWIGLU,
         LM_HEAD,
         EMBEDDING_STAGE,
         QKV_PREP,

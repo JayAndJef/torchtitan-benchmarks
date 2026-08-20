@@ -104,8 +104,8 @@ class KernelWorkload:
     is not a model change. Everything geometric -- dim, head counts, expert
     width, vocabulary, ``max_seq_len`` -- belongs to the shape, and no
     per-family shapes live in either: each scenario's inputs builder computes
-    what it needs (swiglu rows = batch * seq_len * top_k, fused-qkv out
-    features = (n_heads + 2 * n_kv_heads) * head_dim, lm_head tokens =
+    what it needs (expert_mlp rows = batch * seq_len * top_k, fused-qkv out
+    features = (n_heads + 2 * n_kv_heads) * head_dim, cross_entropy tokens =
     batch * seq_len).
     """
 
@@ -149,7 +149,7 @@ def routing_divides_evenly(
     -- ``dispatch_permute`` does, because its per-token expert offsets come
     from a permutation reduced modulo the expert count -- asserts that itself,
     with named numbers. Moving the stronger condition here would make
-    ``swiglu`` skip workloads it can measure.
+    ``expert_mlp`` skip workloads it can measure.
     """
     return (
         workload.batch * workload.seq_len * shape.top_k
@@ -423,13 +423,6 @@ def shape_summary(
             "titan_table_rows": shape.max_seq_len,
             "mcore_freqs": [seq, 1, 1, shape.head_dim],
             "rotated_rows": batch * seq * (shape.n_heads + shape.n_kv_heads),
-        }
-    if scenario_name == "swiglu":
-        rows = batch * seq * shape.top_k
-        per_expert = rows // shape.num_experts
-        return {
-            "x": [rows, shape.dim],
-            "tokens_per_expert": [per_expert] * shape.num_experts,
         }
     if scenario_name == "lm_head":
         return {

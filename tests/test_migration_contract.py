@@ -66,7 +66,6 @@ SWIGLU_INDUCTOR_OVERRIDE = (
 # undo the split, and nothing else in the suite would notice.
 KERNEL_ARMS_MODULES = {
     "rope": "benchmarks.kernel.operations.rope",
-    "swiglu": "benchmarks.kernel.operations.swiglu",
     "lm_head": "benchmarks.kernel.operations.lm_head",
     "embedding_stage": "benchmarks.kernel.operations.embedding_stage",
     "qkv_prep": "benchmarks.kernel.operations.qkv_prep",
@@ -133,7 +132,6 @@ KERNEL_INVENTORY = {
         "titan/helion",
         "titan/te",
     ),
-    "swiglu": ("baseline", "piper_optimized_triton", "piper_optimized_inductor"),
     "lm_head": (
         "baseline",
         "fused_linear_ce",
@@ -250,7 +248,6 @@ KERNEL_INVENTORY = {
 
 KERNEL_BASELINE_ARMS = {
     "rope": "mcore/base",
-    "swiglu": "baseline",
     "lm_head": "baseline",
     # The anchor is mcore/base at every cross-engine scenario that publishes a
     # cross-engine row. Several of them hold mcore-only variant arms that can
@@ -304,8 +301,17 @@ KERNEL_BASELINE_ARMS = {
 # out/, keys in every manifest.json and results.json, and every published
 # rope number, and this file's own section 1 requires them to survive byte
 # for byte.
+#
+# ``swiglu``, ``qkv`` and ``attention`` left it by being deleted: expert_mlp,
+# qkv_prep and attention_core re-homed every one of their arms, and each
+# successor is cross-engine, so none of the three could take the departed
+# scenario's place here. ONE ENTRY IS LEFT, AND THE MAP IS KEPT.
+# ``lm_head`` is the last single-engine kernel scenario, its four arms carry
+# the four ids piper1b_lm_head carries, and reports cite the pair. A rename
+# on one side alone is exactly what this table catches, and a table of one
+# catches it as well as a table of four. Delete the table and the guard goes
+# with it, for a saving of two lines.
 KERNEL_TO_E2E_SCENARIO = {
-    "swiglu": "piper1b_swiglu",
     "lm_head": "piper1b_lm_head",
 }
 # A bandwidth floor has no end-to-end counterpart, so it is excluded from the
@@ -346,8 +352,8 @@ class StableIdInventoryTests(unittest.TestCase):
     def test_kernel_arm_names_still_match_their_e2e_counterparts(self) -> None:
         """The same implementation carries the same id at both scopes.
 
-        Reports lean on this: piper1b_swiglu/piper_optimized_triton and
-        swiglu/piper_optimized_triton are documented as the same code
+        Reports lean on this: piper1b_lm_head/piper_optimized_te_ce and
+        lm_head/piper_optimized_te_ce are documented as the same code
         measured two ways. A rename on one side alone would silently break
         the pairing.
         """
@@ -921,10 +927,10 @@ TEST_CENSUS = {
     # that a selection missing the anchor, a reference or a real arm name is
     # refused rather than repaired.
     "test_kernel_cli": 31,
-    # -1 with the deletion of the single-engine ``qkv`` scenario: the
-    # smoke test names one scenario per test, and this one had no
-    # scenario left to name.
-    "test_kernel_gpu_smoke": 3,
+    # -2 with the deletion of the single-engine ``qkv`` and ``swiglu``
+    # scenarios: the smoke test names one scenario per test, and neither
+    # of these two had a scenario left to name.
+    "test_kernel_gpu_smoke": 2,
     # Added when the merge got a direct caller: every other merge assertion
     # reaches it through execute_kernel_run, which spawns replicate-major and
     # therefore never hands _ordered_replicates the arrival order it exists
@@ -1155,7 +1161,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 991
+TEST_CENSUS_TOTAL = 990
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

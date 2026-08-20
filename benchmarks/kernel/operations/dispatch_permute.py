@@ -206,7 +206,7 @@ class DispatchPermuteInputs:
     form each one consumes, which is what plan section B.4 requires: the one
     place routing values reach timing is here, so both engines must receive the
     same ``tokens_per_expert`` and the same routing map, exactly as
-    ``swiglu_inputs`` does today.
+    ``expert_mlp_inputs`` does today.
 
     * TorchTitan's ``MoE.forward`` consumes ``topk_expert_ids_BLK`` and
       ``topk_scores_BLK`` from its router and builds the one-hot map itself.

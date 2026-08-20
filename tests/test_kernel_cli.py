@@ -214,7 +214,7 @@ class KernelCliTests(unittest.TestCase):
                     "kernel-bench",
                     "7",
                     "--scenario",
-                    "swiglu",
+                    "expert_mlp",
                     "--replicates",
                     "3",
                     "--samples-per-replicate",
@@ -237,7 +237,7 @@ class KernelCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
         self.assertEqual(request.gpu, "7")
-        self.assertEqual(request.scenario_names, ("swiglu",))
+        self.assertEqual(request.scenario_names, ("expert_mlp",))
         self.assertEqual(
             (
                 request.replicates,
@@ -365,7 +365,7 @@ class KernelRunnerTests(unittest.TestCase):
             execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("rope", "swiglu"),
+                    scenario_names=("rope", "expert_mlp"),
                     timestamp="stamp",
                     compiler_env=compiler_env,
                 ),
@@ -377,12 +377,12 @@ class KernelRunnerTests(unittest.TestCase):
         error_index = next(
             index for index, (kind, _) in enumerate(kinds) if kind == "error"
         )
-        swiglu_index = next(
+        expert_mlp_index = next(
             index
             for index, (kind, message) in enumerate(kinds)
-            if kind == "arm" and "swiglu" in message
+            if kind == "arm" and "expert_mlp" in message
         )
-        self.assertLess(error_index, swiglu_index)
+        self.assertLess(error_index, expert_mlp_index)
         self.assertIn("boom", kinds[error_index][1])
 
     def test_a_skip_closes_over_correctness_references(self) -> None:
@@ -455,7 +455,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("rope", "swiglu"),
+                    scenario_names=("rope", "expert_mlp"),
                     replicates=2,
                     timestamp="stamp",
                     compiler_env=Path(temporary) / "missing.sh",
@@ -465,7 +465,7 @@ class KernelRunnerTests(unittest.TestCase):
             )
         by_name = {outcome.scenario: outcome for outcome in outcomes}
         self.assertFalse(by_name["rope"].failed)
-        self.assertFalse(by_name["swiglu"].failed)
+        self.assertFalse(by_name["expert_mlp"].failed)
         arms = by_name["rope"].result.arms
         self.assertEqual(arms["titan/te"].status, "skipped")
         self.assertIn("compiler environment", arms["titan/te"].status_reason)
@@ -646,7 +646,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     replicates=2,
                     samples_per_replicate=2,
                     burst_k=8,
@@ -677,7 +677,7 @@ class KernelRunnerTests(unittest.TestCase):
 
         # One correctness pass, then replicates x arms timing passes, in
         # replicate-major order.
-        arms = [arm.name for arm in kernel_scenario_by_name("swiglu").arms]
+        arms = [arm.name for arm in kernel_scenario_by_name("expert_mlp").arms]
         timing = [
             (
                 argv[argv.index("--arm") + 1],
@@ -693,7 +693,7 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["kind"], "kernel")
         self.assertEqual(manifest["schema_version"], 6)
         self.assertEqual(manifest["skipped_arms"], {})
-        self.assertEqual(manifest["scenario"], "swiglu")
+        self.assertEqual(manifest["scenario"], "expert_mlp")
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
         self.assertNotIn("spec", manifest)
         self.assertEqual(manifest["model_size"], "normal")
@@ -859,8 +859,8 @@ class KernelRunnerTests(unittest.TestCase):
             "benchmarks.kernel.runner.add_compiler_environment",
             side_effect=lambda env, script: {**env, "SOURCED": "1"},
         ) as compiler:
-            self.assertEqual(run(("swiglu",), temporary, compiler), 0)
-            self.assertEqual(run(("swiglu", "rope"), temporary, compiler), 1)
+            self.assertEqual(run(("expert_mlp",), temporary, compiler), 0)
+            self.assertEqual(run(("expert_mlp", "rope"), temporary, compiler), 1)
 
     def test_missing_compiler_env_skips_only_the_te_arm(self) -> None:
         fake_process = fragment_writer()
@@ -880,7 +880,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu", "rope"),
+                    scenario_names=("expert_mlp", "rope"),
                     replicates=2,
                     timestamp="stamp",
                 ),
@@ -888,15 +888,15 @@ class KernelRunnerTests(unittest.TestCase):
                 environment={"PATH": "/usr/bin"},
             )
         by_name = {outcome.scenario: outcome for outcome in outcomes}
-        self.assertFalse(by_name["swiglu"].failed)
+        self.assertFalse(by_name["expert_mlp"].failed)
         self.assertFalse(by_name["rope"].failed)
         arms = by_name["rope"].result.arms
         self.assertEqual(arms["titan/te"].status, "skipped")
         self.assertIn("C++20 host compiler", arms["titan/te"].status_reason)
         self.assertEqual(arms["titan"].status, "ok")
 
-    def test_unbalanced_routing_skips_only_swiglu(self) -> None:
-        """An odd batch x seq_len breaks swiglu's balanced split (rows =
+    def test_unbalanced_routing_skips_only_expert_mlp(self) -> None:
+        """An odd batch x seq_len breaks expert_mlp's balanced split (rows =
         batch * seq_len * top_k against 4 experts); the other scenarios run."""
         events = []
         fake_process = fragment_writer()
@@ -911,7 +911,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu", "rope"),
+                    scenario_names=("expert_mlp", "rope"),
                     batch=3,
                     seq_len=1025,
                     timestamp="stamp",
@@ -922,13 +922,13 @@ class KernelRunnerTests(unittest.TestCase):
                 event_handler=events.append,
             )
         by_name = {outcome.scenario: outcome for outcome in outcomes}
-        self.assertTrue(by_name["swiglu"].failed)
+        self.assertTrue(by_name["expert_mlp"].failed)
         self.assertIn(
             "6150 routed rows (batch 3 x seq 1025 x top_k 2) do not divide "
             "evenly among 4 experts",
-            by_name["swiglu"].error,
+            by_name["expert_mlp"].error,
         )
-        self.assertIsNone(by_name["swiglu"].result)
+        self.assertIsNone(by_name["expert_mlp"].result)
         self.assertFalse(by_name["rope"].failed)
         self.assertIsNotNone(by_name["rope"].result)
         # Loud, not silent: the skip is streamed as it happens.
@@ -939,17 +939,17 @@ class KernelRunnerTests(unittest.TestCase):
             )
         )
         # No output directory is created for a scenario that never ran.
-        self.assertFalse(by_name["swiglu"].out_dir.exists())
+        self.assertFalse(by_name["expert_mlp"].out_dir.exists())
 
     def test_worker_crash_surfaces_the_log_tail(self) -> None:
-        fake_process = fragment_writer(correctness_code={"swiglu": 1})
+        fake_process = fragment_writer(correctness_code={"expert_mlp": 1})
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     out_dir=Path(temporary) / "kernels",
                 ),
                 process_runner=fake_process,
@@ -973,7 +973,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     replicates=2,
                     out_dir=out_dir,
                 ),
@@ -992,7 +992,7 @@ class KernelRunnerTests(unittest.TestCase):
         # scenario that measured nothing from one that declared nothing.
         self.assertEqual(
             {name: arm.status for name, arm in result.arms.items()},
-            {arm.name: "skipped" for arm in kernel_scenario_by_name("swiglu").arms},
+            {arm.name: "skipped" for arm in kernel_scenario_by_name("expert_mlp").arms},
         )
         # The request is recorded, not the zero replicates that ran.
         self.assertEqual(result.replicates, 2)
@@ -1020,7 +1020,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     replicates=2,
                     out_dir=Path(temporary) / "kernels",
                 ),
@@ -1066,9 +1066,9 @@ class KernelRunnerTests(unittest.TestCase):
     def test_anchor_loss_writes_no_results(self) -> None:
         """Every comparison is a ratio against the anchor; without it there is
         no coherent table to write."""
-        anchor = kernel_scenario_by_name("swiglu").baseline_arm
+        anchor = kernel_scenario_by_name("expert_mlp").baseline_arm
         fake_process = fragment_writer(
-            skip_timing=(("swiglu", anchor, 1),)
+            skip_timing=(("expert_mlp", anchor, 1),)
         )
 
         metadata_patch, pinning_patch = patched_environment()
@@ -1077,7 +1077,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     replicates=2,
                     out_dir=out_dir,
                 ),
@@ -1092,16 +1092,16 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertEqual(outcomes[0].failed_passes, (f"{anchor} r1",))
 
     def test_one_lost_arm_keeps_the_others_and_still_fails(self) -> None:
-        scenario = kernel_scenario_by_name("swiglu")
+        scenario = kernel_scenario_by_name("expert_mlp")
         lost = scenario.arms[-1].name
-        fake_process = fragment_writer(skip_timing=(("swiglu", lost, 0),))
+        fake_process = fragment_writer(skip_timing=(("expert_mlp", lost, 0),))
 
         metadata_patch, pinning_patch = patched_environment()
         with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     replicates=2,
                     out_dir=Path(temporary) / "kernels",
                 ),
@@ -1129,7 +1129,7 @@ class KernelRunnerTests(unittest.TestCase):
         mode, so it appeared in no table and in no unmeasured list. It
         vanished, and the scenario exited 0.
         """
-        scenario = kernel_scenario_by_name("swiglu")
+        scenario = kernel_scenario_by_name("expert_mlp")
         empty = scenario.arms[-1].name
         fake_process = fragment_writer(empty_arms=(empty,))
 
@@ -1138,7 +1138,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     replicates=2,
                     out_dir=Path(temporary) / "kernels",
                 ),
@@ -1158,7 +1158,7 @@ class KernelRunnerTests(unittest.TestCase):
     def test_an_empty_anchor_writes_no_results(self) -> None:
         """The same failure one level up. Every comparison is a ratio against
         the anchor, so an anchor that measured nothing has no table."""
-        anchor = kernel_scenario_by_name("swiglu").baseline_arm
+        anchor = kernel_scenario_by_name("expert_mlp").baseline_arm
         fake_process = fragment_writer(empty_arms=(anchor,))
 
         metadata_patch, pinning_patch = patched_environment()
@@ -1167,7 +1167,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("swiglu",),
+                    scenario_names=("expert_mlp",),
                     replicates=2,
                     out_dir=out_dir,
                 ),

@@ -94,7 +94,7 @@ def _gc_paused():
 
     The measured arms only stay ahead of the GPU if the host keeps enqueuing;
     a collection pause starves the stream and lands as idle time inside
-    whichever arm's interval was open. Measured on the swiglu modules: sd
+    whichever arm's interval was open. Measured on the expert modules: sd
     fell from ~63 us to ~1.4 us and every 2x outlier disappeared, with the
     median unchanged. ``timeit`` disables the collector for the same reason.
     """

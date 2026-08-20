@@ -166,7 +166,7 @@ says so.
 
 **The balanced-routing invariant does not apply to this scenario, and that is
 a decision rather than an omission.** ``routing_divides_evenly``
-(``benchmarks/kernel/schema.py``) exists so ``swiglu_inputs`` can hand every
+(``benchmarks/kernel/schema.py``) exists so ``expert_mlp_inputs`` can hand every
 expert an equal slice of ``batch * seq_len * top_k`` synthetic rows. This
 scenario materializes no per-expert tensor and hands no expert a slice: the
 router computes the split itself from the data, and its output shape is

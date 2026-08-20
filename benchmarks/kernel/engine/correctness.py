@@ -183,8 +183,9 @@ def run_correctness(
     This takes each arm's *outputs*, not its ``BuiltArm``. A gate never needs
     a module -- it subtracts one named tensor from another -- so the caller
     builds an arm, takes its outputs, and frees it before building the next.
-    Holding every arm at once is what made ``swiglu`` at the huge shape
-    exhaust a 139 GiB device in this pass while each arm alone fits.
+    Holding every arm at once is what made the retired ``swiglu`` scenario at
+    the huge shape exhaust a 139 GiB device in this pass while each arm alone
+    fits.
 
     The separation was already half here: the old signature took the arms and
     then cached exactly these dictionaries. Taking the dictionaries directly

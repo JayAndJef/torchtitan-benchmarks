@@ -44,14 +44,12 @@ Three consequences follow, and each is enforced rather than described:
   shared inputs and its absence from every titan closure is the scenario's
   asymmetry, written down.
 
-**This scenario supersedes the ``swiglu`` scenario once it is registered.**
+**This scenario replaced the ``swiglu`` scenario, which is now deleted.**
 ``swiglu``'s three arms are ``titan``, ``titan/piper_optimized_triton`` and
 ``titan/piper_optimized_inductor`` here, built the same way from the same
-shared fp32 weights, so their numbers carry across. The future tense is
-deliberate: these builders are not reachable from
-``benchmarks/kernel/registry.py`` yet, because the scenario declaration lands
-in its own commit, and until it does ``swiglu`` is still the only scenario
-measuring this layer.
+shared fp32 weights, so their numbers carry across. A ``swiglu``
+``results.json`` under ``out/`` is a measurement of these same three
+modules, taken without the megatron half of the roster beside them.
 
 **``titan/fused_grouped_experts`` exists because its absence misattributes
 credit.** ``FusedGroupedExperts``
@@ -63,8 +61,8 @@ TorchTitan's **own** w13 fusion: the same ``(E, F, 2, D)`` ``w13`` parameter
 "what the combined activation layout buys over titan's own fusion", not "what
 fusing w13 buys over unfused experts", and their published opponent is
 ``titan/fused_grouped_experts`` rather than ``titan``. The ``titan`` row that
-the ``swiglu`` scenario published is not declared here; it is recoverable from
-the per-replicate samples ``results.json`` keeps, and the
+the retired ``swiglu`` scenario published is not declared here; it is
+recoverable from the per-replicate samples ``results.json`` keeps, and the
 ``titan/fused_grouped_experts`` against ``titan`` row is what supplies the
 factor it differs by.
 
@@ -77,9 +75,9 @@ GEMM and calls ``silu_and_mul_op`` (``fused_swiglu.py:560``), which is a
 ``torch.compile(fullgraph=True)``, and a custom op is opaque to Inductor where
 the anchor's plain ops fuse into their neighbours. So the row is the w13 fusion
 **plus a lost activation fusion**, and the two push in opposite directions --
-the same mechanism CLAUDE.md records for ``swiglu`` as "the swiglu combined
-layout wins eager, loses compiled". A ratio near 1.0 there is therefore
-ambiguous between "the fusion bought nothing" and "the fusion gain was
+the same mechanism CLAUDE.md records as "the swiglu combined layout wins
+eager, loses compiled". A ratio near 1.0 there is therefore ambiguous
+between "the fusion bought nothing" and "the fusion gain was
 cancelled", and the first reading is the likeliest wrong number this scenario
 can publish. Read it as upstream's fused expert layer against upstream's
 unfused one, and attribute nothing in it to the GEMM count.
@@ -171,9 +169,10 @@ storage; TE's ``SwiGLU`` operation clears its saved tensors too. The four titan
 arms keep the mode, because this scenario publishes no cross-engine row: no
 table compares a titan ``backward`` against a megatron one, so dropping it from
 both -- which ``qkv_prep``, ``ffn_norm`` and ``attn_out_proj`` do, and must,
-because they publish such a row -- would delete the ``swiglu`` scenario's
-backward numbers and buy nothing. Megatron's backward cost stays recoverable as
-``forward_backward`` minus ``forward``.
+because they publish such a row -- would delete the isolated backward
+numbers the retired ``swiglu`` scenario published, and buy nothing.
+Megatron's backward cost stays recoverable as ``forward_backward`` minus
+``forward``.
 
 **The routing probabilities require grad on the megatron side, deliberately.**
 In production they carry a gradient back to the router, and two of the four
@@ -196,7 +195,7 @@ the whole 10.5 B-parameter megatron model before one layer is read out of it,
 and on top of an fp64 reference whose weight gradients alone are 47.3 GiB.
 Nothing in this scenario has ever run on a GPU at either shape; the ``huge``
 figures are arithmetic, not a measurement, and the warning CLAUDE.md already
-carries for ``swiglu`` applies here unchanged.
+carries for the retired ``swiglu`` scenario applies here unchanged.
 
 **Every torchtitan, megatron and TransformerEngine import is deferred into the
 builder that needs it**, which is the rule across ``operations/``.
@@ -690,10 +689,10 @@ def _build_titan_module(
 ) -> nn.Module:
     """One expert layer, loaded from the shared fp32 state, then cast.
 
-    The load order matters and is the same one ``swiglu`` and ``qkv_prep``
-    use: build in fp32, load the fp32 shared values, then cast to bf16 in one
-    step, so every arm rounds the same values once. The three fused modules
-    see unquantized values in their ``load_state_dict`` merge hooks, which is
+    The load order matters and is the same one ``qkv_prep`` uses: build in
+    fp32, load the fp32 shared values, then cast to bf16 in one step, so every
+    arm rounds the same values once. The three fused modules see unquantized
+    values in their ``load_state_dict`` merge hooks, which is
     what makes their ``w13`` the bf16 rounding of the same numbers the stock
     arm holds in two parameters.
     """

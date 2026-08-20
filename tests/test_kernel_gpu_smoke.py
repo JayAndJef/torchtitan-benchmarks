@@ -70,9 +70,6 @@ class KernelScenarioSmokeTests(unittest.TestCase):
                     self.assertEqual(len(replicate), 3)
                 self.assertEqual(len(measured[mode].samples_us), 6)
 
-    def test_swiglu(self) -> None:
-        self._run("swiglu")
-
     def test_lm_head(self) -> None:
         self._run("lm_head")
 

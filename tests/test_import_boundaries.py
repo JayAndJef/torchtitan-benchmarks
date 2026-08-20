@@ -152,7 +152,6 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.operations.qk_norm",
     "benchmarks.kernel.operations.qkv_prep",
     "benchmarks.kernel.operations.rope",
-    "benchmarks.kernel.operations.swiglu",
     "benchmarks.kernel.engine.arm",
     "benchmarks.kernel.engine.correctness",
     "benchmarks.kernel.engine.measurement",

@@ -275,7 +275,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_only_te_requires_gcc_toolset(self) -> None:
         self.assertTrue(kernel_scenario_by_name("rope").requires_gcc_toolset)
-        for name in ("swiglu", "lm_head", "qkv_prep"):
+        for name in ("expert_mlp", "lm_head", "qkv_prep"):
             self.assertFalse(
                 kernel_scenario_by_name(name).requires_gcc_toolset
             )
@@ -350,7 +350,7 @@ class RegistryTests(unittest.TestCase):
         }
         self.assertEqual(
             balanced,
-            {"swiglu", "dispatch_permute", "expert_mlp", "moe_combine"},
+            {"dispatch_permute", "expert_mlp", "moe_combine"},
         )
 
 
@@ -358,9 +358,9 @@ class ShapeAndWorkloadTests(unittest.TestCase):
     def test_shape_arithmetic(self) -> None:
         shape, workload = resolve_shape_and_workload()
         self.assertEqual((workload.batch, workload.seq_len), (4, 1024))
-        swiglu = shape_summary("swiglu", shape, workload)
-        self.assertEqual(swiglu["x"], [8192, 1024])
-        self.assertEqual(swiglu["tokens_per_expert"], [2048] * 4)
+        expert_mlp = shape_summary("expert_mlp", shape, workload)
+        self.assertEqual(expert_mlp["x"], [8192, 1024])
+        self.assertEqual(expert_mlp["tokens_per_expert"], [2048] * 4)
         qkv_prep = shape_summary("qkv_prep", shape, workload)
         self.assertEqual(qkv_prep["wqkv"], [2048, 1024])
         lm_head = shape_summary("lm_head", shape, workload)
@@ -393,7 +393,7 @@ class ShapeAndWorkloadTests(unittest.TestCase):
     def test_workload_overrides_apply(self) -> None:
         shape, workload = resolve_shape_and_workload(batch=1, seq_len=2048)
         self.assertEqual(
-            shape_summary("swiglu", shape, workload)["x"], [4096, 1024]
+            shape_summary("expert_mlp", shape, workload)["x"], [4096, 1024]
         )
 
     def test_seq_len_is_bounded_by_the_shapes_ceiling(self) -> None:
@@ -462,13 +462,13 @@ class ShapeAndWorkloadTests(unittest.TestCase):
 class BalancedRoutingInvariantTests(unittest.TestCase):
     """The invariant must hold at every entry point, not just the runner's.
 
-    ``execute_kernel_run`` skips an unbalanced swiglu scenario loudly before
-    it spawns a worker, but that is the friendly path, not the guard:
+    ``execute_kernel_run`` skips an unbalanced expert_mlp scenario loudly
+    before it spawns a worker, but that is the friendly path, not the guard:
     ``python -m benchmarks.kernel.worker`` and direct ``run_kernel_scenario``
     callers (``tests/test_kernel_gpu_smoke.py``) never pass through it. Left
-    unchecked there, ``swiglu_inputs`` builds ``batch * seq_len * top_k`` rows
-    and then splits them into ``num_experts`` equal blocks that do not cover
-    them -- a different workload measured under the scenario's name.
+    unchecked there, ``expert_mlp_inputs`` builds ``batch * seq_len * top_k``
+    rows and then splits them into ``num_experts`` equal blocks that do not
+    cover them -- a different workload measured under the scenario's name.
     """
 
     def test_run_kernel_scenario_rejects_an_uneven_split(self) -> None:
@@ -477,7 +477,7 @@ class BalancedRoutingInvariantTests(unittest.TestCase):
         shape, workload = resolve_shape_and_workload(batch=3, seq_len=1025)
         with self.assertRaises(ValueError) as caught:
             run_kernel_scenario(
-                kernel_scenario_by_name("swiglu"),
+                kernel_scenario_by_name("expert_mlp"),
                 shape,
                 workload,
                 RunOptions(),
@@ -597,8 +597,8 @@ def _residency_builder(shape, workload, inputs):
 class CorrectnessResidencyTests(unittest.TestCase):
     """One arm is resident at a time, and the pass keeps only the outputs.
 
-    ``swiglu`` at the huge shape exhausted a 139 GiB device in the gate pass
-    while each of its three arms fits alone. The pass held every arm at once;
+    The retired ``swiglu`` scenario at the huge shape exhausted a 139 GiB
+    device in the gate pass while each of its three arms fits alone. The pass held every arm at once;
     a check only ever needs two output *tensors*. This pins the fix, because
     the failure it prevents needs a GPU and a 10 B-parameter shape to
     reproduce and would otherwise be untested.

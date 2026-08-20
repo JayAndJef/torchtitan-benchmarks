@@ -156,8 +156,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Backward-mode timing re-runs a compiled backward graph with
     # retain_graph=True; AOT autograd's donated-buffer optimization forbids
-    # re-execution and raises on arms that save intermediates (swiglu's
-    # gate_up). Disabling it changes backward buffer reuse, not the
+    # re-execution and raises on arms that save intermediates
+    # (expert_mlp's gate_up). Disabling it changes backward buffer reuse, not the
     # generated kernels, and applies to every arm alike.
     functorch_config.donated_buffer = False
 

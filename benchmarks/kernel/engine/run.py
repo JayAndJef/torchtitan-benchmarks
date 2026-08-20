@@ -170,8 +170,8 @@ def _prepare(
     # it holds on any host: the runner's loud skip is the friendly path, not
     # the guard. `python -m benchmarks.kernel.worker` and direct callers reach
     # this function without passing through it, and an unbalanced split is the
-    # violation that can measure rather than fail -- swiglu_inputs hands every
-    # expert an equal slice that does not cover the rows it just built.
+    # violation that can measure rather than fail -- expert_mlp_inputs hands
+    # every expert an equal slice that does not cover the rows it just built.
     if scenario.requires_balanced_routing and not routing_divides_evenly(
         shape, workload
     ):
@@ -282,7 +282,7 @@ def gate_outputs(
 
     The invariant: when arm N is built, arms 1..N-1 are already collected.
     Only their output tensors survive, and those are a small fraction of what
-    an arm allocates -- at the huge shape a swiglu arm holds an 11.8 GiB bf16
+    an arm allocates -- at the huge shape an expert arm holds an 11.8 GiB bf16
     expert copy and grows a weight gradient of the same size, against
     activations measured in tens of MiB.
     """
@@ -321,8 +321,8 @@ def run_correctness_pass(
     **One arm is resident at a time.** A gate compares tensors, not modules,
     so each arm is built, asked for its outputs, and dropped before the next
     one is built. The pass held every arm at once until this changed, and
-    ``swiglu`` at the huge shape exhausted a 139 GiB device here while each
-    of its three arms fits alone: three bf16 expert copies of about 11.8 GiB,
+    the retired ``swiglu`` scenario at the huge shape exhausted a 139 GiB
+    device here while each of its three arms fits alone: three bf16 expert copies of about 11.8 GiB,
     plus a weight gradient of the same size per arm.
 
     The pair that was expected to force separate processes does not.
