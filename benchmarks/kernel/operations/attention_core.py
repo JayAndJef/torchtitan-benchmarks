@@ -96,12 +96,12 @@ description that megatron **defers** this copy to the arm that consumes the
 views, and names this scenario as that arm. Handing megatron three
 contiguous tensors instead would measure a layout megatron never produces.
 
-**One half of the deferred copy lands in no scenario, and it is not this
-one.** In the engine the key's 4 MiB is absorbed by ``k_layernorm``, which
-belongs to the ``qk_norm`` scenario -- and that scenario feeds its megatron
-arm a contiguous key (``operations/qk_norm.py``), so nothing times it. This
-scenario declines to double-book it. Fixing it means giving ``qk_norm``'s
-megatron arm a strided key, which is that scenario's change to make.
+**The other half of the deferred copy belongs to another scenario, and that
+scenario now collects it.** In the engine the key's 4 MiB is absorbed by
+``k_layernorm``, which belongs to ``qk_norm``. That scenario builds the same
+fused buffer and hands its megatron arm the same kind of strided view
+(``operations/qk_norm.py``), so the key's half is timed there and this one
+declines to double-book it. The two halves together are the whole 8 MiB.
 
 Verified on CPU, because strides and TE's classifier need no device:
 ``torch.split`` of the fused buffer gives the value the strides
@@ -565,7 +565,7 @@ class AttentionCoreInputs:
     call. The sibling scenario ``qkv_prep`` states that megatron **defers**
     this copy to the arm that consumes the views; this scenario is that arm
     for the value. See the module docstring for the key's half, which
-    ``qk_norm`` measures nowhere today.
+    ``qk_norm`` now measures.
     """
 
     q_BLNH: torch.Tensor
@@ -625,9 +625,10 @@ def _megatron_core_attention_inputs(
     not**, and this scenario begins after RoPE:
 
     * The query is reshaped (``attention.py:1908``), then normed
-      (``:1928``), then rotated (``:1500``). Each step writes a fresh
-      tensor.
-    * The key is normed (``:1929``) and rotated (``:1518``). ``BASE`` sets
+      (``:1923``), then rotated (``:1500``). The reshape alone writes a
+      fresh tensor, because it merges the group dimension with the query
+      heads inside a group and the fused row is wider than ``Q * H``.
+    * The key is normed (``:1926``) and rotated (``:1518``). ``BASE`` sets
       ``qk_layernorm: True``, so ``k_layernorm`` is a real norm and not an
       ``IdentityOp`` (``gpt_layer_specs.py:148-152``). A norm reading a
       non-dense view writes a contiguous output.

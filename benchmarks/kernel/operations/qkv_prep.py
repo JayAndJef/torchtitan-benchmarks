@@ -81,20 +81,20 @@ to two different places.
   (``dot_product_attention/utils.py:2428-2431``). That scenario builds the
   fused buffer and hands its megatron arms the same strided value, so the
   cost is timed where the engine pays it.
-* **The key's 4 MiB is absorbed by ``k_layernorm``, and today it is timed
-  NOWHERE.** ``BASE`` sets ``qk_layernorm: True``, so ``k_layernorm`` is a
-  real norm, and ``attention.py:1929`` reassigns ``key`` to its contiguous
-  output. The read of the strided key is therefore the norm's cost, which
-  belongs to scenario 3, ``qk_norm`` -- but ``qk_norm_inputs`` materializes
-  both engines' layouts contiguously, so no arm there moves it.
-  ``attention_core`` declines to double-book it. **Owed work**: give
-  ``qk_norm``'s megatron arm a strided key, in that scenario.
+* **The key's 4 MiB lands in ``qk_norm`` (scenario 3).** ``BASE`` sets
+  ``qk_layernorm: True``, so ``k_layernorm`` is a real norm, and
+  ``attention.py:1926`` reassigns ``key`` to its contiguous output. The read
+  of the strided key is therefore that norm's cost. ``qk_norm_inputs``
+  builds the same fused buffer, splits it the same way and hands its
+  megatron arm the same strided key, so the cost is timed where the engine
+  pays it. TransformerEngine's RMSNorm materializes the view inside
+  ``op_forward`` (``ops/basic/rmsnorm.py:182``), which is inside the timed
+  closure. ``attention_core`` declines to double-book it.
 
-So the scenarios sum to 4 MiB of this traffic today, not 8. This row read
-alone still overstates titan's projection cost, by roughly 8 MiB per
-direction; megatron pays half of that later and the other half is currently
-unmeasured. The scenario ``description`` in ``registry.py`` still carries the
-older wording and needs the same correction.
+So the two halves are deferred to two scenarios and **both are now
+collected**: the scenarios sum to the whole 8 MiB. This row read alone still
+overstates titan's projection cost, by roughly 8 MiB per direction, because
+megatron pays that traffic in two later scenarios rather than here.
 
 **The qk norms are excluded, and excluding them takes an explicit step.**
 ``get_query_key_value_tensors`` also applies ``q_layernorm`` and
