@@ -1019,6 +1019,29 @@ TEST_CENSUS = {
     # fp32 weight passes the 2e-2 rel_l2 gate, because the bf16 quantization
     # of the activation dominates the metric.
     "test_kernel_lm_head_projection": 33,
+    # Scenario 9: 52 covering the shared inputs, the canonical output
+    # conversion both engines are put through, the two profile deltas, every
+    # arm builder, and the guards. Three of them pin the gate GEMM's branch,
+    # because mcore_bytes_moved is declared rather than measured and it
+    # describes megatron's TransformerEngine path alone.
+    "test_kernel_moe_router": 52,
+    # Scenario 10: 80, the largest of the four. The measurand is a
+    # permutation, so most of them pin the row order -- including the
+    # transcription of megatron's own torch permute path that shows it agrees
+    # with TorchTitan's argsort, which is what the cross-engine bitwise gate
+    # rests on.
+    "test_kernel_dispatch_permute": 80,
+    # Scenario 11: 50 covering the shared weights in all four layouts, the
+    # fp64 reference, all eight arm builders and the guards. The expert-class
+    # guard is the one that matters: megatron polices the agreement between
+    # moe_grouped_gemm's two readers nowhere, and both disagreement
+    # directions are numerically correct.
+    "test_kernel_expert_mlp": 50,
+    # Scenario 12: 62 covering the shared inputs, both engines' fp64 truths,
+    # every arm builder and the guards. A block of them pins the canonical
+    # (expert, token) row order, which is the premise both engines' combines
+    # are checked against.
+    "test_kernel_moe_combine": 62,
     # +3 with the isolation report: that the honest state reaches the reader,
     # that a batched run is marked above the table, and that a renamed
     # interval still prints, with a mark that says it is a lower bound.
@@ -1082,7 +1105,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 643
+TEST_CENSUS_TOTAL = 887
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
