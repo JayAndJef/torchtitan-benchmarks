@@ -356,11 +356,18 @@ trace validation and region pooling. Do not lower `--steps` to save time.
 
 ### Scenarios and arms
 
-Arm names match the kernel scenarios wherever the same implementation is
-measured, so `piper1b_swiglu/piper_optimized_triton` and
-`swiglu/piper_optimized_triton` are the same code at two scopes. Every arm
-in both registries carries a one-line `description`; `./run_bench.sh
-scenarios` prints them and manifests record them.
+Arm names match the kernel scenarios at four scenarios only, and the pairing
+is declared data rather than a naming habit:
+`tests/test_migration_contract.py`'s `KERNEL_TO_E2E_SCENARIO` maps `swiglu`,
+`qkv`, `lm_head` and `attention` onto their `piper1b_*` twins, so
+`piper1b_swiglu/piper_optimized_triton` and `swiglu/piper_optimized_triton`
+are the same code at two scopes. **`rope` left that map when it became
+cross-engine**: its kernel arms are `mcore/base`, `mcore/no_rope_fusion`,
+`titan`, `titan/helion` and `titan/te`, against an e2e `piper1b_rope` that
+still runs `baseline`, `helion` and `te`. The e2e ids are deliberately not
+renamed to match -- they name directories under `out/` and every published
+rope number. Every arm in both registries carries a one-line `description`;
+`./run_bench.sh scenarios` prints them and manifests record them.
 
 The five titan scenarios share `PIPER_1B_REGIONS`: `forward_block` and
 `backward_block`, each 80 invocations per window (16 layers x 5 active
@@ -443,8 +450,10 @@ Dynamo refuses to inline it: any titan arm calling TE attention dies with
 choice, not a gap in our integration, and it is why megatron runs TE eagerly.
 Getting a titan+TE arm would mean excluding that block from compilation,
 which changes the treatment and makes the arm incomparable to the others.
-TE attention is still measured head-to-head in the `attention` kernel
-scenario, where each arm carries its own compile treatment.
+No kernel scenario measures TE attention either: `attention` declares
+`baseline`, `flex_flash` and `flash_attention_3` and no TE arm. A
+cross-engine `attention_core` scenario is in flight in another worktree;
+read the registry for what it ends up declaring.
 
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios
@@ -565,17 +574,20 @@ test. Quote the total only as the arm's step cost.
 `components.py` trace classifier did, and it was removed (before the package
 restructure; it never moved into `tools/`). For the **same-engine**
 case, rank the implementations in the matching `kernel-bench` scenario
-instead: arm names deliberately match across the two registries (see
-"Scenarios and arms"), so `piper1b_attention/flex_flash` and
-`attention/flex_flash` are the same code at two scopes -- while remembering
+instead, where one exists: `KERNEL_TO_E2E_SCENARIO` declares the four
+scenarios whose rosters pair (see "Scenarios and arms"), so
+`piper1b_attention/flex_flash` and `attention/flex_flash` are the same code
+at two scopes -- while remembering
 that a kernel-isolation number is **not device time**: for small kernels it
 is dominated by host dispatch, and `--burst` amortization does not remove
 that (see "Method" under Kernel-isolation benchmarks). A kernel-speed claim
 needs profiler-summed device time, which nothing in this repo currently
 measures. Do not apply the replacement more loosely than the tool it
 replaces. The **cross-engine** case -- attributing a megatron-vs-titan gap to
-particular components -- has no replacement at all, and is what the new
-head-to-head work is for.
+particular components -- is what the 15 cross-engine kernel scenarios are
+for. They are declarations at this rev and nothing more: no `results.json`
+under `out/` names a single one of their arms, so there is no cross-engine
+component number to cite yet.
 
 Measured three times on 2026-08-09, twice producing a published claim that
 had to be retracted:
@@ -942,8 +954,8 @@ own family module.
   point; module arms retain the graph and re-run `torch.autograd.backward`,
   so only backward kernels are timed. `lm_head` is fwd+bwd only because
   `FusedLinearCrossEntropyLoss` runs its backward inside `__call__`.
-- **Every arm is timed in its own process. The gates still build them all in
-  one.** A scenario is one correctness worker plus `replicates x arms` timing
+- **Every arm is timed in its own process. The gates still run in one.** A
+  scenario is one correctness worker plus `replicates x arms` timing
   workers, spawned sequentially by `benchmarks/kernel/runner.py` in
   replicate-major order. (Above `--replicates-per-process 1` the sweep is
   block-major instead, and there are `blocks x arms` workers; see "Startup
@@ -953,12 +965,13 @@ own family module.
   (`benchmarks/kernel/results/merge.py`). The timing split is what keeps one
   arm's dependencies out of another arm's interpreter during measurement, and
   it is why the parent computes the ratios: no timing worker sees a second
-  arm. **`run_correctness_pass` is the exception, and it is a live
-  constraint**: it builds *every* arm of the scenario in one interpreter,
-  because ten of the sixteen arms name another arm as their correctness
-  reference and a check needs both sides at once. It builds one arm at a
-  time and drops it before the next, so the pass is bounded by the largest
-  single arm rather than by their sum. The scenario that was expected to
+  arm. **`run_correctness_pass` is the exception**: it gates *every* arm of
+  the scenario in one interpreter, because 35 of the 73 arms name another
+  arm as their correctness reference and a check needs both sides at once.
+  One arm is resident at a time -- each is built, asked for its outputs, and
+  dropped before the next is built -- so the pass is bounded by the largest
+  single arm rather than by their sum
+  (`benchmarks/kernel/engine/run.py`). The scenario that was expected to
   force a per-arm split -- one holding both a TransformerEngine arm and an
   FA3 arm -- does not: the two were measured to coexist in one process
   (`reports/20260820-te-fa3-coexist.md`). The split may still be wanted, but
