@@ -940,19 +940,16 @@ TEST_CENSUS = {
     # Scenario 5, the last of the cross-engine partition, and the one whose
     # arms no correctness gate can tell apart: cuDNN, FlashAttention and the
     # unfused path all compute attention, so a megatron arm that fell through
-    # to the wrong backend passes every gate the scenario declares. 51 split
-    # roughly in three -- 12 pin the shared inputs, their two engine-native
-    # views and the packed-document invariants; 8 pin the fp64 reference,
-    # including that it respects the document boundaries a causal-only
-    # reference would leak across; and the rest are the guards. 13 of those
-    # exercise every branch of the backend verdict, including the stale
-    # record a second arm in the correctness pass would meet, and one pins
-    # the refutation this roster rests on: TransformerEngine reads no
+    # to the wrong backend passes every gate the scenario declares. By class:
+    # 4 profile deltas, 8 roster, 13 inputs, 3 reference, 5 layout, 4 shared
+    # closures, 12 backend verdict, 7 megatron build guards, 2 markers and
+    # 2 shape summary. Two of them are self-invalidating and are meant to
+    # fail one day: one pins that TransformerEngine reads no
     # NVTE_FLASH_ATTN_V variable, so megatron's flash_attention_version is
-    # inert and the generation cannot be an arm.
-    # +1 for the FlashAttention version TE leaves beside a cuDNN verdict,
-    # which a fused arm must not record as its own.
-    "test_kernel_attention_core": 59,
+    # inert and the generation cannot be an arm; the other pins that TE does
+    # not recognize megatron's fused QKV layout, which is why the megatron
+    # arms carry a copy this scenario times.
+    "test_kernel_attention_core": 60,
     # Scenario 4, the cross-engine rope roster that replaced the
     # single-engine one in place: 35 covering the packed-document inputs in
     # both engine-native forms, the fp64 reference, all five arm builders and
@@ -1095,11 +1092,13 @@ TEST_CENSUS = {
     # dual-delivery field set on one side only is refused -- 5 for the
     # driver's declared-state check, and 1 that the builder takes no default
     # profile.
-    # +2 for the attention-backend encoding: that an unknown backend name is
-    # refused like an unknown activation, that the five names the registry
-    # offers are megatron's own AttnBackend members read out of the pinned
-    # submodule, and that a named backend travels to the config kwargs as a
-    # name for megatron_model.build_model to resolve.
+    # +2 for the attention-backend encoding. Three checks arrive, in two new
+    # tests: that the five names the registry offers are megatron's own
+    # AttnBackend members, read out of the pinned submodule, and that a named
+    # backend travels to the config kwargs as a name for
+    # megatron_model.build_model to resolve. The third -- that an unknown
+    # backend name is refused like an unknown activation -- is one more
+    # assertion inside the existing refusal test, so it adds no row.
     "test_mcore_profiles": 20,
     "test_megatron_data": 5,
     # New with the promotion of the cross-engine weight map out of
@@ -1126,7 +1125,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 948
+TEST_CENSUS_TOTAL = 949
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

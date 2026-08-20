@@ -40,11 +40,11 @@ Which layout each engine reads
 TorchTitan's inner attention takes and returns ``[B, L, N, H]``.
 ``FlexAttention.forward`` transposes to ``[B, N, L, H]`` and back
 (``attention.py:327-353``) and ``VarlenAttention.forward`` reshapes to
-``[T, N, H]`` (``:140-142``); both are views of contiguous storage and
+``[T, N, H]`` (``:139-141``); both are views of contiguous storage and
 neither materializes a copy.
 
 Megatron's THD path takes ``[T, N, H]`` and returns ``[T, N*H]``. The
-reshape megatron then applies (``attention.py:1601-1605``) turns that into
+reshape megatron then applies (``attention.py:1598-1603``) turns that into
 ``[T, 1, N*H]`` for the output projection; it is a view, it belongs to
 ``attn_out_proj``, and this scenario does not run it.
 
@@ -94,9 +94,9 @@ The three forms describe **one** masking function. Every row of
 are also document boundaries, and the block-diagonal causal mask flex builds
 per row is the same predicate the flat ``cu_seqlens`` describes over
 ``B * L``. ``cu_seqlens`` is padded to a fixed multiple with trailing
-full-offset entries, which is exactly what
-``benchmarks/e2e/megatron/train.py:177-191`` feeds the e2e megatron arm
-every step, so TransformerEngine sees the packing it already runs.
+full-offset entries, which is a packed form TransformerEngine already
+consumes in this repo. It is **not** the e2e megatron arm's exact tensor;
+see the padding note below.
 
 Nothing on the torch side validates the FLASH block size: it is forwarded
 verbatim into FA4's block-sparse tensors, so a mismatch surfaces inside FA4
@@ -108,11 +108,46 @@ with trailing full-offset entries, so at the default workload 18 real
 documents become 128 entries, 109 of them zero-length. TransformerEngine
 accepts that -- measured, on all three backends, at the default workload --
 and the titan FA3 arm already consumes the same tensor in the existing
-``attention`` scenario. Note that the e2e megatron driver pads to the run's
-own maximum document count instead
-(``benchmarks/e2e/megatron/train.py:177-186``), so this scenario's segment
-count is not the e2e arm's. That is a property of the isolated workload, not
-an asymmetry between the arms.
+``attention`` scenario.
+
+**The two padding rules differ, and this scenario uses torchtitan's.**
+``create_varlen_metadata_for_document`` pads to a multiple of
+``_CU_SEQLENS_MULTIPLE`` = 128 (``models/common/attention.py:600``,
+``:654-661``), so the segment count here is a fixed 128 whatever the draw
+contains. The e2e megatron driver pads to the run's own maximum document
+count instead (``benchmarks/e2e/megatron/train.py:177-186``). So this
+scenario's segment count is **not** the e2e arm's, and it is not "exactly
+what the driver feeds it". Both engines here receive the identical tensor,
+which is what the cross-engine comparison needs; the e2e difference is a
+property of the isolated workload, not an asymmetry between these arms.
+
+**The segment count, not the document count, is what TE allocates on, and
+``mcore/attn_unfused`` can therefore exhaust the device.**
+``ConvertTHDtoBSHD.forward`` reads ``batch_size = cu_seqlens.shape[0] - 1``
+(``dot_product_attention/utils.py:2153``), so the unfused arm builds its
+scores over **127** segments and not over the 18 real documents. One bf16
+score tensor is then 4.0 GiB at seq 1024, 15.9 GiB at 2048 and 63.5 GiB at
+4096 on the normal shape, and 47.6 GiB at seq 1024 on huge; the arm holds
+the scores, the saved probabilities and the backward gradient. A sweep past
+seq 2048 will OOM. Because the correctness pass has no per-arm exception
+handling (``benchmarks/kernel/engine/run.py:289-298``), that OOM takes the
+whole scenario with it. An adversarial reviewer measured the segment counts
+on the real inputs builder; the arm description carries the table.
+
+Two ways to break this scenario that nothing guards
+--------------------------------------------------
+
+**Do not set ``PackedSeqParams.cu_seqlens_q_padded``.** TE then computes
+``pad_between_seqs = True`` (``dot_product_attention.py:1561-1570``), and
+``utils.py:976-990`` disables FA2, FA4 **and** the unfused path. Probed on
+this host with ``unfused`` requested and ``pad_between_seqs=True``, TE
+reports no backend available and raises. The builders here leave the field
+unset, and nothing checks that they do.
+
+**Do not declare the ``local`` backend.** ``ATTENTION_BACKENDS`` offers the
+name because it is a megatron enum member, but ``local`` zeroes all three
+NVTE variables while the layer spec still builds ``TEDotProductAttention``,
+so TE finds no backend and raises. No profile here uses it.
 
 Which backend each mcore arm runs, and how the guard knows
 ----------------------------------------------------------
@@ -120,7 +155,7 @@ Which backend each mcore arm runs, and how the guard knows
 ``LanguageModule.__init__`` calls ``_set_attention_backend``
 (``language_module.py:49``), which turns ``config.attention_backend`` into
 ``NVTE_FLASH_ATTN`` / ``NVTE_FUSED_ATTN`` / ``NVTE_UNFUSED_ATTN``
-(``:130-147``). TransformerEngine reads those three variables inside
+(``:129-148``). TransformerEngine reads those three variables inside
 ``get_attention_backend``
 (``transformer_engine/pytorch/attention/dot_product_attention/utils.py:457-463``)
 and records what it chose in a module global, ``_attention_backends``
@@ -149,15 +184,28 @@ backend asked    what TransformerEngine selected
 
 Two consequences a reader must not lose:
 
-**FA4 is unreachable from megatron on this device.** TE disables it whenever
-FA3 is installed on sm90 -- "Disabling FlashAttention 4 to prefer
-FlashAttention 3 on SM90" (``utils.py:504-515``), a policy, not a capability
-limit. So there is no megatron opponent for ``titan/flex_flash``, and the
-FA4-against-cuDNN row this scenario cannot publish is a fact about the
-engines, not a gap in the roster.
+**No megatron SETTING selects FA4 on this device, and FA4 itself is not
+unreachable.** TE prefers FA3 on sm90 whenever both are installed --
+"Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90"
+(``utils.py:504-515``) -- and no ``attention_backend`` value, and no other
+``TransformerConfig`` field, reaches past that preference.
+
+The preference is a policy, and the policy is guarded on a **mutable class
+attribute**: ``FlashAttentionUtils.v3_is_installed`` (``utils.py:136``).
+Setting it False makes ``get_attention_backend`` return
+``flash_attention_backend = 4.0.0b25``, and ``backends.py:1013-1016``
+dispatches on that ``major``, so the FA4 kernel really would run. An
+adversarial reviewer measured both on this H200.
+
+So the honest sentence is: **this module declines to monkeypatch TE's
+version bookkeeping to build a benchmark arm.** An arm built that way would
+measure TE with a field of its own state falsified, and would publish it
+beside arms that ran TE as shipped. That is a choice, not a capability
+limit, and ``titan/flex_flash`` therefore runs against ``titan``, which
+isolates the lowering instead.
 
 **Megatron's ``flash_attention_version`` field does not reach this TE.**
-``language_module.py:155-160`` pins the generation by writing
+``language_module.py:154-159`` pins the generation by writing
 ``NVTE_FLASH_ATTN_V2/V3/V4``. Those names appear nowhere in TE 2.17.1 --
 neither in its Python (``os.getenv("NVTE_...")`` over the whole attention
 package yields ``NVTE_FLASH_ATTN``, ``NVTE_FUSED_ATTN`` and
@@ -171,7 +219,7 @@ Why the environment is cleared before every megatron build
 -----------------------------------------------------------
 
 ``check_and_set_env_variable`` **asserts** that any value already present
-equals the one it is about to write (``language_module.py:124-129``). The
+equals the one it is about to write (``language_module.py:124-126``). The
 correctness pass builds every arm of a scenario in one interpreter
 (``benchmarks/kernel/engine/run.py:289-298``), so the second megatron arm
 would meet the first arm's variables and die on that assertion. Its own
@@ -180,7 +228,7 @@ before each build.
 
 The same one-process pass is why ``_assert_te_selected_backend`` sets
 ``backend_selection_requires_update``. TE re-runs the selection only when
-``attention_params`` changes (``dot_product_attention.py:1656-1662``), and
+``attention_params`` changes (``dot_product_attention.py:1655-1662``), and
 two arms of this scenario differ in nothing but the environment, so the
 second arm would otherwise reuse the first arm's cached choice -- and both
 the measurement and a guard that merely read the global would be wrong
@@ -193,7 +241,7 @@ Every megatron arm runs eager, because megatron compiles no whole
 transformer layer and ``TEDotProductAttention`` carries no ``jit_fuser``.
 The titan arms are all compiled, by two different mechanisms:
 ``FlexAttention`` holds a class-level ``torch.compile`` of
-``flex_attention`` (``attention.py:252-255``), so ``titan`` and
+``flex_attention`` (``attention.py:251-255``), so ``titan`` and
 ``titan/flex_flash`` are NOT wrapped again here -- wrapping risks a double
 compile or a graph break around the spmd context -- and only
 ``titan/flash_attention_3`` takes ``_compile_module``.
@@ -952,7 +1000,7 @@ def clear_te_attention_environment() -> None:
     """Drop every backend variable a previous megatron build wrote.
 
     ``check_and_set_env_variable`` asserts that a variable already present
-    holds the value it is about to write (``language_module.py:124-129``), so
+    holds the value it is about to write (``language_module.py:124-126``), so
     a second arm asking for a different backend in the same interpreter dies
     on that assertion rather than reconfiguring. Megatron's own message names
     this as the fix. The correctness pass builds every arm of a scenario in
@@ -1014,8 +1062,12 @@ def _assert_mcore_cut_matches_the_reference(
       (``extensions/transformer_engine.py:2262-2268``), which is the same
       predicate with the document boundaries applied. ``no_mask`` would not
       be.
-    * ``softmax_scale`` must be unset, so TE uses ``1/sqrt(head_dim)`` -- the
-      value ``attention_core_inputs`` hands the titan arms as ``scale``.
+    * ``softmax_scale`` must be unset, so TE falls back to
+      ``1/sqrt(kv_channels)`` (``dot_product_attention.py:446-449``), and
+      ``kv_channels`` must equal the shape's ``head_dim``. Both halves are
+      checked, because only the pair gives the titan arms' ``scale``.
+      ``mcore_profiles.py`` derives ``kv_channels`` from the same shape
+      today, so this asserts a link rather than a coincidence.
     * ``attention_dropout`` must be 0.0. Dropout would make the arm
       nondeterministic and would add device work no other arm carries.
     """
@@ -1033,6 +1085,13 @@ def _assert_mcore_cut_matches_the_reference(
             "TransformerEngine will not use 1/sqrt(head_dim); the titan arms "
             f"and the fp64 reference use {shape.head_dim ** -0.5!r}"
         )
+    if module.config.kv_channels != shape.head_dim:
+        raise RuntimeError(
+            f"{arm}: kv_channels is {module.config.kv_channels!r}, not the "
+            f"shape's head_dim {shape.head_dim!r}. TransformerEngine derives "
+            "the softmax scale from kv_channels, so this arm would use a "
+            "different scale than the titan arms and the fp64 reference"
+        )
     if module.config.attention_dropout != 0.0:
         raise RuntimeError(
             f"{arm}: attention_dropout is {module.config.attention_dropout!r}"
@@ -1046,7 +1105,7 @@ def _assert_config_pins_the_backend(
 ) -> None:
     """Refuse a build whose profile delta did not reach the config.
 
-    ``attention.py:373-380`` hands ``core_attention`` the model's own config
+    ``attention.py:374-381`` hands ``core_attention`` the model's own config
     at ``world_size == 1``, because ``num_query_groups < world_size`` is
     False, so this reads the object the module runs with rather than a copy
     of it. A delta that failed to arrive would leave ``AttnBackend.auto``
@@ -1100,7 +1159,7 @@ def _assert_te_selected_backend(
     is in ``_backend_verdict``:
 
     * It sets ``backend_selection_requires_update`` first. TE re-runs the
-      selection only when ``attention_params`` changes (``:1656-1662``), and
+      selection only when ``attention_params`` changes (``:1655-1662``), and
       the arms of this scenario differ in nothing but the environment, so a
       later arm in the correctness pass would otherwise inherit an earlier
       arm's answer -- and the guard would confirm it.
@@ -1129,6 +1188,17 @@ def _backend_verdict(
     the third thing that makes this guard non-vacuous: a record left by some
     other module's attention -- a different layout, a different mask type, a
     different head count -- cannot satisfy this arm.
+
+    **That check is four fields, and it separates modules, not arms.** It
+    reads ``qkv_layout``, ``attn_mask_type``, ``num_heads`` and
+    ``num_gqa_groups`` only, and it does not read ``head_dim_qk``,
+    ``max_seqlen_q``, ``qkv_dtype``, ``is_training``, ``attention_dropout``
+    or ``deterministic``. It also cannot separate the three mcore arms of
+    this scenario from each other: their ``AttentionParams`` are identical,
+    because the arms differ only in ``os.environ`` and the environment is
+    not a field of ``AttentionParams`` (``utils.py:272-306``). Forcing
+    ``backend_selection_requires_update`` is what separates them, and
+    ``_assert_te_selected_backend`` owns that half.
 
     ``expected`` is one of ``fused``, ``flash3`` or ``unfused``. ``flash3``
     checks the generation as well as the family, because megatron cannot pin
@@ -1324,7 +1394,7 @@ def build_attention_core_mcore_base(
     ``attention_backend`` is pinned to ``fused`` instead of left at
     ``AttnBackend.auto``. Measured on this host, the two make the same
     selection for these parameters -- TE disables FlashAttention "to give
-    FusedAttention preference on Hopper+" (``utils.py:1543-1548``) -- so this
+    FusedAttention preference on Hopper+" (``utils.py:1541-1547``) -- so this
     arm runs the kernel the e2e megatron arm runs. Pinning is what makes that
     a property of the profile rather than of the device.
     """

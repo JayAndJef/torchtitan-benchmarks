@@ -300,7 +300,7 @@ class ArmRosterTests(unittest.TestCase):
         """The refutation that shaped this roster, as a self-invalidating test.
 
         Megatron pins the FlashAttention generation by writing
-        ``NVTE_FLASH_ATTN_V2/V3/V4`` (``language_module.py:155-160``). The
+        ``NVTE_FLASH_ATTN_V2/V3/V4`` (``language_module.py:154-159``). The
         installed TransformerEngine reads no such variable, so the field is
         inert, so ``mcore/attn_flash2`` and ``mcore/attn_flash4`` cannot be
         declared: three arms differing only in it would be one configuration
@@ -309,6 +309,14 @@ class ArmRosterTests(unittest.TestCase):
         If a TE upgrade starts reading them, this fails -- and the failure is
         the signal to split the flash arm by generation and to declare the
         two arms the plan asked for.
+
+        **The sweep is the whole Python package, and that is still less than
+        the claim.** The claim is that TE reads the variable nowhere, and TE
+        ships two compiled objects as well. Those were checked by hand with
+        ``strings`` and hold no ``NVTE_FLASH`` string at all, but no test
+        rereads them, so a future TE that read the pin from C++ would leave
+        this test green. Repeat the ``strings`` check before you trust a
+        green run against a new TE.
         """
         try:
             import transformer_engine.pytorch  # noqa: F401
@@ -317,7 +325,7 @@ class ArmRosterTests(unittest.TestCase):
         import transformer_engine
 
         root = Path(transformer_engine.__file__).resolve().parent
-        sources = sorted((root / "pytorch" / "attention").rglob("*.py"))
+        sources = sorted(root.rglob("*.py"))
         # Non-vacuity: an empty sweep would pass the assertion below without
         # having read anything, and a package move is exactly how that
         # happens.
@@ -909,13 +917,21 @@ class BackendVerdictTests(unittest.TestCase):
     def test_a_record_from_another_module_cannot_satisfy_the_guard(
         self,
     ) -> None:
-        """The non-vacuity check, and it is the reason the guard is trusted.
+        """The non-vacuity check: the verdict must match THIS cut.
 
-        TransformerEngine re-runs its selection only when
-        ``attention_params`` changes, so a stale record is exactly what a
-        second arm in the correctness pass would meet. A guard that read the
-        verdict without checking the parameters would confirm the first arm's
-        answer for the second arm.
+        What the parameter check catches is a record left by a **different
+        module** -- another scenario's arm, or a build that ran at another
+        shape or mask -- because ``_attention_backends`` is a module global
+        of TE, shared by every module in the process.
+
+        It does **not** separate the three mcore arms of this scenario from
+        each other. Their ``AttentionParams`` are identical: they differ
+        only in ``os.environ``, which is not a field of ``AttentionParams``
+        (``dot_product_attention/utils.py:272-306``). The only thing that
+        forces a fresh selection for the second arm is
+        ``backend_selection_requires_update = True``, which
+        ``_assert_te_selected_backend`` sets. Do not delete that line
+        believing this check covers it.
         """
         for wrong in (
             {"qkv_layout": "sbhd_sbhd_sbhd"},
@@ -1053,7 +1069,9 @@ class McoreBuildGuardTests(unittest.TestCase):
                 attention,
                 SimpleNamespace(
                     config=SimpleNamespace(
-                        softmax_scale=0.5, attention_dropout=0.0
+                        softmax_scale=0.5,
+                        kv_channels=TINY.head_dim,
+                        attention_dropout=0.0,
                     )
                 ),
                 TINY,
@@ -1064,7 +1082,9 @@ class McoreBuildGuardTests(unittest.TestCase):
                 attention,
                 SimpleNamespace(
                     config=SimpleNamespace(
-                        softmax_scale=None, attention_dropout=0.1
+                        softmax_scale=None,
+                        kv_channels=TINY.head_dim,
+                        attention_dropout=0.1,
                     )
                 ),
                 TINY,
@@ -1081,6 +1101,7 @@ class McoreBuildGuardTests(unittest.TestCase):
             SimpleNamespace(
                 config=SimpleNamespace(
                     softmax_scale=None,
+                    kv_channels=TINY.head_dim,
                     attention_dropout=BASE.config_overrides[
                         "attention_dropout"
                     ],
@@ -1088,6 +1109,32 @@ class McoreBuildGuardTests(unittest.TestCase):
             ),
             TINY,
         )
+
+    def test_a_kv_channels_that_is_not_the_head_dim_is_refused(self) -> None:
+        """The other half of the scale, and it is not the obvious half.
+
+        TE does not read ``head_dim``. With ``softmax_scale`` unset it uses
+        ``1/sqrt(kv_channels)``, so a profile that set ``kv_channels`` to
+        anything else would run a different scale than the titan arms and
+        the fp64 reference, and every gate would fail at a tolerance that
+        names no cause.
+        """
+        require_megatron(self)
+        from megatron.core.transformer.enums import AttnMaskType
+
+        with self.assertRaisesRegex(RuntimeError, "kv_channels"):
+            _assert_mcore_cut_matches_the_reference(
+                "mcore/base",
+                SimpleNamespace(attn_mask_type=AttnMaskType.causal),
+                SimpleNamespace(
+                    config=SimpleNamespace(
+                        softmax_scale=None,
+                        kv_channels=TINY.head_dim * 2,
+                        attention_dropout=0.0,
+                    )
+                ),
+                TINY,
+            )
 
     def test_a_backend_that_did_not_reach_the_config_is_refused(self) -> None:
         """auto is the value a lost delta leaves behind, and it is silent.
