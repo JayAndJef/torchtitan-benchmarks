@@ -1249,9 +1249,16 @@ per-block compile applied, FSDP skipped) and hard-errors at `world_size > 1`
 or any `training.dtype` other than `bfloat16`. `training.dtype="bfloat16"`
 puts params, grads, and optimizer states in bf16 with no fp32 masters --
 matching piper's own execution and the treatment kernel-bench already gives
-its modules. This is the only bf16 mechanism in the run (there is no
-autocast and no mixed-precision wrapper), which is why the wrapper enforces
-it: the TE RoPE arm requires bf16 activations, and an fp32 swiglu baseline
+its modules. It is the only *framework-level* dtype mechanism in the run:
+there is no mixed-precision wrapper and no autocast in `parallelize_qwen3`.
+**It is not the whole dtype story.** Upstream's MoE router wraps its gate
+GEMM in `torch.autocast(dtype=float32)`
+(`models/common/moe.py:292`, deliberate -- the comment cites expert
+load-balancing stability), so the gate runs fp32 on every layer of this
+model, and autocast casts *both* operands up, which materializes an fp32
+copy of the hidden state. That copy is real work in every e2e run this repo
+has ever done, and nothing isolated it until the `moe_router` kernel
+scenario. Read the wrapper's enforcement narrowly, as what it is: the TE RoPE arm requires bf16 activations, and an fp32 swiglu baseline
 would pass every validation rule while measuring the wrong thing. Manifests
 record `execution_model`; runs from schema <= 6 used FSDP2 mixed precision
 and are not comparable.
@@ -1473,9 +1480,14 @@ that test to make a bump green. (The kernel worker is not exposed: it runs with
 `skip_dp` kwarg and its ordering guarantee: AC, then `apply_compile` (which
 emits the `(mode=...)` log line), then the early return *before* mesh
 resolution and `apply_fsdp_to_decoder`. Note also that this fork applies no
-autocast at world size 1 -- `training.mixed_precision_param` is consumed
-only by `apply_fsdp_to_decoder` -- so `training.dtype` is the whole dtype
-story; if a future bump adds single-device autocast, revisit it.
+*parallelism* autocast at world size 1 -- `training.mixed_precision_param`
+is consumed only by `apply_fsdp_to_decoder`. That is not the same as "no
+autocast": `models/common/moe.py:292` wraps the router gate in
+`torch.autocast(dtype=float32)`, upstream and on purpose. Check that line on
+every bump, because it decides whether the router is a precision difference
+against megatron or a like-for-like one -- megatron routes fp32 too
+(`moe_router_dtype`), so today it is like-for-like on precision and roughly
+5x apart on bytes moved.
 
 `config_registry.py` imports private Qwen3 helpers. After any bump, verify all
 of these still exist with unchanged behavior:
