@@ -941,9 +941,13 @@ TEST_CENSUS = {
     # arms no correctness gate can tell apart: cuDNN, FlashAttention and the
     # unfused path all compute attention, so a megatron arm that fell through
     # to the wrong backend passes every gate the scenario declares. By class:
-    # 4 profile deltas, 8 roster, 14 inputs, 3 reference, 5 layout, 4 shared
-    # closures, 12 backend verdict, 7 megatron build guards, 2 markers and
-    # 2 shape summary. Three of them are self-invalidating and are meant to
+    # 4 profile deltas, 9 roster, 15 inputs, 3 reference, 5 layout, 7 shared
+    # closures, 13 backend verdict, 7 megatron build guards, 2 markers,
+    # 3 shape summary, 5 builder wiring and 1 profile delivery. The last
+    # two groups exist because no test can CALL five of the six builders
+    # without a GPU: a mutation pass wired the FA3 builder to the cuDNN
+    # anchor and the whole suite stayed green. Three tests are
+    # self-invalidating and are meant to
     # fail one day: one pins that TransformerEngine reads no
     # NVTE_FLASH_ATTN_V variable, so megatron's flash_attention_version is
     # inert and the generation cannot be an arm; one pins that TE does not
@@ -951,7 +955,7 @@ TEST_CENSUS = {
     # carry a copy this scenario times; and one pins that megatron still
     # norms the key and still leaves the value alone, which is what decides
     # which tensor carries that copy.
-    "test_kernel_attention_core": 61,
+    "test_kernel_attention_core": 73,
     # Scenario 4, the cross-engine rope roster that replaced the
     # single-engine one in place: 35 covering the packed-document inputs in
     # both engine-native forms, the fp64 reference, all five arm builders and
@@ -1127,7 +1131,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 950
+TEST_CENSUS_TOTAL = 962
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

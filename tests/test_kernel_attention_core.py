@@ -25,6 +25,7 @@ outputs agree with the fp64 reference. Both are recorded in the module
 docstring with their numbers.
 """
 
+import ast
 import os
 import re
 import sys
@@ -36,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
+from benchmarks.kernel.operations import attention_core
 from benchmarks.kernel.operations.attention_core import (
     ARM_NAMES,
     ATTN_FLASH,
@@ -60,6 +62,7 @@ from benchmarks.kernel.operations.attention_core import (
     _flash_major_version,
     _mcore_layout,
     _packed_positions,
+    _probe_leaves,
     _titan_layout,
     attention_core_inputs,
     attention_core_reference,
@@ -210,6 +213,29 @@ class ArmRosterTests(unittest.TestCase):
         self.assertEqual(
             sorted(MCORE_ARMS),
             sorted(name for name in ARM_NAMES if name.startswith("mcore/")),
+        )
+
+    def test_the_roster_is_exactly_these_six_names_in_this_order(
+        self,
+    ) -> None:
+        """The names AND the order, because both are published.
+
+        A name is what a `results.json` row is keyed by and what a merge note
+        or a report cites. The order is the sweep order and puts the anchor
+        first. A mutation reviewer showed that the previous roster test read
+        only the three ``mcore/`` names, so any titan name could be renamed
+        or reordered and no test in the suite noticed.
+        """
+        self.assertEqual(
+            ARM_NAMES,
+            (
+                "mcore/base",
+                "mcore/attn_flash3",
+                "mcore/attn_unfused",
+                "titan",
+                "titan/flex_flash",
+                "titan/flash_attention_3",
+            ),
         )
 
     def test_every_expected_backend_is_one_the_verdict_enforces(self) -> None:
@@ -436,6 +462,33 @@ class InputsTests(unittest.TestCase):
             inputs.v_TNH.storage_offset(),
             (TINY.heads_per_group + 1) * head_dim,
         )
+
+    def test_the_packed_boundaries_carry_their_padding(self) -> None:
+        """The LENGTH of cu_seqlens is load-bearing, not only its content.
+
+        TE reads ``batch_size = cu_seqlens.shape[0] - 1``
+        (``dot_product_attention/utils.py:2153``), so the padded length is
+        what the unfused arm allocates its scores over. A mutation reviewer
+        showed that trimming a trailing padding entry passed every test,
+        because the other assertions compare two counts that both shrink.
+        """
+        inputs = cpu_inputs()
+        tokens = TINY_WORKLOAD.batch * TINY_WORKLOAD.seq_len
+        # torchtitan pads to a multiple of its own constant, so the count is
+        # a property of the padding rule and not of the seeded draw.
+        self.assertEqual(inputs.cu_seqlens.numel() % 128, 0)
+        self.assertGreater(inputs.cu_seqlens.numel() - 1, inputs.num_documents)
+        self.assertEqual(int(inputs.cu_seqlens[0]), 0)
+        self.assertEqual(int(inputs.cu_seqlens[-1]), tokens)
+        # The real boundaries come first: one entry per document, plus the
+        # opening zero.
+        self.assertEqual(
+            int(inputs.cu_seqlens[inputs.num_documents]), tokens
+        )
+        # Every padding entry is the full offset, so it describes a
+        # zero-length segment rather than a second copy of the last document.
+        tail = inputs.cu_seqlens[inputs.num_documents :]
+        self.assertTrue(bool((tail == tokens).all()))
 
     def test_the_query_and_the_key_reach_megatron_contiguous(self) -> None:
         """Both leave the fused buffer before this cut, and that is engine.
@@ -796,6 +849,31 @@ class LayoutTests(unittest.TestCase):
 
 
 
+class _Recorder:
+    """A stand-in attention that remembers what it was handed.
+
+    The timed closures own their leaves, so a test cannot reach them from
+    outside. This is the one thing that can: the closure passes its leaves
+    to the call, so the call records them.
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[tuple] = []
+        self.grad_at_entry: list = []
+
+    def __call__(self, q, k, v):
+        self.seen.append((q, k, v))
+        self.grad_at_entry.append(
+            None if q.grad is None else float(q.grad.abs().sum())
+        )
+        repeats = q.shape[-2] // k.shape[-2]
+        return (
+            q
+            + k.repeat_interleave(repeats, dim=-2)
+            + v.repeat_interleave(repeats, dim=-2)
+        )
+
+
 class SharedClosureTests(unittest.TestCase):
     """The closures every arm shares, over a stand-in attention.
 
@@ -824,9 +902,15 @@ class SharedClosureTests(unittest.TestCase):
         Sharing one leaf set would let a forward_backward burst accumulate
         gradients into the tensors the gate then reads, and would leave an
         autograd graph attached to the tensors the timing pass measures.
+
+        This reads the tensors each closure was handed, not only the output
+        keys. A mutation reviewer collapsed the three sets into one and this
+        test still passed, because ``correctness_outputs`` resets the
+        gradients of whatever it was given before it reads them.
         """
+        recorder = _Recorder()
         arm = _attention_core_arm(
-            "probe", _titan_layout(cpu_inputs()), self._call
+            "probe", _titan_layout(cpu_inputs()), recorder
         )
         arm.calls["forward"]()
         arm.calls["forward_backward"]()
@@ -835,16 +919,82 @@ class SharedClosureTests(unittest.TestCase):
         for name in GATED_OUTPUTS:
             self.assertIsNotNone(outputs[name])
 
-    def test_forward_backward_clears_the_gradients_between_calls(self) -> None:
-        """A burst is thousands of calls; accumulation would be timed work."""
+        pointers = [q.data_ptr() for q, _, _ in recorder.seen]
+        self.assertEqual(len(pointers), 3)
+        self.assertEqual(
+            len(set(pointers)), 3, "the three closures share a leaf set"
+        )
+
+    def test_a_guard_probe_never_touches_the_arm_tensors(self) -> None:
+        """``_probe_leaves`` must hand a guard something it may consume.
+
+        A guard runs a forward. On the arm's own tensors that would leave an
+        autograd graph attached to what the timing pass measures, which is
+        the function's stated reason to exist.
+        """
         inputs = cpu_inputs()
-        arm = _attention_core_arm("probe", _titan_layout(inputs), self._call)
-        arm.calls["forward_backward"]()
-        first = arm.correctness_outputs()["dq"].clone()
+        layout = _titan_layout(inputs)
+        probes = _probe_leaves(layout)
+        self.assertEqual(len(probes), 3)
+        for probe, native in zip(probes, (layout.q, layout.k, layout.v)):
+            with self.subTest(shape=tuple(probe.shape)):
+                self.assertNotEqual(probe.data_ptr(), native.data_ptr())
+                self.assertTrue(probe.is_leaf and probe.requires_grad)
+                self.assertTrue(torch.equal(probe, native))
+
+    def test_the_gate_keeps_the_gradients_apart(self) -> None:
+        """dk and dv must not be swapped, and shapes cannot detect that.
+
+        The key and the value gradients have the same shape, so the earlier
+        shape checks pass either way. This closure weights them differently,
+        which makes a swap arithmetic rather than cosmetic.
+        """
+
+        def weighted(q, k, v):
+            repeats = q.shape[-2] // k.shape[-2]
+            return (
+                q
+                + 2.0 * k.repeat_interleave(repeats, dim=-2)
+                + 3.0 * v.repeat_interleave(repeats, dim=-2)
+            )
+
+        inputs = cpu_inputs()
+        outputs = _attention_core_arm(
+            "probe", _titan_layout(inputs), weighted
+        ).correctness_outputs()
+        batch, seq, heads, head_dim = inputs.grad_BLNH.shape
+        groups = inputs.k_BLNH.shape[2]
+        # Each key/value group receives the gradient of the query heads that
+        # read it, summed.
+        pooled = (
+            inputs.grad_BLNH.double()
+            .reshape(batch, seq, groups, heads // groups, head_dim)
+            .sum(dim=3)
+        )
+        self.assertLess(rel_l2(outputs["dk"], 2.0 * pooled), 2e-2)
+        self.assertLess(rel_l2(outputs["dv"], 3.0 * pooled), 2e-2)
+        # And the swap this test exists for is far outside that gate.
+        self.assertGreater(rel_l2(outputs["dk"], 3.0 * pooled), 0.2)
+
+    def test_forward_backward_clears_the_gradients_between_calls(self) -> None:
+        """A burst is thousands of calls; accumulation would be timed work.
+
+        The gradient is read where it accumulates -- on the tensors
+        ``forward_backward`` itself is handed. Reading it through
+        ``correctness_outputs`` cannot see this: that path owns a different
+        leaf set and resets it first, so a mutation reviewer deleted the
+        reset and the old version of this test still passed.
+        """
+        recorder = _Recorder()
+        arm = _attention_core_arm(
+            "probe", _titan_layout(cpu_inputs()), recorder
+        )
         for _ in range(4):
             arm.calls["forward_backward"]()
-        second = arm.correctness_outputs()["dq"]
-        self.assertTrue(torch.equal(first, second))
+        # Every call must start from a cleared gradient. The first sees None
+        # because nothing ran; the rest see None because the closure reset
+        # them.
+        self.assertEqual(recorder.grad_at_entry, [None, None, None, None])
 
     def test_the_mcore_closures_return_canonical_tensors(self) -> None:
         """The gates read one shape whichever engine produced it."""
@@ -958,6 +1108,28 @@ class BackendVerdictTests(unittest.TestCase):
     def test_no_backend_at_all_is_refused(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "NoBackend"):
             _backend_verdict("mcore/base", "fused", te_record(), TINY)
+
+    def test_a_record_that_names_two_backends_is_refused(self) -> None:
+        """TE returns exactly one, so two means the record is not TE's.
+
+        ``utils.py:1550-1554`` forces exclusivity before ``get_attention_
+        backend`` returns, so a record with two flags set describes
+        something this guard must not read. A mutation reviewer removed
+        every ``not flash and not unfused`` conjunct and no test noticed,
+        because every stand-in record here set exactly one flag.
+        """
+        for expected, record in (
+            ("fused", te_record(fused=True, unfused=True)),
+            ("fused", te_record(fused=True, flash=True, flash_version="3.0")),
+            ("unfused", te_record(unfused=True, fused=True)),
+            (
+                "flash3",
+                te_record(flash=True, flash_version="3.0", fused=True),
+            ),
+        ):
+            with self.subTest(expected=expected):
+                with self.assertRaises(RuntimeError):
+                    _backend_verdict("mcore/base", expected, record, TINY)
 
     def test_a_record_from_another_module_cannot_satisfy_the_guard(
         self,
@@ -1247,12 +1419,267 @@ class ShapeSummaryTests(unittest.TestCase):
         )
         self.assertEqual(summary["max_seqlen"], seq)
 
+    def test_the_manifest_branch_is_exactly_this_mapping(self) -> None:
+        """Every key, not a sample of them.
+
+        The manifest is how a reader without this repo learns what the arms
+        consumed. A mutation reviewer showed that reading five of the keys
+        left the other ten free to drift, including the fused-buffer width
+        and the flex block size, which are the two that describe the layout
+        asymmetry this scenario measures.
+        """
+        workload = KernelWorkload()
+        batch, seq = workload.batch, workload.seq_len
+        tokens = batch * seq
+        heads, groups = NORMAL.n_heads, NORMAL.n_kv_heads
+        head_dim = NORMAL.head_dim
+        self.assertEqual(
+            shape_summary("attention_core", NORMAL, workload),
+            {
+                "q_titan_BLNH": [batch, seq, heads, head_dim],
+                "k_titan_BLNH": [batch, seq, groups, head_dim],
+                "v_titan_BLNH": [batch, seq, groups, head_dim],
+                "qkv_mcore_fused_TGR": [
+                    tokens,
+                    groups,
+                    (NORMAL.heads_per_group + 2) * head_dim,
+                ],
+                "q_mcore_THD": [tokens, heads, head_dim],
+                "k_mcore_THD": [tokens, groups, head_dim],
+                "v_mcore_THD": [tokens, groups, head_dim],
+                "v_mcore_is_a_strided_view": True,
+                "out_titan_BLNH": [batch, seq, heads, head_dim],
+                "out_mcore_TD": [tokens, heads * head_dim],
+                "positions": [batch, seq],
+                "packed_tokens": tokens,
+                "flex_block_size": 128,
+                "flex_flash_block_size": list(FLEX_FLASH_BLOCK_SIZE),
+                "max_seqlen": seq,
+                "max_seq_len": NORMAL.max_seq_len,
+            },
+        )
+
     def test_the_navigation_path_names_the_first_layer(self) -> None:
         """The path is data, so it can drift away from the model silently."""
         self.assertEqual(
             MCORE_SELF_ATTENTION_PATH, "decoder.layers.0.self_attention"
         )
         self.assertEqual(MCORE_CORE_ATTENTION_ATTR, "core_attention")
+
+
+class BuilderWiringTests(unittest.TestCase):
+    """Which arm each builder builds, and which guard it arms.
+
+    **No test can call these builders without a GPU**: five of the six reach
+    TransformerEngine, megatron or torchtitan, and the sixth compiles. So
+    they are read instead. A mutation reviewer showed what that gap costs --
+    pointing the FA3 builder at the cuDNN anchor, or dropping the FA4
+    ``kernel_options``, passed all 61 tests and the whole suite. Each of
+    those publishes one arm's number under another arm's name, which is the
+    failure this scenario exists to prevent.
+
+    Reading the source is weaker than running it. It is what is available
+    here, and it is stronger than nothing.
+    """
+
+    #: builder -> (arm name, marker constant or None)
+    WIRING = {
+        "build_attention_core_mcore_base": ("mcore/base", None),
+        "build_attention_core_mcore_flash3": ("mcore/attn_flash3", None),
+        "build_attention_core_mcore_unfused": ("mcore/attn_unfused", None),
+        "build_attention_core_titan": ("titan", "FLEX_ATTENTION_MARKER"),
+        "build_attention_core_titan_flex_flash": (
+            "titan/flex_flash",
+            "FA4_MARKER",
+        ),
+        "build_attention_core_titan_flash3": (
+            "titan/flash_attention_3",
+            "FA3_MARKER",
+        ),
+    }
+
+    MARKERS = ("FLEX_ATTENTION_MARKER", "FA4_MARKER", "FA3_MARKER")
+
+    @staticmethod
+    def _body(name: str) -> ast.FunctionDef:
+        """The builder's body, with its docstring removed.
+
+        The docstrings name other arms on purpose -- they explain the
+        comparisons -- so a search over them would report every arm in every
+        builder.
+        """
+        tree = ast.parse(Path(attention_core.__file__).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                body = list(node.body)
+                if (
+                    body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    body = body[1:]
+                return ast.Module(body=body, type_ignores=[])
+        raise AssertionError(f"no builder named {name}")
+
+    @classmethod
+    def _strings(cls, name: str) -> set:
+        return {
+            node.value
+            for node in ast.walk(cls._body(name))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+
+    @classmethod
+    def _names(cls, name: str) -> set:
+        return {
+            node.id
+            for node in ast.walk(cls._body(name))
+            if isinstance(node, ast.Name)
+        }
+
+    def test_every_declared_arm_has_exactly_one_builder(self) -> None:
+        self.assertEqual(
+            sorted(name for name, _ in self.WIRING.values()),
+            sorted(ARM_NAMES),
+        )
+        for builder in self.WIRING:
+            with self.subTest(builder=builder):
+                self.assertTrue(hasattr(attention_core, builder))
+
+    def test_each_builder_names_its_own_arm_and_no_other(self) -> None:
+        """A builder wired to another arm's name is a wrong number."""
+        for builder, (arm, _) in self.WIRING.items():
+            with self.subTest(builder=builder):
+                strings = self._strings(builder)
+                self.assertIn(arm, strings)
+                for other in ARM_NAMES:
+                    if other != arm:
+                        self.assertNotIn(other, strings)
+
+    def test_each_titan_builder_arms_its_own_marker(self) -> None:
+        """The silent-fallback guards, one per titan arm.
+
+        FA3 degrades to FA2 rather than failing, and a future refactor could
+        drop the FA4 lowering, so each arm is held to the kernel name only
+        it can produce. A builder holding another arm's marker guards
+        nothing.
+        """
+        for builder, (_, marker) in self.WIRING.items():
+            with self.subTest(builder=builder):
+                names = self._names(builder)
+                if marker is None:
+                    self.assertIn("_build_mcore_arm", names)
+                    continue
+                self.assertIn("_assert_kernel_marker", names)
+                self.assertIn(marker, names)
+                for other in self.MARKERS:
+                    if other != marker:
+                        self.assertNotIn(other, names)
+
+    def test_calling_a_megatron_builder_asks_for_its_own_arm(self) -> None:
+        """The runtime half, for the three builders that can have one.
+
+        ``_build_mcore_arm`` is where the arm name chooses the profile, the
+        backend and the expected kernel, all three from one table. Replacing
+        it records the name the builder really passes, which is stronger
+        than reading the source: it survives a refactor that moves the
+        literal.
+
+        The titan builders cannot be called here -- each constructs a
+        torchtitan attention module and runs a guard forward -- so they keep
+        the source-level checks above.
+        """
+        recorded = []
+
+        def spy(arm, shape, workload, inputs):
+            recorded.append((arm, shape, workload, inputs))
+            return "built"
+
+        original = attention_core._build_mcore_arm
+        attention_core._build_mcore_arm = spy
+        try:
+            for builder, (arm, _) in self.WIRING.items():
+                if not arm.startswith("mcore/"):
+                    continue
+                with self.subTest(builder=builder):
+                    recorded.clear()
+                    result = getattr(attention_core, builder)(
+                        TINY, TINY_WORKLOAD, "inputs-sentinel"
+                    )
+                    self.assertEqual(result, "built")
+                    self.assertEqual(len(recorded), 1)
+                    self.assertEqual(recorded[0][0], arm)
+                    # The builder forwards what it was given, unchanged.
+                    self.assertEqual(
+                        recorded[0][1:], (TINY, TINY_WORKLOAD, "inputs-sentinel")
+                    )
+        finally:
+            attention_core._build_mcore_arm = original
+
+    def test_the_flex_flash_builder_still_asks_for_the_flash_backend(
+        self,
+    ) -> None:
+        """Without the kernel option the arm IS the baseline.
+
+        ``titan`` and ``titan/flex_flash`` are the same module with the same
+        mask. The lowering is the only difference, and one dict carries it.
+        """
+        strings = self._strings("build_attention_core_titan_flex_flash")
+        self.assertIn("BACKEND", strings)
+        self.assertIn("FLASH", strings)
+        self.assertNotIn(
+            "BACKEND", self._strings("build_attention_core_titan")
+        )
+
+
+class ProfileDeliveryTests(unittest.TestCase):
+    def test_build_model_resolves_the_attention_backend_field(self) -> None:
+        """The profile's name must become megatron's enum, or nothing changes.
+
+        ``mcore_profiles`` keeps the field as a name so the registry stays
+        torch-free, and ``build_model`` is the only place that turns it into
+        an ``AttnBackend`` member. Drop that step and all three megatron arms
+        build at ``AttnBackend.auto``, which on this host resolves to the
+        same cuDNN kernel the anchor runs -- three labels, one kernel, every
+        gate green. A mutation reviewer showed no test covered it.
+
+        ``build_model`` needs a GPU, so this reads the resolution rather than
+        running it.
+        """
+        from benchmarks.models.piper_qwen3 import megatron_model
+
+        tree = ast.parse(Path(megatron_model.__file__).read_text())
+        loops = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.For)
+            and isinstance(node.iter, ast.Name)
+            and node.iter.id == "ATTENTION_BACKEND_FIELDS"
+        ]
+        self.assertEqual(len(loops), 1, "the resolution loop is gone")
+        assigned = [
+            node
+            for node in ast.walk(loops[0])
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "kwargs"
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(
+            len(assigned), 1, "the loop no longer writes back into kwargs"
+        )
+        self.assertIn(
+            "attention_backends",
+            {
+                node.id
+                for node in ast.walk(assigned[0])
+                if isinstance(node, ast.Name)
+            },
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
