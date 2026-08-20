@@ -137,8 +137,8 @@ this repository sets that field.
 Every megatron import is deferred into the builder that needs it, which is
 the rule across ``operations/``. ``benchmarks.models.piper_qwen3.
 mcore_profiles`` is the one module-scope exception, as in ``ffn_norm`` and
-``cross_entropy``: it is torch-free parent-side data, and the derived profile
-below is declared from it.
+``cross_entropy``: it is torch-free parent-side data, and both profiles the
+two mcore arms take are read from it.
 """
 
 from __future__ import annotations
@@ -157,7 +157,11 @@ from benchmarks.kernel.operations.common import (
     initialize_megatron_single_rank,
 )
 from benchmarks.kernel.schema import KernelWorkload
-from benchmarks.models.piper_qwen3.mcore_profiles import BASE, McoreProfile, derive
+from benchmarks.models.piper_qwen3.mcore_profiles import (
+    BASE,
+    NO_BIAS_DROPOUT_FUSION,
+    McoreProfile,
+)
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
@@ -178,28 +182,15 @@ TITAN_ARM = "titan"
 MCORE_LAYER = 0
 
 
-# The one megatron variant this scenario declares, as a delta rather than a
-# second copy of 28 flags. Declared here rather than added to
-# ``MCORE_PROFILES`` because it is this scenario's roster -- the e2e megatron
-# arm and every other cross-engine scenario run ``base`` -- which is the same
-# reason ``cross_entropy`` declares its two variants locally.
-#
-# **Scenario 7 (``attn_residual``) needs the identical profile**, because
-# ``bias_dropout_fusion`` gates ``self_attn_bda`` and ``mlp_bda`` off one
-# field (``transformer_layer.py:684`` and ``:980`` both read it). Two local
-# copies of one delta is a duplication a merge should collapse into
-# ``mcore_profiles.py``; it is recorded here so the merge can see it rather
-# than inherit it.
-NO_BIAS_DROPOUT_FUSION: McoreProfile = derive(
-    BASE,
-    name="no_bias_dropout_fusion",
-    description=(
-        "megatron with the bias-dropout-add fusion off: the residual add "
-        "runs as bias_dropout_add_unfused, plain eager python, instead of "
-        "the @jit_fuser-compiled bias_dropout_add_fused_train"
-    ),
-    config_overrides={"bias_dropout_fusion": False},
-)
+# The one megatron variant this scenario measures is a delta on one field,
+# and it is declared once for the whole repository in
+# ``benchmarks/models/piper_qwen3/mcore_profiles.py``. Scenario 7
+# (``attn_residual``) cuts the other call site the same field gates --
+# ``self_attn_bda`` at ``transformer_layer.py:684`` against ``mlp_bda`` at
+# ``:980`` -- so the two scenarios share one profile rather than each holding
+# a copy. ``NO_BIAS_DROPOUT_FUSION`` is imported above and stays out of
+# ``MCORE_PROFILES``: that dict is the roster of profiles other systems run,
+# and the e2e megatron arm runs ``base``.
 
 
 @dataclass

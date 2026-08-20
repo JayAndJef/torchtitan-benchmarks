@@ -42,7 +42,7 @@ from benchmarks.kernel.operations.attn_residual import (
     COPY_FLOOR_ARM,
     MCORE_BASE_ARM,
     MCORE_NO_FUSION_ARM,
-    NO_BIAS_DROPOUT_FUSION_PROFILE,
+    NO_BIAS_DROPOUT_FUSION,
     TITAN_ARM,
 )
 from benchmarks.kernel.schema import KernelWorkload
@@ -75,7 +75,7 @@ class ProfileDeltaTests(unittest.TestCase):
     def test_the_variant_changes_exactly_one_field(self) -> None:
         changed = {
             key: value
-            for key, value in NO_BIAS_DROPOUT_FUSION_PROFILE.config_overrides.items()
+            for key, value in NO_BIAS_DROPOUT_FUSION.config_overrides.items()
             if BASE.config_overrides.get(key) != value
         }
         self.assertEqual(changed, {"bias_dropout_fusion": False})
@@ -83,7 +83,7 @@ class ProfileDeltaTests(unittest.TestCase):
     def test_the_variant_drops_no_field_of_the_base(self) -> None:
         """A delta adds and replaces; it must never remove a fusion flag."""
         self.assertEqual(
-            set(NO_BIAS_DROPOUT_FUSION_PROFILE.config_overrides),
+            set(NO_BIAS_DROPOUT_FUSION.config_overrides),
             set(BASE.config_overrides),
         )
 
@@ -107,7 +107,7 @@ class ProfileDeltaTests(unittest.TestCase):
         self.assertNotIn("fp32_residual_connection", BASE.config_overrides)
 
     def test_the_variant_keeps_those_three_values(self) -> None:
-        overrides = NO_BIAS_DROPOUT_FUSION_PROFILE.config_overrides
+        overrides = NO_BIAS_DROPOUT_FUSION.config_overrides
         self.assertEqual(overrides["hidden_dropout"], 0.0)
         self.assertIs(overrides["add_bias_linear"], False)
         self.assertNotIn("fp32_residual_connection", overrides)

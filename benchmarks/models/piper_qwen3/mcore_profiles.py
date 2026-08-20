@@ -224,6 +224,39 @@ BASE = McoreProfile(
 )
 
 
+# The one delta two kernel scenarios share, and the reason it lives here
+# rather than in either of them. ``bias_dropout_fusion`` is a single
+# ``TransformerConfig`` field, and megatron reads it at two call sites:
+# ``self_attn_bda`` (``transformer_layer.py:684``), which the ``attn_residual``
+# scenario cuts, and ``mlp_bda`` (``:980``), which ``moe_residual`` cuts. Two
+# local copies would be one object described twice, and a reader would have to
+# diff them to learn that.
+#
+# ``BASE`` sets the flag True because megatron's own argparse layer does:
+# ``--no-bias-dropout-fusion`` is ``action="store_false"``, and the
+# ``TransformerConfig`` dataclass default is the opposite of what a real
+# megatron run gets. Turning the flag off is therefore a deviation from
+# megatron, not a return to its default.
+#
+# It stays out of ``MCORE_PROFILES`` deliberately. That dict is the roster of
+# profiles other systems run, and the e2e megatron arm runs ``base``. The
+# ``cross_entropy`` scenario keeps its two variants out of the roster for the
+# same reason.
+NO_BIAS_DROPOUT_FUSION: McoreProfile = derive(
+    BASE,
+    name="no_bias_dropout_fusion",
+    description=(
+        "megatron with the bias-dropout-add fusion off: both bda call sites "
+        "resolve to bias_dropout_add_unfused, which builds a Python closure "
+        "per call and then dispatches the same arithmetic eagerly, instead "
+        "of the @jit_fuser-compiled bias_dropout_add_fused_train. The device "
+        "work is one bf16 add either way, so this profile isolates the cost "
+        "of the compiled region and nothing else"
+    ),
+    config_overrides={"bias_dropout_fusion": False},
+)
+
+
 MCORE_PROFILES: dict[str, McoreProfile] = {
     profile.name: profile for profile in (BASE,)
 }

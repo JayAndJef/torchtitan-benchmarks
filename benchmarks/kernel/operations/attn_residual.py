@@ -135,8 +135,8 @@ one scenario.
 Every torchtitan, megatron and TransformerEngine import is deferred into the
 builder that needs it, which is the rule across ``operations/``.
 ``benchmarks.models.piper_qwen3.mcore_profiles`` is the one exception at
-module scope: it is torch-free parent-side data, and this module derives one
-profile from it.
+module scope: it is torch-free parent-side data, and this module reads two
+profiles from it.
 """
 
 from __future__ import annotations
@@ -157,8 +157,8 @@ from benchmarks.kernel.operations.common import (
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.mcore_profiles import (
     BASE,
+    NO_BIAS_DROPOUT_FUSION,
     McoreProfile,
-    derive,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
@@ -187,32 +187,20 @@ MCORE_LAYER_PATH = f"decoder.layers.{MCORE_LAYER}"
 MCORE_BDA_ATTRIBUTE = "self_attn_bda"
 
 
-# The one megatron variant this scenario adds, as a delta rather than a second
-# copy of 28 flags. Declared here rather than added to ``MCORE_PROFILES``,
-# which is the rule ``cross_entropy.py`` records for its two variants: the
-# registry is the roster of profiles other systems run, and the e2e megatron
-# arm plus every other cross-engine scenario run ``base``.
+# The one megatron variant this scenario measures is a delta on one field,
+# and it is declared once for the whole repository in
+# ``benchmarks/models/piper_qwen3/mcore_profiles.py``. Scenario 13
+# (``moe_residual``) cuts the other call site the same field gates --
+# ``self_attn_bda`` at ``transformer_layer.py:684`` against ``mlp_bda`` at
+# ``:980`` -- so the two scenarios share one profile rather than each holding
+# a copy. ``NO_BIAS_DROPOUT_FUSION`` is imported above and stays out of
+# ``MCORE_PROFILES``, which is the rule ``cross_entropy.py`` records for its
+# two variants: that dict is the roster of profiles other systems run, and
+# the e2e megatron arm plus every other cross-engine scenario run ``base``.
 #
 # ``bias_dropout_fusion`` is one of ``mcore_profiles.FUSION_FIELDS``, so
 # ``benchmarks/e2e/megatron/train.py`` would assert the built config against
-# this declaration in both directions if a run ever took this profile. The
-# base profile sets the flag True because megatron's own argparse layer does:
-# ``--no-bias-dropout-fusion`` is ``action="store_false"``, and the
-# ``TransformerConfig`` dataclass default is the opposite of what a real
-# megatron run gets. Turning it off is therefore a deviation from megatron,
-# not a return to its default.
-NO_BIAS_DROPOUT_FUSION_PROFILE: McoreProfile = derive(
-    BASE,
-    name="no_bias_dropout_fusion",
-    description=(
-        "megatron with the bias-dropout-add fusion off: the call site "
-        "resolves to bias_dropout_add_unfused, which builds a Python closure "
-        "per call and dispatches the same arithmetic eagerly. The device work "
-        "is one bf16 add either way, so this profile isolates the cost of the "
-        "@jit_fuser region and nothing else"
-    ),
-    config_overrides={"bias_dropout_fusion": False},
-)
+# this declaration in both directions if a run ever took this profile.
 
 
 @dataclass
@@ -885,7 +873,7 @@ def build_attn_residual_mcore_no_bias_dropout_fusion(
     """
     return _build_attn_residual_mcore(
         arm=MCORE_NO_FUSION_ARM,
-        profile=NO_BIAS_DROPOUT_FUSION_PROFILE,
+        profile=NO_BIAS_DROPOUT_FUSION,
         fused=False,
         shape=shape,
         workload=workload,
