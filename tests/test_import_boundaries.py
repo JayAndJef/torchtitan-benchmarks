@@ -141,6 +141,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.operations.cross_entropy",
     "benchmarks.kernel.operations.dispatch_permute",
     "benchmarks.kernel.operations.embedding_stage",
+    "benchmarks.kernel.operations.expert_mlp",
     "benchmarks.kernel.operations.ffn_norm",
     "benchmarks.kernel.operations.final_norm",
     "benchmarks.kernel.operations.lm_head",
