@@ -793,6 +793,44 @@ class KernelEngineImportBoundaryTest(unittest.TestCase):
             + "\n  ".join(violations),
         )
 
+    def test_every_arm_requirement_lives_in_a_parent_side_module(self):
+        """A requirement is resolved in the PARENT, unlike a builder.
+
+        ``resolve_arm_skips`` calls it before a GPU is claimed and before any
+        arm is built, so the module it names is imported into the torch-free
+        parent. A requirement that lived beside its family's builders would
+        put an ``operations/`` module -- and torch behind it -- into that
+        process, which is the edge per-arm process isolation cannot have.
+
+        Vacuous while no arm declares one, and that is the point: it fires
+        the moment the first declaration lands, rather than after a run has
+        paid for torch in the supervisor.
+        """
+        from benchmarks.kernel.registry import KERNEL_SCENARIOS
+        from benchmarks.kernel.spans import KERNEL_SPANS
+
+        parent_side = set(PARENT_SIDE_MODULES)
+        violations = []
+        units = list(KERNEL_SCENARIOS.values()) + [
+            span.measurement for span in KERNEL_SPANS.values()
+        ]
+        for unit in units:
+            for arm in unit.arms:
+                if arm.requirement is None:
+                    continue
+                module = arm.requirement.partition(":")[0]
+                if module not in parent_side:
+                    violations.append(
+                        f"{unit.name}/{arm.name}: {arm.requirement}"
+                    )
+        self.assertEqual(
+            violations,
+            [],
+            "an arm's requirement names a module that is not classified "
+            "parent-side; the parent resolves it before any arm is built:\n  "
+            + "\n  ".join(violations),
+        )
+
 
 class OperationsDeferredImportTest(unittest.TestCase):
     """Each arm's dependencies are paid for by that arm's process alone."""

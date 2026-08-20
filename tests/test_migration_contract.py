@@ -418,7 +418,7 @@ def _split_dotted(path: str) -> tuple[str, str]:
 
 
 def _split_builder(path: str) -> tuple[str, str]:
-    """Split ``module:symbol`` as kernel.engine.run.resolve_symbol does."""
+    """Split ``module:symbol`` as kernel.schema.resolve_symbol does."""
     module_name, _, attribute = path.partition(":")
     return module_name, attribute
 
@@ -515,10 +515,16 @@ class KernelBuilderPathTests(unittest.TestCase):
                     self.assertEqual(_split_builder(path)[0], expected)
 
     def test_the_split_matches_resolve_symbol(self) -> None:
-        """The colon format is resolve_symbol's, not a guess."""
-        from benchmarks.kernel.engine import run as kernel_bench
+        """The colon format is resolve_symbol's, not a guess.
 
-        source = Path(kernel_bench.__file__).read_text()
+        ``resolve_symbol`` moved into the schema when the parent gained a
+        dotted path of its own to resolve: an arm's ``requirement``. Both
+        sides read the same function, which is what keeps the two
+        conventions from drifting.
+        """
+        from benchmarks.kernel import schema as kernel_schema
+
+        source = Path(kernel_schema.__file__).read_text()
         self.assertIn('path.partition(":")', source)
 
 
@@ -955,6 +961,14 @@ TEST_CENSUS = {
     # scenario files, that the printed table marks every interval,
     # and that a span is opt-in.
     "test_kernel_spans": 42,
+    # The per-arm build probe. requires_gcc_toolset answers a question about
+    # the HOST; KernelArm.requirement answers one about this shape and this
+    # workload, which is what a sequence sweep needs and what an arm that
+    # skips for a runtime reason needs. 6 covering both answers of the
+    # contract, that the reason reaches the file in the predicate's own
+    # words, and that a workload skip closes over correctness references --
+    # the closure the compiler skip has never reached.
+    "test_kernel_arm_requirements": 6,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them. +3 for
@@ -1162,7 +1176,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1007
+TEST_CENSUS_TOTAL = 1013
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

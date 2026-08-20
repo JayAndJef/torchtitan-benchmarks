@@ -37,13 +37,31 @@ already share, not a model package.
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 
 MODES = ("forward", "backward", "forward_backward")
+
+
+def resolve_symbol(path: str) -> Any:
+    """Import ``module:function`` and return the function.
+
+    Here rather than in the engine because both sides resolve a dotted path
+    now: a worker resolves an arm's builder, and the **parent** resolves an
+    arm's ``requirement``. Resolution by string is what keeps either side
+    from importing what the other needs -- the parent must never import an
+    ``operations/`` module, and the engine must never import the registry.
+    Two copies of these three lines would let the two conventions drift.
+    """
+    module_name, _, attribute = path.partition(":")
+    module = importlib.import_module(module_name)
+    return getattr(module, attribute)
+
 
 # The two fragment shapes a worker writes and the parent reads, named once.
 # They live here, in the declaration module both sides already import, rather
@@ -250,6 +268,29 @@ class KernelArm:
     ``fullgraph=True`` compile over a titan arm. Each arm's ``description``
     says which.
 
+    **A requirement that depends on the workload is declared, not
+    discovered.** ``requires_gcc_toolset`` is a property of the *host*, and
+    the parent can answer it before it knows the shape. ``requirement``
+    covers the other case: an arm this shape or this workload cannot run --
+    an unfused attention arm whose dense score tensor grows with the square
+    of the sequence length is the case that forced it. It is a dotted
+    ``module:function`` path, resolved by ``resolve_symbol`` **in the
+    parent** and called as ``predicate(shape, workload)``. It returns
+    ``None`` when the arm can run here, or the reason it cannot -- and that
+    reason is what reaches ``results.json`` as ``status_reason``, so a
+    reader learns why an arm is absent without holding the registry.
+
+    The module it names must therefore be parent-side and torch-free, like
+    this one and unlike every ``operations/`` module. A test asserts it.
+
+    **Rejected: catch the builder's exception instead.** A ``try`` around
+    the build turns a bug into a skipped arm: the roster shortens for a
+    reason nobody declared, the real cause is a log line nobody reads, and
+    the run still exits zero. A declared requirement names the condition in
+    advance, records it in the manifest and in the results, and is checked
+    before a GPU is claimed. A builder that raises for an undeclared reason
+    stays a failure, because that is what it is.
+
     **An eager arm states why it is eager.** ``compiled=False`` requires an
     ``eager_reason``, and ``compiled=True`` forbids one. The reasons are not
     interchangeable, and a reader who cannot tell them apart will misread the
@@ -281,6 +322,7 @@ class KernelArm:
     modes: tuple[str, ...]
     correctness: tuple[CorrectnessCheck, ...] = ()
     requires_gcc_toolset: bool = False
+    requirement: str | None = None
     is_floor: bool = False
     compiled: bool = False
     eager_reason: str | None = None

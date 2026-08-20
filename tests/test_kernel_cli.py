@@ -26,6 +26,7 @@ from benchmarks.kernel.schema import (
     KernelArm,
     KernelScenario,
     TIMING_FRAGMENT_KIND,
+    resolve_shape_and_workload,
     timing_fragment_path,
 )
 from tests.test_kernel_results import sample_result
@@ -393,10 +394,22 @@ class KernelRunnerTests(unittest.TestCase):
                 arm("independent", reference="anchor"),
             ),
         )
+        shape, workload = resolve_shape_and_workload()
         self.assertEqual(
-            resolve_arm_skips(scenario, compiler_unavailable=None), {}
+            resolve_arm_skips(
+                scenario,
+                compiler_unavailable=None,
+                shape=shape,
+                workload=workload,
+            ),
+            {},
         )
-        skipped = resolve_arm_skips(scenario, compiler_unavailable="no gcc")
+        skipped = resolve_arm_skips(
+            scenario,
+            compiler_unavailable="no gcc",
+            shape=shape,
+            workload=workload,
+        )
         self.assertEqual(
             sorted(skipped), ["gated_on_it", "gated_on_that", "needs_compiler"]
         )

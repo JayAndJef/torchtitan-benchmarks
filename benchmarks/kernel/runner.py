@@ -80,6 +80,7 @@ from benchmarks.kernel.schema import (
     KernelSpan,
     KernelWorkload,
     resolve_shape_and_workload,
+    resolve_symbol,
     routing_divides_evenly,
     shape_summary,
     timing_fragment_path,
@@ -389,8 +390,10 @@ def resolve_arm_skips(
     scenario: KernelScenario | KernelSpan,
     *,
     compiler_unavailable: str | None,
+    shape: PiperShape,
+    workload: KernelWorkload,
 ) -> dict[str, str]:
-    """Which arms this host cannot run, and why, keyed by arm name.
+    """Which arms this host and this workload cannot run, and why.
 
     **Requirements belong to the arm, not to the scenario.** Without a C++20
     host compiler, rope loses ``titan/te`` and still measures its other four
@@ -398,18 +401,40 @@ def resolve_arm_skips(
     using it to decide cost every arm of the scenario; it keeps its one honest
     use, which is asking whether anything here needs the compiler at all.
 
+    **Two kinds of requirement, and the second needs the workload.**
+    ``requires_gcc_toolset`` is a property of the host, answerable before the
+    shape is known. ``KernelArm.requirement`` is the other kind: a dotted
+    path to a parent-side predicate, called with ``(shape, workload)``, that
+    returns the reason this arm cannot run here or ``None``. An unfused
+    attention arm whose dense score tensor grows with the square of the
+    sequence length is the case that forced it, and it is why a sequence
+    sweep was impossible before: one builder raising killed the whole
+    scenario, because the correctness pass builds every arm in one process
+    and catches nothing.
+
+    **The probe runs in the parent, before a GPU is claimed.** That is what
+    makes it a probe rather than a rescue: the arm is never built, so nothing
+    has to decide whether an exception was a requirement or a bug. A builder
+    that raises for an undeclared reason still fails the scenario, which is
+    what it is.
+
     **The set is closed over correctness references.** An arm whose reference
     is skipped is skipped too. The alternative is to time an arm that nothing
-    checked, which is the silent wrongness the gates exist to prevent. No
-    scenario produces the case today -- ``titan/te`` is a referrer, never a
-    reference -- so the closure is a guard against the roster growing into
-    it.
+    checked, which is the silent wrongness the gates exist to prevent. The
+    compiler skip has never reached that closure -- ``titan/te`` is a
+    referrer, never a reference -- but a workload skip does: an arm dropped
+    at a long sequence takes with it anything gated against it.
     """
     skipped: dict[str, str] = {}
-    if compiler_unavailable is not None:
-        for arm in scenario.arms:
-            if arm.requires_gcc_toolset:
-                skipped[arm.name] = compiler_unavailable
+    for arm in scenario.arms:
+        if compiler_unavailable is not None and arm.requires_gcc_toolset:
+            skipped[arm.name] = compiler_unavailable
+            continue
+        if arm.requirement is None:
+            continue
+        reason = resolve_symbol(arm.requirement)(shape, workload)
+        if reason:
+            skipped[arm.name] = reason
     while True:
         grew = False
         for arm in scenario.arms:
@@ -673,7 +698,10 @@ def execute_kernel_run(
         _emit(event_handler, "arm", f"=== kernel {unit.kind}: {name} ===")
 
         skipped = resolve_arm_skips(
-            scenario, compiler_unavailable=compiler_unavailable
+            scenario,
+            compiler_unavailable=compiler_unavailable,
+            shape=shape,
+            workload=workload,
         )
         if scenario.baseline_arm in skipped:
             # The anchor carries every ratio, so losing it is the one skip
