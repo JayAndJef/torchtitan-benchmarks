@@ -89,6 +89,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.kernel.registry",
     "benchmarks.kernel.runner",
     "benchmarks.kernel.schema",
+    # The span registry. It imports the scenario registry to check that
+    # every part arm exists, and nothing else: a span declaration is
+    # dotted strings, exactly as a scenario declaration is.
+    "benchmarks.kernel.spans",
     "benchmarks.kernel.worker",
     "benchmarks.kernel.engine.statistics",
     # Stdlib only, and it has to be: the worker imports it before it imports
@@ -570,7 +574,11 @@ ENGINE_FORBIDDEN_IMPORTS = (
 # The declaration side of the same edge: neither the types nor the scenarios
 # may reach the builders they name, which is what makes the builder paths
 # strings in the first place.
-DECLARATION_MODULES = ("benchmarks.kernel.schema", "benchmarks.kernel.registry")
+DECLARATION_MODULES = (
+    "benchmarks.kernel.schema",
+    "benchmarks.kernel.registry",
+    "benchmarks.kernel.spans",
+)
 
 # The third edge of the same constraint, one level down. The two above keep
 # the *engine* free of the arms; this one keeps each arm free of the others.
