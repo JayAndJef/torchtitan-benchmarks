@@ -83,10 +83,10 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/e2e/data/piper_qwen3.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
 | `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
 | `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
-| `benchmarks/kernel/registry.py` | The five kernel scenarios themselves, declared with those types |
+| `benchmarks/kernel/registry.py` | The kernel scenarios themselves (19 at this rev, 73 arms), declared with those types |
 | `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness |
 | `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py` |
-| `benchmarks/kernel/operations/` | Arm builders, one module per kernel family (`rope.py`, `swiglu.py`, `qkv.py`, `attention.py`, `lm_head.py`) plus `common.py` |
+| `benchmarks/kernel/operations/` | Arm builders, one module per scenario and named after it, plus `common.py` |
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments) and `reporting.py` |
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
@@ -647,7 +647,7 @@ even absent, once Inductor fuses the surrounding graph).
 
 | flag | default | meaning |
 |---|---|---|
-| `--scenario` (repeatable) | all five | subset of kernel scenarios |
+| `--scenario` (repeatable) | every scenario | subset of kernel scenarios |
 | `--replicates` | 5 | sweeps of every arm; the unit the CI is taken over |
 | `--replicates-per-process` | 1 | consecutive replicates of one arm per worker; above 1 the CI is renamed (see "Startup cost") |
 | `--samples-per-replicate` | 40 | timed bursts per arm per mode, per replicate |
@@ -667,28 +667,52 @@ every scenario is reported and the command exits nonzero if any failed.
 Deliberately ignores the `OUT`/`SEQ`/`BATCH` env vars -- flags only, so an
 e2e shell cannot leak settings into a kernel run.
 
-`swiglu` additionally needs its synthetic rows to route evenly
-(`batch * seq_len * top_k` divisible by `num_experts`). A shape/workload pair
-that breaks that skips `swiglu` **loudly** -- named numbers, a recorded error,
-a nonzero exit -- rather than capping or rounding anything; the other four
-scenarios are unaffected and still run. The same invariant is re-asserted
+Four scenarios need their synthetic rows to route evenly
+(`batch * seq_len * top_k` divisible by `num_experts`), and each declares it
+with `requires_balanced_routing`: `swiglu`, `dispatch_permute`, `expert_mlp`
+and `moe_combine`. A shape/workload pair that breaks that skips those four
+**loudly** -- named numbers, a recorded error, a nonzero exit -- rather than
+capping or rounding anything. The check is per scenario, so every other
+scenario is unaffected and still runs. The same invariant is re-asserted
 inside `run_kernel_scenario`, so `python -m benchmarks.kernel.worker` and any
 other direct caller raise instead of measuring an expert split that does not
 cover the rows they built.
 
-**`--model-size` is new and has not been probed on hardware.** Every kernel
-number in this repo was measured at `normal`; nothing has been run at `huge`.
-Treat the other four scenarios there as untested rather than as working, and
-expect `swiglu` at `huge` to **exhaust the memory of a single device**. That
-last one is arithmetic, not a measurement: `swiglu_inputs` allocates three
-fp32 `(4, 43008, 12288)` expert tensors (7.9 GiB each, 23.6 GiB of state
-dict, held for the whole run), and each of the three arms then loads its own
-bf16 copy (11.8 GiB) and grows a bf16 weight gradient of the same size in
-backward -- ~95 GiB resident before activations, plus a transient fp32 module
-during each arm's build. Replace this estimate with a real run before
-reporting anything about it.
+**`--model-size huge` is probed on four scenarios only.** On an H200 on
+2026-08-19, `qkv`, `attention` and `lm_head` completed at `huge` with every
+arm `ok`, and `swiglu` ran out of memory and wrote no `results.json`
+(`out/20260819T010252Z/kernels/`). No cross-engine arm has run at either
+size. Treat every other scenario at `huge` as untested rather than as
+working.
+
+The `swiglu` run died inside `run_correctness_pass`, in the gate's fp32
+upcast, with 134 GiB of the device's 139.81 GiB already in use. The
+arithmetic behind that: `swiglu_inputs` allocates three fp32
+`(4, 43008, 12288)` expert tensors (7.9 GiB each, 23.6 GiB of state dict,
+held for the whole run), and each of the three arms then loads its own bf16
+copy (11.8 GiB) and grows a bf16 weight gradient of the same size in
+backward. That run predates the residency change: `run_correctness_pass`
+now builds one arm at a time and drops it before the next, so the pass is
+bounded by the largest single arm rather than by their sum. Nobody has
+re-run `swiglu` at `huge` since. Measure it before reporting anything about
+it.
 
 ### Scenarios and arms
+
+**The registry declares 19 scenarios and 73 arms.** 15 of the 19 are
+cross-engine: they put megatron-core beside TorchTitan at one cut of the
+model. The other 4 -- `swiglu`, `qkv`, `lm_head` and `attention` -- are
+single-engine holdovers that the cross-engine roster supersedes; a later
+commit removes them together. A 16th cross-engine scenario, `attention_core`,
+is in flight in another worktree, so re-count with the command below rather
+than trusting this paragraph.
+
+```bash
+.venv/bin/python -c "from benchmarks.kernel.registry import KERNEL_SCENARIOS as K; print(len(K), sum(len(s.arms) for s in K.values()))"
+```
+
+The table below details the 4 holdovers plus `rope`. **It is 5 of the 19, and
+the registry is the authority.** The remaining 14 are named after it.
 
 | scenario | arms | modes | notes |
 |---|---|---|---|
@@ -698,15 +722,22 @@ reporting anything about it.
 | `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
 | `attention` | `baseline`*, `flex_flash`, `flash_attention_3` | fwd, fwd+bwd | inner attention only, packed-document causal masking; FA3 needs the `flash3` group, `flex_flash` the `fa4` group |
 
-**The table above is the single-engine roster, plus `rope`. It is not the
-whole registry.** `benchmarks/kernel/registry.py` also declares the
-cross-engine scenarios that put megatron-core beside TorchTitan at one cut --
-`embedding_stage`, `qkv_prep`, `qk_norm`, `attn_out_proj`, `attn_residual`,
-`ffn_norm`, `moe_residual`, `final_norm`, `lm_head_projection` and
-`cross_entropy`. Their arms are named `engine/profile`, the anchor is
-`mcore/base` throughout, and `./run_bench.sh scenarios` prints every one of
-them with its description. Read the registry rather than this table for that
-half.
+**The table above is the four single-engine holdovers, plus `rope`. It is not
+the whole registry.** `benchmarks/kernel/registry.py` declares 14 further
+cross-engine scenarios, in partition order: `embedding_stage`, `qkv_prep`,
+`qk_norm`, `attn_out_proj`, `attn_residual`, `ffn_norm`, `moe_router`,
+`dispatch_permute`, `expert_mlp`, `moe_combine`, `moe_residual`, `final_norm`,
+`lm_head_projection` and `cross_entropy`. Their arms are named
+`engine/profile`, except the `copy_floor` bandwidth arms. The anchor is
+`mcore/base` in every one except `expert_mlp`, which anchors on `titan`
+because it publishes no cross-engine row. `./run_bench.sh scenarios` prints
+every scenario with its description. Read the registry rather than this table
+for that half.
+
+**No cross-engine arm has produced a number on this box yet.** Every
+`results.json` under `out/` names one of the five scenarios in the table
+above, and none of them contains the string `mcore/base`. Treat the 15
+cross-engine scenarios as declarations until a run says otherwise.
 
 The `attention` scenario measures **inner attention only** -- the level at
 which the implementations are substitutable, and the level that keeps it from
@@ -772,7 +803,7 @@ nothing describes, and a floor known only to its builder could not produce
 the x-floor column, which the parent computes.
 
 **Which comparisons exist is declared too.** `KernelScenario.comparisons` is
-a tuple of `(arm, opponent)` pairs. Left `None` -- as all five scenarios
+a tuple of `(arm, opponent)` pairs. Left `None` -- as 7 of the 19 scenarios
 leave it -- it derives the usual set: every non-floor arm against the anchor.
 An explicit tuple is exhaustive, and the empty tuple declares a scenario that
 publishes no ratio at all, which a scenario whose two sides are not a
