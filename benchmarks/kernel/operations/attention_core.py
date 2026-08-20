@@ -663,8 +663,9 @@ def attention_core_inputs(
         grad_BLNH=grad,
         qkv_fused_TGR=fused,
         # Megatron's three tensors with megatron's strides: a contiguous
-        # query, and key and value as strided views of the fused buffer.
-        # The values equal k_BLNH and v_BLNH element for element.
+        # query, a contiguous key, and the value as a strided view of the
+        # fused buffer. The values equal q_BLNH, k_BLNH and v_BLNH element
+        # for element.
         q_TNH=q_mcore,
         k_TNH=k_mcore,
         v_TNH=v_mcore,
