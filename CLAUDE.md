@@ -453,7 +453,10 @@ which changes the treatment and makes the arm incomparable to the others.
 No kernel scenario measures TE attention either: `attention` declares
 `baseline`, `flex_flash` and `flash_attention_3` and no TE arm. A
 cross-engine `attention_core` scenario is in flight in another worktree;
-read the registry for what it ends up declaring.
+read the registry for what it ends up declaring. (That scenario name
+collides with the `attention_core` component label in "Total kernel time
+cannot rank arms that differ in one component". The label there is the
+removed trace classifier's, and it names no scenario.)
 
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios
@@ -714,10 +717,18 @@ it.
 **The registry declares 19 scenarios and 73 arms.** 15 of the 19 are
 cross-engine: they put megatron-core beside TorchTitan at one cut of the
 model. The other 4 -- `swiglu`, `qkv`, `lm_head` and `attention` -- are
-single-engine holdovers that the cross-engine roster supersedes; a later
-commit removes them together. A 16th cross-engine scenario, `attention_core`,
-is in flight in another worktree, so re-count with the command below rather
-than trusting this paragraph.
+single-engine, and they do **not** share one fate. `swiglu` is recorded as
+superseded by `expert_mlp` and deliberately not deleted
+(`reports/20260819-partc/MERGE-half2-result.md`). Nothing supersedes
+`attention`: no declared scenario cuts inner attention cross-engine, and the
+`attention_core` scenario that would is in flight in another worktree and is
+not in this registry. Do not write that a later commit removes the four
+together; no in-tree document says so.
+
+**Every count in this section is the count at this HEAD**, and
+`attention_core` moves all of them at once -- scenarios, arms, the
+cross-engine total, the comparison and correctness tallies below. Re-derive
+rather than quote:
 
 ```bash
 .venv/bin/python -c "from benchmarks.kernel.registry import KERNEL_SCENARIOS as K; print(len(K), sum(len(s.arms) for s in K.values()))"
@@ -1138,9 +1149,20 @@ destroying it.
   eager one -- the fused-vs-unfused QKV outputs are the original case -- and
   the rel_l2 gates enforce closeness there. It **enforces** on a permutation
   or a routing decision, in `dispatch_permute` and on `moe_router`'s
-  `selected_count`, because no tolerance metric can see a wrong one: with
-  `N` output rows, swapping one pair moves `max_rel_l2` by about
-  `sqrt(2/N)`, which is below the 2e-2 gate at the default workload.
+  `selected_count`. A permutation is a gather, so a wrong one moves right
+  values to wrong places, and both engines build the permuted rows by a pure
+  copy: exact equality is achievable, and it is the metric that sees a
+  misplacement whatever the shape.
+
+  **Do not justify that with the `sqrt(2/N)` figure two other files carry.**
+  Swapping one pair of `N` rows gives `max_rel_l2 ~ 2/sqrt(N)`, not
+  `sqrt(2/N)`. At the default `dispatch_permute` workload (`N = 8192`) that
+  is 2.21e-2 measured, **above** the 2e-2 gate, not below it. So a tolerance
+  gate would catch a single swap here by a 10% margin, and would stop
+  catching it as `N` grows. `benchmarks/kernel/registry.py` and
+  `benchmarks/kernel/operations/dispatch_permute.py` state the wrong form and
+  the wrong conclusion; neither is editable from here. The bitwise gate is
+  right for the reason above, not for that one.
 
 ### Silent-fallback guard
 

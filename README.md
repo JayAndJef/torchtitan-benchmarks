@@ -195,8 +195,10 @@ the model at one component and put megatron-core beside TorchTitan there.
 | `lm_head` | full logits vs fused linear-CE vs TE and Piper-optimized cross entropy |
 | `attention` | inner attention only: FlexAttention vs FlashAttention-3 varlen vs FlexAttention lowered to FlashAttention-4 |
 
-The last four are single-engine holdovers that the cross-engine roster
-supersedes; a later commit removes them together.
+The last four are single-engine. `swiglu` is recorded as superseded by the
+cross-engine `expert_mlp` and deliberately not deleted; `attention` is
+superseded by nothing, because no declared scenario cuts inner attention
+cross-engine.
 
 Each number is the burst-amortized per-call cost under back-to-back dispatch,
 repeated over replicate sweeps so drift affects every arm equally. It is not

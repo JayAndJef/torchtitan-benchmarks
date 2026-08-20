@@ -459,12 +459,16 @@ def merge_kernel_fragments(
         if arm_name not in samples:
             continue
         if opponent not in samples:
-            # No current scenario reaches this. All five derive their pairs,
-            # so every opponent is the anchor, and an anchor missing from
-            # ``samples`` raised above. The branch is here for a scenario that
-            # declares ``comparisons`` explicitly and names a second arm as an
-            # opponent: that arm can be skipped or lost while the anchor
-            # survives, and one absent row must not cost the other rows.
+            # Reachable, and by a growing number of rows. 12 of the 19
+            # scenarios declare ``comparisons`` explicitly and 8 of their
+            # pairs name an opponent that is not the anchor:
+            # ``qkv_prep``'s titan-vs-unfused row, all six of
+            # ``expert_mlp``'s, and two of ``cross_entropy``'s. Such an
+            # opponent can be skipped or lost while the anchor survives, and
+            # one absent row must not cost the other rows. Only the 7
+            # scenarios that leave ``comparisons`` at ``None`` have the old
+            # property that every opponent is the anchor, and a missing
+            # anchor raised above.
             warnings.append(
                 f"{arm_name}: opponent {opponent!r} is absent, so this arm "
                 "carries no ratio"
