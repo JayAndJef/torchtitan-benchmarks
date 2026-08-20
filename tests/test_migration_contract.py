@@ -79,6 +79,7 @@ KERNEL_ARMS_MODULES = {
     "moe_router": "benchmarks.kernel.operations.moe_router",
     "dispatch_permute": "benchmarks.kernel.operations.dispatch_permute",
     "expert_mlp": "benchmarks.kernel.operations.expert_mlp",
+    "moe_combine": "benchmarks.kernel.operations.moe_combine",
     "moe_residual": "benchmarks.kernel.operations.moe_residual",
     "final_norm": "benchmarks.kernel.operations.final_norm",
     "lm_head_projection": "benchmarks.kernel.operations.lm_head_projection",
@@ -204,6 +205,17 @@ KERNEL_INVENTORY = {
         "titan/piper_optimized_triton",
         "titan/piper_optimized_inductor",
     ),
+    # Scenario 12, the mirror of scenario 10 on the way back. Five arms and
+    # two rows, both within megatron: titan applies the routing
+    # probabilities here and megatron applied them in scenario 11, so the
+    # two sides compute different functions of the same rows.
+    "moe_combine": (
+        "copy_floor",
+        "mcore/base",
+        "mcore/no_permute_fusion",
+        "mcore/dispatcher_alltoall",
+        "titan",
+    ),
     # Scenario 13, the twin of attn_residual at the other bda call site. Four
     # arms, one published row, and the row is within megatron for the same
     # reason.
@@ -261,6 +273,7 @@ KERNEL_BASELINE_ARMS = {
     "moe_router": "mcore/base",
     "dispatch_permute": "mcore/base",
     "expert_mlp": "titan",
+    "moe_combine": "mcore/base",
     "moe_residual": "mcore/base",
     "final_norm": "mcore/base",
     "lm_head_projection": "mcore/base",

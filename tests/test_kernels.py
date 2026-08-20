@@ -245,7 +245,8 @@ class RegistryTests(unittest.TestCase):
             if scenario.requires_balanced_routing
         }
         self.assertEqual(
-            balanced, {"swiglu", "dispatch_permute", "expert_mlp"}
+            balanced,
+            {"swiglu", "dispatch_permute", "expert_mlp", "moe_combine"},
         )
 
 

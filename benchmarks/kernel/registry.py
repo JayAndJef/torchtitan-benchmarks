@@ -2635,6 +2635,274 @@ EXPERT_MLP = KernelScenario(
 )
 
 
+# Each engine is gated against its OWN fp64 truth, under its own output names.
+# That is not a stylistic choice: at this cut the two engines compute
+# different functions, because megatron applies the routing probabilities
+# inside TEGroupedMLP (scenario 11) and titan applies them here. A shared
+# ``out`` name would force one side to be gated against the other's function,
+# and the difference is a row-by-row scaling rather than a tolerance.
+#
+# rel_l2 rather than a ULP metric, because a combine is a scatter-add and a
+# scatter-add is a reduction. CLAUDE.md's rule applies directly: cancellation
+# drives individual outputs toward zero, so a per-element relative error
+# divides a negligible absolute error by a negligible magnitude and reports
+# thousands of ULPs for a numerically perfect kernel.
+#
+# The gradient is named next to the output, and it is not a restatement of it.
+# The forward is a scatter-add and the backward is a gather, and they are
+# separate implementations on both engines -- TE's fused_unpermute has its own
+# backward, the torch path's is autograd's, and titan's custom op registers
+# one by hand. A forward that agrees is no evidence about any of them.
+MOE_COMBINE_MCORE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("mcore_out", "mcore_expert_out_grad"),
+    max_rel_l2=2e-2,
+)
+
+# The titan gate carries a third output the megatron side does not have.
+# ``titan_scores_grad`` is the gradient of the probability multiply, and it is
+# the one number that proves the multiply happened inside the timed region.
+# Without it a titan combine that silently stopped scoring would still pass
+# every remaining check that the scenario runs.
+MOE_COMBINE_TITAN_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("titan_out", "titan_expert_out_grad", "titan_scores_grad"),
+    max_rel_l2=2e-2,
+)
+
+# The within-engine check, and the premise of both published rows: each delta
+# changes the implementation and not the arithmetic. Enforced rather than
+# informational, because unlike the qkv fused/unfused pair these arms are not
+# expected to be bit-identical -- TE's fused unpermute and torch's scatter_add
+# may accumulate in a different order -- but they must agree to bf16
+# tolerance, and a delta that changed the result is a delta that changed the
+# operation.
+MOE_COMBINE_VARIANT_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=("mcore_out", "mcore_expert_out_grad"),
+    max_rel_l2=2e-2,
+)
+
+
+MOE_COMBINE = KernelScenario(
+    name="moe_combine",
+    description=(
+        "The step that puts routed expert outputs back into token order: "
+        "TorchTitan's token_dispatcher.combine(...) against megatron-core's "
+        "THREE combine phases -- combine_preprocess, token_combine and "
+        "combine_postprocess. All three, because "
+        "MoEAllGatherTokenDispatcher.token_combine is guarded by tp_size > 1 "
+        "or ep_size > 1 and is therefore THE IDENTITY at world_size=1, and "
+        "MoELayer.combine wraps that method and nothing else: a cut there "
+        "would have measured a zero on the megatron side and read as a "
+        "spectacular win. The work is in the neighbouring phases, and the two "
+        "dispatcher classes place it differently -- allgather unpermutes in "
+        "combine_preprocess, alltoall in combine_postprocess -- so the cut "
+        "names the triple. THIS SCENARIO PUBLISHES NO CROSS-ENGINE RATIO. The "
+        "routing probabilities are applied on OPPOSITE sides of this "
+        "boundary: megatron multiplies them inside TEGroupedMLP "
+        "(weighted_bias_swiglu_impl, scenario 11), and titan multiplies them "
+        "here -- LocalTokenDispatcher.combine is documented 'Score and "
+        "scatter_add routed expert outputs'. So the two sides compute "
+        "different functions of the same rows and a ratio would compare two "
+        "different amounts of work; the cross-engine row belongs to the "
+        "expert_combine span (11+12), which is declared elsewhere. For the "
+        "same reason there is no cross-engine correctness check either: each "
+        "engine is gated against its own fp64 truth, under its own output "
+        "names. The two rows published are megatron's own. no_permute_fusion "
+        "swaps TE's fused_unpermute for the torch path (a zeroed tensor and a "
+        "scatter_add with an expanded index) at ONE read site inside a "
+        "scenario that also holds token_combine and combine_postprocess. "
+        "dispatcher_alltoall MEASURES THE DISPATCHER'S LOCAL UNPERMUTE AND "
+        "SYNC STRATEGY, NOT COMMUNICATION: _AllToAll.forward returns its "
+        "input unchanged at world_size=1, so no bytes move, but the class "
+        "still unsorts chunks in combine_preprocess and unpermutes in "
+        "combine_postprocess where allgather does neither. Every number here "
+        "is device time plus host dispatch and carries NO blocking "
+        "device-to-host synchronization inside the timed region -- the "
+        "allgather .cpu() and every _maybe_dtoh_and_synchronize sit in the "
+        "dispatch phases, which run once at build time. Both engines receive "
+        "one expert-output tensor in one (expert, token) row order, checked "
+        "at build time against titan's own argsort, and a build-time guard "
+        "RAISES unless the megatron combine reproduces the unpermute of those "
+        "rows. copy_floor performs the same traffic and the same additions "
+        "with no indirection at all: a scatter-add is bandwidth-bound at "
+        "these shapes, so the x_floor column is what separates an unpermute "
+        "result from a bandwidth result. WARNING: THE gbps AND x_floor COLUMNS "
+        "STILL LET A READER RECOVER THE RATIO THIS SCENARIO REFUSES TO "
+        "PUBLISH. Every arm shares one bytes_moved, so gbps(titan) divided by "
+        "gbps(mcore/base) is exactly the suppressed median ratio, and the two "
+        "x_floor values divide to the same number. Neither column can be "
+        "removed without deleting the floor, so the hazard is stated instead: "
+        "that quotient is meaningless for the reason above, and doubly so "
+        "because titan is the only compiled arm and titan alone forces a "
+        "deterministic scatter_add. gbps counts forward traffic in every mode. "
+        "Two asymmetries are declared rather than hidden: megatron's "
+        "combine_postprocess holds the shape restore where titan's equivalent "
+        "view sits after the combine call, so the mcore side is charged one "
+        "extra Python call and no kernel; and titan's deterministic_scatter_add "
+        "enables deterministic algorithms around its own scatter_add where "
+        "megatron's unpermute does not. Neither reaches a published row."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.moe_combine:moe_combine_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.moe_combine:moe_combine_reference"
+    ),
+    baseline_arm="mcore/base",
+    # The synthetic routing is a round-robin, exactly balanced only when
+    # batch * seq_len * top_k divides num_experts. At any other workload one
+    # expert's group is short and the tokens_per_expert the manifest records
+    # stops describing the tensors the arms hold. The runner skips the
+    # scenario loudly instead, and moe_combine_inputs re-asserts it with named
+    # numbers for any direct caller.
+    requires_balanced_routing=True,
+    # Explicit, exhaustive, and NOT the derived set. Left None the schema
+    # would pair every non-floor arm with the anchor, which would publish
+    # titan against mcore/base -- the one row this scenario has evidence
+    # against. The two rows below are real questions: each is one megatron
+    # field, with everything else held fixed.
+    comparisons=(
+        ("mcore/no_permute_fusion", "mcore/base"),
+        ("mcore/dispatcher_alltoall", "mcore/base"),
+    ),
+    arms=(
+        # The floor decides whether the two published rows are kernel results
+        # at all. A combine must read every routed row, add them top_k at a
+        # time and write one row per token; that is bandwidth-bound by
+        # construction, which is why the plan names this scenario and
+        # scenario 10 as the strongest floor candidates after the norms.
+        # Declared exactly as rope, ffn_norm and moe_residual declare theirs:
+        # forward only, is_floor, and an eager_reason rather than
+        # compiled=False.
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "torch.sum over a contiguous [tokens, top_k, dim] view: the "
+                "same traffic and the same additions a combine performs, with "
+                "no index read and no scattered write. The combine, if the "
+                "routing had already put every token's rows side by side"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_combine:"
+                "build_moe_combine_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a sum "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron-core's allgather dispatcher off a real GPTModel, "
+                "all three combine phases: TransformerEngine's "
+                "fused_unpermute in combine_preprocess, an inert token_combine "
+                "and a view in combine_postprocess"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_combine:"
+                "build_moe_combine_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, and none of "
+                "the three combine phases carries @jit_fuser -- the single "
+                "decorator in token_dispatcher.py sits on "
+                "MoEFlexTokenDispatcher, a class that asserts "
+                "tp_size * ep_size > 1 and is never built here. TE's "
+                "fused_unpermute is a hand-written kernel, not a compile "
+                "treatment"
+            ),
+            correctness=(MOE_COMBINE_MCORE_GATE,),
+        ),
+        KernelArm(
+            name="mcore/no_permute_fusion",
+            description=(
+                "the same allgather dispatcher with moe_permute_fusion=False: "
+                "unpermute falls to the torch path, a zeroed [tokens, dim] "
+                "tensor and a scatter_add with an index expanded to the "
+                "hidden width. ONE read site inside a scenario that is larger "
+                "than the unpermute"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_combine:"
+                "build_moe_combine_mcore_no_permute_fusion"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "the arm IS the removal of a TE kernel: it replaces "
+                "fused_unpermute with torch operations, and compiling those "
+                "would erase the difference the published row measures"
+            ),
+            correctness=(MOE_COMBINE_MCORE_GATE, MOE_COMBINE_VARIANT_GATE),
+        ),
+        KernelArm(
+            name="mcore/dispatcher_alltoall",
+            description=(
+                "megatron's alltoall token dispatcher, fusion left on. THIS "
+                "ARM MEASURES THE DISPATCHER'S LOCAL UNPERMUTE AND SYNC "
+                "STRATEGY, NOT COMMUNICATION: _AllToAll.forward returns its "
+                "input unchanged at world_size=1. What differs is local -- it "
+                "unsorts chunks in combine_preprocess (a real row copy, even "
+                "though the chunk order is the identity at one rank) and "
+                "unpermutes in combine_postprocess, where the allgather class "
+                "unpermutes in combine_preprocess and does nothing else"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_combine:"
+                "build_moe_combine_mcore_dispatcher_alltoall"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "the same reason as mcore/base: megatron compiles no whole "
+                "layer and no combine phase of this class carries @jit_fuser "
+                "either"
+            ),
+            correctness=(MOE_COMBINE_MCORE_GATE, MOE_COMBINE_VARIANT_GATE),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan's token_dispatcher.combine(...) under "
+                "torch.compile(fullgraph=True): score the routed rows, then "
+                "scatter_add them into a zeroed [tokens, dim] tensor. Built "
+                "as AllToAllTokenDispatcher, the class production builds, "
+                "which delegates to LocalTokenDispatcher.combine at EP=1. "
+                "Measured and gated, and deliberately in no comparison -- "
+                "read its number as titan's cost for this cut, never as a "
+                "ratio against megatron, whose combine does not apply the "
+                "probabilities"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_combine:"
+                "build_moe_combine_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            # No cross-engine check, and that is the same fact the missing
+            # ratio states. The two engines compute different functions here,
+            # so a gate between them would have to be given either an extra
+            # multiply charged to one engine inside its timed region, or two
+            # different synthetic expert-output tensors. Both are worse than
+            # declaring none. Note also the direction rule this scenario would
+            # have had to obey if it declared one: every cross-engine check
+            # goes ON the titan arm and REFERENCES mcore/base, because
+            # resolve_arm_skips closes the skip set over correctness
+            # references and a check pointing out from the anchor would let a
+            # skipped titan arm take the anchor -- and every row -- with it.
+            correctness=(MOE_COMBINE_TITAN_GATE,),
+        ),
+    ),
+)
+
+
 # The gate every arm faces, and rel_l2 rather than a ULP metric. An add is not
 # a reduction, but the hazard CLAUDE.md's ULP rule names is CANCELLATION, and
 # the reduction is only where that rule met it first. ``residual + x`` on two
@@ -3416,6 +3684,7 @@ KERNEL_SCENARIOS = {
         MOE_ROUTER,
         DISPATCH_PERMUTE,
         EXPERT_MLP,
+        MOE_COMBINE,
         MOE_RESIDUAL,
         FINAL_NORM,
         LM_HEAD_PROJECTION,

@@ -776,4 +776,37 @@ def shape_summary(
             ],
             "linear_fc2_mcore_per_expert": [shape.dim, shape.moe_hidden_dim],
         }
+    if scenario_name == "moe_combine":
+        tokens = batch * seq
+        rows = tokens * shape.top_k
+        return {
+            # The block input. Both engines read it inside the combine for
+            # its shape alone -- titan allocates torch.zeros_like(x_TD) and
+            # megatron restores self.hidden_shape -- so its values reach no
+            # number.
+            "x": [batch, seq, shape.dim],
+            # Recorded next to x because our megatron driver runs THD, so a
+            # hidden state reaching the dispatcher is (t, 1, h) and that is
+            # the shape the mcore triple returns. Both hold the same
+            # batch*seq rows, so this is a label rather than a measured
+            # difference.
+            "x_thd": [tokens, 1, shape.dim],
+            # The tensor every arm combines, in the canonical (expert
+            # ascending, token ascending) row order both engines'
+            # permutations produce.
+            "expert_out": [rows, shape.dim],
+            "grad_out": [tokens, shape.dim],
+            # The routing decision in the two forms the engines take. They
+            # encode one decision; the inputs builder refuses to return a
+            # pair that does not.
+            "routing_map": [tokens, shape.num_experts],
+            "probs": [tokens, shape.num_experts],
+            "topk_expert_ids": [tokens, shape.top_k],
+            "tokens_per_expert": [rows // shape.num_experts]
+            * shape.num_experts,
+            # What the kernel actually does: read this many rows, write this
+            # many, and add top_k of the first into each of the second.
+            "rows_combined": rows,
+            "rows_out": tokens,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")
