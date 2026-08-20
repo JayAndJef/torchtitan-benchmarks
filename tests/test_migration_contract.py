@@ -84,6 +84,7 @@ KERNEL_ARMS_MODULES = {
     "final_norm": "benchmarks.kernel.operations.final_norm",
     "lm_head_projection": "benchmarks.kernel.operations.lm_head_projection",
     "cross_entropy": "benchmarks.kernel.operations.cross_entropy",
+    "attention_core": "benchmarks.kernel.operations.attention_core",
 }
 
 # Third-party roots override paths are allowed to name, so the "did this move
@@ -241,6 +242,14 @@ KERNEL_INVENTORY = {
         "titan/te_fused_ce",
         "titan/piper_optimized_te_ce",
     ),
+    "attention_core": (
+        "mcore/base",
+        "mcore/attn_flash3",
+        "mcore/attn_unfused",
+        "titan",
+        "titan/flex_flash",
+        "titan/flash_attention_3",
+    ),
 }
 
 KERNEL_BASELINE_ARMS = {
@@ -278,6 +287,7 @@ KERNEL_BASELINE_ARMS = {
     "final_norm": "mcore/base",
     "lm_head_projection": "mcore/base",
     "cross_entropy": "mcore/base",
+    "attention_core": "mcore/base",
 }
 
 # Arm names deliberately match across the two registries wherever the same

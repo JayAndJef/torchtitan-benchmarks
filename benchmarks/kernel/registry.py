@@ -3719,6 +3719,287 @@ CROSS_ENTROPY = KernelScenario(
 )
 
 
+# The gate every arm faces. Attention is a reduction over the sequence, so
+# rel_l2 is the only safe metric and a max or a ULP count is forbidden
+# (CLAUDE.md, "Choosing a correctness metric"): cancellation drives
+# individual outputs toward zero, and a per-element metric then reports a
+# huge number for arithmetic that is exactly right.
+#
+# Measured on an H200 at dim 256, 4 q heads over 2 kv groups, head_dim 64,
+# batch 2, seq 128, over 8 seeded packed documents: megatron lands at 1.76e-3
+# (out), 2.75e-3 (dq), 3.31e-3 (dk), 2.81e-3 (dv), and TorchTitan's
+# FlexAttention at 1.76e-3 / 2.75e-3 / 2.72e-3 / 2.22e-3. The gate keeps
+# roughly six times that headroom, which the normal shape needs: the
+# reduction there runs over eight times as many keys.
+ATTENTION_CORE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "dq", "dk", "dv"),
+    max_rel_l2=2e-2,
+)
+
+
+# Recorded, not enforced, and pointed at the anchor from every other arm.
+#
+# Informational because the fp64 gates above are stronger: each arm is right
+# in absolute terms, which bounds the distance between any two of them. And
+# the cross-engine agreement has been checked at exactly one small shape, so
+# enforcing it would risk the whole scenario on a number nobody has measured
+# where it will run. Measured there, the two engines agree to 4.3e-4 on
+# ``out`` and to 2.9e-3 on the widest gradient.
+#
+# The direction is required, not stylistic. ``resolve_arm_skips`` closes the
+# skip set over correctness references, so a check declared on the anchor and
+# pointing outward would let a skipped arm take the anchor down -- and the
+# anchor's loss costs the scenario.
+ATTENTION_CORE_CROSS_ARM = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=("out", "dq", "dk", "dv"),
+    max_rel_l2=2e-2,
+    informational=True,
+)
+
+
+ATTENTION_CORE = KernelScenario(
+    name="attention_core",
+    description=(
+        "Inner attention at Piper-1B shapes with packed-document causal "
+        "masking, cross-engine: megatron-core's TEDotProductAttention "
+        "against TorchTitan's FlexAttention, the same FlexAttention lowered "
+        "to FlashAttention-4, and VarlenAttention over FlashAttention-3. "
+        "The cut runs from q/k/v after RoPE to the attention output; the "
+        "projections belong to qkv_prep and attn_out_proj. Both engines read "
+        "the same q/k/v VALUES, in each engine's own MEMORY LAYOUT, and the "
+        "layouts differ on purpose. Titan gets three contiguous tensors, "
+        "which is what its projection materializes. Megatron gets a "
+        "contiguous query, a contiguous key and ONE NON-CONTIGUOUS STRIDED "
+        "VIEW -- the value. Its QKV GEMM writes one fused buffer and splits "
+        "it into three views; the query and the key then leave the buffer "
+        "because the norm and the rotation write fresh tensors, and the "
+        "value is neither normed nor rotated. TransformerEngine does not "
+        "recognize that layout and copies the value inside every timed "
+        "megatron call -- 4 MiB per forward at batch 4 / seq 1024 / normal, "
+        "paid by every backend because get_qkv_layout runs before the "
+        "backend is chosen. THAT COPY IS THE COST qkv_prep SAYS MEGATRON "
+        "DEFERS TO THIS SCENARIO, so a megatron number here is attention "
+        "plus megatron's own layout adaptation for the value. The key's "
+        "equal half is absorbed by k_layernorm in the engine, which belongs "
+        "to scenario qk_norm, and that scenario feeds its megatron arm a "
+        "contiguous key -- so 4 MiB of real traffic is timed in no scenario "
+        "today, and this one declines to double-book it. Megatron's "
+        "[T, N*H] output is canonicalized back outside every timed closure. "
+        "COMPILE TREATMENT DIFFERS BY ARM AND THE RATIOS ARE COMPARISONS OF "
+        "TREATMENTS. Every megatron arm is eager, because megatron compiles "
+        "no whole transformer layer. 'titan' and 'titan/flex_flash' are "
+        "compiled by FlexAttention's own class-level torch.compile, which "
+        "carries max_autotune AND coordinate_descent_tuning; "
+        "'titan/flash_attention_3' gets a plain torch.compile(fullgraph=True) "
+        "with no autotune. So the Triton template is the only autotuned arm "
+        "in the scenario, and a row against it is not a kernel-quality claim "
+        "on its own. "
+        "WHICH KERNEL EACH MEGATRON ARM RUNS IS PINNED BY THE PROFILE AND "
+        "ENFORCED BY A GUARD, because every backend computes the same "
+        "function and no correctness gate can tell them apart: mcore/base "
+        "runs cuDNN FusedAttention, mcore/attn_flash3 runs FlashAttention 3, "
+        "mcore/attn_unfused runs TE's torch implementation. There is no "
+        "mcore FlashAttention-4 arm: TE prefers FA3 on sm90 whenever both "
+        "are installed and no megatron setting reaches past that, so "
+        "'titan/flex_flash' has no megatron opponent and is published "
+        "against 'titan' instead, "
+        "which isolates the lowering. Expect it to lose on Hopper for a "
+        "reason that is not about FA4: FlexAttention's packed-interval mask "
+        "optimization is gated on compute capability 10/11, so partial "
+        "blocks evaluate the mask per lane here. "
+        "No bandwidth floor is declared, deliberately: attention's "
+        "arithmetic grows with the square of the sequence length while its "
+        "traffic grows linearly, so a copy floor would bound nothing. That "
+        "does NOT make these numbers device time -- run --burst before "
+        "ranking anything. "
+        "The number includes host serialization on neither side: no timed "
+        "closure calls .cpu(), .item() or synchronize, and every mask form "
+        "is built once in the inputs builder."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.attention_core:attention_core_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.attention_core:attention_core_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit and exhaustive, and every arm names EXACTLY ONE opponent.
+    # reporting.py keys its printed table on (arm, mode), so a second
+    # opponent for one arm would be dropped from the terminal while surviving
+    # in results.json. Merge note 12 names the two rows a fixed renderer
+    # would unlock.
+    #
+    # The derived set would have compared all five non-anchor arms against
+    # mcore/base, which loses the row this scenario exists for:
+    # titan/flash_attention_3 against mcore/attn_flash3 is the same kernel
+    # family and the same THD masking through two host stacks, and it is the
+    # only pair here that isolates the engine.
+    comparisons=(
+        # Within megatron: FlashAttention-3 against the cuDNN kernel.
+        ("mcore/attn_flash3", "mcore/base"),
+        # Within megatron: the unfused path against the fused one.
+        ("mcore/attn_unfused", "mcore/base"),
+        # The headline cross-engine row. An autotuned Triton template against
+        # an eager cuDNN kernel -- read the description before ranking it.
+        ("titan", "mcore/base"),
+        # Within titan: the same module, the same BlockMask and the same
+        # mask_mod, lowered two ways. The one pair here that isolates the
+        # kernel family alone.
+        ("titan/flex_flash", "titan"),
+        # Cross-engine, one kernel family: both sides run FlashAttention-3
+        # varlen over the same cu_seqlens, and only the host stack differs.
+        ("titan/flash_attention_3", "mcore/attn_flash3"),
+    ),
+    arms=(
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron self_attention.core_attention with "
+                "attention_backend PINNED to fused: TransformerEngine's cuDNN "
+                "FusedAttention over THD cu_seqlens, eager as megatron runs "
+                "it. Pinned rather than left at AttnBackend.auto. THE BASE "
+                "PROFILE STILL CARRIES NO attention_backend, so the e2e "
+                "megatron arm and every other cross-engine scenario's "
+                "mcore/base still run at auto, and this arm's profile is the "
+                "only pinned one. Measured on this host the two make the "
+                "same selection, so this arm runs the kernel the e2e arm "
+                "runs; pinning makes that a property of the profile instead "
+                "of the device"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attention_core"
+                ":build_attention_core_mcore_base"
+            ),
+            # No isolated backward on either engine. TE's fused-attention
+            # autograd function consumes its saved-tensor context on the
+            # first backward and then raises, so the retained-graph re-run
+            # other scenarios use is unavailable; the titan arms record the
+            # same. Backward cost is forward_backward minus forward.
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, and "
+                "TEDotProductAttention carries no jit_fuser, so this module "
+                "runs eager end to end; compiling it would measure a "
+                "treatment megatron never applies"
+            ),
+            correctness=(ATTENTION_CORE_GATE,),
+        ),
+        KernelArm(
+            name="mcore/attn_flash3",
+            description=(
+                "megatron with attention_backend pinned to flash, which "
+                "TransformerEngine resolves to FlashAttention 3.0.0 on sm90. "
+                "The opponent of titan/flash_attention_3: the same kernel "
+                "family and the same THD cu_seqlens through a different host "
+                "stack. The GENERATION is enforced by the arm's guard and not "
+                "by megatron -- flash_attention_version writes "
+                "NVTE_FLASH_ATTN_V2/V3/V4, which TransformerEngine 2.17.1 "
+                "reads nowhere, and FA3 degrades to FA2 rather than failing"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attention_core"
+                ":build_attention_core_mcore_flash3"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so its "
+                "attention runs eager whichever backend it selects"
+            ),
+            correctness=(ATTENTION_CORE_GATE, ATTENTION_CORE_CROSS_ARM),
+        ),
+        KernelArm(
+            name="mcore/attn_unfused",
+            description=(
+                "megatron with attention_backend pinned to unfused: "
+                "TransformerEngine's own torch implementation, which "
+                "materializes the score matrix. NOT a bandwidth floor -- it "
+                "is a real implementation and it publishes a ratio. IT WILL "
+                "DOMINATE THE PEAK-MEMORY COLUMN AND IT CAN EXHAUST THE "
+                "DEVICE. Its scores are [SEGMENTS, n_heads, max_seqlen, "
+                "max_seqlen], where SEGMENTS is cu_seqlens.numel() - 1 "
+                "(ConvertTHDtoBSHD reads exactly that, "
+                "dot_product_attention/utils.py:2153) and NOT the real "
+                "document count. cu_seqlens is padded to 128 entries, so "
+                "segments is 127 at every workload: one bf16 score tensor is "
+                "4.0 GiB at seq 1024, 15.9 GiB at 2048 and 63.5 GiB at 4096 "
+                "on the normal shape, and 47.6 GiB at seq 1024 on huge. The "
+                "arm needs the scores, the saved probabilities and the "
+                "backward gradient, so budget three of those. A sweep past "
+                "seq 2048 will OOM, and because the correctness pass has no "
+                "per-arm exception handling that OOM takes the whole "
+                "scenario with it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attention_core"
+                ":build_attention_core_mcore_unfused"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so its "
+                "attention runs eager whichever backend it selects"
+            ),
+            correctness=(ATTENTION_CORE_GATE, ATTENTION_CORE_CROSS_ARM),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan FlexAttention: an Inductor-generated Triton "
+                "template driven by a block-diagonal causal BlockMask. "
+                "Compiled by the class's own torch.compile of flex_attention, "
+                "which carries max_autotune and coordinate_descent_tuning, so "
+                "this is the ONLY autotuned arm in the scenario"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attention_core"
+                ":build_attention_core_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(ATTENTION_CORE_GATE, ATTENTION_CORE_CROSS_ARM),
+        ),
+        KernelArm(
+            name="titan/flex_flash",
+            description=(
+                "The same FlexAttention module, mask_mod and BlockMask "
+                "lowered to FlashAttention-4 CuTe DSL kernels instead of a "
+                "Triton template (BACKEND=FLASH, 256x128 blocks); requires "
+                "the fa4 dependency group. Published against titan, because "
+                "only the lowering differs and because TransformerEngine "
+                "cannot select FA4 on sm90, so there is no megatron opponent"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attention_core"
+                ":build_attention_core_titan_flex_flash"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(ATTENTION_CORE_GATE, ATTENTION_CORE_CROSS_ARM),
+        ),
+        KernelArm(
+            name="titan/flash_attention_3",
+            description=(
+                "FlashAttention-3 varlen (CUTLASS sm90) over the same packed "
+                "documents, via torch.nn.attention.varlen; requires the "
+                "flash3 dependency group. Wrapped in a plain "
+                "torch.compile(fullgraph=True) with NO autotune, unlike the "
+                "two FlexAttention arms"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attention_core"
+                ":build_attention_core_titan_flash3"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(ATTENTION_CORE_GATE, ATTENTION_CORE_CROSS_ARM),
+        ),
+    ),
+)
+
+
 KERNEL_SCENARIOS = {
     scenario.name: scenario
     for scenario in (
@@ -3741,6 +4022,7 @@ KERNEL_SCENARIOS = {
         FINAL_NORM,
         LM_HEAD_PROJECTION,
         CROSS_ENTROPY,
+        ATTENTION_CORE,
     )
 }
 
