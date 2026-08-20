@@ -143,6 +143,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.operations.ffn_norm",
     "benchmarks.kernel.operations.final_norm",
     "benchmarks.kernel.operations.lm_head",
+    "benchmarks.kernel.operations.moe_residual",
     "benchmarks.kernel.operations.qk_norm",
     "benchmarks.kernel.operations.qkv",
     "benchmarks.kernel.operations.qkv_prep",
