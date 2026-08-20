@@ -167,6 +167,13 @@ class KernelScenarioResult:
                     "burst_us_per_call": arm.burst_us_per_call,
                     "status": arm.status,
                     "status_reason": arm.status_reason,
+                    # The declared compile treatment, carried here from the
+                    # registry by the merge. A cross-engine ratio compares
+                    # two treatments and not two kernels, so a row that does
+                    # not name both sides cannot be read. A reader of this
+                    # file holds no registry.
+                    "compiled": arm.compiled,
+                    "eager_reason": arm.eager_reason,
                 }
                 for name, arm in self.arms.items()
             },
@@ -176,6 +183,7 @@ class KernelScenarioResult:
             "methodology": self.methodology,
             "environment": self.environment,
             "warnings": list(self.warnings),
+            "description": self.description,
         }
         return _json_safe(value)
 
@@ -205,6 +213,8 @@ class KernelScenarioResult:
                 burst_us_per_call=arm.get("burst_us_per_call"),
                 status=arm["status"],
                 status_reason=arm["status_reason"],
+                compiled=arm["compiled"],
+                eager_reason=arm["eager_reason"],
             )
             for name, arm in value["arms"].items()
         }
@@ -229,6 +239,7 @@ class KernelScenarioResult:
             methodology=value["methodology"],
             environment=value["environment"],
             warnings=tuple(value.get("warnings", ())),
+            description=value["description"],
         )
 
 

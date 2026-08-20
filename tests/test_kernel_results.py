@@ -88,11 +88,12 @@ def sample_result() -> KernelScenarioResult:
 
 
 class KernelResultsTests(unittest.TestCase):
-    def test_schema_five_records_the_burst_parameters_and_statuses(self) -> None:
+    def test_schema_six_records_the_burst_parameters_and_statuses(self) -> None:
         """Schema 3 replaced n/warmup; reusing either name is the bug.
         Schema 4 added the per-arm status. Schema 5 renamed the interval a
-        batched run publishes."""
-        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 5)
+        batched run publishes. Schema 6 carries the declared compile
+        treatment and the scenario's own description."""
+        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 6)
         payload = sample_result().to_dict()
         # Schema 2's model/workload split, still asserted.
         self.assertNotIn("spec", payload)
@@ -109,6 +110,10 @@ class KernelResultsTests(unittest.TestCase):
         self.assertEqual(payload["warmup_calls"], 1)
         self.assertEqual(payload["arms"]["baseline"]["status"], "ok")
         self.assertIsNone(payload["arms"]["baseline"]["status_reason"])
+        # Schema 6. Every arm names its compile treatment, measured or not.
+        self.assertIn("compiled", payload["arms"]["baseline"])
+        self.assertIn("eager_reason", payload["arms"]["baseline"])
+        self.assertIn("description", payload)
 
     def test_an_unmeasured_arm_carries_a_status_and_a_reason(self) -> None:
         """An arm this host could not run and an arm nobody declared must not
@@ -132,6 +137,98 @@ class KernelResultsTests(unittest.TestCase):
         self.assertEqual(loaded.arms["te"].status_reason, "no C++20 host compiler")
         with self.assertRaisesRegex(ValueError, "unknown arm status"):
             ArmResult(name="te", modes={}, status="nope")
+
+    def test_the_compile_treatment_survives_the_round_trip(self) -> None:
+        """A field the dataclass holds but ``to_dict`` drops is worse than a
+        missing field: the schema says the file carries the treatment and the
+        file does not. Round-trip both directions and both values."""
+        result = replace(
+            sample_result(),
+            description="titan compiled against megatron eager",
+            arms={
+                "mcore/base": ArmResult(
+                    name="mcore/base",
+                    modes={},
+                    status="skipped",
+                    status_reason="no GPU",
+                    compiled=False,
+                    eager_reason="megatron compiles no whole layer",
+                ),
+                "titan": ArmResult(name="titan", modes={}, compiled=True),
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "results.json"
+            write_kernel_results(result, path)
+            raw = json.loads(path.read_text())
+            loaded = load_kernel_results(path)
+        # On disk, so a reader with no registry can still read the row.
+        self.assertFalse(raw["arms"]["mcore/base"]["compiled"])
+        self.assertEqual(
+            raw["arms"]["mcore/base"]["eager_reason"],
+            "megatron compiles no whole layer",
+        )
+        self.assertTrue(raw["arms"]["titan"]["compiled"])
+        self.assertIsNone(raw["arms"]["titan"]["eager_reason"])
+        self.assertEqual(
+            raw["description"], "titan compiled against megatron eager"
+        )
+        # And back, so the evaluation path sees what the run recorded.
+        self.assertFalse(loaded.arms["mcore/base"].compiled)
+        self.assertEqual(
+            loaded.arms["mcore/base"].eager_reason,
+            "megatron compiles no whole layer",
+        )
+        self.assertTrue(loaded.arms["titan"].compiled)
+        self.assertEqual(
+            loaded.description, "titan compiled against megatron eager"
+        )
+
+    def test_the_compile_treatment_survives_the_round_trip(self) -> None:
+        """A field the dataclass holds but ``to_dict`` drops is worse than a
+        missing field: the schema says the file carries the treatment and the
+        file does not. Round-trip both directions and both values."""
+        result = replace(
+            sample_result(),
+            description="titan compiled against megatron eager",
+            arms={
+                "mcore/base": ArmResult(
+                    name="mcore/base",
+                    modes={},
+                    status="skipped",
+                    status_reason="no GPU",
+                    compiled=False,
+                    eager_reason="megatron compiles no whole layer",
+                ),
+                "titan": ArmResult(name="titan", modes={}, compiled=True),
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "results.json"
+            write_kernel_results(result, path)
+            raw = json.loads(path.read_text())
+            loaded = load_kernel_results(path)
+        # On disk, so a reader with no registry can still read the row.
+        self.assertFalse(raw["arms"]["mcore/base"]["compiled"])
+        self.assertEqual(
+            raw["arms"]["mcore/base"]["eager_reason"],
+            "megatron compiles no whole layer",
+        )
+        self.assertTrue(raw["arms"]["titan"]["compiled"])
+        self.assertIsNone(raw["arms"]["titan"]["eager_reason"])
+        self.assertEqual(
+            raw["description"], "titan compiled against megatron eager"
+        )
+        # And back, so the evaluation path sees what the run recorded.
+        self.assertFalse(loaded.arms["mcore/base"].compiled)
+        self.assertEqual(
+            loaded.arms["mcore/base"].eager_reason,
+            "megatron compiles no whole layer",
+        )
+        self.assertTrue(loaded.arms["titan"].compiled)
+        self.assertEqual(
+            loaded.description, "titan compiled against megatron eager"
+        )
 
     def test_replicate_boundaries_survive_the_round_trip(self) -> None:
         """The boundaries are the repetition unit; a flat list loses them."""

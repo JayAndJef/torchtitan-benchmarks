@@ -265,6 +265,123 @@ class WithinProcessIntervalTests(unittest.TestCase):
             result.methodology["replicates_per_process_note"],
         )
 
+# ``ffn_norm`` is the scenario that exercises every compile treatment at once:
+# ``copy_floor`` is eager because a bandwidth floor is not an implementation,
+# ``mcore/base`` is eager because megatron compiles no whole layer, and
+# ``titan`` is compiled. ``qkv`` above cannot distinguish them -- both its arms
+# are compiled -- so a merge that dropped the treatment entirely would leave
+# these tests green if they used it.
+TREATMENT_SCENARIO = "ffn_norm"
+TREATMENT_ANCHOR = "mcore/base"
+
+
+def treatment_fragments(skip: str | None = None) -> list[dict]:
+    """Every (arm, replicate) of ``ffn_norm``, optionally missing one arm."""
+    scenario = kernel_scenario_by_name(TREATMENT_SCENARIO)
+    return [
+        {
+            "kind": TIMING_FRAGMENT_KIND,
+            "scenario": TREATMENT_SCENARIO,
+            "arm": arm.name,
+            "replicate": replicate,
+            "modes": {mode: [100.0, 101.0] for mode in arm.modes},
+            "bytes_moved": None,
+            "peak_memory_gib": 1.5 if replicate == 0 else None,
+            "burst_us_per_call": None,
+        }
+        for replicate in range(REPLICATES)
+        for arm in scenario.arms
+        if arm.name != skip
+    ]
+
+
+def merge_treatment(timings: list[dict]):
+    shape, workload = resolve_shape_and_workload()
+    correctness = correctness_fragment()
+    correctness["scenario"] = TREATMENT_SCENARIO
+    return merge_kernel_fragments(
+        scenario=kernel_scenario_by_name(TREATMENT_SCENARIO),
+        shape=shape,
+        workload=workload,
+        hardware="test-gpu",
+        replicates=REPLICATES,
+        samples_per_replicate=2,
+        burst_k=16,
+        warmup_calls=1,
+        seed=0,
+        correctness=correctness,
+        timings=timings,
+        replicates_per_process=1,
+    )
+
+
+class CompileTreatmentTests(unittest.TestCase):
+    """Schema 6 carries the declared compile treatment into every arm.
+
+    A cross-engine ratio is a comparison of two compile treatments, not of
+    two kernels: every megatron arm runs eager because megatron compiles no
+    whole layer, and every titan module arm runs compiled because that is
+    what it faces end to end. A row that does not name both sides cannot be
+    read, so the treatment must reach ``results.json`` rather than staying in
+    the registry.
+    """
+
+    def test_the_treatment_comes_from_the_declaration_and_not_the_worker(
+        self,
+    ) -> None:
+        """The declaration is the authority. A timing worker builds exactly
+        one arm and never sees a second, so it cannot own the roster -- the
+        same reason ``is_floor`` is read here and ``BuiltArm`` carries
+        neither."""
+        fragments = treatment_fragments()
+        for fragment in fragments:
+            self.assertNotIn("compiled", fragment)
+            self.assertNotIn("eager_reason", fragment)
+        result = merge_treatment(fragments)
+        scenario = kernel_scenario_by_name(TREATMENT_SCENARIO)
+        for declaration in scenario.arms:
+            arm = result.arms[declaration.name]
+            self.assertEqual(arm.compiled, declaration.compiled)
+            self.assertEqual(arm.eager_reason, declaration.eager_reason)
+
+    def test_an_eager_arm_publishes_why_it_is_eager(self) -> None:
+        """``compiled=False`` alone reads as an oversight. The three eager
+        arms here are eager for three different reasons, and only the reason
+        tells them apart."""
+        result = merge_treatment(treatment_fragments())
+        floor = result.arms["copy_floor"]
+        anchor = result.arms[TREATMENT_ANCHOR]
+        self.assertFalse(floor.compiled)
+        self.assertFalse(anchor.compiled)
+        self.assertIn("bandwidth floor", floor.eager_reason)
+        self.assertIn("megatron", anchor.eager_reason)
+        self.assertNotEqual(floor.eager_reason, anchor.eager_reason)
+        compiled = result.arms["titan"]
+        self.assertTrue(compiled.compiled)
+        self.assertIsNone(compiled.eager_reason)
+
+    def test_an_arm_that_never_measured_still_names_its_treatment(
+        self,
+    ) -> None:
+        """An arm reaches the file whether it measured or not. Its treatment
+        is declared, not measured, so losing the worker must not lose it --
+        otherwise a reader cannot tell a compiled arm that failed from an
+        eager one."""
+        result = merge_treatment(treatment_fragments(skip="titan"))
+        lost = result.arms["titan"]
+        self.assertEqual(lost.status, "failed")
+        self.assertEqual(lost.modes, {})
+        self.assertTrue(lost.compiled)
+        self.assertIsNone(lost.eager_reason)
+
+    def test_the_scenario_description_reaches_the_results_file(self) -> None:
+        """The caption belongs beside the numbers. A reader of
+        ``results.json`` has no registry in hand."""
+        result = merge_treatment(treatment_fragments())
+        scenario = kernel_scenario_by_name(TREATMENT_SCENARIO)
+        self.assertEqual(result.description, scenario.description)
+        self.assertIn("megatron", result.description)
+
 
 if __name__ == "__main__":
     unittest.main()
