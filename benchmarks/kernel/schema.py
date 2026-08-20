@@ -645,4 +645,41 @@ def shape_summary(
             "tokens": batch * seq,
             "vocab_size": shape.vocab_size,
         }
+    if scenario_name == "moe_router":
+        tokens = batch * seq
+        return {
+            "x": [batch, seq, shape.dim],
+            # Recorded next to x because the two engines consume different
+            # leading dimensions of the same elements: our megatron driver
+            # runs THD, so the hidden state reaching MoELayer.route is
+            # (t, 1, h). The gate GEMM flattens every leading dimension, so
+            # this is a label and not a measured difference -- the same
+            # thing the attn_out_proj and moe_residual branches already say
+            # of the identical [T, 1, .] reshape.
+            "x_thd": [tokens, 1, shape.dim],
+            "gate_weight": [shape.num_experts, shape.dim],
+            # What each engine RETURNS, both recorded, because the two
+            # differ in kind and not only in layout. Megatron writes a dense
+            # [T, E] probability tensor and a dense [T, E] boolean routing
+            # map. Titan writes a [B, L, E] score tensor plus a [B, L, K]
+            # probability tensor and a [B, L, K] int64 index tensor. At
+            # E = 4 and K = 2 all of them are small next to x, which is what
+            # both arms read and what dominates the traffic -- so the memory
+            # column here is not a kernel statement, and the manifest
+            # records the shapes rather than leaving a reader to assume one
+            # form.
+            "probs_mcore_TE": [tokens, shape.num_experts],
+            "routing_map_mcore_TE": [tokens, shape.num_experts],
+            "scores_titan_BLE": [batch, seq, shape.num_experts],
+            "topk_probs_titan_BLK": [batch, seq, shape.top_k],
+            "topk_indices_titan_BLK": [batch, seq, shape.top_k],
+            "tokens": tokens,
+            "experts": shape.num_experts,
+            "top_k": shape.top_k,
+            # Spelled out because the scenario's headline caption rests on
+            # it being negligible: 33.5 MFLOP at the default workload,
+            # against one 8 MiB read. This scenario is bandwidth-and-dispatch
+            # bound, not compute bound, and this is the number that says so.
+            "gate_gemm_flops": 2 * tokens * shape.dim * shape.num_experts,
+        }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

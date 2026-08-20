@@ -1522,6 +1522,400 @@ FFN_NORM = KernelScenario(
 )
 
 
+# The scenario's outputs fall into two classes, and the gate roster below is
+# that split written down. A router is a GEMM, a top-k and a softmax: the GEMM
+# is continuous, and the top-k is a DISCRETE DECISION. Two implementations that
+# agree to the last bit on the logits may still order two near-equal logits
+# differently, and then they route a token to a different expert. That is not a
+# wrong kernel. It is the one place a norm-based tolerance cannot tell a wrong
+# kernel from a legitimate tie.
+#
+# So the enforced gates are the TIE-IMMUNE outputs, and they are enforced on
+# every arm across every precision boundary:
+#
+#   logits          the gate GEMM, which holds no discrete decision at all. A
+#                   wrong gate matrix, a wrong dtype or a wrong GEMM lands
+#                   here and nowhere else.
+#   prob_row_sums   1.0 for every token whichever experts were selected. It
+#                   catches a missing renormalization (the top-2 of a 4-way
+#                   softmax sums to about 0.7, rel_l2 about 0.3), a wrong k,
+#                   and a stray scaling factor (route_scale=2 doubles it).
+#   selected_count  exactly top_k for every token, and an integer fp32
+#                   represents exactly -- so it takes a BITWISE gate. It
+#                   catches token dropping and a degenerate routing map.
+#
+# and the TIE-SENSITIVE outputs -- probs, routing_map, x_grad and
+# gate_weight_grad -- are enforced only between sides that select on the same
+# precision, and recorded rather than enforced across a precision boundary.
+#
+# **What one flipped token costs, so a first GPU failure is legible.** At the
+# default workload (8192 tokens, 4 experts, top_k 2, dim 1024) a single token
+# routed differently moves rel_l2 by roughly 1e-2 on ``probs`` and roughly
+# 2e-2 on ``x_grad``, and breaks ``routing_map`` outright. rel_l2 grows as the
+# square root of the flip count, so the 2e-2 gate tolerates a handful of flips
+# on ``probs`` and about ONE on ``x_grad``. Both figures are
+# order-of-magnitude estimates from the tensor norms, not measurements: read
+# them as "one flip reaches the gate limit", not a threshold. Nobody ran it.
+#
+# **The informational routing_map row is the instrument that tells a reader
+# which failure they are looking at**, and it is why it is declared rather
+# than dropped. If ``x_grad`` fails and ``routing_map`` is bitwise equal, the
+# two sides selected identically and the disagreement is arithmetic -- a real
+# fault. If ``routing_map`` differs too, the disagreement is a tie. Read that
+# row before touching a threshold. Widening a gate to absorb a tie would also
+# absorb the fault the gate exists for.
+#
+# rel_l2 throughout, and no max or ULP metric anywhere. A router is a reduction
+# over dim and a softmax over the experts, and both drive individual outputs
+# toward zero, which is exactly the cancellation case CLAUDE.md's rule names.
+MOE_ROUTER_TIE_IMMUNE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("logits", "prob_row_sums"),
+    max_rel_l2=2e-2,
+)
+
+# Bitwise, and safe to enforce across every precision boundary in the
+# scenario: torch.topk returns distinct indices, so this row is the integer
+# top_k for every token however the selection came out, and fp32 holds a small
+# integer exactly. ``moe_router_reference`` returns it as fp32 rather than
+# fp64 for that reason -- torch.equal compares dtypes, and an fp64 reference
+# row would fail against every arm's fp32 row for a reason no reader could
+# recover.
+MOE_ROUTER_SELECTED_COUNT_GATE = CorrectnessCheck(
+    kind="bitwise",
+    reference="fp64",
+    outputs=("selected_count",),
+)
+
+# The tie-sensitive outputs, enforced. The fp64 reference selects on fp64
+# logits and these three arms select on fp32 ones, so they are the same
+# selection except on a tie fp32 cannot resolve. The gradients are named here
+# and not folded into the gate above because they cover the BACKWARD, which is
+# a separate implementation on each engine: a forward that agrees is no
+# evidence about it, and a gradient that arrives scaled or masked is visible
+# nowhere else.
+MOE_ROUTER_FP32_SELECTION_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("probs", "x_grad", "gate_weight_grad"),
+    max_rel_l2=2e-2,
+)
+
+# The same three outputs for the one arm that selects on bf16. Recorded, never
+# enforced: bf16 top-k may legitimately pick a different expert than an fp64
+# reference, and that difference IS this arm's measurement. Enforcing it would
+# fail the arm for doing the thing its name says it does.
+MOE_ROUTER_BF16_SELECTION_RECORD = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("probs", "x_grad", "gate_weight_grad"),
+    max_rel_l2=2e-2,
+    informational=True,
+)
+
+# Never enforced anywhere, on any arm. See the routing_map paragraph above:
+# this is the diagnostic that separates a tie from a fault, and a diagnostic
+# that can fail the run is not one.
+MOE_ROUTER_ROUTING_MAP_RECORD = CorrectnessCheck(
+    kind="bitwise",
+    reference="fp64",
+    outputs=("routing_map",),
+    informational=True,
+)
+
+
+MOE_ROUTER = KernelScenario(
+    name="moe_router",
+    description=(
+        "The MoE router, cross-engine: TorchTitan's TokenChoiceTopKRouter "
+        "against megatron-core's MoELayer.route/TopKRouter, over one shared "
+        "gate matrix. The cut starts at the hidden state the MoE block "
+        "receives and ends at the routing decision. It stops there: the "
+        "one-hot routing map and the per-expert counts titan builds after the "
+        "router returns belong to scenario 10, and MoELayer.preprocess is "
+        "scenario 10 on the megatron side. "
+        "BOTH ENGINES ROUTE AT THE SAME PRECISION -- titan wraps its gate in "
+        "torch.autocast(float32) and mcore/base sets moe_router_dtype='fp32' "
+        "-- so the plan's caption that this row is a precision difference is "
+        "WRONG in that direction. It is wrong in the other direction too: the "
+        "two GEMMs differ in their OPERAND precision. Titan's autocast casts "
+        "both operands UP, so it materializes a full fp32 copy of the hidden "
+        "state and runs an fp32 GEMM; megatron hands TE the bf16 operands and "
+        "asks only for an fp32 output. Titan therefore moves about 5x the "
+        "bytes (40 MiB against 8 at the default workload) in a scenario whose "
+        "device work is one bandwidth-bound read. THE CROSS-ENGINE ROW IS "
+        "THEREFORE NOT A VERDICT ON TITAN'S ROUTER KERNEL, and the arm that "
+        "would separate the two -- a titan arm with the autocast removed -- is "
+        "NOT DECLARED. Each arm carries its own bytes_moved so the GB/s and "
+        "x_floor columns show the asymmetry instead of absorbing it. "
+        "mcore/router_bf16 publishes against mcore/base, never against titan, "
+        "and its row is a PRECISION result and not a speed one: the delta is "
+        "the dtype of the [T, E] outputs, about 0.4% of the arm's traffic, "
+        "which is an order of magnitude below this repo's measured noise "
+        "floor. The titan arm is compiled (fullgraph=True) and the three "
+        "megatron arms are eager, which is what each engine does end to end, "
+        "so every cross-engine row is also a comparison of two compile "
+        "treatments. The scenario is expected to be DISPATCH-BOUND: a "
+        "megatron forward reads 8 MiB and computes 33.5 MFLOP at the default "
+        "workload, so copy_floor says how far above the bus each arm sits, "
+        "and the --burst residual must be read before anything here is ranked "
+        "as a kernel."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.moe_router:moe_router_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.moe_router:moe_router_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit, and exhaustive. It is the same set the default derivation
+    # would produce, and writing it down is what makes the direction of every
+    # published row a declaration rather than an accident of arm order. Note
+    # what is deliberately ABSENT: there is no ("titan", "mcore/router_bf16")
+    # row. Titan routes in fp32, so mcore/base is already its like-for-like
+    # opponent, and a titan-against-bf16 row would move the engine and the
+    # precision together.
+    comparisons=(
+        ("titan", "mcore/base"),
+        ("mcore/router_fusion", "mcore/base"),
+        ("mcore/router_bf16", "mcore/base"),
+    ),
+    # NOT requires_balanced_routing, and that is a decision. The flag exists
+    # so swiglu_inputs can hand every expert an equal slice of synthetic rows.
+    # This scenario materializes no per-expert tensor and hands no expert a
+    # slice: the router computes the split itself, and its output is [T, E]
+    # whatever the split turns out to be. Declaring the flag would refuse
+    # workloads this scenario measures correctly.
+    arms=(
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "One read of the [B, L, D] hidden state and one write: the "
+                "bandwidth reference the four router arms are read against"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_router:"
+                "build_moe_router_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a copy "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron-core MoELayer.route off a real GPTModel: TopKRouter "
+                "with moe_router_dtype='fp32', unfused, eager, as our "
+                "megatron arm runs it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_router:"
+                "build_moe_router_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, so the router "
+                "runs eager as megatron runs it. One exception is stated "
+                "rather than hidden: TopKRouter._apply_expert_bias is "
+                "@jit_fuser decorated and megatron binds jit_fuser to "
+                "torch.compile at import, so one compiled region runs per "
+                "call. At moe_router_enable_expert_bias=False its body does "
+                "nothing, so what remains is Dynamo's per-call guard "
+                "evaluation -- host cost, in a host-bound scenario"
+            ),
+            correctness=(
+                MOE_ROUTER_TIE_IMMUNE_GATE,
+                MOE_ROUTER_SELECTED_COUNT_GATE,
+                MOE_ROUTER_FP32_SELECTION_GATE,
+                MOE_ROUTER_ROUTING_MAP_RECORD,
+            ),
+        ),
+        KernelArm(
+            name="mcore/router_fusion",
+            description=(
+                "The same router with moe_router_fusion=True: "
+                "TransformerEngine's fused top-k score-function kernel in "
+                "place of megatron's torch sequence. One substitution -- the "
+                "flag's second read site is inside an is_aux_loss_enabled() "
+                "branch the base profile leaves False"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_router:"
+                "build_moe_router_mcore_router_fusion"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "the same treatment as mcore/base, and it must be: this row "
+                "is a within-engine fusion delta, so a different compile "
+                "treatment on one side would be measured as the fusion"
+            ),
+            correctness=(
+                MOE_ROUTER_TIE_IMMUNE_GATE,
+                MOE_ROUTER_SELECTED_COUNT_GATE,
+                MOE_ROUTER_FP32_SELECTION_GATE,
+                MOE_ROUTER_ROUTING_MAP_RECORD,
+                # Against the anchor, and enforced on the tie-sensitive
+                # outputs too: both sides select on fp32 logits produced by
+                # the same gate GEMM, so this is the check that says the fused
+                # kernel computes megatron's own routing and not another one.
+                # It is the only gate that can see a fused kernel that is
+                # numerically valid and wrong -- the fp64 gates above would
+                # pass a fusion that quietly changed the score function, as
+                # long as it stayed a valid routing.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=(
+                        "logits",
+                        "probs",
+                        "prob_row_sums",
+                        "x_grad",
+                        "gate_weight_grad",
+                    ),
+                    max_rel_l2=2e-2,
+                ),
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("selected_count",),
+                ),
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("routing_map",),
+                    informational=True,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="mcore/router_bf16",
+            description=(
+                "The same router with moe_router_dtype=None. THE DELTA IS "
+                "BF16, NOT FP32: the base profile already sets fp32, so this "
+                "arm removes the request rather than adding it. The gate GEMM "
+                "writes bf16 logits and the top-k selects on them, so this "
+                "arm may legitimately route a token to a different expert "
+                "than any fp32 arm. Read its row as a PRECISION result only: "
+                "the delta is the dtype of the [T, E] outputs, about 32 KiB "
+                "of the arm's ~8.4 MiB, so no speed difference it reports can "
+                "be separated from noise"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_router:"
+                "build_moe_router_mcore_router_bf16"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "the same treatment as mcore/base, and it must be: this row "
+                "is a within-engine precision delta, so a different compile "
+                "treatment on one side would be measured as the precision"
+            ),
+            correctness=(
+                MOE_ROUTER_TIE_IMMUNE_GATE,
+                MOE_ROUTER_SELECTED_COUNT_GATE,
+                # Recorded, not enforced. This is the one arm whose selection
+                # precision differs from the reference's.
+                MOE_ROUTER_BF16_SELECTION_RECORD,
+                MOE_ROUTER_ROUTING_MAP_RECORD,
+                # Against the anchor, tie-immune outputs only. logits belongs
+                # here and is the row that says the delta is precision and
+                # nothing else: bf16 logits sit about 4e-3 from fp32 ones,
+                # comfortably inside 2e-2, so a failure means the arm changed
+                # more than the dtype.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("logits", "prob_row_sums"),
+                    max_rel_l2=2e-2,
+                ),
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("selected_count",),
+                ),
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("probs", "x_grad", "gate_weight_grad"),
+                    max_rel_l2=2e-2,
+                    informational=True,
+                ),
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("routing_map",),
+                    informational=True,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan TokenChoiceTopKRouter from the production MoE "
+                "config node, under torch.compile(fullgraph=True). It takes "
+                "the softmax over all E experts, selects the top k and "
+                "renormalizes; megatron selects first and takes the softmax "
+                "over k. Softmax is monotone and the renormalization cancels "
+                "the shared denominator, so the two compute one function. The "
+                "gate GEMM runs under torch.autocast(float32), which is why "
+                "this arm is like for like with mcore/base on precision"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_router:"
+                "build_moe_router_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                MOE_ROUTER_TIE_IMMUNE_GATE,
+                MOE_ROUTER_SELECTED_COUNT_GATE,
+                MOE_ROUTER_FP32_SELECTION_GATE,
+                MOE_ROUTER_ROUTING_MAP_RECORD,
+                # The cross-engine gates, and they are what make the published
+                # row a comparison of two implementations of one function
+                # rather than of two functions. Both sides select on fp32
+                # logits from the same bf16 gate, so the tie-sensitive outputs
+                # are enforced here too.
+                #
+                # Every one of them sits on the NON-ANCHOR arm, and none of
+                # them points outward from mcore/base. resolve_arm_skips
+                # closes the skip set over correctness references, so a check
+                # declared on the anchor and pointing at titan would add the
+                # anchor to the skip set whenever the titan arm is skipped.
+                # The scenario would then lose every row.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=(
+                        "logits",
+                        "probs",
+                        "prob_row_sums",
+                        "x_grad",
+                        "gate_weight_grad",
+                    ),
+                    max_rel_l2=2e-2,
+                ),
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("selected_count",),
+                ),
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("routing_map",),
+                    informational=True,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 # The gate every arm faces, and rel_l2 rather than a ULP metric. An add is not
 # a reduction, but the hazard CLAUDE.md's ULP rule names is CANCELLATION, and
 # the reduction is only where that rule met it first. ``residual + x`` on two
@@ -2300,6 +2694,7 @@ KERNEL_SCENARIOS = {
         ATTN_OUT_PROJ,
         ATTN_RESIDUAL,
         FFN_NORM,
+        MOE_ROUTER,
         MOE_RESIDUAL,
         FINAL_NORM,
         LM_HEAD_PROJECTION,

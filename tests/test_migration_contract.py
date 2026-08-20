@@ -76,6 +76,7 @@ KERNEL_ARMS_MODULES = {
     "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
     "attn_residual": "benchmarks.kernel.operations.attn_residual",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
+    "moe_router": "benchmarks.kernel.operations.moe_router",
     "moe_residual": "benchmarks.kernel.operations.moe_residual",
     "final_norm": "benchmarks.kernel.operations.final_norm",
     "lm_head_projection": "benchmarks.kernel.operations.lm_head_projection",
@@ -161,6 +162,18 @@ KERNEL_INVENTORY = {
         "titan",
     ),
     "ffn_norm": ("copy_floor", "mcore/base", "titan"),
+    # Scenario 9. Five arms and a cross-engine row: both engines route in
+    # fp32, so titan against mcore/base is the like-for-like precision cut.
+    # The two engines do NOT move the same bytes, and the module declares a
+    # byte count per engine so the GB/s column shows that rather than
+    # burying it.
+    "moe_router": (
+        "copy_floor",
+        "mcore/base",
+        "mcore/router_fusion",
+        "mcore/router_bf16",
+        "titan",
+    ),
     # Scenario 13, the twin of attn_residual at the other bda call site. Four
     # arms, one published row, and the row is within megatron for the same
     # reason.
@@ -207,6 +220,7 @@ KERNEL_BASELINE_ARMS = {
     "attn_out_proj": "mcore/base",
     "attn_residual": "mcore/base",
     "ffn_norm": "mcore/base",
+    "moe_router": "mcore/base",
     "moe_residual": "mcore/base",
     "final_norm": "mcore/base",
     "lm_head_projection": "mcore/base",
