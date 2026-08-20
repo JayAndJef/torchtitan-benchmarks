@@ -34,6 +34,24 @@ are correctness rather than speed:
   that the THD ``cu_seqlens`` and the flex ``BlockMask`` are one predicate,
   and the shared scale -- none of which a CPU test can reach.
 
+Both of those were probes beside the scenario. **The scenario's own
+correctness pass has now run**, on an H200 on 2026-08-20, at the default
+workload (``normal``, batch 4, seq 1024) and through
+``benchmarks.kernel.worker``. All six arms built, all 24 fp64 gates passed,
+and the widest of them was ``mcore/attn_unfused``'s ``dk`` at 4.43e-3
+against the 2e-2 threshold. The 20 informational cross-arm rows passed too,
+the widest being 5.26e-3.
+
+Two results of that pass are worth keeping. TE resolved the three megatron
+arms to three different kernels, which is the whole premise of the roster:
+``FusedAttention NVTE_F16_arbitrary_seqlen``, ``FlashAttention 3.0.0`` and
+``UnfusedDotProductAttention``. And ``mcore/attn_flash3`` and
+``titan/flash_attention_3`` land on **identical** distances from
+``mcore/base`` -- 7.493e-4 / 6.980e-4 / 2.895e-3 / 2.867e-3 on out/dq/dk/dv
+-- which is the evidence that the pair really is one kernel family and one
+masking through two host stacks. **That pass needed the cuDNN workaround
+below.** It still produced no timing number.
+
 Which layout each engine reads
 ------------------------------
 
@@ -151,8 +169,53 @@ handling (``benchmarks/kernel/engine/run.py:289-298``), that OOM takes the
 whole scenario with it. An adversarial reviewer measured the segment counts
 on the real inputs builder; the arm description carries the table.
 
-Two ways to break this scenario that nothing guards
---------------------------------------------------
+Three ways to break this scenario that nothing guards
+-----------------------------------------------------
+
+**This scenario does not run as shipped on a host that has cuDNN in
+``/usr/lib64``, and the failure is an environment split, not a bug here.**
+Measured on this H200 on 2026-08-20, on the first run this scenario ever
+had. The five other arms build, and ``titan/flash_attention_3`` then dies
+inside ``torch.nn.attention.varlen._varlen_attn`` with "cuDNN version
+incompatibility: PyTorch was compiled against (9, 24, 0) but found runtime
+version (9, 23, 2)".
+
+The mechanism, and every step of it was observed:
+
+* ``libtransformer_engine.so`` carries ``DT_NEEDED`` on ``libcudnn.so.9``
+  and its seven engine libraries, and it carries no ``RUNPATH``.
+* torch loads its own cuDNN **lazily**. After ``import torch`` only the
+  dispatcher ``nvidia/cudnn/lib/libcudnn.so.9`` is mapped; the engine
+  libraries are not.
+* So at TE import the loader resolves TE's seven entries down the default
+  search path and binds ``/usr/lib64`` cuDNN 9.23.2, which no part of this
+  project pins.
+* ``torch.backends.cudnn.version()`` then reports 9.23.2 and
+  ``backends/cudnn/__init__.py`` raises, because torch wants
+  ``runtime_minor >= compile_minor``.
+* ``torch.nn.attention.varlen`` asks for that version on every call
+  (``_should_use_cudnn``), so torchtitan's ``VarlenAttention`` cannot run in
+  a process that has imported TE.
+
+**cuDNN is the only library that splits.** ``libcublas``, ``libcublasLt``,
+``libcudart`` and ``libnccl`` all resolve to the venv wheels in the same
+process, because torch loads those eagerly and TE's ``DT_NEEDED`` entries
+find them already mapped. The cuDNN split is an accident of lazy loading,
+and its consequence is that **which cuDNN every megatron arm in this repo
+runs is decided by the host, not by the pin**.
+
+Two workarounds exist and they are not equivalent. Prepending
+``.venv/lib/python3.10/site-packages/nvidia/cudnn/lib`` to
+``LD_LIBRARY_PATH`` gives the whole process the pinned 9.24.0 and needs no
+other change -- but it moves TE off the 9.23.2 every published megatron
+number was taken with, and no manifest records a cuDNN version, so that
+boundary would be invisible. ``PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1``
+leaves TE on 9.23.2 and only stops torch refusing to answer; it selects no
+kernel here, because ``_can_use_cudnn`` rejects this arm on ``enable_gqa``
+before the version is used. Do **not** initialize torch's cuDNN before TE
+imports as a third option: that loads the wheel's ``libcudnn_graph.so.9``
+and leaves TE running a 9.24.0 graph engine against 9.23.2 ops, which is a
+combination nobody tests.
 
 **Do not set ``PackedSeqParams.cu_seqlens_q_padded``.** TE then computes
 ``pad_between_seqs = True`` (``dot_product_attention.py:1561-1570``), and
