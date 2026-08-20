@@ -195,7 +195,9 @@ from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     WEIGHT_STD,
     _compile_module,
+    _navigate,
     _randn,
+    _require_grads,
     _reset_grads,
     initialize_megatron_single_rank,
 )
@@ -303,14 +305,6 @@ def mcore_transformer_layer_path(layer: int = LAYER) -> str:
     suffix = ".mlp"
     assert path.endswith(suffix)
     return path[: -len(suffix)]
-
-
-def _navigate(root: object, path: str) -> Any:
-    """Walk a dotted attribute path, indexing on a numeric segment."""
-    node = root
-    for segment in path.split("."):
-        node = node[int(segment)] if segment.isdigit() else getattr(node, segment)
-    return node
 
 
 @dataclass
@@ -482,16 +476,6 @@ def moe_router_reference(
         "x_grad": x.grad.reshape(batch, seq, shape.dim),
         "gate_weight_grad": weight.grad,
     }
-
-
-def _require_grads(arm: str, outputs: dict[str, torch.Tensor | None]) -> None:
-    """Turn a missing gradient into a named failure, not an AttributeError."""
-    missing = sorted(name for name, value in outputs.items() if value is None)
-    if missing:
-        raise RuntimeError(
-            f"{arm}: backward produced no gradient for {', '.join(missing)}; "
-            "the correctness gate cannot compare a tensor that does not exist"
-        )
 
 
 def _canonical_outputs(

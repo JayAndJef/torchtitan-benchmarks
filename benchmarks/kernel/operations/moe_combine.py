@@ -226,6 +226,7 @@ import torch
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     _randn,
+    _require_grads,
     _reset_grads,
     initialize_megatron_single_rank,
 )
@@ -527,26 +528,17 @@ def _rel_l2(value: torch.Tensor, truth: torch.Tensor) -> float:
     return (delta / norm).item() if norm else delta.item()
 
 
-def _require_grads(
-    arm: str, outputs: dict[str, torch.Tensor | None]
-) -> dict[str, torch.Tensor]:
-    """Turn a missing gradient into a named failure, not an AttributeError.
-
-    A combine that dropped an operand is the failure this catches. Megatron
-    has a spelling of it -- an unpermute that ignored its input would still
-    return a correctly shaped zero tensor -- and so does titan, whose
-    ``deterministic_scatter_add`` returns ``grad_output`` for its first
-    argument and a gather for its third, so a wiring error can silence one
-    without silencing the other.
-    """
-    missing = sorted(name for name, value in outputs.items() if value is None)
-    if missing:
-        raise RuntimeError(
-            f"{arm}: backward produced no gradient for {', '.join(missing)}; "
-            "the combine did not consume that operand, so the correctness "
-            "gate has nothing to compare"
-        )
-    return outputs
+# What a missing gradient means at this cut, handed to the shared guard as its
+# ``detail``. A combine that dropped an operand is the failure it catches.
+# Megatron has a spelling of it -- an unpermute that ignored its input would
+# still return a correctly shaped zero tensor -- and so does titan, whose
+# ``deterministic_scatter_add`` returns ``grad_output`` for its first argument
+# and a gather for its third, so a wiring error can silence one without
+# silencing the other.
+MISSING_COMBINE_GRADIENT = (
+    "the combine did not consume that operand, so the correctness "
+    "gate has nothing to compare"
+)
 
 
 def _combine_arm(
@@ -606,7 +598,7 @@ def _combine_arm(
             f"{output_prefix}_expert_out_grad": check_leaf.grad,
         }
         named.update(extra_outputs())
-        return _require_grads(name, named)
+        return _require_grads(name, named, MISSING_COMBINE_GRADIENT)
 
     return BuiltArm(
         name=name,
