@@ -6,19 +6,24 @@ failures that would ship a wrong number are all reachable on a CPU:
 
 * the two engines drift apart on the epsilon or on the layout, so the ratio
   compares two different computations;
+* the megatron arm reads a memory layout megatron never produces, which
+  deletes a copy megatron really pays and flatters the anchor;
 * the titan arm builds a lookalike norm instead of the one the production
   config puts on the block;
 * the fp64 reference is wrong, so every gate passes against a wrong truth;
 * the megatron attribute names drift away from the cross-engine weight map,
   so the arm navigates to a module the map never checked.
 
-The tests below cover those four. They do not cover the megatron arm's own
+The tests below cover those five. They do not cover the megatron arm's own
 build, which needs a device, and they do not compile anything: the titan
 builder wraps its pair in ``torch.compile``, which compiles on the first call,
 so building the arm stays cheap and the arithmetic is checked on the
-uncompiled pair.
+uncompiled pair. Strides need no device either, so the layout of every tensor
+the megatron arm reads is checked here in full -- shape, stride and storage
+offset, against megatron's own arithmetic.
 """
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -39,19 +44,21 @@ from benchmarks.kernel.operations.qk_norm import (
     WEIGHT_GRAD_OUTPUTS,
     _NormPair,
     _build_titan_norms,
+    _mcore_leaves,
+    _titan_leaves,
     _to_blnh,
     build_qk_norm_copy_floor,
     build_qk_norm_titan,
     qk_norm_inputs,
     qk_norm_reference,
 )
-from benchmarks.kernel.schema import KernelWorkload
+from benchmarks.kernel.schema import KernelWorkload, shape_summary
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
 from benchmarks.models.piper_qwen3.megatron_weights import (
     COMPONENTS,
     weight_transfers,
 )
-from benchmarks.models.piper_qwen3.shape import PiperShape
+from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 # head_dim stays 64, the real value, because it is the width the norm reduces
 # over and the only geometry this scenario reads. Everything else shrinks:
@@ -83,6 +90,37 @@ def rel_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return float(difference / expected.double().norm())
 
 
+def megatron_source() -> str:
+    """The pinned megatron ``attention.py``, read as text.
+
+    Read rather than imported, and read at run time rather than at module
+    scope. ``add_megatron_to_path`` inserts the checkout at ``sys.path[0]``
+    and Megatron-LM ships a ``tests/`` package of its own, so a module-scope
+    call makes every later ``from tests.<x> import ...`` in this suite
+    resolve to megatron's tests instead. Reading the file needs neither the
+    path entry nor an import.
+    """
+    from benchmarks.models.piper_qwen3.megatron_bootstrap import megatron_dir
+
+    try:
+        root = Path(megatron_dir())
+    except RuntimeError as error:  # pragma: no cover - host dependent
+        raise unittest.SkipTest(str(error)) from error
+    return (root / "megatron/core/transformer/attention.py").read_text()
+
+
+def transformer_engine_source(*parts: str) -> str:
+    """One TransformerEngine source file, located without importing TE.
+
+    ``find_spec`` on the top-level name executes no module, so this runs on a
+    host with no GPU and no working TE runtime.
+    """
+    spec = importlib.util.find_spec("transformer_engine")
+    if spec is None or not spec.submodule_search_locations:
+        raise unittest.SkipTest("transformer_engine is not installed")
+    return Path(spec.submodule_search_locations[0]).joinpath(*parts).read_text()
+
+
 class InputsTest(unittest.TestCase):
     def test_both_layouts_hold_the_same_rows(self):
         """The megatron form is a permutation of the titan form, not new data.
@@ -96,15 +134,21 @@ class InputsTest(unittest.TestCase):
         self.assertTrue(torch.equal(_to_blnh(inputs.gq_SBNH), inputs.gq_BLNH))
         self.assertTrue(torch.equal(_to_blnh(inputs.gk_SBNH), inputs.gk_BLNH))
 
-    def test_every_timed_tensor_is_contiguous(self):
-        """Neither engine may pay for a transpose inside a timed closure."""
+    def test_every_tensor_but_the_megatron_key_is_contiguous(self):
+        """Neither engine may pay for a transpose inside a timed closure.
+
+        ``k_SBNH`` is the one exception and it has its own tests below: it is
+        strided because megatron's is, not because anything here transposes.
+        Both gradient seeds stay contiguous, because both norms write a
+        contiguous output.
+        """
         for name in (
             "q_BLNH",
             "k_BLNH",
             "gq_BLNH",
             "gk_BLNH",
+            "qkv_fused_SBGR",
             "q_SBNH",
-            "k_SBNH",
             "gq_SBNH",
             "gk_SBNH",
         ):
@@ -151,12 +195,213 @@ class InputsTest(unittest.TestCase):
         self.assertFalse(torch.equal(one.q_BLNH, cpu_inputs(seed=8).q_BLNH))
 
     def test_bytes_moved_counts_the_forward_traffic(self):
-        """The floor and the norms must declare one number, or x_floor lies."""
+        """One read and one write of q and k, which is what the floor copies."""
         inputs = cpu_inputs()
         expected = 2 * (inputs.q_BLNH.numel() + inputs.k_BLNH.numel()) * 2
         self.assertEqual(inputs.qk_bytes, expected)
         floor = build_qk_norm_copy_floor(TINY, TINY_WORKLOAD, inputs)
         self.assertEqual(floor.bytes_moved, inputs.qk_bytes)
+
+    def test_the_megatron_count_adds_the_copy_of_the_strided_key(self):
+        """TE materializes the key inside op_forward, so the arm moves more.
+
+        Following ``moe_router``: a per-arm ``bytes_moved`` makes the GB/s
+        column show the asymmetry instead of absorbing it. ``x_floor`` is a
+        ratio of times and is untouched either way.
+        """
+        inputs = cpu_inputs()
+        one_pass_over_the_key = inputs.k_BLNH.numel() * 2
+        self.assertEqual(
+            inputs.mcore_qk_bytes, inputs.qk_bytes + 2 * one_pass_over_the_key
+        )
+        self.assertGreater(inputs.mcore_qk_bytes, inputs.qk_bytes)
+
+
+class MegatronLayoutTest(unittest.TestCase):
+    """The layout the megatron arm reads, asserted against megatron's own.
+
+    Shape, stride and storage offset, not merely "it is not contiguous". A
+    tensor can be non-contiguous for the wrong reason -- a transpose, a
+    permutation, a slice of the wrong axis -- and every one of those would
+    still measure a layout megatron never produces.
+    """
+
+    def row_width(self) -> int:
+        """``(Q + 2) * H``: megatron's fused row, per key/value group."""
+        return (TINY.heads_per_group + 2) * TINY.head_dim
+
+    def test_the_fused_buffer_carries_megatrons_row(self):
+        inputs = cpu_inputs()
+        seq, batch = TINY_WORKLOAD.seq_len, TINY_WORKLOAD.batch
+        self.assertEqual(
+            tuple(inputs.qkv_fused_SBGR.shape),
+            (seq, batch, TINY.n_kv_heads, self.row_width()),
+        )
+        self.assertTrue(inputs.qkv_fused_SBGR.is_contiguous())
+        self.assertEqual(inputs.qkv_fused_SBGR.dtype, torch.bfloat16)
+
+    def test_the_key_reaches_megatron_as_a_strided_view(self):
+        """The measurand, not a detail.
+
+        ``get_query_key_value_tensors`` splits the fused buffer and hands
+        ``k_layernorm`` the split result unchanged. Storage offset ``Q * H``
+        and a group stride of ``(Q + 2) * H`` are megatron's arithmetic, and
+        a tensor that fails either is not the one the engine norms.
+        """
+        inputs = cpu_inputs()
+        seq, batch = TINY_WORKLOAD.seq_len, TINY_WORKLOAD.batch
+        groups, head_dim = TINY.n_kv_heads, TINY.head_dim
+        row = self.row_width()
+        self.assertEqual(
+            tuple(inputs.k_SBNH.shape), (seq, batch, groups, head_dim)
+        )
+        self.assertFalse(inputs.k_SBNH.is_contiguous())
+        self.assertEqual(
+            inputs.k_SBNH.stride(), (batch * groups * row, groups * row, row, 1)
+        )
+        self.assertEqual(
+            inputs.k_SBNH.storage_offset(), TINY.heads_per_group * head_dim
+        )
+        self.assertEqual(
+            inputs.k_SBNH.untyped_storage().data_ptr(),
+            inputs.qkv_fused_SBGR.untyped_storage().data_ptr(),
+        )
+
+    def test_the_query_reaches_megatron_contiguous(self):
+        """Megatron's own reshape allocates, so ``q_layernorm`` reads a copy.
+
+        ``query.reshape(s, b, -1, H)`` merges the group dimension with the
+        query heads inside a group, and the two are not adjacent while the
+        row is wider than ``Q * H``. That copy is megatron's work at
+        ``:1908`` and it belongs to ``qkv_prep``, so it must already have
+        happened before this scenario starts.
+        """
+        inputs = cpu_inputs()
+        self.assertTrue(inputs.q_SBNH.is_contiguous())
+        self.assertNotEqual(
+            inputs.q_SBNH.untyped_storage().data_ptr(),
+            inputs.qkv_fused_SBGR.untyped_storage().data_ptr(),
+        )
+
+    def test_the_strided_key_holds_the_canonical_values(self):
+        """A layout change may not become a value change.
+
+        The two arms must read one q and one k, or the ratio compares two
+        inputs. This is the same assertion ``test_both_layouts_hold_the_same
+        _rows`` makes, restated against the buffer the values now travel
+        through.
+        """
+        inputs = cpu_inputs()
+        self.assertTrue(
+            torch.equal(_to_blnh(inputs.k_SBNH).contiguous(), inputs.k_BLNH)
+        )
+        self.assertTrue(
+            torch.equal(_to_blnh(inputs.q_SBNH).contiguous(), inputs.q_BLNH)
+        )
+
+    def test_cloning_the_strided_key_returns_a_contiguous_tensor(self):
+        """Why the leaf sets use ``detach`` and not ``clone``.
+
+        ``clone`` carries a layout only for a tensor that is non-overlapping
+        AND dense. The key view is neither, so ``preserve_format`` gives up.
+        A cloned leaf would hand TE a layout it recognizes and would delete
+        the copy this arm exists to measure, without any test failing.
+        """
+        inputs = cpu_inputs()
+        self.assertFalse(inputs.k_SBNH.is_contiguous())
+        self.assertTrue(inputs.k_SBNH.clone().is_contiguous())
+
+    def test_megatron_still_norms_the_key_it_split(self):
+        """Self-invalidating. A submodule bump can move this layout.
+
+        Three facts on the pinned rev decide it: the split returns views, the
+        query is reshaped out of the buffer before its norm, and the key is
+        not. If megatron starts reshaping the key too, the inputs builder is
+        modelling an engine that no longer exists.
+        """
+        source = megatron_source()
+        self.assertIn(
+            "query, key, value = torch.split(mixed_qkv, split_arg_list, dim=3)",
+            source,
+        )
+        self.assertIn(
+            "query = query.reshape(query.size(0), query.size(1), -1, "
+            "self.hidden_size_per_attention_head)",
+            source,
+        )
+        self.assertIn("key = apply_module(self.k_layernorm)(key)", source)
+        self.assertNotIn("key = key.reshape(", source)
+        self.assertTrue(
+            BASE.config_overrides["qk_layernorm"],
+            "with qk_layernorm off there is no k_layernorm to hand the "
+            "strided key to",
+        )
+
+    def test_transformer_engine_still_copies_a_noncontiguous_norm_input(self):
+        """Self-invalidating, and it is what makes the extra bytes real.
+
+        TE's RMSNorm materializes its input inside ``op_forward``, so the
+        strided key costs a read and a write before the norm kernel runs.
+        This test FAILS if a TE upgrade drops the call -- at which point
+        ``mcore_qk_bytes`` and the module docstring must be rewritten rather
+        than carried.
+        """
+        source = transformer_engine_source(
+            "pytorch", "ops", "basic", "rmsnorm.py"
+        )
+        self.assertIn("input_.contiguous()", source)
+
+
+class LeafSetTest(unittest.TestCase):
+    """The layout must survive into the tensors the timed closures read."""
+
+    def test_a_megatron_leaf_set_keeps_megatron_strides(self):
+        inputs = cpu_inputs()
+        query, key = _mcore_leaves(TINY, inputs)()
+        self.assertTrue(query.is_contiguous())
+        self.assertFalse(key.is_contiguous())
+        self.assertEqual(key.stride(), inputs.k_SBNH.stride())
+        self.assertEqual(
+            key.storage_offset(), inputs.k_SBNH.storage_offset()
+        )
+        self.assertTrue(query.is_leaf and query.requires_grad)
+        self.assertTrue(key.is_leaf and key.requires_grad)
+        self.assertTrue(torch.equal(query, inputs.q_SBNH))
+        self.assertTrue(torch.equal(key, inputs.k_SBNH))
+
+    def test_a_titan_leaf_set_is_contiguous(self):
+        inputs = cpu_inputs()
+        query, key = _titan_leaves(inputs)()
+        for leaf, source in ((query, inputs.q_BLNH), (key, inputs.k_BLNH)):
+            with self.subTest(shape=tuple(leaf.shape)):
+                self.assertTrue(leaf.is_contiguous())
+                self.assertTrue(leaf.is_leaf and leaf.requires_grad)
+                self.assertTrue(torch.equal(leaf, source))
+
+    def test_each_leaf_set_owns_its_own_storage(self):
+        """Three sets per arm, and none of them may share a buffer.
+
+        The forward mode, the forward+backward mode and the correctness pass
+        each hold one set. A shared buffer would let one mode's gradient
+        reach another mode's leaf.
+        """
+        inputs = cpu_inputs()
+        for factory in (_mcore_leaves(TINY, inputs), _titan_leaves(inputs)):
+            one, two = factory(), factory()
+            pointers = {
+                leaf.untyped_storage().data_ptr() for leaf in one + two
+            }
+            with self.subTest(factory=factory.__qualname__):
+                self.assertEqual(len(pointers), len(one) + len(two))
+
+    def test_a_megatron_leaf_set_does_not_alias_the_inputs(self):
+        """A timed closure may not write through to the shared inputs."""
+        inputs = cpu_inputs()
+        _query, key = _mcore_leaves(TINY, inputs)()
+        self.assertNotEqual(
+            key.untyped_storage().data_ptr(),
+            inputs.qkv_fused_SBGR.untyped_storage().data_ptr(),
+        )
 
 
 class ReferenceTest(unittest.TestCase):
@@ -287,6 +532,41 @@ class TitanArmTest(unittest.TestCase):
         self.assertEqual(set(floor.calls), {"forward"})
         floor.calls["forward"]()
         self.assertEqual(floor.correctness_outputs(), {})
+
+
+class ShapeSummaryTest(unittest.TestCase):
+    def test_the_manifest_branch_is_exactly_this_mapping(self):
+        """Every key, not a sample of them.
+
+        The manifest is how a reader without this repo learns what the arms
+        consumed, and this branch is where it learns that the two engines do
+        not read the same tensors. The fused row width is what makes the
+        megatron key strided, so it is recorded beside the key itself.
+        """
+        workload = KernelWorkload()
+        batch, seq = workload.batch, workload.seq_len
+        normal = shape_by_name("normal")
+        heads, groups = normal.n_heads, normal.n_kv_heads
+        head_dim = normal.head_dim
+        self.assertEqual(
+            shape_summary("qk_norm", normal, workload),
+            {
+                "q_titan_BLNH": [batch, seq, heads, head_dim],
+                "k_titan_BLNH": [batch, seq, groups, head_dim],
+                "qkv_mcore_fused_SBGR": [
+                    seq,
+                    batch,
+                    groups,
+                    (normal.heads_per_group + 2) * head_dim,
+                ],
+                "q_mcore_SBNH": [seq, batch, heads, head_dim],
+                "k_mcore_SBNH": [seq, batch, groups, head_dim],
+                "k_mcore_is_a_strided_view": True,
+                "weight": [head_dim],
+                "rows": batch * seq * (heads + groups),
+                "reduction_length": head_dim,
+            },
+        )
 
 
 class CrossEngineNameTest(unittest.TestCase):

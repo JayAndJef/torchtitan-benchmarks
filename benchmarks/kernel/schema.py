@@ -447,12 +447,25 @@ def shape_summary(
         }
     if scenario_name == "qk_norm":
         return {
-            # Both layouts, because both are materialized and each engine
-            # reads its own. They hold the same rows in a different order.
+            # Both engine-native forms, because both are read, and they are
+            # NOT the same tensors. Titan materializes two contiguous
+            # tensors. Megatron's QKV GEMM writes one fused buffer and splits
+            # it; the query leaves the buffer because megatron reshapes it,
+            # and the key does not, so k_layernorm norms a non-contiguous
+            # view. TE copies it inside the timed call, which is the half of
+            # qkv_prep's deferral this scenario collects. The row width is
+            # what makes that view strided, so it is recorded.
             "q_titan_BLNH": [batch, seq, shape.n_heads, shape.head_dim],
             "k_titan_BLNH": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            "qkv_mcore_fused_SBGR": [
+                seq,
+                batch,
+                shape.n_kv_heads,
+                (shape.heads_per_group + 2) * shape.head_dim,
+            ],
             "q_mcore_SBNH": [seq, batch, shape.n_heads, shape.head_dim],
             "k_mcore_SBNH": [seq, batch, shape.n_kv_heads, shape.head_dim],
+            "k_mcore_is_a_strided_view": True,
             "weight": [shape.head_dim],
             # The reduction runs over the last dimension alone, so every
             # leading dimension is a row count. This is the number that says

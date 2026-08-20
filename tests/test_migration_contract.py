@@ -951,7 +951,7 @@ TEST_CENSUS = {
     # to build both engines: 17 covering the shared inputs, the two layouts,
     # the fp64 reference, both arm builders and the guards that refuse a norm
     # the spec resolved to something other than a real one.
-    "test_kernel_qk_norm": 17,
+    "test_kernel_qk_norm": 30,
     # Scenario 5, the last of the cross-engine partition, and the one whose
     # arms no correctness gate can tell apart: cuDNN, FlashAttention and the
     # unfused path all compute attention, so a megatron arm that fell through
@@ -1153,7 +1153,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 975
+TEST_CENSUS_TOTAL = 988
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
