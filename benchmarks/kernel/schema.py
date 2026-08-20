@@ -212,8 +212,31 @@ class KernelArm:
     ``builder`` is a dotted path ("module:function") resolved in the GPU
     worker; the function receives (shape, workload, inputs) and returns a
     BuiltArm whose per-mode closures are the timed operations.
-    ``compiled`` records that the builder runs the arm under torch.compile,
-    as production does.
+    ``compiled`` records that the timed closure's entry point is a compiled
+    callable, as production runs it.
+
+    **The test is where the compile sits, not who applied it.** Our builders
+    apply ``torch.compile`` to every titan module arm, so for those two
+    readings agree. They part on the megatron side, because megatron-core
+    binds ``jit_fuser`` to ``torch.compile`` at import
+    (``megatron/core/jit.py``) and decorates 41 of its own functions with it.
+    ``attn_residual/mcore/base`` and ``moe_residual/mcore/base`` therefore
+    declare ``compiled=True`` although no builder wraps them: the timed
+    closure calls ``bias_dropout_add_fused_train``, which *is* the
+    ``torch.compile`` wrapper, and the compile is the treatment the published
+    row measures. Declaring them eager would put "eager against eager" in the
+    manifest for a row whose whole delta is that compile.
+
+    The counter-example is ``cross_entropy/mcore/ce_native``, which declares
+    ``compiled=False``. Its entry point is a plain method, and the
+    ``@jit_fuser`` regions are helpers nested inside it. The arm is eager
+    where it is timed from.
+
+    A megatron ``compiled=True`` arm is **not** the same treatment as a titan
+    one, and a report may not pool them: megatron applied the compile at
+    import over one function, and the harness applied a whole-module
+    ``fullgraph=True`` compile over a titan arm. Each arm's ``description``
+    says which.
 
     **An eager arm states why it is eager.** ``compiled=False`` requires an
     ``eager_reason``, and ``compiled=True`` forbids one. The reasons are not
