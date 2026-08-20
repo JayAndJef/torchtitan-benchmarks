@@ -1111,6 +1111,287 @@ ATTN_OUT_PROJ = KernelScenario(
 # RMSNorm is a reduction over the last dimension, so max and ULP metrics report
 # garbage wherever cancellation drives an output toward zero; rel_l2 is the only
 # safe metric here (CLAUDE.md, "Choosing a correctness metric").
+# The gate all three arms face. An add is not a reduction, so an exact metric
+# would be defensible on ``out`` -- and the informational bitwise gate below
+# states that claim directly. rel_l2 is what enforces, because the two
+# gradients are the output gradient itself and the whole set takes one
+# tolerance rather than three metrics. 2e-2 is CLAUDE.md's gate for a bf16
+# kernel, and a single bf16 add lands at ~0 against fp64: both addends are
+# exact in fp64 and the sum rounds once.
+ATTN_RESIDUAL_FP64_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "attn_out_grad", "residual_grad"),
+    max_rel_l2=2e-2,
+)
+
+# The cross-engine gate, enforced, and the within-engine one beside it. Both
+# sit on a non-anchor arm and point at ``mcore/base``: ``resolve_arm_skips``
+# closes the skip set over correctness references, so a check pointing from
+# the anchor at another arm would let that arm's skip take the anchor -- and
+# the whole scenario -- down with it. This holds even though the scenario
+# publishes no cross-engine ratio. A gate is not a comparison; it is what
+# proves the three arms compute one function.
+ATTN_RESIDUAL_AGREEMENT_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=("out", "attn_out_grad", "residual_grad"),
+    max_rel_l2=2e-2,
+)
+
+# Recorded, not enforced, as the qkv and embedding_stage scenarios record
+# theirs. The three arms should agree bitwise: the exact sum of two bf16
+# values fits in fp32, every torch backend accumulates a bf16 add in fp32,
+# and so the correctly rounded bf16 result is the only result any of them can
+# produce. This row is the published evidence for the declined cross-engine
+# ratio -- if the two engines are bit-identical, there is no arithmetic left
+# to compare and the only remaining difference is fusion scope.
+#
+# Informational rather than enforcing, because the claim is unmeasured: no
+# arm of this scenario has run on a GPU, and CLAUDE.md records that compiled
+# GEMM epilogues once broke a bit-identity the qkv scenario expected. An add
+# has no epilogue, so the expectation is stronger here -- but the honest
+# order is to record it, run it, and promote it only if the hardware agrees.
+ATTN_RESIDUAL_BITWISE_GATE = CorrectnessCheck(
+    kind="bitwise",
+    reference="mcore/base",
+    outputs=("out", "attn_out_grad", "residual_grad"),
+    informational=True,
+)
+
+
+ATTN_RESIDUAL = KernelScenario(
+    name="attn_residual",
+    description=(
+        "The residual add after attention: TorchTitan's x + attention(...) "
+        "against megatron-core's self_attn_bda. BOTH ENGINES COMPUTE THE SAME "
+        "FUNCTION, AND THEY COMPUTE IT IDENTICALLY. The base profile sets "
+        "hidden_dropout 0.0 and add_bias_linear False, so "
+        "_bias_dropout_add_func takes its no-bias branch, F.dropout(p=0.0) "
+        "returns its own input, and what remains is out = residual + out. "
+        "bias_dropout_add is the function's name, not this model's operation, "
+        "and every arm proves the equality on the device before it is timed. "
+        "THE DIFFERENCE IS FUSION SCOPE, NOT PRESENCE: titan's add is one node "
+        "of a whole-block Inductor graph and folds into the next norm's "
+        "prologue, while megatron's bias_dropout_add_fused_train is "
+        "@jit_fuser-decorated, compiles as its own region and emits one "
+        "standalone add that cannot fuse outward. Isolating the cut forces "
+        "titan into megatron's fusion scope, so a titan-against-megatron ratio "
+        "would report the isolation and not the engines. THIS SCENARIO "
+        "THEREFORE PUBLISHES NO CROSS-ENGINE ROW, and the omission is a "
+        "declaration -- see the comparisons tuple. The one row it does publish "
+        "is within megatron, and it is a HOST-DISPATCH comparison rather than "
+        "a kernel one: both mcore arms run the same single bf16 add on the "
+        "same tensors, so their device work is identical by construction and "
+        "the whole ratio is the compiled region's guard check against a fresh "
+        "Python closure per call. Run --burst and read the residual before "
+        "quoting it. The per-call resolution of "
+        "self_attn_bda(training, bias_dropout_fusion) and the enclosing "
+        "torch.enable_grad context are INSIDE the timed closure, because "
+        "megatron enters both on every layer of every step and the resolution "
+        "is where the unfused arm builds its closure. The "
+        "attention_output_with_bias tuple is excluded: scenario 6 produces it. "
+        "THE MOST LIKELY WAY THIS ROW PUBLISHES A WRONG NUMBER IS A NULL. One "
+        "add moves 24 MiB, which is roughly 11-13 us of device work at "
+        "normal/batch 4/seq 1024, and the two dispatch paths plausibly cost "
+        "5 to 40 us each -- so this scenario sits AT the crossover rather "
+        "than safely above it, unlike rope, where dispatch is 6-19x the "
+        "floor. If the arms are device-bound, both report the same ~12 us, "
+        "the ratio lands at 1.00 with a tight interval, and the whole "
+        "declared delta is invisible. --burst cannot settle that, because "
+        "CLAUDE.md records the residual test as one-sided. copy_floor is the "
+        "instrument that settles it: AN x_floor NEAR 1.5 ON BOTH ARMS MEANS "
+        "THE ROW MEASURED THE MEMORY BUS AND NOT THE FUSION. Read that "
+        "column before quoting the ratio. The floor is a COPY, so it moves "
+        "two thirds of the add's bytes -- multiply it by 1.5 before reading "
+        "it as the add's device cost, because the raw x_floor column "
+        "overstates the distance. No other arm declares bytes_moved, because "
+        "one byte count cannot describe both forward and forward_backward. "
+        "Finally, the flag NAMES THREE OPERATIONS AND THIS MODEL RUNS ONE: "
+        "with hidden_dropout 0.0 and add_bias_linear False the bias add and "
+        "the dropout do not exist, so bias_dropout_fusion selects a "
+        "@jit_fuser region wrapped around a single add with nothing to fuse "
+        "it to. The row is what wrapping one add in torch.compile costs, not "
+        "what megatron's bias-dropout-add fusion costs."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.attn_residual:attn_residual_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.attn_residual:attn_residual_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit and exhaustive, and the derived set would be wrong here. It
+    # would publish titan against mcore/base, which is the one row this
+    # scenario exists to decline. Plan section C.0 rule 6 names scenario 7 as
+    # one of the four within-engine-only scenarios.
+    comparisons=(
+        # Within megatron, and the scenario's reason to exist: what the
+        # @jit_fuser region on bias_dropout_add costs against the eager
+        # closure. Both sides emit one bf16 add, so the row is a dispatch
+        # comparison and the caption must say so.
+        ("mcore/no_bias_dropout_fusion", "mcore/base"),
+        #
+        # DECLINED, and recorded so nobody re-adds it: ("titan", "mcore/base").
+        #
+        # The two arms compute the same function -- the bitwise gate above
+        # records it -- so the ratio would carry no arithmetic difference at
+        # all. What it would carry is the isolation: titan's add emits no
+        # kernel in production because it folds into the prologue of the next
+        # norm, and an isolated arm has no neighbour to fold into. The number
+        # would land near 1.0 and would be read as "the two engines add at the
+        # same speed", which is a statement about this harness rather than
+        # about either engine.
+        #
+        # The titan arm stays, and it is not decoration. It is the scenario-7
+        # term of the attn_residual_norm span over 6+7+8, which is compared
+        # against the sum of the scenarios it replaces: the span's claim is
+        # that titan's add disappears into the norm, and that claim is
+        # measured as span minus sum, so the sum needs this number. It carries
+        # the cross-engine gate that proves the two engines compute one
+        # function, which is the evidence this declined row rests on. It keeps
+        # the partition's titan side complete, so qwen3/model.py:60 belongs to
+        # a scenario. And it is the standing measurement of what that add
+        # costs alone, if a later change stops Inductor from folding it.
+        #
+        # The counter-argument -- that a reader can divide the two absolute
+        # numbers anyway -- is the same one the cross_entropy scenario records
+        # as declined, and gets the same answer: results.json has nowhere to
+        # put a caption, so a published row would carry the same visual status
+        # as a genuine one. Promoting a ratio to a row is an editorial act.
+    ),
+    arms=(
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "One read of attn_out and one write: the bandwidth floor for "
+                "this shape. It is what separates a kernel result from a "
+                "dispatch comparison, which this scenario needs because both "
+                "sides of its published row run the same single bf16 add. A "
+                "copy moves TWO THIRDS of the add's bytes -- the add reads two "
+                "operands and writes one -- so this arm understates the device "
+                "by a third and the x_floor column overstates the distance by "
+                "the reciprocal. Multiply this arm's median by 1.5 before "
+                "reading it as the add's device cost"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attn_residual"
+                ":build_attn_residual_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a copy "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron's fused bias-dropout-add: the call site resolves to "
+                "bias_dropout_add_fused_train, which IS a torch.compile "
+                "wrapper -- @jit_fuser at fused_bias_dropout.py:69, and "
+                "megatron/core/jit.py binds jit_fuser to torch.compile at "
+                "line 21 and applies the binding at import on line 33. "
+                "bias_dropout_fusion is True in the base profile because "
+                "megatron's own argparse layer sets it, so this is megatron as "
+                "a real run gets it. THE WHOLE TIMED PAYLOAD IS THE COMPILED "
+                "CALL, which is why this arm declares compiled=True and the "
+                "other mcore arm does not: torch.compile is the treatment "
+                "under test, not a property of the surrounding harness. "
+                "megatron compiles no whole transformer layer, so everything "
+                "outside this one function stays eager -- the arm is compiled "
+                "at the cut and eager around it, and no harness choice added "
+                "either. The build refuses to continue unless the resolved "
+                "callable really is a torch.compile wrapper, so the "
+                "declaration is proved rather than asserted. NOTE THAT THIS "
+                "IS NOT THE SAME TREATMENT AS A TITAN compiled=True ARM: "
+                "megatron applied the compile at import, the harness applied "
+                "nothing, and the region is one function rather than a whole "
+                "block. This is the scenario anchor and the arm both other "
+                "arms are gated against"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attn_residual"
+                ":build_attn_residual_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            # compiled=True, and it is the one megatron arm in the whole
+            # registry that takes it. The precedent it does not follow is
+            # cross_entropy/mcore/ce_native, which declares compiled=False
+            # around @jit_fuser helpers -- and the difference is where the
+            # compile sits. There the arm's entry point is a plain method and
+            # the compiled regions are helpers nested inside it. Here the
+            # entry point IS the compiled function: the timed closure calls
+            # the torch.compile wrapper directly. Declaring this arm eager
+            # would put "eager vs eager" in the manifest for a row whose whole
+            # delta is that compile, which is the mislabelling the
+            # eager_reason contract exists to prevent.
+            compiled=True,
+            correctness=(ATTN_RESIDUAL_FP64_GATE,),
+        ),
+        KernelArm(
+            name="mcore/no_bias_dropout_fusion",
+            description=(
+                "megatron with bias_dropout_fusion off: the call site "
+                "resolves to bias_dropout_add_unfused, which builds a fresh "
+                "Python closure on every call and then dispatches the same "
+                "arithmetic eagerly. Turning the flag off is a DEVIATION from "
+                "megatron, not a return to its default, because the "
+                "TransformerConfig dataclass default is the opposite of what "
+                "megatron's argparse layer gives a real run. The device work "
+                "is the same single bf16 add the anchor runs, so the ratio "
+                "against the anchor is host dispatch and nothing else"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attn_residual"
+                ":build_attn_residual_mcore_no_bias_dropout_fusion"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "this arm IS the eager side of the fusion delta: "
+                "bias_dropout_fusion=False is what removes the torch.compile "
+                "region, and compiling the arm would put it back under "
+                "another name"
+            ),
+            correctness=(
+                ATTN_RESIDUAL_FP64_GATE,
+                ATTN_RESIDUAL_AGREEMENT_GATE,
+                ATTN_RESIDUAL_BITWISE_GATE,
+            ),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan's x = x + self.attention(...) "
+                "(qwen3/model.py:60): one binary operator, under "
+                "torch.compile(fullgraph=True), applied to a function rather "
+                "than to a module because the call site has no nn.Module "
+                "wrapper and this scenario is dispatch-bound. THIS ARM IS IN "
+                "NO PUBLISHED COMPARISON, by declaration: an isolated titan "
+                "add emits a standalone kernel that production never emits, "
+                "because in a whole-block graph it folds into the prologue of "
+                "the next norm. It is here as the scenario-7 term of the "
+                "attn_residual_norm span over 6+7+8, as the side of the "
+                "cross-engine gate that proves both engines compute one "
+                "function, and as the standing cost of the add alone"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.attn_residual"
+                ":build_attn_residual_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                ATTN_RESIDUAL_FP64_GATE,
+                ATTN_RESIDUAL_AGREEMENT_GATE,
+                ATTN_RESIDUAL_BITWISE_GATE,
+            ),
+        ),
+    ),
+)
+
+
 FFN_NORM_ACTIVATION_GATE = CorrectnessCheck(
     kind="tolerance",
     reference="fp64",
@@ -1680,6 +1961,7 @@ KERNEL_SCENARIOS = {
         QKV_PREP,
         QK_NORM,
         ATTN_OUT_PROJ,
+        ATTN_RESIDUAL,
         FFN_NORM,
         FINAL_NORM,
         CROSS_ENTROPY,

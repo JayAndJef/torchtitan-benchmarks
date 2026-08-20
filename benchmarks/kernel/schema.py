@@ -480,6 +480,27 @@ def shape_summary(
             "grad_out": [batch, seq, shape.dim],
             "tokens": batch * seq,
         }
+    if scenario_name == "attn_residual":
+        return {
+            "attn_out": [batch, seq, shape.dim],
+            "residual": [batch, seq, shape.dim],
+            "grad_out": [batch, seq, shape.dim],
+            # Recorded next to the canonical shapes because the mcore arms
+            # consume a different leading layout of the same storage: our
+            # megatron driver packs THD, so the layer receives a (t, b, h)
+            # tensor. An add treats every leading dimension as a row index,
+            # and the view is free on a contiguous tensor, so this is a label
+            # and not a measured difference -- and the manifest says so
+            # rather than leaving a reader to assume.
+            "attn_out_thd": [batch * seq, 1, shape.dim],
+            "tokens": batch * seq,
+            # The scenario performs one flop per element and reads two
+            # operands for every one it writes, so this number is what a
+            # reader needs to see that both arms are at bandwidth or at
+            # dispatch. No arm declares bytes_moved, because one count cannot
+            # describe both of the declared modes.
+            "elements": batch * seq * shape.dim,
+        }
     if scenario_name == "ffn_norm":
         return {
             "x": [batch, seq, shape.dim],

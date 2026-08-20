@@ -74,6 +74,7 @@ KERNEL_ARMS_MODULES = {
     "qkv_prep": "benchmarks.kernel.operations.qkv_prep",
     "qk_norm": "benchmarks.kernel.operations.qk_norm",
     "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
+    "attn_residual": "benchmarks.kernel.operations.attn_residual",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
     "final_norm": "benchmarks.kernel.operations.final_norm",
     "cross_entropy": "benchmarks.kernel.operations.cross_entropy",
@@ -147,6 +148,16 @@ KERNEL_INVENTORY = {
     # No floor: a GEMM is compute-bound, and a bandwidth number would not
     # bound it. The two arms are the whole roster.
     "attn_out_proj": ("mcore/base", "titan"),
+    # Scenario 7. Four arms and one published row, and the row is within
+    # megatron: the titan arm is measured and gated but compared with
+    # nothing, because isolating the cut gives titan megatron's fusion scope
+    # and a cross-engine ratio would report the isolation.
+    "attn_residual": (
+        "copy_floor",
+        "mcore/base",
+        "mcore/no_bias_dropout_fusion",
+        "titan",
+    ),
     "ffn_norm": ("copy_floor", "mcore/base", "titan"),
     "final_norm": ("copy_floor", "mcore/base", "titan"),
     # Six arms: three megatron CE variants and the three titan losses re-homed
@@ -178,6 +189,7 @@ KERNEL_BASELINE_ARMS = {
     "qkv_prep": "mcore/base",
     "qk_norm": "mcore/base",
     "attn_out_proj": "mcore/base",
+    "attn_residual": "mcore/base",
     "ffn_norm": "mcore/base",
     "final_norm": "mcore/base",
     "cross_entropy": "mcore/base",
