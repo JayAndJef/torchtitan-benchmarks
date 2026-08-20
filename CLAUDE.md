@@ -692,11 +692,21 @@ reporting anything about it.
 
 | scenario | arms | modes | notes |
 |---|---|---|---|
-| `rope` | `copy_floor`, `baseline`*, `helion`, `te` | fwd, bwd | `te` alone needs gcc-13, and is skipped by name without it; GB/s and x-floor reported |
+| `rope` | `mcore/base`*, `mcore/no_rope_fusion`, `titan`, `titan/helion`, `titan/te` | fwd, bwd | **cross-engine**: megatron's THD path eager against three compiled titan modules. `titan/te` alone needs gcc-13, and is skipped by name without it. GB/s is reported; **x-floor is not**, because the scenario declares no floor |
 | `swiglu` | `baseline`*, `piper_optimized_triton`, `piper_optimized_inductor` | fwd, bwd, fwd+bwd | whole expert layer only; both Piper arms fuse the w13 GEMM and differ in the activation (custom Triton op vs plain ops left to Inductor) |
 | `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
 | `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
 | `attention` | `baseline`*, `flex_flash`, `flash_attention_3` | fwd, fwd+bwd | inner attention only, packed-document causal masking; FA3 needs the `flash3` group, `flex_flash` the `fa4` group |
+
+**The table above is the single-engine roster, plus `rope`. It is not the
+whole registry.** `benchmarks/kernel/registry.py` also declares the
+cross-engine scenarios that put megatron-core beside TorchTitan at one cut --
+`embedding_stage`, `qkv_prep`, `qk_norm`, `attn_out_proj`, `attn_residual`,
+`ffn_norm`, `moe_residual`, `final_norm`, `lm_head_projection` and
+`cross_entropy`. Their arms are named `engine/profile`, the anchor is
+`mcore/base` throughout, and `./run_bench.sh scenarios` prints every one of
+them with its description. Read the registry rather than this table for that
+half.
 
 The `attention` scenario measures **inner attention only** -- the level at
 which the implementations are substitutable, and the level that keeps it from
@@ -779,8 +789,10 @@ own family module.
   qkv arms) run under `torch.compile(fullgraph=True)`, because that is what
   they face end-to-end: eager isolation races custom ops against
   materialization costs Inductor deletes, which inverts verdicts (the
-  swiglu combined layout wins eager, loses compiled). `copy_floor` is the
-  one deliberately eager arm: a bandwidth floor, not an implementation.
+  swiglu combined layout wins eager, loses compiled). An arm is eager only
+  where the declaration says why: a `copy_floor` because a bandwidth floor
+  is not an implementation, and every megatron-core arm because megatron
+  compiles no whole layer.
   lm_head losses are built with the production
   `CompileConfig(components=["loss"])`. `KernelArm.compiled` records the
   treatment in the manifest. The worker sets
@@ -797,7 +809,10 @@ own family module.
   drains, the interval holds the host stalls too. A burst amortizes the
   fixed per-burst synchronize; it does not amortize per-call dispatch, so
   no `k` removes them. Measured on an H200, rope forward, us per call at
-  k=1/4/16/64: `copy_floor` 27.66/16.16/13.43/13.18, `baseline`
+  k=1/4/16/64 -- **on the retired single-engine rope roster**, whose arm
+  names the cross-engine replacement no longer uses, and which nothing
+  re-measures:
+  `copy_floor` 27.66/16.16/13.43/13.18, `baseline`
   125.49/88.96/76.91/73.10, `helion` 301.23/256.53/234.87/226.01, `te`
   186.64/138.87/122.60/114.40. `copy_floor` converges onto the ~11-13 us of
   device work these shapes carry, so the method works where an arm is
@@ -915,9 +930,9 @@ own family module.
   alternative is a table whose missing ratios look like a scenario that
   declared none.
 - **Requirements belong to the arm, not to the scenario.** Without a C++20
-  host compiler, rope loses `te` and still measures `baseline`, `helion` and
-  `copy_floor`; the former scenario-level `requires_gcc_toolset` check threw
-  away all four. `resolve_arm_skips` decides the set in the parent, closes it
+  host compiler, rope loses `titan/te` and still measures its other four
+  arms; the former scenario-level `requires_gcc_toolset` check threw away
+  the whole scenario. `resolve_arm_skips` decides the set in the parent, closes it
   over correctness references (an arm whose reference is skipped is skipped
   too -- timing an arm nothing checked is the wrongness the gates exist for),
   and delivers it to the correctness worker as `--skip-arm NAME`. A skipped
