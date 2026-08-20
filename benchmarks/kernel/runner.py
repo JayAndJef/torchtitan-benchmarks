@@ -1,4 +1,13 @@
-"""Orchestrate kernel-isolation benchmark scenarios from the torch-free CLI.
+"""Orchestrate kernel-isolation measurements from the torch-free CLI.
+
+A run measures two kinds of unit. A **scenario** cuts the model at one
+boundary and ranks the implementations there. A **span** fuses across a cut,
+so it is declared over an ordered scenario range and its claim is the span
+against the sum of the scenarios it replaces. ``measurement_plan`` puts every
+enclosed scenario ahead of its span and each scenario once, and the span
+merge takes its second total from those results -- so both sides of the claim
+share one request's hardware, shape, workload, seed, ``burst_k``, replicate
+count and NUMA pinning by construction rather than by a re-check.
 
 Mirrors ``e2e/runner.py``: the parent resolves provenance and pinning, writes
 the manifest, spawns pinned GPU workers so CUDA device selection, NUMA
@@ -56,19 +65,26 @@ from benchmarks.execution.events import EventHandler, _emit
 from benchmarks.execution.paths import BENCH_DIR, RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
 from benchmarks.kernel.registry import kernel_scenario_by_name
-from benchmarks.kernel.results.merge import merge_kernel_fragments
+from benchmarks.kernel.results.merge import (
+    MeasuredScenario,
+    merge_kernel_fragments,
+    merge_kernel_span_fragments,
+)
 from benchmarks.kernel.results.schema import (
     KernelScenarioResult,
+    KernelSpanResult,
     write_kernel_results,
 )
 from benchmarks.kernel.schema import (
     KernelScenario,
+    KernelSpan,
     KernelWorkload,
     resolve_shape_and_workload,
     routing_divides_evenly,
     shape_summary,
     timing_fragment_path,
 )
+from benchmarks.kernel.spans import kernel_span_by_name
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
@@ -100,7 +116,16 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # replicate, so it is handed the directory. Nothing reads the field, but a
 # reader diffing a schema-5 manifest against a schema-6 one meets the change
 # and this is where it is explained.
-KERNEL_MANIFEST_SCHEMA_VERSION = 6
+#
+# 7: a run measures two kinds of unit. A **span** fuses across a scenario
+# cut, so it is declared over an ordered scenario range and its claim is the
+# span against the sum of the scenarios it replaces. The manifest gains
+# "unit_kind", "span_scenarios" and "parts", and its "kind" value changes
+# from "kernel" to "kernel_scenario" or "kernel_span" -- the same rename the
+# results file makes at schema 7, and for the same reason: "kernel" named the
+# family and one member of it at once. This file is write-only provenance
+# with no loader, so the bump is labelling, exactly as 3, 5 and 6 were.
+KERNEL_MANIFEST_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -141,6 +166,12 @@ class KernelRunRequest:
 
     gpu: str
     scenario_names: tuple[str, ...]
+    # The spans this run measures, and never a default. A span is compared
+    # against the sum of the scenarios it replaces, and those scenarios are
+    # measured in the same run -- so one span can drag six scenarios into a
+    # run that asked for none of them. Making it opt-in keeps a bare
+    # ``kernel-bench <gpu>`` meaning what it has always meant.
+    span_names: tuple[str, ...] = ()
     replicates: int = 5
     replicates_per_process: int = 1
     samples_per_replicate: int = 40
@@ -161,11 +192,21 @@ class KernelRunRequest:
 
 @dataclass(frozen=True)
 class KernelScenarioOutcome:
+    """What one measurement unit produced.
+
+    ``scenario`` is the unit's name and ``unit_kind`` says which kind of unit
+    it names. The published artifacts keep the two apart by shape -- a span
+    writes a ``kernel_span`` results file with a ``span`` field, and never a
+    ``scenario`` one -- and this type is the in-memory hand-off that carries
+    both to the reporter.
+    """
+
     scenario: str
     out_dir: Path
-    result: KernelScenarioResult | None
+    result: KernelScenarioResult | KernelSpanResult | None
     correctness_failed: bool = False
     error: str | None = None
+    unit_kind: str = "scenario"
     # (arm, replicate) pairs whose worker did not produce a fragment. The
     # scenario still reports whatever the survivors measured, but it exits
     # nonzero: a partial roster published as a whole one is the failure this
@@ -187,8 +228,69 @@ class KernelScenarioOutcome:
         )
 
 
+@dataclass(frozen=True)
+class MeasurementUnit:
+    """One thing this run measures: a scenario, or a span.
+
+    ``measurement`` is what the workers build and time, and it is a
+    ``KernelScenario`` either way -- a span composes one. That is what keeps
+    ``benchmarks.kernel.engine`` free of any knowledge that spans exist.
+
+    ``span`` is set only for a span, and it is what the merge needs on top of
+    the measurement: the ordered range and what each arm replaces. The
+    runner reads it for the output directory, the manifest, the worker argv
+    and the merge, and for nothing else.
+    """
+
+    measurement: KernelScenario
+    span: KernelSpan | None = None
+
+    @property
+    def name(self) -> str:
+        return self.measurement.name
+
+    @property
+    def kind(self) -> str:
+        return "scenario" if self.span is None else "span"
+
+
+def measurement_plan(request: KernelRunRequest) -> tuple[MeasurementUnit, ...]:
+    """Every unit this run measures, in the order it measures them.
+
+    **Scenarios first, then spans.** A span's claim is against the sum of the
+    scenarios it replaces, and the merge takes that sum from the results of
+    the same run -- so every enclosed scenario must have finished before the
+    span is merged. Running them together is what makes the two sides share a
+    hardware label, a shape, a workload, a seed, a ``burst_k``, a replicate
+    count and a NUMA pinning by construction rather than by a re-check.
+
+    **Each scenario appears once.** A scenario the operator asked for and a
+    scenario two spans both enclose is still one scenario. Measuring it twice
+    would spend the GPU on it twice and produce two different numbers for one
+    thing, and nothing would say which of them a span summed.
+    """
+    ordered: list[str] = list(request.scenario_names)
+    for span_name in request.span_names:
+        for scenario_name in kernel_span_by_name(span_name).scenarios:
+            if scenario_name not in ordered:
+                ordered.append(scenario_name)
+    return tuple(
+        [
+            MeasurementUnit(measurement=kernel_scenario_by_name(name))
+            for name in ordered
+        ]
+        + [
+            MeasurementUnit(
+                measurement=(span := kernel_span_by_name(name)).measurement,
+                span=span,
+            )
+            for name in request.span_names
+        ]
+    )
+
+
 def worker_command(
-    scenario_name: str,
+    unit: MeasurementUnit,
     fragments_dir: Path,
     request: KernelRunRequest,
     prefix: Sequence[str],
@@ -205,13 +307,18 @@ def worker_command(
     A timing worker is handed the fragments directory rather than a path,
     because a batched one writes a file per replicate. The correctness worker
     writes exactly one file and is still handed it by name.
+
+    A span is named with ``--span`` and never with ``--scenario``. The worker
+    resolves it through the span registry and measures ``span.measurement``,
+    so the recorded argv says which roster the name belongs to and a reader
+    of the manifest never has to guess.
     """
     command = list(prefix) + [
         sys.executable,
         "-m",
         "benchmarks.kernel.worker",
-        "--scenario",
-        scenario_name,
+        "--span" if unit.span is not None else "--scenario",
+        unit.name,
         "--mode",
         mode,
     ]
@@ -279,7 +386,9 @@ def replicate_blocks(
 
 
 def resolve_arm_skips(
-    scenario: KernelScenario, *, compiler_unavailable: str | None
+    scenario: KernelScenario | KernelSpan,
+    *,
+    compiler_unavailable: str | None,
 ) -> dict[str, str]:
     """Which arms this host cannot run, and why, keyed by arm name.
 
@@ -319,7 +428,7 @@ def resolve_arm_skips(
 
 
 def timing_passes(
-    scenario: KernelScenario,
+    scenario: KernelScenario | KernelSpan,
     request: KernelRunRequest,
     skipped: Mapping[str, str] = MappingProxyType({}),
 ) -> tuple[tuple[str, int, int], ...]:
@@ -359,20 +468,23 @@ def timing_passes(
 
 
 def planned_commands(
-    scenario: KernelScenario,
+    unit: MeasurementUnit,
     request: KernelRunRequest,
     fragments_dir: Path,
     prefix: Sequence[str],
     skipped: Mapping[str, str] = MappingProxyType({}),
 ) -> list[list[str]]:
-    """Every worker argv this scenario will issue, in the order it issues it.
+    """Every worker argv this unit will issue, in the order it issues it.
 
     The correctness pass first, then one argv per entry of
-    ``timing_passes``, which is where the order is decided.
+    ``timing_passes``, which is where the order is decided. A span's passes
+    are a scenario's passes: it composes a ``KernelScenario`` and the workers
+    measure that.
     """
+    scenario = unit.measurement
     return [
         worker_command(
-            scenario.name,
+            unit,
             fragments_dir,
             request,
             prefix,
@@ -381,7 +493,7 @@ def planned_commands(
         ),
         *(
             worker_command(
-                scenario.name,
+                unit,
                 fragments_dir,
                 request,
                 prefix,
@@ -396,7 +508,7 @@ def planned_commands(
 
 
 def kernel_manifest_data(
-    scenario: KernelScenario,
+    unit: MeasurementUnit,
     shape: PiperShape,
     workload: KernelWorkload,
     request: KernelRunRequest,
@@ -405,17 +517,42 @@ def kernel_manifest_data(
     metadata: dict[str, str],
     skipped: Mapping[str, str] = MappingProxyType({}),
 ) -> dict:
+    scenario = unit.measurement
+    span = unit.span
     return {
         "schema_version": KERNEL_MANIFEST_SCHEMA_VERSION,
-        "kind": "kernel",
+        # Renamed at schema 7, exactly as the results file renames it: two
+        # kinds of unit now write a manifest, and "kernel" named the family
+        # and one member of it at once.
+        "kind": f"kernel_{unit.kind}",
+        "unit_kind": unit.kind,
         "scenario": scenario.name,
         "description": scenario.description,
+        # The ordered range a span replaces, and what each of its arms
+        # replaces in that range. Absent on a scenario, where there is no
+        # range to name.
+        "span_scenarios": list(span.scenarios) if span else None,
+        "parts": (
+            {entry.arm: list(entry.parts) for entry in span.parts}
+            if span
+            else None
+        ),
         "model_size": request.model_size,
         # The same record the e2e manifest writes, so both systems state
         # model identity identically.
         "model_shape": shape.describe(seq_len=workload.seq_len),
         "workload": asdict(workload),
-        "shapes": shape_summary(scenario.name, shape, workload),
+        # A span's inputs are the first cut's and its outputs are the last
+        # cut's, so no single entry describes it and shape_summary knows
+        # scenario names only. The union of the range is what a reader needs.
+        "shapes": (
+            {
+                name: shape_summary(name, shape, workload)
+                for name in span.scenarios
+            }
+            if span
+            else shape_summary(scenario.name, shape, workload)
+        ),
         "arms": [asdict(arm) for arm in scenario.arms],
         # "arms" is the registry's roster, so it names arms this host never
         # ran. The reason is recorded beside the name: a reader of the
@@ -491,12 +628,10 @@ def execute_kernel_run(
     # Resolved once per run, not once per scenario and certainly not once per
     # worker: add_compiler_environment shells out to bash, and the answer
     # cannot change between two scenarios of the same run.
+    plan = measurement_plan(request)
     compiler_environment = base_environment
     compiler_unavailable: str | None = None
-    if any(
-        kernel_scenario_by_name(name).requires_gcc_toolset
-        for name in request.scenario_names
-    ):
+    if any(unit.measurement.requires_gcc_toolset for unit in plan):
         if paths.compiler_env is None:
             compiler_unavailable = (
                 "needs a C++20 host compiler for the TE build; set "
@@ -519,13 +654,23 @@ def execute_kernel_run(
             )
 
     outcomes = []
-    for name in request.scenario_names:
-        scenario = kernel_scenario_by_name(name)
-        out_dir = request.out_dir or (
-            BENCH_DIR / "out" / timestamp / "kernels" / name / hardware
-        )
+    # Every scenario this run measured, for the span merges below. A span's
+    # second total is the sum of its scenarios, and the plan guarantees they
+    # ran first and in this same run.
+    measured: dict[str, MeasuredScenario] = {}
+    for unit in plan:
+        scenario = unit.measurement
+        name = unit.name
+        # A span sits under its own directory, so a glob of
+        # out/*/kernels/*/*/ over the scenarios does not sweep up a span
+        # beside them: a span total and a scenario total answer different
+        # questions and must not be pooled by a path pattern.
+        root = BENCH_DIR / "out" / timestamp / "kernels"
+        if unit.span is not None:
+            root = root / "spans"
+        out_dir = request.out_dir or (root / name / hardware)
         out_dir = out_dir.expanduser().resolve()
-        _emit(event_handler, "arm", f"=== kernel scenario: {name} ===")
+        _emit(event_handler, "arm", f"=== kernel {unit.kind}: {name} ===")
 
         skipped = resolve_arm_skips(
             scenario, compiler_unavailable=compiler_unavailable
@@ -537,6 +682,7 @@ def execute_kernel_run(
                 scenario=name,
                 out_dir=out_dir,
                 result=None,
+                unit_kind=unit.kind,
                 error=(
                     f"{name}: the anchor arm {scenario.baseline_arm!r} "
                     f"{skipped[scenario.baseline_arm]}"
@@ -558,6 +704,7 @@ def execute_kernel_run(
                 scenario=name,
                 out_dir=out_dir,
                 result=None,
+                unit_kind=unit.kind,
                 error=(
                     f"{name}: {rows} routed rows (batch {workload.batch} x "
                     f"seq {workload.seq_len} x top_k {shape.top_k}) do not "
@@ -572,13 +719,13 @@ def execute_kernel_run(
         fragments_dir = out_dir / "fragments"
         fragments_dir.mkdir()
         commands = planned_commands(
-            scenario, request, fragments_dir, pinning.prefix, skipped
+            unit, request, fragments_dir, pinning.prefix, skipped
         )
 
         atomic_write_json(
             out_dir / "manifest.json",
             kernel_manifest_data(
-                scenario,
+                unit,
                 shape,
                 workload,
                 request,
@@ -625,6 +772,7 @@ def execute_kernel_run(
                     scenario=name,
                     out_dir=out_dir,
                     result=None,
+                    unit_kind=unit.kind,
                     error=(
                         f"{name}: the correctness worker exited with "
                         f"{correctness_code} and wrote no fragment; log "
@@ -714,27 +862,42 @@ def execute_kernel_run(
 
         result = None
         error = None
+        results_path = out_dir / "results.json"
+        shared = dict(
+            shape=shape,
+            workload=workload,
+            hardware=hardware,
+            replicates=request.replicates,
+            samples_per_replicate=request.samples_per_replicate,
+            burst_k=request.burst_k,
+            warmup_calls=request.warmup_calls,
+            seed=request.seed,
+            correctness=correctness,
+            timings=timings,
+            timings_ran=not gates_failed,
+            skipped=skipped,
+            replicates_per_process=request.replicates_per_process,
+        )
         try:
-            result = merge_kernel_fragments(
-                scenario=scenario,
-                shape=shape,
-                workload=workload,
-                hardware=hardware,
-                replicates=request.replicates,
-                samples_per_replicate=request.samples_per_replicate,
-                burst_k=request.burst_k,
-                warmup_calls=request.warmup_calls,
-                seed=request.seed,
-                correctness=correctness,
-                timings=timings,
-                timings_ran=not gates_failed,
-                skipped=skipped,
-                replicates_per_process=request.replicates_per_process,
-            )
+            if unit.span is not None:
+                # ``measured`` holds the scenarios this same run produced.
+                # The plan put every one of them ahead of the span, so the
+                # sum is taken from results that share this run's hardware,
+                # shape, workload, seed, burst_k and replicate count by
+                # construction.
+                result = merge_kernel_span_fragments(
+                    span=unit.span, parts=measured, **shared
+                )
+            else:
+                result = merge_kernel_fragments(scenario=scenario, **shared)
         except (ValueError, KeyError) as merge_error:
             error = f"{name}: {merge_error}"
         else:
-            write_kernel_results(result, out_dir / "results.json")
+            write_kernel_results(result, results_path)
+            if unit.span is None:
+                measured[name] = MeasuredScenario(
+                    result=result, results_path=str(results_path)
+                )
 
         outcome = KernelScenarioOutcome(
             scenario=name,
@@ -742,6 +905,7 @@ def execute_kernel_run(
             result=result,
             correctness_failed=gates_failed,
             error=error,
+            unit_kind=unit.kind,
             failed_passes=tuple(failed_passes),
         )
         # Report a failure the moment it happens. Scenarios continue past one

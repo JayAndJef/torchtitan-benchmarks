@@ -7,6 +7,11 @@ parent merges the fragments into ``results.json``.
 
 Two modes, matching the two passes:
 
+Either ``--scenario NAME`` or ``--span NAME`` names the unit. A span composes
+a ``KernelScenario`` -- its own head-to-head -- and that is what is measured
+here; the parent assembles the span's second total, the sum of the scenarios
+it replaces, because no worker sees a second unit.
+
 * ``--mode correctness`` builds every arm and gates them. Once per scenario,
   and first -- a failed gate means no timing is worth taking. ``--skip-arm``
   removes an arm this host cannot run, so a missing compiler costs the TE arm
@@ -57,7 +62,17 @@ from pathlib import Path
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="benchmarks.kernel.worker")
-    parser.add_argument("--scenario", required=True)
+    parser.add_argument("--scenario", default=None)
+    parser.add_argument(
+        "--span",
+        default=None,
+        help=(
+            "a kernel span instead of a scenario. The worker measures the "
+            "span's own head-to-head, which is a KernelScenario the span "
+            "composes; the parent assembles the second total. Exactly one of "
+            "--scenario and --span is required."
+        ),
+    )
     parser.add_argument("--mode", required=True, choices=("correctness", "timing"))
     parser.add_argument(
         "--fragment", default=None, type=Path, help="correctness mode only"
@@ -108,6 +123,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-seq-len", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
+    if (args.scenario is None) == (args.span is None):
+        # Neither would leave the worker with nothing to build; both would
+        # leave it choosing, and the two rosters are disjoint on purpose.
+        parser.error("give exactly one of --scenario and --span")
     if args.mode == "timing":
         if args.arm is None or args.replicate is None:
             parser.error("--mode timing requires --arm and --replicate")
@@ -134,9 +153,16 @@ def main(argv: list[str] | None = None) -> int:
     with phases.phase("import_registry"):
         from benchmarks.kernel.registry import kernel_scenario_by_name
         from benchmarks.kernel.schema import resolve_shape_and_workload
+        from benchmarks.kernel.spans import kernel_span_by_name
 
     try:
-        scenario = kernel_scenario_by_name(args.scenario)
+        # A span composes a KernelScenario, and that is what the two passes
+        # below measure. The engine therefore never learns that spans exist.
+        scenario = (
+            kernel_scenario_by_name(args.scenario)
+            if args.scenario is not None
+            else kernel_span_by_name(args.span).measurement
+        )
         shape, workload = resolve_shape_and_workload(
             model_size=args.model_size,
             batch=args.batch,

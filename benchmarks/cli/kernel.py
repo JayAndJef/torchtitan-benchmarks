@@ -45,8 +45,13 @@ import click
 
 from benchmarks.cli.rendering import _show_event
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
-from benchmarks.kernel.results.reporting import render_kernel_results
+from benchmarks.kernel.results.reporting import (
+    render_kernel_results,
+    render_kernel_span_results,
+)
+from benchmarks.kernel.results.schema import KernelSpanResult
 from benchmarks.kernel.runner import KernelRunRequest, execute_kernel_run
+from benchmarks.kernel.spans import KERNEL_SPANS
 from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 
 
@@ -58,6 +63,18 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
     multiple=True,
     type=click.Choice(list(KERNEL_SCENARIOS)),
     help="Kernel scenario subset; repeat per scenario. Default: all.",
+)
+@click.option(
+    "--span",
+    "span_names",
+    multiple=True,
+    type=click.Choice(list(KERNEL_SPANS)),
+    help=(
+        "Kernel span to measure; repeat per span. Default: none. A span is "
+        "compared against the SUM of the scenarios it replaces, and those "
+        "scenarios are measured in the same run -- so asking for one span "
+        "can add several scenarios to the run."
+    ),
 )
 @click.option(
     "--replicates",
@@ -170,18 +187,28 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 def kernel_bench_command(
     gpu: str,
     scenario_names: tuple[str, ...],
+    span_names: tuple[str, ...],
     out_dir: Path | None,
     **options: Any,
 ) -> None:
     """Benchmark kernel implementations head-to-head in isolation."""
-    selected = scenario_names or tuple(KERNEL_SCENARIOS)
-    if out_dir is not None and len(selected) != 1:
+    # ``--scenario`` defaults to every scenario; ``--span`` defaults to none.
+    # A span drags every scenario it encloses into the run, so a default of
+    # "all spans" would silently change what a bare invocation costs. An
+    # explicit ``--span`` with no ``--scenario`` measures that span and its
+    # range, and nothing else.
+    selected = scenario_names or (() if span_names else tuple(KERNEL_SCENARIOS))
+    if out_dir is not None and len(selected) + len(span_names) != 1:
         raise click.UsageError(
-            "--out requires exactly one --scenario; otherwise scenarios would "
-            "overwrite each other"
+            "--out requires exactly one --scenario or --span; otherwise the "
+            "units would overwrite each other"
         )
     request = KernelRunRequest(
-        gpu=gpu, scenario_names=selected, out_dir=out_dir, **options
+        gpu=gpu,
+        scenario_names=selected,
+        span_names=span_names,
+        out_dir=out_dir,
+        **options,
     )
     try:
         outcomes = execute_kernel_run(request, event_handler=_show_event)
@@ -192,7 +219,11 @@ def kernel_bench_command(
     for outcome in outcomes:
         if outcome.result is not None:
             click.echo()
-            click.echo(render_kernel_results(outcome.result))
+            click.echo(
+                render_kernel_span_results(outcome.result)
+                if isinstance(outcome.result, KernelSpanResult)
+                else render_kernel_results(outcome.result)
+            )
             click.echo(f"\nmachine-readable results: {outcome.out_dir}/results.json")
 
     failures = [outcome for outcome in outcomes if outcome.failed]

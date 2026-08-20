@@ -949,7 +949,12 @@ TEST_CENSUS = {
     # renamed interval and no two-sample test, that a missing part
     # costs one arm its claim, and that a span with no claim at all
     # is refused.
-    "test_kernel_spans": 35,
+    # +7 with the runner and the CLI: that the enclosed scenarios run
+    # first and once, that a span is named with --span, that one run
+    # publishes both totals, that a span file sits apart from the
+    # scenario files, that the printed table marks every interval,
+    # and that a span is opt-in.
+    "test_kernel_spans": 42,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them. +3 for
@@ -1157,7 +1162,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1000
+TEST_CENSUS_TOTAL = 1007
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

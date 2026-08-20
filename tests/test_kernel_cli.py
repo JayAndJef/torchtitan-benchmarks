@@ -474,7 +474,8 @@ class KernelRunnerTests(unittest.TestCase):
         # The manifest says so on its own. "arms" is the registry roster and
         # still lists titan/te, so without this a reader must diff it against
         # "commands" to learn that the arm never ran.
-        self.assertEqual(manifest["schema_version"], 6)
+        self.assertEqual(manifest["schema_version"], 7)
+        self.assertEqual(manifest["unit_kind"], "scenario")
         self.assertEqual(list(manifest["skipped_arms"]), ["titan/te"])
         self.assertIn(
             "compiler environment", manifest["skipped_arms"]["titan/te"]
@@ -539,8 +540,11 @@ class KernelRunnerTests(unittest.TestCase):
             timing, [(arm, r) for r in range(2) for arm in arms]
         )
 
-        self.assertEqual(manifest["kind"], "kernel")
-        self.assertEqual(manifest["schema_version"], 6)
+        # Schema 7 renames the value: two kinds of unit write a manifest,
+        # and "kernel" named the family and one member of it at once.
+        self.assertEqual(manifest["kind"], "kernel_scenario")
+        self.assertEqual(manifest["schema_version"], 7)
+        self.assertIsNone(manifest["span_scenarios"])
         self.assertEqual(manifest["skipped_arms"], {})
         self.assertEqual(manifest["scenario"], "swiglu")
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")

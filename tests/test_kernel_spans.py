@@ -19,15 +19,22 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.summaries import summarize
+from click.testing import CliRunner
+
+from benchmarks.cli.kernel import kernel_bench_command
+from benchmarks.execution.affinity import CpuPinning
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
 from benchmarks.kernel.results.merge import (
     MeasuredScenario,
     merge_kernel_span_fragments,
 )
+from benchmarks.kernel.results.reporting import render_kernel_span_results
 from benchmarks.kernel.results.schema import (
     ArmResult,
     CorrectnessResult,
@@ -49,7 +56,35 @@ from benchmarks.kernel.schema import (
     resolve_shape_and_workload,
     validate_span_parts,
 )
+from benchmarks.kernel.runner import (
+    KernelRunRequest,
+    MeasurementUnit,
+    execute_kernel_run,
+    measurement_plan,
+    planned_commands,
+)
+from benchmarks.kernel.schema import timing_fragment_path
 from benchmarks.kernel.spans import KERNEL_SPANS, kernel_span_by_name
+
+
+METADATA = {
+    "requested_gpu": "7",
+    "nvidia_smi": "Test GPU",
+    "torch_version": "test",
+}
+PINNING = CpuPinning(("numactl", "--cpunodebind=1"), "numactl test")
+
+
+def patched_environment():
+    return (
+        mock.patch(
+            "benchmarks.kernel.runner.hardware_metadata",
+            return_value=("test-gpu", dict(METADATA)),
+        ),
+        mock.patch(
+            "benchmarks.kernel.runner.resolve_cpu_pinning", return_value=PINNING
+        ),
+    )
 
 
 # The span's own head-to-head. Its arms name builders that do not exist:
@@ -865,6 +900,290 @@ class SpanMergeTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             merge_span(parts=parts)
         self.assertIn("no arm carries a parts total", str(caught.exception))
+
+
+
+# One value per (unit, arm), so every median is exact and the two totals can
+# be checked by arithmetic. The samples carry a spread so the within-span
+# Welch has a variance to work with.
+UNIT_ARM_VALUE = {
+    ("expert_mlp", "mcore/base"): 20.0,
+    ("expert_mlp", "titan"): 22.0,
+    ("moe_combine", "mcore/base"): 10.0,
+    ("moe_combine", "titan"): 11.0,
+    ("test_expert_combine", "mcore/base"): 30.0,
+    ("test_expert_combine", "titan"): 30.0,
+}
+
+
+def span_run_process_runner():
+    """A ``process_runner`` that plays the worker protocol for both kinds.
+
+    It reads ``--span`` or ``--scenario``, exactly as the real worker does,
+    which is what makes the argv the runner emits part of what is under test.
+    """
+
+    def fake_process(command, **kwargs):
+        if "--span" in command:
+            unit = command[command.index("--span") + 1]
+            declaration = kernel_span_by_name(unit)
+        else:
+            unit = command[command.index("--scenario") + 1]
+            declaration = KERNEL_SCENARIOS[unit]
+        mode = command[command.index("--mode") + 1]
+        if mode == "correctness":
+            Path(command[command.index("--fragment") + 1]).write_text(
+                json.dumps(
+                    {
+                        "kind": CORRECTNESS_FRAGMENT_KIND,
+                        "scenario": unit,
+                        "rows": [],
+                        "all_passed": True,
+                        "environment": {
+                            "device": "Test GPU",
+                            "torch_version": "test",
+                        },
+                    }
+                )
+            )
+            return SimpleNamespace(returncode=0)
+        fragments_dir = Path(command[command.index("--fragments-dir") + 1])
+        arm = command[command.index("--arm") + 1]
+        replicate = int(command[command.index("--replicate") + 1])
+        value = UNIT_ARM_VALUE.get((unit, arm), 5.0)
+        timing_fragment_path(fragments_dir, arm, replicate).write_text(
+            json.dumps(
+                {
+                    "kind": TIMING_FRAGMENT_KIND,
+                    "scenario": unit,
+                    "arm": arm,
+                    "replicate": replicate,
+                    "modes": {
+                        mode_name: [value - 0.1, value, value + 0.1]
+                        for mode_name in declaration.arm(arm).modes
+                    },
+                    "bytes_moved": None,
+                    "peak_memory_gib": 1.5 if replicate == 0 else None,
+                    "burst_us_per_call": None,
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    return fake_process
+
+
+def declared(span: KernelSpan):
+    """Put one span in the registry for the duration of a test."""
+    return mock.patch.dict(
+        "benchmarks.kernel.spans.KERNEL_SPANS", {span.name: span}
+    )
+
+
+class SpanPlanTests(unittest.TestCase):
+    """Which units a run measures, and in which order."""
+
+    def test_the_enclosed_scenarios_run_before_the_span(self) -> None:
+        """The span's second total is taken from their results.
+
+        Reading it from an older run's results.json would have made the
+        hardware, shape, workload, seed, burst_k and replicate count things
+        to verify instead of things one request fixed.
+        """
+        span = make_span()
+        with declared(span):
+            plan = measurement_plan(
+                KernelRunRequest(gpu="0", scenario_names=(), span_names=(span.name,))
+            )
+        self.assertEqual(
+            [(unit.name, unit.kind) for unit in plan],
+            [
+                ("expert_mlp", "scenario"),
+                ("moe_combine", "scenario"),
+                ("test_expert_combine", "span"),
+            ],
+        )
+
+    def test_a_scenario_asked_for_twice_is_measured_once(self) -> None:
+        """Once by name and once as part of the span's range.
+
+        Measuring it twice would spend the GPU on it twice and leave two
+        different numbers for one thing, with nothing to say which of them
+        the span summed.
+        """
+        span = make_span()
+        with declared(span):
+            plan = measurement_plan(
+                KernelRunRequest(
+                    gpu="0",
+                    scenario_names=("moe_combine", "qkv"),
+                    span_names=(span.name,),
+                )
+            )
+        self.assertEqual(
+            [unit.name for unit in plan],
+            ["moe_combine", "qkv", "expert_mlp", "test_expert_combine"],
+        )
+
+    def test_a_span_is_named_with_span_in_the_worker_argv(self) -> None:
+        """So a reader of the manifest never has to guess which roster."""
+        span = make_span()
+        with declared(span):
+            commands = planned_commands(
+                MeasurementUnit(measurement=span.measurement, span=span),
+                KernelRunRequest(gpu="0", scenario_names=()),
+                Path("/tmp/fragments"),
+                (),
+            )
+        for command in commands:
+            self.assertIn("--span", command)
+            self.assertNotIn("--scenario", command)
+            self.assertEqual(
+                command[command.index("--span") + 1], "test_expert_combine"
+            )
+
+
+class SpanRunTests(unittest.TestCase):
+    """One run measures a span and the scenarios it replaces."""
+
+    def _run(self, span: KernelSpan, temporary: str):
+        metadata_patch, pinning_patch = patched_environment()
+        with metadata_patch, pinning_patch, declared(span), mock.patch(
+            "benchmarks.kernel.runner.BENCH_DIR", Path(temporary)
+        ):
+            return execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=(),
+                    span_names=(span.name,),
+                    replicates=2,
+                    timestamp="stamp",
+                ),
+                process_runner=span_run_process_runner(),
+                environment={"PATH": "/usr/bin"},
+            )
+
+    def test_a_span_run_publishes_both_totals(self) -> None:
+        """30.0 measured against 20.0 + 10.0 summed, and 30.0 against 33.0."""
+        span = make_span()
+        with tempfile.TemporaryDirectory() as temporary:
+            outcomes = self._run(span, temporary)
+            by_name = {outcome.scenario: outcome for outcome in outcomes}
+            self.assertEqual(
+                sorted(by_name),
+                ["expert_mlp", "moe_combine", "test_expert_combine"],
+            )
+            self.assertFalse(by_name["test_expert_combine"].failed)
+            result = by_name["test_expert_combine"].result
+            self.assertIsInstance(result, KernelSpanResult)
+
+            rows = {
+                (row["arm"], row["mode"]): row
+                for row in result.parts_comparisons
+            }
+            even = rows[("mcore/base", "forward")]
+            self.assertAlmostEqual(even["span_median_us"], 30.0)
+            self.assertAlmostEqual(even["parts_median_us"], 30.0)
+            self.assertAlmostEqual(even["median_ratio"], 1.0)
+
+            win = rows[("titan", "forward")]
+            self.assertAlmostEqual(win["span_median_us"], 30.0)
+            self.assertAlmostEqual(win["parts_median_us"], 33.0)
+            self.assertAlmostEqual(win["median_ratio"], 30.0 / 33.0)
+
+    def test_the_span_file_sits_apart_from_the_scenario_files(self) -> None:
+        """A glob over the scenarios must not sweep up a span beside them.
+
+        A span total and a scenario total answer different questions, so a
+        path pattern must not be able to pool them.
+        """
+        span = make_span()
+        with tempfile.TemporaryDirectory() as temporary:
+            outcomes = self._run(span, temporary)
+            by_name = {outcome.scenario: outcome for outcome in outcomes}
+            span_dir = by_name["test_expert_combine"].out_dir
+            self.assertEqual(span_dir.parent.parent.name, "spans")
+            scenario_dirs = {
+                by_name[name].out_dir for name in ("expert_mlp", "moe_combine")
+            }
+            self.assertTrue(
+                all("spans" not in path.parts for path in scenario_dirs)
+            )
+            raw = json.loads((span_dir / "results.json").read_text())
+            self.assertEqual(raw["kind"], "kernel_span")
+            manifest = json.loads((span_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["kind"], "kernel_span")
+            self.assertEqual(manifest["unit_kind"], "span")
+            self.assertEqual(
+                manifest["span_scenarios"], ["expert_mlp", "moe_combine"]
+            )
+            self.assertEqual(
+                manifest["parts"],
+                {
+                    "mcore/base": ["mcore/base", "mcore/base"],
+                    "titan": ["titan", "titan"],
+                },
+            )
+
+    def test_the_printed_table_names_both_totals_and_marks_the_interval(
+        self,
+    ) -> None:
+        """A reader of the terminal is the reader most likely to quote."""
+        span = make_span()
+        with tempfile.TemporaryDirectory() as temporary:
+            outcomes = self._run(span, temporary)
+            result = next(
+                outcome.result
+                for outcome in outcomes
+                if outcome.scenario == "test_expert_combine"
+            )
+        rendered = render_kernel_span_results(result)
+        self.assertIn("kernel span: test_expert_combine", rendered)
+        self.assertIn("replaces: expert_mlp + moe_combine", rendered)
+        self.assertIn("against the sum of the scenarios it replaces:", rendered)
+        self.assertIn("span us", rendered)
+        self.assertIn("parts us", rendered)
+        self.assertIn("expert_mlp/mcore/base + moe_combine/mcore/base", rendered)
+        # Every interval on this table is marked: there is no condition under
+        # which a span and its parts are measured adjacently.
+        row = next(
+            line
+            for line in rendered.splitlines()
+            if "expert_mlp/titan + moe_combine/titan" in line
+        )
+        self.assertIn("~[", row)
+        self.assertIn("30.00", row)
+        self.assertIn("33.00", row)
+        self.assertIn("0.9091", row)
+        self.assertIn("The 'parts us' column is a", rendered)
+        self.assertIn("SUM", rendered)
+        self.assertIn("cross_sweep_ratio_ci_*", rendered)
+
+
+class SpanCliTests(unittest.TestCase):
+    def test_a_span_is_opt_in_and_never_a_default(self) -> None:
+        """One span can drag six scenarios into a run that asked for none.
+
+        ``--scenario`` still defaults to every scenario, so making
+        ``--span`` default to every span would silently change what a bare
+        ``kernel-bench <gpu>`` costs.
+        """
+        with mock.patch(
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=()
+        ) as execute:
+            result = CliRunner().invoke(kernel_bench_command, ["3"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        request = execute.call_args.args[0]
+        # --scenario still defaults to the whole roster; --span does not.
+        self.assertEqual(request.scenario_names, tuple(KERNEL_SCENARIOS))
+        self.assertEqual(request.span_names, ())
+        option = next(
+            param
+            for param in kernel_bench_command.params
+            if param.name == "span_names"
+        )
+        self.assertTrue(option.multiple)
+        self.assertEqual(list(option.type.choices), list(KERNEL_SPANS))
 
 
 if __name__ == "__main__":
