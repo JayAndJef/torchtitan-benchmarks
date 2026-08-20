@@ -472,17 +472,26 @@ def shape_summary(
         }
     if scenario_name == "attention_core":
         return {
-            # Both engine-native forms, because both are read. The THD triple
-            # is a view of the BLNH triple and not a second allocation:
-            # [B, L, N, H] is contiguous, so [B*L, N, H] is the same storage
-            # in the same order, and this scenario charges no layout
-            # conversion to either engine.
+            # Both engine-native forms, because both are read, and they are
+            # NOT the same tensors. Titan materializes three contiguous
+            # tensors. Megatron's QKV GEMM writes one fused buffer and
+            # reshapes only the query, so its key and value arrive as
+            # non-contiguous views of that buffer. TE copies them inside the
+            # timed call, which is the cost qkv_prep says megatron defers to
+            # this scenario. The row width is what makes the views strided,
+            # so it is recorded.
             "q_titan_BLNH": [batch, seq, shape.n_heads, shape.head_dim],
             "k_titan_BLNH": [batch, seq, shape.n_kv_heads, shape.head_dim],
             "v_titan_BLNH": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            "qkv_mcore_fused_TGR": [
+                batch * seq,
+                shape.n_kv_heads,
+                (shape.heads_per_group + 2) * shape.head_dim,
+            ],
             "q_mcore_THD": [batch * seq, shape.n_heads, shape.head_dim],
             "k_mcore_THD": [batch * seq, shape.n_kv_heads, shape.head_dim],
             "v_mcore_THD": [batch * seq, shape.n_kv_heads, shape.head_dim],
+            "kv_mcore_is_a_strided_view": True,
             # What each engine returns. Megatron's THD output folds the head
             # dimension in; the titan modules keep it split. The two hold the
             # same elements in the same order.

@@ -48,12 +48,33 @@ reshape megatron then applies (``attention.py:1601-1605``) turns that into
 ``[T, 1, N*H]`` for the output projection; it is a view, it belongs to
 ``attn_out_proj``, and this scenario does not run it.
 
-``attention_core_inputs`` materializes q, k and v once, in ``[B, L, N, H]``.
-The THD form each engine wants is ``reshape(B*L, N, H)`` of that same
-contiguous tensor -- the same elements in the same order, so **no layout
-conversion is charged to either engine**, and the two sides read the same
-values. Each arm clones its own leaves, because autograd needs one leaf set
-per arm, not because the layouts differ.
+``attention_core_inputs`` materializes q, k and v once, in ``[B, L, N, H]``,
+and the titan arms read exactly that. **The megatron arms do not read a
+reshape of it**, and that difference is deliberate.
+
+Megatron's QKV GEMM writes one fused ``[T, G, (Q + 2) * H]`` tensor, and
+``get_query_key_value_tensors`` reshapes only the query. So
+``core_attention`` receives a contiguous query and two **non-contiguous
+strided views** of that buffer. Megatron adds no ``.contiguous()`` before
+the call. TE then classifies the three tensors in ``get_qkv_layout``, does
+not recognize the layout, and forces ``.contiguous()`` on all three
+(``dot_product_attention/utils.py:2428-2431``). That copy is 8 MiB per
+forward at the default workload, and it runs inside every timed megatron
+call here.
+
+This scenario therefore builds the fused buffer and hands each megatron arm
+megatron's own three tensors. The sibling scenario ``qkv_prep`` states in
+its own description that megatron **defers** this copy to the arm that
+consumes the views, and names this scenario as that arm. Handing megatron
+contiguous tensors instead would measure a layout megatron never produces,
+and would leave real engine traffic measured in no scenario at all.
+
+Verified on CPU, because strides and TE's classifier need no device:
+``torch.split`` of the fused buffer gives ``k`` and ``v`` the strides
+``(G*R, R, 1)``; ``get_qkv_layout`` returns ``thd_thd_thd`` only **after**
+copying both; and ``Tensor.clone()`` of such a view returns a contiguous
+tensor. The last fact is why ``_Layout.make_leaves`` exists and why no leaf
+set here is built with ``clone``.
 
 The output canonicalization runs OUTSIDE the timed closures, in
 ``correctness_outputs``: megatron's ``[T, N*H]`` becomes ``[B, L, N, H]``
@@ -154,7 +175,7 @@ equals the one it is about to write (``language_module.py:124-129``). The
 correctness pass builds every arm of a scenario in one interpreter
 (``benchmarks/kernel/engine/run.py:289-298``), so the second megatron arm
 would meet the first arm's variables and die on that assertion. Its own
-message says the fix: unset them. ``_clear_te_attention_environment`` does,
+message says the fix: unset them. ``clear_te_attention_environment`` does,
 before each build.
 
 The same one-process pass is why ``_assert_te_selected_backend`` sets
@@ -378,16 +399,34 @@ ARM_NAMES = (
 class AttentionCoreInputs:
     """One q/k/v triple, and every mask form the six arms need.
 
-    ``*_BLNH`` is what both engines' modules ultimately read: titan takes it
-    directly, and the THD form megatron takes is ``reshape(B*L, N, H)`` of
-    the same contiguous storage. The THD views are held here so no closure
-    computes one.
+    ``*_BLNH`` is what titan reads. Titan materializes all three tensors
+    contiguously.
+
+    **Megatron does not, and this scenario reproduces that.** Megatron's QKV
+    GEMM writes one fused ``[T, G, (Q + 2) * H]`` tensor, where ``G`` counts
+    the key/value groups and ``Q`` the query heads per group.
+    ``get_query_key_value_tensors`` splits it and reshapes **only** the
+    query, so the query arrives contiguous and the key and the value arrive
+    as non-contiguous strided views of that buffer. Megatron adds no
+    ``.contiguous()`` of its own on this path. ``qkv_fused_TGR`` is the
+    buffer, and ``k_TNH``/``v_TNH`` are those views.
+
+    **The strides are part of the measurand.** TE's ``get_qkv_layout``
+    classifies the three tensors, does not recognize this layout, and then
+    forces ``.contiguous()`` on all three
+    (``dot_product_attention/utils.py:2428-2431``), which runs inside every
+    timed megatron call here. The sibling scenario ``qkv_prep`` states that
+    megatron **defers** this copy to the arm that consumes the views; this
+    scenario is that arm. Handing megatron contiguous tensors instead would
+    measure a layout megatron never produces, and 8 MiB per forward of real
+    engine traffic at the default workload would be measured nowhere.
     """
 
     q_BLNH: torch.Tensor
     k_BLNH: torch.Tensor
     v_BLNH: torch.Tensor
     grad_BLNH: torch.Tensor
+    qkv_fused_TGR: torch.Tensor
     q_TNH: torch.Tensor
     k_TNH: torch.Tensor
     v_TNH: torch.Tensor
@@ -427,6 +466,62 @@ def _packed_positions(
             remaining -= length
         rows.append(positions)
     return torch.tensor(rows, device=device, dtype=torch.int32)
+
+
+def _split_megatron_qkv(
+    shape: PiperShape, fused: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Megatron's own split of the fused QKV buffer.
+
+    This is ``get_query_key_value_tensors`` without the norms: one
+    ``torch.split`` along the last dimension, then a reshape of the query
+    alone (``transformer/attention.py``). The reshape copies, because its
+    source is a strided view, so the query comes back contiguous. The key
+    and the value stay views and keep the buffer's strides.
+    """
+    per_group, head_dim = shape.heads_per_group, shape.head_dim
+    query, key, value = torch.split(
+        fused, [per_group * head_dim, head_dim, head_dim], dim=2
+    )
+    return (
+        query.reshape(fused.shape[0], shape.n_heads, head_dim),
+        key,
+        value,
+    )
+
+
+def _megatron_qkv_buffer(
+    shape: PiperShape,
+    q_BLNH: torch.Tensor,
+    k_BLNH: torch.Tensor,
+    v_BLNH: torch.Tensor,
+) -> torch.Tensor:
+    """The fused ``[T, G, (Q + 2) * H]`` tensor megatron's QKV GEMM writes.
+
+    The values are the canonical ones, so every arm reads the same numbers
+    and only the memory layout differs. The head order agrees with titan's
+    by construction: titan's query head ``n`` belongs to key/value group
+    ``n // Q``, which is the group megatron's interleave puts it in, and
+    ``megatron_weights.assert_qkv_roundtrip`` proves that mapping bitwise
+    for the weights.
+    """
+    tokens = q_BLNH.shape[0] * q_BLNH.shape[1]
+    groups, per_group = shape.n_kv_heads, shape.heads_per_group
+    head_dim = shape.head_dim
+    fused = torch.empty(
+        (tokens, groups, (per_group + 2) * head_dim),
+        dtype=q_BLNH.dtype,
+        device=q_BLNH.device,
+    )
+    query_width = per_group * head_dim
+    fused[..., :query_width] = q_BLNH.reshape(tokens, groups, query_width)
+    fused[..., query_width : query_width + head_dim] = k_BLNH.reshape(
+        tokens, groups, head_dim
+    )
+    fused[..., query_width + head_dim :] = v_BLNH.reshape(
+        tokens, groups, head_dim
+    )
+    return fused
 
 
 def attention_core_inputs(
@@ -476,17 +571,21 @@ def attention_core_inputs(
 
     varlen = create_varlen_metadata_for_document(positions)
 
+    fused = _megatron_qkv_buffer(shape, q, k, v)
+    q_mcore, k_mcore, v_mcore = _split_megatron_qkv(shape, fused)
+
     return AttentionCoreInputs(
         q_BLNH=q,
         k_BLNH=k,
         v_BLNH=v,
         grad_BLNH=grad,
-        # Views, not copies: [B, L, N, H] is contiguous, so [B*L, N, H] is the
-        # same storage in the same order. Neither engine is charged a layout
-        # conversion, and both read the same values.
-        q_TNH=q.reshape(tokens, shape.n_heads, shape.head_dim),
-        k_TNH=k.reshape(tokens, shape.n_kv_heads, shape.head_dim),
-        v_TNH=v.reshape(tokens, shape.n_kv_heads, shape.head_dim),
+        qkv_fused_TGR=fused,
+        # Megatron's three tensors with megatron's strides: a contiguous
+        # query, and key and value as strided views of the fused buffer.
+        # The values equal k_BLNH and v_BLNH element for element.
+        q_TNH=q_mcore,
+        k_TNH=k_mcore,
+        v_TNH=v_mcore,
         # Megatron's core attention returns [T, N*H], so its backward seed has
         # that shape. It is the same view of the same gradient the titan arms
         # receive as [B, L, N, H], element for element, which is what makes
@@ -572,10 +671,18 @@ def attention_core_reference(
 class _Layout:
     """One engine's native tensors, and the way back to the canonical form.
 
-    ``q``/``k``/``v``/``grad`` are already in the shape that engine's module
-    expects, because a reshape inside a timed closure would be timed as
-    attention. ``to_canonical`` puts an output or a gradient back into
-    ``[B, L, N, H]`` for the gates, which run outside the timed region.
+    ``q``/``k``/``v``/``grad`` are already in the shape **and the strides**
+    that engine's module expects, because a reshape inside a timed closure
+    would be timed as attention. ``to_canonical`` puts an output or a
+    gradient back into ``[B, L, N, H]`` for the gates, which run outside the
+    timed region.
+
+    ``make_leaves`` builds one differentiable leaf set. It exists because
+    ``Tensor.clone()`` **cannot** carry the megatron layout: a strided view
+    of the fused QKV buffer is non-overlapping but not dense, so
+    ``preserve_format`` gives up and returns a contiguous tensor. Cloning
+    the arm's inputs would therefore hand TE a layout it recognizes, and
+    would delete the copy this scenario exists to measure, silently.
     """
 
     q: torch.Tensor
@@ -584,6 +691,7 @@ class _Layout:
     grad: torch.Tensor
     to_canonical_out: Callable[[torch.Tensor], torch.Tensor]
     to_canonical_qkv: Callable[[torch.Tensor], torch.Tensor]
+    make_leaves: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
 
 def _identity(tensor: torch.Tensor) -> torch.Tensor:
@@ -591,6 +699,15 @@ def _identity(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def _titan_layout(inputs: AttentionCoreInputs) -> _Layout:
+    def make_leaves() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # All three are contiguous, which is what titan's projection
+        # materializes, so a clone carries the layout unchanged.
+        return (
+            inputs.q_BLNH.clone().requires_grad_(),
+            inputs.k_BLNH.clone().requires_grad_(),
+            inputs.v_BLNH.clone().requires_grad_(),
+        )
+
     return _Layout(
         q=inputs.q_BLNH,
         k=inputs.k_BLNH,
@@ -598,6 +715,7 @@ def _titan_layout(inputs: AttentionCoreInputs) -> _Layout:
         grad=inputs.grad_BLNH,
         to_canonical_out=_identity,
         to_canonical_qkv=_identity,
+        make_leaves=make_leaves,
     )
 
 
@@ -617,6 +735,18 @@ def _mcore_layout(
         # builder used to make the THD views.
         return tensor.reshape(batch, seq, *tensor.shape[1:])
 
+    def make_leaves() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # One buffer per leaf set, split megatron's own way. The key and the
+        # value leaves share that buffer and keep its strides. The query
+        # leaf is contiguous, because megatron's reshape copies it.
+        # ``detach`` is what makes a strided view a leaf; ``clone`` would
+        # make it contiguous instead.
+        fused = inputs.qkv_fused_TGR.clone()
+        return tuple(
+            tensor.detach().requires_grad_()
+            for tensor in _split_megatron_qkv(shape, fused)
+        )
+
     return _Layout(
         q=inputs.q_TNH,
         k=inputs.k_TNH,
@@ -624,6 +754,7 @@ def _mcore_layout(
         grad=inputs.grad_TD,
         to_canonical_out=out_to_canonical,
         to_canonical_qkv=qkv_to_canonical,
+        make_leaves=make_leaves,
     )
 
 
@@ -641,16 +772,9 @@ def _attention_core_arm(
     cost is still forward_backward minus forward.
     """
 
-    def leaves() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return (
-            layout.q.clone().requires_grad_(),
-            layout.k.clone().requires_grad_(),
-            layout.v.clone().requires_grad_(),
-        )
-
-    forward_leaves = leaves()
-    round_trip_leaves = leaves()
-    check_leaves = leaves()
+    forward_leaves = layout.make_leaves()
+    round_trip_leaves = layout.make_leaves()
+    check_leaves = layout.make_leaves()
 
     def forward():
         return call(*forward_leaves)
@@ -685,10 +809,7 @@ def _probe_leaves(layout: _Layout) -> tuple[torch.Tensor, ...]:
     ``forward_leaves`` would leave an autograd graph attached to the tensors
     the timing pass then measures.
     """
-    return tuple(
-        tensor.clone().requires_grad_()
-        for tensor in (layout.q, layout.k, layout.v)
-    )
+    return layout.make_leaves()
 
 
 # ---------------------------------------------------------------------------

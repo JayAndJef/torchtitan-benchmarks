@@ -952,7 +952,7 @@ TEST_CENSUS = {
     # inert and the generation cannot be an arm.
     # +1 for the FlashAttention version TE leaves beside a cuDNN verdict,
     # which a fused arm must not record as its own.
-    "test_kernel_attention_core": 52,
+    "test_kernel_attention_core": 59,
     # Scenario 4, the cross-engine rope roster that replaced the
     # single-engine one in place: 35 covering the packed-document inputs in
     # both engine-native forms, the fp64 reference, all five arm builders and
@@ -1126,7 +1126,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 941
+TEST_CENSUS_TOTAL = 948
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

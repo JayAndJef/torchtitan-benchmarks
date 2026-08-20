@@ -361,29 +361,113 @@ class ArmRosterTests(unittest.TestCase):
 
 
 class InputsTests(unittest.TestCase):
-    def test_the_thd_views_share_storage_with_the_blnh_tensors(self) -> None:
-        """No layout conversion is charged to either engine, and this is why.
+    def test_the_gradient_seed_is_a_view_of_the_canonical_gradient(
+        self,
+    ) -> None:
+        """Both engines are seeded with the same bytes in a different shape.
 
-        If the THD form were a copy, the megatron arms would read different
-        bytes from the titan arms, and the reshape would also be real work
-        somebody paid for. Sharing storage is the claim the module docstring
-        makes; this asserts it rather than trusting ``reshape``.
+        Megatron's core attention returns ``[T, N*H]``, so its backward seed
+        has that shape. If that were a copy of a different tensor, the two
+        engines' backward measurements would not be comparable at all.
         """
         inputs = cpu_inputs()
-        for native, thd in (
+        self.assertEqual(
+            inputs.grad_BLNH.untyped_storage().data_ptr(),
+            inputs.grad_TD.untyped_storage().data_ptr(),
+        )
+        self.assertTrue(
+            torch.equal(
+                inputs.grad_BLNH.reshape(-1), inputs.grad_TD.reshape(-1)
+            )
+        )
+
+    def test_megatron_reads_the_canonical_values(self) -> None:
+        """Only the layout differs between the engines, never the numbers."""
+        inputs = cpu_inputs()
+        batch, seq = TINY_WORKLOAD.batch, TINY_WORKLOAD.seq_len
+        for native, mcore in (
             (inputs.q_BLNH, inputs.q_TNH),
             (inputs.k_BLNH, inputs.k_TNH),
             (inputs.v_BLNH, inputs.v_TNH),
-            (inputs.grad_BLNH, inputs.grad_TD),
         ):
-            with self.subTest(shape=tuple(thd.shape)):
-                self.assertEqual(
-                    native.untyped_storage().data_ptr(),
-                    thd.untyped_storage().data_ptr(),
-                )
+            with self.subTest(shape=tuple(mcore.shape)):
                 self.assertTrue(
-                    torch.equal(native.reshape(-1), thd.reshape(-1))
+                    torch.equal(
+                        native,
+                        mcore.reshape(batch, seq, *mcore.shape[1:]),
+                    )
                 )
+
+    def test_the_key_and_the_value_reach_megatron_as_strided_views(
+        self,
+    ) -> None:
+        """The measurand, not a detail.
+
+        Megatron's QKV GEMM writes one fused buffer and
+        ``get_query_key_value_tensors`` reshapes only the query, so
+        ``core_attention`` receives two non-contiguous views. TE then copies
+        them inside the timed call. Handing megatron contiguous tensors
+        would delete that copy from every scenario in the partition.
+        """
+        inputs = cpu_inputs()
+        tokens = TINY_WORKLOAD.batch * TINY_WORKLOAD.seq_len
+        groups, head_dim = TINY.n_kv_heads, TINY.head_dim
+        row = (TINY.heads_per_group + 2) * head_dim
+        self.assertEqual(
+            tuple(inputs.qkv_fused_TGR.shape), (tokens, groups, row)
+        )
+        for view in (inputs.k_TNH, inputs.v_TNH):
+            with self.subTest(shape=tuple(view.shape)):
+                self.assertFalse(view.is_contiguous())
+                self.assertEqual(view.stride(), (groups * row, row, 1))
+                self.assertEqual(
+                    view.untyped_storage().data_ptr(),
+                    inputs.qkv_fused_TGR.untyped_storage().data_ptr(),
+                )
+
+    def test_the_query_reaches_megatron_contiguous(self) -> None:
+        """Megatron reshapes the query, and that reshape copies.
+
+        ``qkv_prep`` charges ``mcore/base`` for exactly this copy, so it must
+        NOT happen again here.
+        """
+        inputs = cpu_inputs()
+        self.assertTrue(inputs.q_TNH.is_contiguous())
+        self.assertNotEqual(
+            inputs.q_TNH.untyped_storage().data_ptr(),
+            inputs.qkv_fused_TGR.untyped_storage().data_ptr(),
+        )
+
+    def test_transformer_engine_does_not_recognize_the_megatron_layout(
+        self,
+    ) -> None:
+        """The reason the strided views cost anything. Self-invalidating.
+
+        TE's ``get_qkv_layout`` classifies q, k and v by their strides. It
+        does not recognize megatron's interleaved GQA split, so it forces
+        ``.contiguous()`` on all three and returns ``thd_thd_thd``. This test
+        FAILS if a TE upgrade starts to recognize the layout -- at which
+        point the copy disappears and the module docstring's claim about it
+        must be rewritten rather than carried.
+
+        Strides need no device, so this runs on CPU.
+        """
+        try:
+            from transformer_engine.pytorch.attention.dot_product_attention.utils import (  # noqa: E501
+                get_qkv_layout,
+            )
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(
+                f"TransformerEngine is not importable: {error}"
+            )
+        inputs = cpu_inputs()
+        layout, q, k, v, _, _ = get_qkv_layout(
+            inputs.q_TNH, inputs.k_TNH, inputs.v_TNH, qkv_format="thd"
+        )
+        self.assertEqual(layout, "thd_thd_thd")
+        self.assertEqual(q.data_ptr(), inputs.q_TNH.data_ptr())
+        self.assertNotEqual(k.data_ptr(), inputs.k_TNH.data_ptr())
+        self.assertNotEqual(v.data_ptr(), inputs.v_TNH.data_ptr())
 
     def test_the_shapes_follow_the_geometry(self) -> None:
         inputs = cpu_inputs()
@@ -601,6 +685,62 @@ class LayoutTests(unittest.TestCase):
                 back = layout.to_canonical_qkv(thd)
                 self.assertEqual(tuple(back.shape), tuple(native.shape))
                 self.assertTrue(torch.equal(back, native))
+
+    def test_a_megatron_leaf_set_keeps_megatron_strides(self) -> None:
+        """A leaf set must carry the layout, or the copy is never timed.
+
+        The timed closures call the leaves, not the inputs. A leaf set built
+        with ``clone`` would be contiguous and TE would recognize it, so the
+        arm would measure a layout megatron never produces.
+        """
+        inputs = cpu_inputs()
+        layout = _mcore_layout(TINY, TINY_WORKLOAD, inputs)
+        query, key, value = layout.make_leaves()
+        self.assertTrue(query.is_contiguous())
+        for leaf, reference in ((key, inputs.k_TNH), (value, inputs.v_TNH)):
+            with self.subTest(shape=tuple(leaf.shape)):
+                self.assertFalse(leaf.is_contiguous())
+                self.assertEqual(leaf.stride(), reference.stride())
+                self.assertTrue(leaf.is_leaf)
+                self.assertTrue(leaf.requires_grad)
+                self.assertTrue(torch.equal(leaf, reference))
+        self.assertEqual(
+            key.untyped_storage().data_ptr(),
+            value.untyped_storage().data_ptr(),
+        )
+        self.assertNotEqual(
+            key.untyped_storage().data_ptr(),
+            inputs.qkv_fused_TGR.untyped_storage().data_ptr(),
+        )
+
+    def test_a_titan_leaf_set_is_contiguous_and_independent(self) -> None:
+        inputs = cpu_inputs()
+        layout = _titan_layout(inputs)
+        first = layout.make_leaves()
+        second = layout.make_leaves()
+        for leaf, other, reference in zip(
+            first, second, (inputs.q_BLNH, inputs.k_BLNH, inputs.v_BLNH)
+        ):
+            with self.subTest(shape=tuple(leaf.shape)):
+                self.assertTrue(leaf.is_contiguous())
+                self.assertTrue(leaf.is_leaf and leaf.requires_grad)
+                self.assertTrue(torch.equal(leaf, reference))
+                self.assertNotEqual(leaf.data_ptr(), other.data_ptr())
+                self.assertNotEqual(leaf.data_ptr(), reference.data_ptr())
+
+    def test_cloning_a_strided_view_returns_a_contiguous_tensor(self) -> None:
+        """The torch behaviour ``make_leaves`` exists for.
+
+        ``Tensor.clone()`` preserves the format only for a tensor that is
+        non-overlapping AND dense. A strided view of the fused QKV buffer is
+        not dense, so ``clone`` silently gives back a contiguous tensor. If
+        torch ever changes that, this test fails and ``make_leaves`` can be
+        simplified -- but nothing may rely on ``clone`` until it does.
+        """
+        inputs = cpu_inputs()
+        self.assertFalse(inputs.k_TNH.is_contiguous())
+        self.assertTrue(inputs.k_TNH.clone().is_contiguous())
+
 
 
 class SharedClosureTests(unittest.TestCase):
