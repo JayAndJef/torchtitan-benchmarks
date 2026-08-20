@@ -1879,6 +1879,124 @@ FINAL_NORM = KernelScenario(
 # before a single bf16 store. A workload whose ``batch * seq_len`` is not a
 # power of two would make ``mcore/base`` round twice, which is a widened gate
 # rather than a bug -- measure before widening.
+# One GEMM and two gradients, at the tolerance every cross-engine projection
+# in this registry already uses. A projection is a reduction over ``dim``, so
+# the gate is rel_l2 and never a max or a ULP count: cancellation drives
+# individual outputs toward zero and a per-element metric then reports a huge
+# number for arithmetic that is exactly right.
+LM_HEAD_PROJECTION_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "x_grad", "weight_grad"),
+    max_rel_l2=2e-2,
+)
+
+
+LM_HEAD_PROJECTION = KernelScenario(
+    name="lm_head_projection",
+    description=(
+        "The language-model head, cross-engine: megatron-core's "
+        "ColumnParallelLinear against TorchTitan's nn.Linear, over one shared "
+        "[vocab_size, dim] weight. This is the projection alone. The loss is "
+        "scenario 16's cut, and no arm here computes one. "
+        "The megatron arm is NOT TransformerEngine, and the row must not be "
+        "read as TE against torch: GPTModel selects "
+        "tensor_parallel.ColumnParallelLinear for the output layer, and its "
+        "TE variant is reachable only under an mxfp8 recipe this build never "
+        "sets. The megatron arm is megatron-native, and it dispatches through "
+        "linear_with_grad_accumulation_and_async_allreduce, so it pays two "
+        "torch.autograd.Function.apply calls that titan's F.linear does not. "
+        "At tensor-parallel size 1 that path runs no collective, but the "
+        "dispatch is not free and it is a real part of the gap. "
+        "Both arms are eager, and the titan arm's treatment is the "
+        "correction: torchtitan's apply_compile walks model.layers only, and "
+        "lm_head is a sibling of layers rather than a child, so no compiled "
+        "region reaches it end-to-end. One titan configuration does compile a "
+        "projection of this shape -- the fused_linear_ce loss owns the head "
+        "under the LossWithLMHead protocol -- but that is a different cut, it "
+        "fuses the loss in, and it belongs to a span this scenario does not "
+        "declare."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.lm_head_projection"
+        ":lm_head_projection_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.lm_head_projection"
+        ":lm_head_projection_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit, and the same single pair the default derivation would produce.
+    # Writing it down makes the direction of the published ratio a
+    # declaration: this scenario reports titan against megatron, which matches
+    # the e2e piper1b_megatron scenario, where megatron is also the anchor.
+    comparisons=(("titan", "mcore/base"),),
+    arms=(
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "Megatron-core GPTModel.output_layer: "
+                "tensor_parallel.ColumnParallelLinear, NOT TransformerEngine, "
+                "eager, tp_size 1 so no all-gather and no dgrad all-reduce "
+                "run"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.lm_head_projection"
+                ":build_lm_head_projection_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer and no output "
+                "layer, so this module runs eager end to end; compiling it "
+                "would measure a treatment megatron never applies"
+            ),
+            correctness=(LM_HEAD_PROJECTION_GATE,),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan decoder.lm_head: nn.Linear without a bias, eager, "
+                "because apply_compile reaches model.layers only and lm_head "
+                "is a sibling of layers"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.lm_head_projection"
+                ":build_lm_head_projection_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            # No compiled=True, and the eager_reason is the whole finding of
+            # this scenario. The plan asserts every titan module arm runs
+            # under torch.compile(fullgraph=True). That is true of every arm
+            # built from a transformer block and false here, for the same
+            # reason it is false in scenario 1 (tok_embeddings) and scenario
+            # 14 (norm): all three are siblings of ``layers`` in the decoder,
+            # and apply_compile walks the children of ``layers`` alone.
+            eager_reason=(
+                "torchtitan's apply_compile compiles each TransformerBlock in "
+                "model.layers; lm_head is a sibling of layers in the decoder, "
+                "so it sits outside every compiled region end-to-end and a "
+                "compiled arm here would measure a treatment no run applies"
+            ),
+            correctness=(
+                LM_HEAD_PROJECTION_GATE,
+                # The cross-engine gate, declared on the titan arm and
+                # pointing at the anchor. The direction is required, not
+                # stylistic: resolve_arm_skips closes the skip set over
+                # correctness references, so a gate declared on the anchor and
+                # pointing at titan would make the anchor depend on titan and
+                # cost the whole scenario if titan were ever skipped.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("out", "x_grad", "weight_grad"),
+                    max_rel_l2=2e-2,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 CROSS_ENTROPY_GATE = CorrectnessCheck(
     kind="tolerance",
     reference="fp64",
@@ -2180,6 +2298,7 @@ KERNEL_SCENARIOS = {
         FFN_NORM,
         MOE_RESIDUAL,
         FINAL_NORM,
+        LM_HEAD_PROJECTION,
         CROSS_ENTROPY,
     )
 }

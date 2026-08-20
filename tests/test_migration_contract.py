@@ -78,6 +78,7 @@ KERNEL_ARMS_MODULES = {
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
     "moe_residual": "benchmarks.kernel.operations.moe_residual",
     "final_norm": "benchmarks.kernel.operations.final_norm",
+    "lm_head_projection": "benchmarks.kernel.operations.lm_head_projection",
     "cross_entropy": "benchmarks.kernel.operations.cross_entropy",
 }
 
@@ -170,6 +171,11 @@ KERNEL_INVENTORY = {
         "titan",
     ),
     "final_norm": ("copy_floor", "mcore/base", "titan"),
+    # Scenario 15. Two arms and no floor: the projection is compute-bound at
+    # 1.27 TFLOP of forward work at the normal shape, so a copy floor would
+    # answer a question nobody asks of it. Both arms are eager, and the titan
+    # side is eager because apply_compile reaches model.layers only.
+    "lm_head_projection": ("mcore/base", "titan"),
     # Six arms: three megatron CE variants and the three titan losses re-homed
     # from lm_head, which measured the projection and the loss together.
     "cross_entropy": (
@@ -203,6 +209,7 @@ KERNEL_BASELINE_ARMS = {
     "ffn_norm": "mcore/base",
     "moe_residual": "mcore/base",
     "final_norm": "mcore/base",
+    "lm_head_projection": "mcore/base",
     "cross_entropy": "mcore/base",
 }
 

@@ -590,6 +590,35 @@ def shape_summary(
             "v": [batch, seq, shape.n_kv_heads, shape.head_dim],
             "tokens": batch * seq,
         }
+    if scenario_name == "lm_head_projection":
+        # Both native hidden-state layouts are recorded, because the two
+        # engines really do consume different ones. Our megatron driver packs
+        # THD as [1, batch*seq_len] (``benchmarks/e2e/megatron/data.py:54``),
+        # so hidden states reach ``output_layer`` as [batch*seq_len, 1, dim].
+        # Titan consumes [batch, seq_len, dim]. Both fold every leading
+        # dimension inside the GEMM, so this is a label and not a measured
+        # difference -- and the manifest says so rather than leaving a reader
+        # to assume one shared tensor.
+        #
+        # Note the deliberate disagreement with the ``cross_entropy`` branch,
+        # which labels megatron's side [seq, batch, V]. Scenario 16 builds its
+        # logits from megatron's own SBHD convention; this scenario builds
+        # them from what our THD driver actually delivers. Both are honest
+        # about the run they describe, and neither is the other's shape.
+        #
+        # ``vocab_size`` is spelled out next to ``tokens`` because the output
+        # of this projection is the largest object in the scenario by three
+        # orders of magnitude -- 1.16 GiB of bf16 at the default workload
+        # against 8 MiB of input -- and every memory number the scenario
+        # publishes is read against it.
+        return {
+            "x_titan_BLD": [batch, seq, shape.dim],
+            "x_mcore_TBD": [batch * seq, 1, shape.dim],
+            "weight": [shape.vocab_size, shape.dim],
+            "grad_out": [batch, seq, shape.vocab_size],
+            "tokens": batch * seq,
+            "vocab_size": shape.vocab_size,
+        }
     if scenario_name == "cross_entropy":
         # Both logit layouts are recorded because the two engines really do
         # consume different ones and the manifest should say so rather than
