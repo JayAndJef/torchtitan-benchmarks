@@ -392,14 +392,24 @@ def merge_kernel_fragments(
                     "the correctness gates failed, so no arm was timed"
                 )
             arm_results[name] = ArmResult(
-                name=name, modes={}, status=status, status_reason=reason
+                name=name,
+                modes={},
+                status=status,
+                status_reason=reason,
+                compiled=declaration.compiled,
+                eager_reason=declaration.eager_reason
             )
             continue
         if name in unmeasured:
             message = "produced no samples in any declared mode"
             warnings.append(f"{name}: {message}")
             arm_results[name] = ArmResult(
-                name=name, modes={}, status="failed", status_reason=message
+                name=name,
+                modes={},
+                status="failed",
+                status_reason=message,
+                compiled=declaration.compiled,
+                eager_reason=declaration.eager_reason
             )
             continue
         ordered = complete[name]
@@ -433,6 +443,8 @@ def merge_kernel_fragments(
             # Both measured once per arm, by replicate 0's worker.
             peak_memory_gib=first["peak_memory_gib"],
             burst_us_per_call=first["burst_us_per_call"],
+            compiled=declaration.compiled,
+            eager_reason=declaration.eager_reason,
         )
 
     # Which rows exist is declared by the scenario, never inferred here. A
@@ -497,4 +509,5 @@ def merge_kernel_fragments(
         },
         environment=dict(correctness["environment"]),
         warnings=tuple(warnings),
+        description=scenario.description
     )

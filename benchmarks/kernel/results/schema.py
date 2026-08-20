@@ -44,7 +44,7 @@ from benchmarks.artifacts.summaries import SampleSummary
 # comparison row always carried ``ratio_ci_low``; after this a row may not,
 # which is a change to the shape of the file and therefore a bump rather than
 # an addition.
-KERNEL_RESULTS_SCHEMA_VERSION = 5
+KERNEL_RESULTS_SCHEMA_VERSION = 6
 
 # ``ok`` measured. ``skipped`` was never launched, because this host cannot
 # run it or because the gates failed first. ``failed`` was launched and did
@@ -87,6 +87,8 @@ class ArmResult:
     burst_us_per_call: dict[str, dict[str, float]] | None = None
     status: str = "ok"
     status_reason: str | None = None
+    compiled: bool = True
+    eager_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in ARM_STATUSES:
@@ -131,6 +133,7 @@ class KernelScenarioResult:
     methodology: dict[str, Any]
     environment: dict[str, Any]
     warnings: tuple[str, ...] = ()
+    description: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = {
