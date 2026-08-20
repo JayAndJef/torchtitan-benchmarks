@@ -823,14 +823,22 @@ own family module.
 
 ### Method
 
-- Module-scope arms (all rope modules, the swiglu layer arms, both
-  qkv arms) run under `torch.compile(fullgraph=True)`, because that is what
-  they face end-to-end: eager isolation races custom ops against
+- Module-scope arms (the three titan rope modules, the swiglu layer arms,
+  both qkv arms) run under `torch.compile(fullgraph=True)`, because that is
+  what they face end-to-end: eager isolation races custom ops against
   materialization costs Inductor deletes, which inverts verdicts (the
-  swiglu combined layout wins eager, loses compiled). An arm is eager only
-  where the declaration says why: a `copy_floor` because a bandwidth floor
-  is not an implementation, and every megatron-core arm because megatron
-  compiles no whole layer.
+  swiglu combined layout wins eager, loses compiled). **The treatment is per
+  arm, and the engine does not imply it.** An arm is eager only where
+  `KernelArm.eager_reason` says why: every `copy_floor`, because a bandwidth
+  floor is not an implementation; most megatron-core arms, because megatron
+  compiles no whole layer; and the three titan arms whose module sits
+  outside every compiled region end-to-end (`embedding_stage/titan`,
+  `final_norm/titan`, `lm_head_projection/titan` -- `apply_compile` walks
+  `model.layers` alone and each of those modules is a sibling of `layers`).
+  Two megatron arms run the other way and declare `compiled=True`:
+  `attn_residual/mcore/base` and `moe_residual/mcore/base`, whose timed
+  closure calls megatron's own `@jit_fuser` function directly, so the
+  compile is the engine's choice rather than the harness's.
   lm_head losses are built with the production
   `CompileConfig(components=["loss"])`. `KernelArm.compiled` records the
   treatment in the manifest. The worker sets
@@ -1108,10 +1116,17 @@ destroying it.
   drives individual dot-product outputs toward zero, and dividing their
   negligible error by that tiny magnitude reports thousands of ULPs for a
   numerically perfect kernel -- including the stock one.
-- **`bitwise`** where implementations must agree exactly. Currently only
-  the fused-vs-unfused QKV outputs use it, and informationally: compiled
-  GEMM epilogues broke bit-identity, so the gate records equality without
-  enforcing it while the rel_l2 gates still enforce closeness.
+- **`bitwise`** where implementations must agree exactly. Seven scenarios
+  declare it (`qkv`, `embedding_stage`, `qkv_prep`, `attn_residual`,
+  `moe_router`, `dispatch_permute`, `moe_residual`), and whether a given
+  check *gates* depends on what it compares. It stays informational
+  wherever a compiled region may legitimately round differently from an
+  eager one -- the fused-vs-unfused QKV outputs are the original case -- and
+  the rel_l2 gates enforce closeness there. It **enforces** on a permutation
+  or a routing decision, in `dispatch_permute` and on `moe_router`'s
+  `selected_count`, because no tolerance metric can see a wrong one: with
+  `N` output rows, swapping one pair moves `max_rel_l2` by about
+  `sqrt(2/N)`, which is below the 2e-2 gate at the default workload.
 
 ### Silent-fallback guard
 
@@ -1181,11 +1196,11 @@ interpreter, so the interval is a lower bound, and a reader of the honest
 name must find nothing rather than a narrower number. The results file went
 5 -> 6 when it started carrying the **declared compile treatment** of every
 arm (`compiled` and `eager_reason`) and the scenario's own `description`.
-A cross-engine ratio compares two compile treatments and not two kernels --
-every megatron arm runs eager, because megatron compiles no whole layer, and
-every titan module arm runs compiled, because that is what it faces end to
-end. A reader of `results.json` holds no registry, so a row that does not
-name both sides cannot be read. The fields were added to the dataclasses one
+A cross-engine ratio compares two compile treatments and not two kernels,
+and neither treatment follows from the engine: most megatron arms run eager
+and two do not, most titan arms run compiled and three do not. A reader of
+`results.json` holds no registry, so a row that does not name both sides
+cannot be read. The fields were added to the dataclasses one
 commit before they reached `to_dict`, so a schema-6 file briefly had the
 shape of a schema-5 file; a round-trip test now pins both directions. The
 results loader enforces exact schema equality,
