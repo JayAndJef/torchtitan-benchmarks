@@ -145,6 +145,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.operations.lm_head",
     "benchmarks.kernel.operations.lm_head_projection",
     "benchmarks.kernel.operations.moe_residual",
+    "benchmarks.kernel.operations.moe_router",
     "benchmarks.kernel.operations.qk_norm",
     "benchmarks.kernel.operations.qkv",
     "benchmarks.kernel.operations.qkv_prep",
