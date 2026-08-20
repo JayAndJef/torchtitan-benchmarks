@@ -226,6 +226,50 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown arm"):
             kernel_scenario_by_name("rope").arm("nope")
 
+    def test_a_declined_cross_engine_row_is_captioned_where_it_is_read(
+        self,
+    ) -> None:
+        """Suppressing `comparisons` removes the row, never the number.
+
+        A scenario that holds both engines and publishes no row between them
+        still prints every arm's median in one column, and where it declares
+        a floor or a byte count the merge also derives `x_floor` and `gbps`
+        per arm. Dividing either derived column reproduces the ratio exactly
+        -- the floor median cancels, and a shared `bytes_moved` cancels too.
+        None of that can be removed without deleting the diagnostic that says
+        whether the published rows are kernel results at all, so each such
+        scenario states the hazard in its `description`, which is the string
+        the renderer now prints above the tables.
+
+        The class is derived rather than listed, so a scenario that declines
+        a cross-engine row in future inherits the requirement.
+        """
+        def side(arm_name: str) -> str:
+            return arm_name.split("/", 1)[0]
+
+        captioned = []
+        for scenario in KERNEL_SCENARIOS.values():
+            sides = {side(arm.name) for arm in scenario.arms}
+            if not {"mcore", "titan"} <= sides:
+                continue
+            crosses = any(
+                side(arm) != side(opponent)
+                for arm, opponent in scenario.comparison_pairs()
+            )
+            if crosses:
+                continue
+            captioned.append(scenario.name)
+            with self.subTest(scenario=scenario.name):
+                self.assertIn(
+                    "removes the ROW and not the NUMBER",
+                    scenario.description,
+                )
+        # Non-vacuity: the class is the four scenarios that decline the row.
+        self.assertEqual(
+            set(captioned),
+            {"attn_residual", "expert_mlp", "moe_combine", "moe_residual"},
+        )
+
     def test_the_balanced_routing_flag_is_set_exactly_where_it_is_needed(
         self,
     ) -> None:

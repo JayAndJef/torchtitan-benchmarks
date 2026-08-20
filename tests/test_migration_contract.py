@@ -1045,7 +1045,10 @@ TEST_CENSUS = {
     # from process exec is a plausible age.
     # +1 with the libc flush: os._exit skips libc's own exit, so a C
     # extension's output would be lost from the log the parent tails.
-    "test_kernels": 46,
+    # +1 with the within-engine-only caption: a scenario that declines a
+    # cross-engine row must say in its description that suppressing the row
+    # does not suppress the number two derived columns still reproduce.
+    "test_kernels": 47,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against
     # a frozen literal (including the cuda-graph branch the parity check
@@ -1079,7 +1082,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 642
+TEST_CENSUS_TOTAL = 643
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
