@@ -1518,6 +1518,221 @@ FFN_NORM = KernelScenario(
 )
 
 
+# The gate every arm faces, and rel_l2 rather than a ULP metric. An add is not
+# a reduction, but the hazard CLAUDE.md's ULP rule names is CANCELLATION, and
+# the reduction is only where that rule met it first. ``residual + x`` on two
+# independent operands cancels wherever their signs oppose, so individual
+# outputs land near zero and a per-element relative error divides a negligible
+# absolute error by a negligible magnitude -- the same failure the rule warns
+# about, reached without a reduction. rel_l2 takes one norm over the whole
+# tensor and is immune to it, and it is the metric every neighbouring
+# cross-engine scenario uses on this class of tensor.
+#
+# ``x_grad`` and ``residual_grad`` are named next to ``out``, and they are not
+# a restatement of it. An add that consumed one operand and dropped the other
+# moves ``out`` by about 100%, so the forward output already catches that case
+# on its own. What the two gradients cover is the BACKWARD, which is a
+# separate implementation on both engines: megatron's @jit_fuser region
+# compiles its own and titan's torch.compile region compiles its own, so a
+# forward that agrees is no evidence about either. A gradient that arrives
+# scaled or masked is visible here and nowhere else.
+# ``_require_both_gradients`` covers only the coarser case of no gradient at
+# all.
+MOE_RESIDUAL_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("out", "x_grad", "residual_grad"),
+    max_rel_l2=2e-2,
+)
+
+
+MOE_RESIDUAL = KernelScenario(
+    name="moe_residual",
+    description=(
+        "The residual add after the MoE block: TorchTitan's x + moe(...) "
+        "against megatron-core's mlp_bda(...). The two engines compute the "
+        "SAME add -- the base profile sets hidden_dropout=0.0 and "
+        "add_bias_linear=False, so megatron takes the no-bias branch of "
+        "_bias_dropout_add_func and F.dropout(p=0.0) returns its own input, "
+        "leaving residual + x. They differ in fusion SCOPE: end to end "
+        "titan's add is one node inside a whole-block torch.compile region, "
+        "where Inductor may fuse it into a neighbour, while megatron's "
+        "bias_dropout_add_fused_train is @jit_fuser-decorated and compiles as "
+        "a region of its own. Isolating the scenario gives titan megatron's "
+        "scope and takes that freedom away, so THIS SCENARIO "
+        "PUBLISHES NO CROSS-ENGINE RATIO: the one comparison declared is "
+        "megatron's own bias_dropout_fusion on/off delta, compiled "
+        "bias_dropout_add_fused_train against eager "
+        "bias_dropout_add_unfused. READ THAT ROW AS A DISPATCH COMPARISON "
+        "UNLESS THE FLOOR SAYS OTHERWISE: the measurand is one bf16 "
+        "elementwise add, which carries only tens of microseconds of device "
+        "work at these shapes, and the two arms differ precisely in their "
+        "dispatch paths -- a torch.compile wrapper's per-call guard "
+        "evaluation against a per-call python closure allocation plus eager "
+        "op dispatch. Neither difference is device work. copy_floor moves "
+        "the same bytes and the x_floor column is what can say the arms are "
+        "device-bound; the --burst residual cannot, because a ladder may "
+        "plateau at a dispatch cost bursting never amortizes. The titan arm "
+        "is measured and gated but "
+        "ranked against nothing; read its number as an upper bound on what "
+        "this node can cost titan end to end, never as titan's share of "
+        "a step. There is no span here either: titan's downstream partner is "
+        "the next block's attention-input norm, which megatron has already "
+        "fused into linear_qkv (scenario 2), so no cut leaves both engines "
+        "having done the same work. This scenario is the far end of the "
+        "within-engine ffn_norm_to_moe_residual span instead, because "
+        "fused_residual_rmsnorm is backward-only and joins pre_mlp_layernorm "
+        "to mlp_bda."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.moe_residual:moe_residual_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.moe_residual:moe_residual_reference"
+    ),
+    baseline_arm="mcore/base",
+    # Explicit, exhaustive, and NOT the derived set. Left None the schema would
+    # pair every non-floor arm with the anchor, which would publish
+    # titan against mcore/base -- the one row this scenario has evidence
+    # against. See the description and the module docstring: at this cut the
+    # engines compute the same add and differ only in the scope isolation
+    # removes, so that ratio would land near 1.0 and would mean nothing. The
+    # row below is a real question: it is megatron's own fusion flag, with
+    # everything else held fixed.
+    comparisons=(("mcore/no_bias_dropout_fusion", "mcore/base"),),
+    arms=(
+        # The floor decides whether the one published row is a kernel result
+        # at all. Both mcore arms sit above an operation with tens of
+        # microseconds of device work, and they differ in dispatch cost, so
+        # without a bandwidth reference a reader cannot tell a fusion result
+        # from a dispatch result. Declared exactly as ``rope`` and
+        # ``ffn_norm`` declare theirs: forward only, is_floor, and an
+        # eager_reason rather than compiled=False.
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "torch.add(x, residual, out=out): two reads and one write of "
+                "a [batch, seq_len, dim] bf16 tensor, and the bandwidth floor "
+                "for the forward traffic at this shape"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_residual:"
+                "build_moe_residual_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling an add "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron-core mlp_bda off a real GPTModel: "
+                "bias_dropout_add_fused_train, which megatron itself "
+                "decorates with @jit_fuser (torch.compile on torch >= 2.2), "
+                "resolved per call exactly as transformer_layer.py:980 "
+                "resolves it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_residual:"
+                "build_moe_residual_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            # The one arm in the package whose compile treatment is the
+            # engine's own choice rather than the harness's: the builder wraps
+            # nothing, and _assert_mcore_bda refuses to continue unless
+            # megatron.core.jit.jit_fuser really is torch.compile.
+            compiled=True,
+            correctness=(MOE_RESIDUAL_GATE,),
+        ),
+        KernelArm(
+            name="mcore/no_bias_dropout_fusion",
+            description=(
+                "the same call site with bias_dropout_fusion=False: "
+                "bias_dropout_add_unfused, plain eager python, with a fresh "
+                "closure allocated per call as megatron allocates it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_residual:"
+                "build_moe_residual_mcore_no_bias_dropout_fusion"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "the arm IS the removal of megatron's compiled region: "
+                "compiling it would erase the difference the published row "
+                "measures"
+            ),
+            correctness=(
+                MOE_RESIDUAL_GATE,
+                # The within-engine check, and the one that states the
+                # published row's premise: the fusion flag changes the
+                # implementation and not the arithmetic. Informational,
+                # following the qkv precedent -- a compiled region may
+                # legitimately round differently from the eager one, so
+                # equality is recorded rather than enforced while
+                # MOE_RESIDUAL_GATE still enforces closeness on both arms.
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("out", "x_grad", "residual_grad"),
+                    informational=True,
+                ),
+            ),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan's residual add, the x + of x = x + "
+                "self.moe(self.ffn_norm(x)), under "
+                "torch.compile(fullgraph=True). Measured and gated, and "
+                "deliberately in no comparison"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.moe_residual:"
+                "build_moe_residual_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                MOE_RESIDUAL_GATE,
+                # The cross-engine gates, and the reason the titan arm exists
+                # at all. No ratio is published between the engines, so this
+                # is where the scenario's central claim gets tested rather
+                # than asserted: the two engines compute one function of one
+                # pair of operands. Without the arm the claim would rest on
+                # this file.
+                #
+                # Both gates sit on the NON-ANCHOR arm. ``resolve_arm_skips``
+                # closes the skip set over correctness references, so a check
+                # pointing from ``mcore/base`` at ``titan`` would let a
+                # skipped titan arm take the anchor -- and with it every row
+                # in the scenario -- down with it.
+                CorrectnessCheck(
+                    kind="tolerance",
+                    reference="mcore/base",
+                    outputs=("out", "x_grad", "residual_grad"),
+                    max_rel_l2=2e-2,
+                ),
+                # Stronger than the gate above, and informational because a
+                # compiled region is entitled to reassociate. Both engines
+                # evaluate residual + x on identical bf16 operands in the same
+                # operand order, so equality is what a reader should expect;
+                # recording it is what would show a future lowering silently
+                # changing the operation.
+                CorrectnessCheck(
+                    kind="bitwise",
+                    reference="mcore/base",
+                    outputs=("out", "x_grad", "residual_grad"),
+                    informational=True,
+                ),
+            ),
+        ),
+    ),
+)
+
+
 FINAL_NORM = KernelScenario(
     name="final_norm",
     description=(
@@ -1963,6 +2178,7 @@ KERNEL_SCENARIOS = {
         ATTN_OUT_PROJ,
         ATTN_RESIDUAL,
         FFN_NORM,
+        MOE_RESIDUAL,
         FINAL_NORM,
         CROSS_ENTROPY,
     )

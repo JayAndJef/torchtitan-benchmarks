@@ -510,6 +510,23 @@ def shape_summary(
             "rows": batch * seq,
             "row_width": shape.dim,
         }
+    if scenario_name == "moe_residual":
+        return {
+            "x": [batch, seq, shape.dim],
+            "residual": [batch, seq, shape.dim],
+            "grad_out": [batch, seq, shape.dim],
+            # Recorded next to the canonical shapes because the two engines
+            # consume different leading dimensions of the same elements: our
+            # megatron driver runs THD, so a hidden state reaching mlp_bda is
+            # (t, 1, h). An add treats every leading dimension as a row
+            # index, so this is a label rather than a measured difference --
+            # and the manifest says so rather than leaving a reader to
+            # assume it.
+            "x_thd": [batch * seq, 1, shape.dim],
+            # What the kernel actually sees. The operation is elementwise, so
+            # the element count is the whole of its work.
+            "elements": batch * seq * shape.dim,
+        }
     if scenario_name == "final_norm":
         return {
             "x": [batch, seq, shape.dim],

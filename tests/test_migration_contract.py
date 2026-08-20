@@ -76,6 +76,7 @@ KERNEL_ARMS_MODULES = {
     "attn_out_proj": "benchmarks.kernel.operations.attn_out_proj",
     "attn_residual": "benchmarks.kernel.operations.attn_residual",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
+    "moe_residual": "benchmarks.kernel.operations.moe_residual",
     "final_norm": "benchmarks.kernel.operations.final_norm",
     "cross_entropy": "benchmarks.kernel.operations.cross_entropy",
 }
@@ -159,6 +160,15 @@ KERNEL_INVENTORY = {
         "titan",
     ),
     "ffn_norm": ("copy_floor", "mcore/base", "titan"),
+    # Scenario 13, the twin of attn_residual at the other bda call site. Four
+    # arms, one published row, and the row is within megatron for the same
+    # reason.
+    "moe_residual": (
+        "copy_floor",
+        "mcore/base",
+        "mcore/no_bias_dropout_fusion",
+        "titan",
+    ),
     "final_norm": ("copy_floor", "mcore/base", "titan"),
     # Six arms: three megatron CE variants and the three titan losses re-homed
     # from lm_head, which measured the projection and the loss together.
@@ -191,6 +201,7 @@ KERNEL_BASELINE_ARMS = {
     "attn_out_proj": "mcore/base",
     "attn_residual": "mcore/base",
     "ffn_norm": "mcore/base",
+    "moe_residual": "mcore/base",
     "final_norm": "mcore/base",
     "cross_entropy": "mcore/base",
 }

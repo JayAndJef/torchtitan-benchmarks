@@ -54,6 +54,7 @@ from benchmarks.kernel.operations.moe_residual import (
     NO_BIAS_DROPOUT_FUSION,
     TITAN_ARM,
 )
+from benchmarks.kernel.registry import KERNEL_SCENARIOS
 from benchmarks.kernel.schema import fragment_stem, KernelWorkload
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
 from benchmarks.models.piper_qwen3.megatron_bootstrap import megatron_dir
@@ -509,21 +510,25 @@ class RegisteredShapeTests(unittest.TestCase):
 
 
 class ArmNameTests(unittest.TestCase):
-    """**Not a registry test, and it cannot be one yet.**
+    """The module's own constants against the registry that publishes them.
 
-    The ``moe_residual`` scenario is not in ``benchmarks/kernel/registry.py``:
-    it lands as a declaration fragment that a merge agent pastes, because
-    several scenarios are written in parallel and one file cannot take four
-    concurrent edits. So these assertions compare the module's own constants
-    against the names the fragment spells. **After the merge, replace them
-    with assertions against** ``KERNEL_SCENARIOS["moe_residual"]``, which is
-    the only version of this test that can catch a divergence.
+    This module names its four arms as constants, and
+    ``benchmarks/kernel/registry.py`` names them again in the declaration. A
+    divergence would rename an arm on one side only: the builder would return
+    one name and the merge would file it under another. The scenario reached
+    the registry with the Part C merge, so these assertions read it rather
+    than the declaration fragment they were first written against.
     """
 
-    def test_each_builder_returns_the_arm_name_the_fragment_declares(
+    def test_each_builder_returns_the_arm_name_the_registry_declares(
         self,
     ) -> None:
         inputs = _inputs()
+        declared = [arm.name for arm in KERNEL_SCENARIOS["moe_residual"].arms]
+        self.assertEqual(
+            declared,
+            [COPY_FLOOR_ARM, MCORE_BASE_ARM, MCORE_NO_FUSION_ARM, TITAN_ARM],
+        )
         self.assertEqual(
             build_moe_residual_copy_floor(TINY, TINY_WORKLOAD, inputs).name,
             COPY_FLOOR_ARM,
@@ -539,10 +544,10 @@ class ArmNameTests(unittest.TestCase):
 
         ``schema.fragment_stem`` replaces the slash, so two arms whose names
         differ only there would collide. ``KernelScenario.__post_init__``
-        raises on that, and this is the CPU-side statement of the same
-        invariant while the scenario is still a fragment.
+        raises on that at import; this states the same invariant over the
+        registry's own roster, which is what a reader of this module checks.
         """
-        names = [COPY_FLOOR_ARM, MCORE_BASE_ARM, MCORE_NO_FUSION_ARM, TITAN_ARM]
+        names = [arm.name for arm in KERNEL_SCENARIOS["moe_residual"].arms]
         self.assertEqual(len(set(names)), 4)
         self.assertEqual(len({fragment_stem(name) for name in names}), 4)
 
