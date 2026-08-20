@@ -724,7 +724,8 @@ than trusting this paragraph.
 ```
 
 The table below details the 4 holdovers plus `rope`. **It is 5 of the 19, and
-the registry is the authority.** The remaining 14 are named after it.
+the registry is the authority.** The paragraph after the table names the other
+14.
 
 | scenario | arms | modes | notes |
 |---|---|---|---|
@@ -739,7 +740,7 @@ the whole registry.** `benchmarks/kernel/registry.py` declares 14 further
 cross-engine scenarios, in partition order: `embedding_stage`, `qkv_prep`,
 `qk_norm`, `attn_out_proj`, `attn_residual`, `ffn_norm`, `moe_router`,
 `dispatch_permute`, `expert_mlp`, `moe_combine`, `moe_residual`, `final_norm`,
-`lm_head_projection` and `cross_entropy`. Their arms are named
+`lm_head_projection` and `cross_entropy`. Their arms are named `engine` or
 `engine/profile`, except the `copy_floor` bandwidth arms. The anchor is
 `mcore/base` in every one except `expert_mlp`, which anchors on `titan`
 because it publishes no cross-engine row. `./run_bench.sh scenarios` prints
