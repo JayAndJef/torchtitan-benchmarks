@@ -1024,6 +1024,13 @@ class KernelRunnerTests(unittest.TestCase):
         parent reads it from the declaration rather than from the fragment.
         Deleting the whole derived block left the suite green: the fixture
         reported no ``bytes_moved``, so GB/s was never computed at all.
+
+        Driven against ``qk_norm``. This test ran on ``rope`` until scenario 4
+        made that scenario cross-engine and retired its ``copy_floor``: a
+        bandwidth floor answers no cross-engine question. The x_floor column
+        is derived from a floor, so the test has to sit on a scenario that
+        still declares one. ``qk_norm`` does, and it has the same shape --
+        one floor and two arms above it.
         """
         fake_process = fragment_writer(
             bytes_moved=4_000_000, arm_scale={"copy_floor": 0.5}
@@ -1034,7 +1041,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("rope",),
+                    scenario_names=("qk_norm",),
                     replicates=2,
                     out_dir=Path(temporary) / "kernels",
                     compiler_env=Path(temporary) / "missing.sh",
@@ -1045,10 +1052,10 @@ class KernelRunnerTests(unittest.TestCase):
         arms = outcomes[0].result.arms
         # Samples are 10..13 over two replicates, so the pooled median is
         # 11.5 us; copy_floor's are halved, so its median is 5.75 us.
-        baseline = arms["baseline"].modes["forward"].derived
-        self.assertAlmostEqual(baseline["gbps"], 4e6 / 11.5e-6 / 1e9)
-        self.assertAlmostEqual(baseline["x_floor"], 2.0)
-        self.assertAlmostEqual(arms["helion"].modes["forward"].derived["x_floor"], 2.0)
+        anchor = arms["mcore/base"].modes["forward"].derived
+        self.assertAlmostEqual(anchor["gbps"], 4e6 / 11.5e-6 / 1e9)
+        self.assertAlmostEqual(anchor["x_floor"], 2.0)
+        self.assertAlmostEqual(arms["titan"].modes["forward"].derived["x_floor"], 2.0)
         # The floor is the denominator, so it carries no ratio to itself.
         floor = arms["copy_floor"].modes["forward"].derived
         self.assertNotIn("x_floor", floor)
