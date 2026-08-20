@@ -1185,6 +1185,38 @@ class SpanCliTests(unittest.TestCase):
         self.assertTrue(option.multiple)
         self.assertEqual(list(option.type.choices), list(KERNEL_SPANS))
 
+    def test_out_refuses_a_span_outright(self) -> None:
+        """A span run is never one unit.
+
+        It measures every scenario the span replaces as well, so they would
+        all resolve to the one directory --out names. The choice list is
+        widened here because no span is declared at this rev; the guard
+        under test is the one after the parse.
+        """
+        span = make_span()
+        option = next(
+            param
+            for param in kernel_bench_command.params
+            if param.name == "span_names"
+        )
+        with declared(span), mock.patch.object(
+            option.type, "choices", [span.name]
+        ), mock.patch(
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=()
+        ):
+            refused = CliRunner().invoke(
+                kernel_bench_command,
+                ["3", "--span", span.name, "--out", "/tmp/x"],
+            )
+            allowed = CliRunner().invoke(
+                kernel_bench_command, ["3", "--span", span.name]
+            )
+        self.assertNotEqual(refused.exit_code, 0)
+        self.assertIn("no --span", refused.output)
+        # Without --out the same request is fine, and it asks for no
+        # scenario of its own: the plan derives them from the range.
+        self.assertEqual(allowed.exit_code, 0, allowed.output)
+
 
 if __name__ == "__main__":
     unittest.main()

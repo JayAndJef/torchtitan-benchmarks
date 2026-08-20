@@ -23,7 +23,9 @@ module's docstring for the other half.
 The single ``--out`` guard is here rather than in ``KernelRunRequest``
 because it is a usage error about flags, not a property of a request: without
 it, several scenarios would resolve to the same directory and overwrite each
-other's ``results.json``. Everything else this function does after the runner
+other's ``results.json``. It refuses ``--span`` outright, because a span run
+always measures the scenarios the span replaces as well and is therefore
+never one unit. Everything else this function does after the runner
 returns is reporting -- errors were already streamed through the shared
 renderer as they happened, so only the successful scenarios' reports are
 printed, and a nonzero exit summarizes the failures.
@@ -198,10 +200,15 @@ def kernel_bench_command(
     # explicit ``--span`` with no ``--scenario`` measures that span and its
     # range, and nothing else.
     selected = scenario_names or (() if span_names else tuple(KERNEL_SCENARIOS))
-    if out_dir is not None and len(selected) + len(span_names) != 1:
+    if out_dir is not None and (len(selected) != 1 or span_names):
+        # A span is never allowed here, whatever else was asked for: it
+        # measures the scenarios it replaces in the same run, so a span run
+        # is always several units and they would all resolve to this one
+        # directory.
         raise click.UsageError(
-            "--out requires exactly one --scenario or --span; otherwise the "
-            "units would overwrite each other"
+            "--out requires exactly one --scenario and no --span; a span "
+            "also measures every scenario it replaces, so the units would "
+            "overwrite each other"
         )
     request = KernelRunRequest(
         gpu=gpu,
