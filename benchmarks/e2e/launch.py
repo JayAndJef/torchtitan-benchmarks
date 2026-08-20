@@ -26,7 +26,7 @@ def command_for_arm(
 ) -> list[str]:
     """Build the training command for one arm, dispatching on its launcher.
 
-    ``model_size`` is keyword-only: the five positional parameters are the
+    ``model_size`` is keyword-only: the six positional parameters are the
     historical signature and callers pass them positionally.
     """
     if arm.launcher == "megatron":
