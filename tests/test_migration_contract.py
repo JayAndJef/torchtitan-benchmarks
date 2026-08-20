@@ -937,6 +937,20 @@ TEST_CENSUS = {
     # the fp64 reference, both arm builders and the guards that refuse a norm
     # the spec resolved to something other than a real one.
     "test_kernel_qk_norm": 17,
+    # Scenario 5, the last of the cross-engine partition, and the one whose
+    # arms no correctness gate can tell apart: cuDNN, FlashAttention and the
+    # unfused path all compute attention, so a megatron arm that fell through
+    # to the wrong backend passes every gate the scenario declares. 51 split
+    # roughly in three -- 12 pin the shared inputs, their two engine-native
+    # views and the packed-document invariants; 8 pin the fp64 reference,
+    # including that it respects the document boundaries a causal-only
+    # reference would leak across; and the rest are the guards. 13 of those
+    # exercise every branch of the backend verdict, including the stale
+    # record a second arm in the correctness pass would meet, and one pins
+    # the refutation this roster rests on: TransformerEngine reads no
+    # NVTE_FLASH_ATTN_V variable, so megatron's flash_attention_version is
+    # inert and the generation cannot be an arm.
+    "test_kernel_attention_core": 51,
     # Scenario 4, the cross-engine rope roster that replaced the
     # single-engine one in place: 35 covering the packed-document inputs in
     # both engine-native forms, the fp64 reference, all five arm builders and
@@ -1110,7 +1124,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 889
+TEST_CENSUS_TOTAL = 940
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
