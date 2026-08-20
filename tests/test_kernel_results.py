@@ -549,8 +549,8 @@ class ArmColumnWidthTests(unittest.TestCase):
         """A name wider than the field pushes the rest of its row right.
 
         The table is read by eye, so a misaligned row is read as a different
-        column. The field was 22 while two declared names were already 28,
-        and the MoE scenarios brought a 31.
+        column. The field was 22 while `mcore/no_bias_dropout_fusion` was
+        already 28, and the MoE scenarios brought a 31.
         """
         longest = max(
             (arm.name for scenario in KERNEL_SCENARIOS.values()

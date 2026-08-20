@@ -7,15 +7,16 @@ import textwrap
 from benchmarks.artifacts.summaries import _pvalue, _value
 from benchmarks.kernel.results.merge import BURST_RESIDUAL_FLAG
 from benchmarks.kernel.results.schema import KernelScenarioResult
+from benchmarks.kernel.schema import MODES
 
 # The arm-name column. Widened from 22 when the MoE scenarios arrived: the
-# longest declared name is `mcore/no_bias_activation_fusion` at 31, and two
-# 28-character names predate them, so every row holding one already pushed
-# the rest of its line right. One constant rather than seven literals, so the
-# next long name moves the column once. `benchmarks/kernel/registry.py` is
-# the authority on the names; a test pins the width against it.
+# longest declared name is `mcore/no_bias_activation_fusion` at 31. One
+# 28-character name, `mcore/no_bias_dropout_fusion`, already overflowed the
+# old width, so rows holding it already pushed the rest of their line right.
+# One constant rather than seven literals, so the next long name moves the
+# column once. `benchmarks/kernel/registry.py` is the authority on the names;
+# a test pins the width against it.
 ARM_FIELD = 31
-from benchmarks.kernel.schema import MODES
 
 
 def _ratio_ci(row: dict | None) -> str:

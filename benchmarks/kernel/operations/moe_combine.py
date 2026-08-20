@@ -428,6 +428,17 @@ def moe_combine_inputs(
         row_token_N=row_token_N,
         row_expert_N=row_expert_N,
         scores_sorted_N=scores_sorted_N,
+        # ONE figure for every arm, and it describes MEGATRON'S traffic:
+        # read the routed rows, write one row per token, which is what an
+        # unpermute moves. Titan's combine additionally scales every routed
+        # row by its probability -- megatron applied that in scenario 11 --
+        # so titan moves at least one more pass over [rows, dim] and its GB/s
+        # figure is low. How low is not measured here: it depends on whether
+        # Inductor fuses the cast, the multiply and the cast back into one
+        # pass or materializes an fp32 copy. Scenario 9 declares a byte count
+        # per engine for exactly this reason and this scenario does not yet.
+        # The two published rows are both within megatron, so the shared
+        # constant cancels in them and no ratio is affected.
         bytes_moved=(rows + tokens) * shape.dim * expert_out_ND.element_size(),
     )
 
