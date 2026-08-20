@@ -2,15 +2,15 @@
 
 Eight unrelated-looking helpers held together by one fact: each has three or
 more of the family modules as consumers, so leaving any of them in a family
-module would make ``rope`` a dependency of ``attention``, or ``swiglu`` of
-``qkv``.
+module would make ``rope`` a dependency of ``attention_core``, or
+``expert_mlp`` of ``qkv_prep``.
 
 * ``_randn`` / ``_randn_like`` / ``WEIGHT_STD`` -- seeded input material. Every
   tensor either builder kind materializes goes through them, drawn in fp32
   from the run's generator and cast down, so the bf16 inputs an arm sees do
   not depend on the dtype the caller happened to ask for.
 * ``_reset_grads`` -- clears leaf and parameter grads between timed calls
-  (swiglu, qkv, attention).
+  (expert_mlp, qkv_prep, attention_core).
 * ``_require_grads`` -- turns a gradient the backward never produced into a
   named failure (ffn_norm, qkv_prep, embedding_stage, attn_residual,
   moe_residual).
@@ -19,7 +19,7 @@ module would make ``rope`` a dependency of ``attention``, or ``swiglu`` of
   races custom ops against materialization costs Inductor deletes, which
   inverted the swiglu verdict outright.
 * ``_assert_kernel_marker`` -- the silent-fallback guard the rope overrides
-  and all three attention arms depend on.
+  and all three titan attention_core arms depend on.
 * ``_navigate`` -- walks a dotted attribute path down a built model
   (attn_out_proj, qkv_prep, lm_head_projection).
 * ``_projection_arm`` -- the timed closures every cross-engine linear shares

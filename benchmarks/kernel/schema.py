@@ -7,7 +7,7 @@ follows from a (shape, workload) pair: what a run may ask for
 workload``, ``routing_divides_evenly``), and the derived tensor shapes both
 systems record (``shape_summary``). ``benchmarks.kernel.registry`` holds the
 scenarios themselves and imports from here; nothing here knows that ``rope``
-or ``attention`` exist as objects.
+or ``attention_core`` exist as objects.
 
 **The split is an import-graph rule, not tidiness.**
 ``benchmarks.kernel.engine`` needs these types and must never import the
@@ -166,7 +166,8 @@ def resolve_shape_and_workload(
     """The geometry and the workload one kernel-bench run measures."""
     shape = shape_by_name(model_size)
     # max_seq_len first: validation rejects seq_len > max_seq_len, and the
-    # attention sweep raises the ceiling precisely in order to run past it.
+    # attention_core sweep raises the ceiling precisely in order to run
+    # past it.
     if max_seq_len is not None:
         shape = replace(shape, max_seq_len=int(max_seq_len))
     workload = KernelWorkload()
@@ -486,15 +487,6 @@ def shape_summary(
             # times a pair rather than one module twice.
             "rows": batch * seq * (shape.n_heads + shape.n_kv_heads),
             "reduction_length": shape.head_dim,
-        }
-    if scenario_name == "attention":
-        return {
-            "q": [batch, seq, shape.n_heads, shape.head_dim],
-            "k": [batch, seq, shape.n_kv_heads, shape.head_dim],
-            "v": [batch, seq, shape.n_kv_heads, shape.head_dim],
-            "positions": [batch, seq],
-            "packed_tokens": batch * seq,
-            "max_seq_len": shape.max_seq_len,
         }
     if scenario_name == "attention_core":
         return {

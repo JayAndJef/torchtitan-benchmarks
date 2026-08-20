@@ -134,7 +134,6 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.titan_model",
     "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron.data",
-    "benchmarks.kernel.operations.attention",
     "benchmarks.kernel.operations.attention_core",
     "benchmarks.kernel.operations.attn_out_proj",
     "benchmarks.kernel.operations.attn_residual",

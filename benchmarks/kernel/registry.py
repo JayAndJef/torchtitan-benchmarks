@@ -412,77 +412,6 @@ LM_HEAD = KernelScenario(
 )
 
 
-ATTENTION_GATE = CorrectnessCheck(
-    kind="tolerance",
-    reference="fp64",
-    outputs=("out", "dq", "dk", "dv"),
-    # Attention is a reduction, so max/ULP metrics report garbage wherever
-    # cancellation drives an output toward zero; rel_l2 is the only safe gate.
-    # Measured headroom: both implementations land at ~2e-3 against fp64.
-    max_rel_l2=2e-2,
-)
-
-
-ATTENTION = KernelScenario(
-    name="attention",
-    description=(
-        "Inner attention at Piper-1B shapes with packed-document causal "
-        "masking: FlexAttention vs FlashAttention-3 varlen vs FlexAttention "
-        "lowered to FlashAttention-4."
-    ),
-    inputs_builder="benchmarks.kernel.operations.attention:attention_inputs",
-    reference_builder="benchmarks.kernel.operations.attention:attention_reference",
-    baseline_arm="baseline",
-    arms=(
-        KernelArm(
-            name="baseline",
-            description=(
-                "TorchTitan FlexAttention: an Inductor-generated Triton "
-                "template driven by a block-diagonal causal BlockMask"
-            ),
-            builder="benchmarks.kernel.operations.attention:build_attention_baseline",
-            modes=("forward", "forward_backward"),
-            compiled=True,
-            correctness=(ATTENTION_GATE,),
-        ),
-        KernelArm(
-            name="flex_flash",
-            description=(
-                "The same FlexAttention module and mask lowered to "
-                "FlashAttention-4 CuTe DSL kernels instead of a Triton "
-                "template (BACKEND=FLASH, 256x128 blocks); requires the fa4 "
-                "dependency group"
-            ),
-            builder="benchmarks.kernel.operations.attention:build_attention_flex_flash",
-            modes=("forward", "forward_backward"),
-            compiled=True,
-            correctness=(ATTENTION_GATE,),
-        ),
-        KernelArm(
-            name="flash_attention_3",
-            description=(
-                "FlashAttention-3 varlen (CUTLASS sm90) over the same packed "
-                "documents, via torch.nn.attention.varlen; requires the "
-                "flash3 dependency group"
-            ),
-            builder="benchmarks.kernel.operations.attention:build_attention_flash3",
-            modes=("forward", "forward_backward"),
-            compiled=True,
-            correctness=(
-                ATTENTION_GATE,
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="baseline",
-                    outputs=("out", "dq", "dk", "dv"),
-                    max_rel_l2=2e-2,
-                    informational=True,
-                ),
-            ),
-        ),
-    ),
-)
-
-
 # The gate both arms face. ``out`` is a gather, so it is not a reduction and an
 # exact metric would be defensible there -- measured on CPU at a tiny shape the
 # titan arm's rel_l2 against fp64 is exactly 0.0, because a gather copies bf16
@@ -4039,7 +3968,6 @@ KERNEL_SCENARIOS = {
         SWIGLU,
         QKV,
         LM_HEAD,
-        ATTENTION,
         EMBEDDING_STAGE,
         QKV_PREP,
         QK_NORM,

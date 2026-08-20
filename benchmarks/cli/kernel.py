@@ -151,7 +151,8 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
     type=int,
     help=(
         "Raise the shape's max_seq_len ceiling (default 2048); needed to "
-        "sweep attention past 2048. Also sizes the RoPE cos/sin tables."
+        "sweep attention_core past 2048. Also sizes the RoPE cos/sin "
+        "tables."
     ),
 )
 @click.option("--seed", default=0, show_default=True, help="Input seed.")

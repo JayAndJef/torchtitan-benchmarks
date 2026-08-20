@@ -69,7 +69,6 @@ KERNEL_ARMS_MODULES = {
     "swiglu": "benchmarks.kernel.operations.swiglu",
     "qkv": "benchmarks.kernel.operations.qkv",
     "lm_head": "benchmarks.kernel.operations.lm_head",
-    "attention": "benchmarks.kernel.operations.attention",
     "embedding_stage": "benchmarks.kernel.operations.embedding_stage",
     "qkv_prep": "benchmarks.kernel.operations.qkv_prep",
     "qk_norm": "benchmarks.kernel.operations.qk_norm",
@@ -143,7 +142,6 @@ KERNEL_INVENTORY = {
         "te_fused_ce",
         "piper_optimized_te_ce",
     ),
-    "attention": ("baseline", "flex_flash", "flash_attention_3"),
     # Cross-engine from here down, in partition order. The arms are named
     # engine/profile, and the anchor is the megatron side throughout -- see
     # KERNEL_BASELINE_ARMS.
@@ -257,7 +255,6 @@ KERNEL_BASELINE_ARMS = {
     "swiglu": "baseline",
     "qkv": "baseline",
     "lm_head": "baseline",
-    "attention": "baseline",
     # The anchor is mcore/base at every cross-engine scenario that publishes a
     # cross-engine row. Several of them hold mcore-only variant arms that can
     # compare against nothing else, so an anchor on the titan side would make
@@ -314,7 +311,6 @@ KERNEL_TO_E2E_SCENARIO = {
     "swiglu": "piper1b_swiglu",
     "qkv": "piper1b_qkv",
     "lm_head": "piper1b_lm_head",
-    "attention": "piper1b_attention",
 }
 # A bandwidth floor has no end-to-end counterpart, so it is excluded from the
 # pairing above. No scenario the map still holds declares one today -- rope
@@ -354,9 +350,10 @@ class StableIdInventoryTests(unittest.TestCase):
     def test_kernel_arm_names_still_match_their_e2e_counterparts(self) -> None:
         """The same implementation carries the same id at both scopes.
 
-        Reports lean on this: piper1b_attention/flex_flash and
-        attention/flex_flash are documented as the same code measured two
-        ways. A rename on one side alone would silently break the pairing.
+        Reports lean on this: piper1b_swiglu/piper_optimized_triton and
+        swiglu/piper_optimized_triton are documented as the same code
+        measured two ways. A rename on one side alone would silently break
+        the pairing.
         """
         for kernel_name, e2e_name in KERNEL_TO_E2E_SCENARIO.items():
             with self.subTest(scenario=kernel_name):
@@ -1108,7 +1105,10 @@ TEST_CENSUS = {
     # +1 with the within-engine-only caption: a scenario that declines a
     # cross-engine row must say in its description that suppressing the row
     # does not suppress the number two derived columns still reproduce.
-    "test_kernels": 50,
+    # -1 with the deletion of the single-engine ``attention`` scenario: its
+    # roster test had no subject left, and attention_core already pins the
+    # re-homed one.
+    "test_kernels": 49,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against
     # a frozen literal (including the cuda-graph branch the parity check
@@ -1156,7 +1156,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 993
+TEST_CENSUS_TOTAL = 992
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

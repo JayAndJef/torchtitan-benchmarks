@@ -141,17 +141,6 @@ class RegistryTests(unittest.TestCase):
                 arms=tuple(replace(arm, modes=()) for arm in scenario.arms),
             )
 
-    def test_attention_arms(self) -> None:
-        scenario = KERNEL_SCENARIOS["attention"]
-        self.assertEqual(
-            [arm.name for arm in scenario.arms],
-            ["baseline", "flex_flash", "flash_attention_3"],
-        )
-        # No isolated backward: see _attention_arm's docstring.
-        for arm in scenario.arms:
-            self.assertEqual(arm.modes, ("forward", "forward_backward"))
-            self.assertTrue(arm.compiled, arm.name)
-
     def test_attention_core_arms(self) -> None:
         scenario = KERNEL_SCENARIOS["attention_core"]
         self.assertEqual(
@@ -415,8 +404,8 @@ class ShapeAndWorkloadTests(unittest.TestCase):
     def test_max_seq_len_override_replaces_the_shape_before_the_check(
         self,
     ) -> None:
-        """Ordering is load-bearing: the attention sweep raises the ceiling
-        precisely so it can then set seq_len above the old one."""
+        """Ordering is load-bearing: the attention_core sweep raises the
+        ceiling precisely so it can then set seq_len above the old one."""
         shape, workload = resolve_shape_and_workload(
             seq_len=4096, max_seq_len=4096
         )
@@ -426,7 +415,8 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         self.assertEqual(shape.name, "normal")
         self.assertEqual(resolve_shape_and_workload()[0].max_seq_len, 2048)
         self.assertEqual(
-            shape_summary("attention", shape, workload)["max_seq_len"], 4096
+            shape_summary("attention_core", shape, workload)["max_seq_len"],
+            4096,
         )
 
     def test_routing_needs_an_even_row_count(self) -> None:
