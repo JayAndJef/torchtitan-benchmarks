@@ -153,10 +153,6 @@ TITAN_TE_ARM = "titan/te"
 FALLBACK_MARKERS = {
     TITAN_HELION_ARM: HELION_MARKER,
     TITAN_TE_ARM: TE_MARKER,
-    # The two retired spellings, kept in step with the retired builders at
-    # the foot of this module. See the note there.
-    "helion": HELION_MARKER,
-    "te": TE_MARKER,
 }
 
 # The names every arm and the fp64 reference return, in titan's BLNH layout.
@@ -783,73 +779,3 @@ def build_rope_mcore_no_rope_fusion(
         workload,
         inputs,
     )
-
-
-# ---------------------------------------------------------------------------
-# The retired roster: alive only until the registry merge
-#
-# ``benchmarks/kernel/registry.py`` still declares the four-arm single-engine
-# ``rope`` scenario, and its builder paths are resolved by
-# ``tests/test_migration_contract.py``. The scenario declaration that replaces
-# it is serialized through the parent that merges this work
-# (``reports/20260819-partc/decl/rope.decl.py``), so these four builders stay
-# until that paste lands and are deleted by it, together with their two
-# entries in ``FALLBACK_MARKERS``.
-#
-# They run against the new inputs, which is the one behavioural change: the
-# retired arms now see packed-document positions instead of ``arange``. That
-# is strictly closer to what a training step feeds them, and every gate still
-# holds, because ``rope_reference`` indexes the same positions.
-# ---------------------------------------------------------------------------
-
-
-def build_rope_copy_floor(
-    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
-) -> BuiltArm:
-    """The retired bandwidth floor. Plan section C.4 deletes it: a floor is
-    not an implementation and answers no cross-engine question."""
-    q_out = torch.empty_like(inputs.q_BLNH)
-    k_out = torch.empty_like(inputs.k_BLNH)
-
-    def forward() -> None:
-        q_out.copy_(inputs.q_BLNH)
-        k_out.copy_(inputs.k_BLNH)
-
-    return BuiltArm(
-        name="copy_floor",
-        calls={"forward": forward},
-        correctness_outputs=dict,
-        bytes_moved=inputs.qk_bytes,
-    )
-
-
-def build_rope_baseline(
-    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
-) -> BuiltArm:
-    """The retired spelling of ``titan``."""
-    from torchtitan.models.common.rope import CosSinRoPE
-
-    module = _compile_module(_titan_module(shape, inputs, CosSinRoPE))
-    return _titan_arm("baseline", module, inputs)
-
-
-def build_rope_helion(
-    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
-) -> BuiltArm:
-    """The retired spelling of ``titan/helion``."""
-    from torchtitan.overrides.helion_rope import HelionCosSinRoPE
-
-    module = _compile_module(_titan_module(shape, inputs, HelionCosSinRoPE))
-    return _titan_arm("helion", module, inputs, marker=HELION_MARKER)
-
-
-def build_rope_te(
-    shape: PiperShape, workload: KernelWorkload, inputs: RopeInputs
-) -> BuiltArm:
-    """The retired spelling of ``titan/te``."""
-    from benchmarks.models.piper_qwen3.components.rope.te_rope_override import (
-        TECosSinRoPE,
-    )
-
-    module = _compile_module(_titan_module(shape, inputs, TECosSinRoPE))
-    return _titan_arm("te", module, inputs, marker=TE_MARKER)
