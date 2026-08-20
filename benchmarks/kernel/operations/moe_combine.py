@@ -231,7 +231,12 @@ from benchmarks.kernel.operations.common import (
     initialize_megatron_single_rank,
 )
 from benchmarks.kernel.schema import KernelWorkload
-from benchmarks.models.piper_qwen3.mcore_profiles import BASE, McoreProfile, derive
+from benchmarks.models.piper_qwen3.mcore_profiles import (
+    BASE,
+    DISPATCHER_ALLTOALL,
+    McoreProfile,
+    NO_PERMUTE_FUSION,
+)
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
@@ -269,39 +274,6 @@ TITAN_COMM_BACKEND = "standard"
 COMBINE_GUARD_REL_L2 = 2e-2
 
 
-# The two megatron variants this scenario declares, as deltas rather than two
-# more copies of 28 flags. Declared here rather than in ``MCORE_PROFILES``
-# because they are this scenario's roster, which is the same reason
-# ``cross_entropy`` and ``moe_residual`` declare their variants locally.
-#
-# **Scenario 10 (``dispatch_permute``) needs both of these unchanged**, because
-# ``moe_permute_fusion`` and ``moe_token_dispatcher_type`` gate the dispatch
-# phases and the combine phases off one field each. Two local copies of one
-# delta is a duplication a merge should collapse into ``mcore_profiles.py``;
-# it is recorded here so the merge can see it rather than inherit it.
-NO_PERMUTE_FUSION: McoreProfile = derive(
-    BASE,
-    name="no_permute_fusion",
-    description=(
-        "megatron with the MoE permutation fusion off: unpermute runs the "
-        "torch path -- a zeroed output tensor and a scatter_add with an "
-        "expanded index -- instead of TransformerEngine's fused_unpermute"
-    ),
-    config_overrides={"moe_permute_fusion": False},
-)
-
-DISPATCHER_ALLTOALL: McoreProfile = derive(
-    BASE,
-    name="dispatcher_alltoall",
-    description=(
-        "megatron with the alltoall token dispatcher instead of allgather. "
-        "The collective is inert at world_size=1; the class is not -- it "
-        "unsorts chunks in combine_preprocess and unpermutes in "
-        "combine_postprocess, where allgather unpermutes in "
-        "combine_preprocess and does nothing else"
-    ),
-    config_overrides={"moe_token_dispatcher_type": "alltoall"},
-)
 
 
 @dataclass

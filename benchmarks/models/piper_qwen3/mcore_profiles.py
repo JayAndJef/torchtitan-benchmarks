@@ -257,6 +257,48 @@ NO_BIAS_DROPOUT_FUSION: McoreProfile = derive(
 )
 
 
+# The two deltas the dispatch_permute and moe_combine scenarios share, held
+# here for the reason above. ``moe_permute_fusion`` is one field that megatron
+# reads on both halves of the MoE round trip -- ``permute``
+# (``token_dispatcher.py:324``), which dispatch_permute cuts, and
+# ``unpermute`` (``:348``), which moe_combine cuts. The dispatcher class
+# decides both halves too. Two local copies of one delta can drift, and a
+# drifted delta publishes one configuration under another's label.
+#
+# Each description states what BOTH scenarios see, because one object cannot
+# have two captions. Neither joins ``MCORE_PROFILES``, for the reason the
+# previous block gives.
+NO_PERMUTE_FUSION: McoreProfile = derive(
+    BASE,
+    name="no_permute_fusion",
+    description=(
+        "megatron with the TransformerEngine permutation fusion off. permute "
+        "falls from TE's fused kernel to the torch path -- a transpose plus "
+        "contiguous, a stable descending argsort, a slice, a modulo and an "
+        "index_select -- and unpermute falls from fused_unpermute to a zeroed "
+        "output tensor plus a scatter_add with an expanded index. Same "
+        "permutation either way, different implementation"
+    ),
+    config_overrides={"moe_permute_fusion": False},
+)
+
+DISPATCHER_ALLTOALL: McoreProfile = derive(
+    BASE,
+    name="dispatcher_alltoall",
+    description=(
+        "megatron with the alltoall token dispatcher instead of the allgather "
+        "one. THE COLLECTIVE IS INERT AT world_size=1 AND THE CLASS IS NOT: "
+        "_AllToAll returns its input unchanged, so the collective itself is "
+        "inert and the arm measures the dispatcher's local permute, unpermute "
+        "and sync strategy, never communication. The two classes place the "
+        "work differently -- alltoall unsorts chunks in combine_preprocess "
+        "and unpermutes in combine_postprocess, where allgather unpermutes in "
+        "combine_preprocess and does nothing else"
+    ),
+    config_overrides={"moe_token_dispatcher_type": "alltoall"},
+)
+
+
 MCORE_PROFILES: dict[str, McoreProfile] = {
     profile.name: profile for profile in (BASE,)
 }
