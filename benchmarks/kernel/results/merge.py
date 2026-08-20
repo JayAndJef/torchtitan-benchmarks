@@ -116,9 +116,10 @@ KERNEL_MEASUREMENT_METHODOLOGY = {
 def _isolation(replicates_per_process: int) -> dict[str, Any]:
     """How the run mapped replicates onto processes, said in the file.
 
-    Two arms never share a timing process, at any value: that is the split
-    the cuDNN soname collision makes non-negotiable. What the value changes
-    is whether an arm's replicates are independent processes, which is what
+    Two arms never share a timing process, at any value: that split is what
+    keeps one arm's dependencies out of another's interpreter. What the value
+    changes is whether an arm's replicates are independent processes, which is
+    what
     the per-replicate log-ratio treats them as. A reader who does not know
     the value cannot tell a CI narrowed by evidence from one narrowed by
     removing a source of variation, so the file says it rather than leaving

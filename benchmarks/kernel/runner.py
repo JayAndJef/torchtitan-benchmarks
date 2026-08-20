@@ -11,10 +11,10 @@ all outcomes.
 worker followed by ``blocks x arms`` timing workers, each building a single
 arm. A block is ``replicates_per_process`` consecutive replicates, so at the
 default of 1 there are ``replicates x arms`` of them. That is what keeps one
-arm's dependencies out of another arm's
-interpreter -- FA3 and TransformerEngine cannot share a process at all (a
-cuDNN soname collision, see CLAUDE.md) -- and it is why the parent, not a
-worker, writes ``results.json``: only the parent sees every fragment.
+arm's dependencies out of another arm's interpreter -- a build failure, a
+leaked CUDA context or a JIT-built CUDA extension in one arm cannot reach
+another -- and it is why the parent, not a worker, writes ``results.json``:
+only the parent sees every fragment.
 
 **The sweep is block-major.** A block is ``replicates_per_process``
 consecutive replicates of one arm; the outer loop walks the blocks and the

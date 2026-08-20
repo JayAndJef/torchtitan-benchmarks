@@ -6,8 +6,8 @@ follows from a (shape, workload) pair: what a run may ask for
 (``resolve_shape_and_workload``), what it may not (``validate_shape_and_
 workload``, ``routing_divides_evenly``), and the derived tensor shapes both
 systems record (``shape_summary``). ``benchmarks.kernel.registry`` holds the
-five scenarios themselves and imports from here; nothing here knows that
-``rope`` or ``attention`` exist as objects.
+scenarios themselves and imports from here; nothing here knows that ``rope``
+or ``attention`` exist as objects.
 
 **The split is an import-graph rule, not tidiness.**
 ``benchmarks.kernel.engine`` needs these types and must never import the

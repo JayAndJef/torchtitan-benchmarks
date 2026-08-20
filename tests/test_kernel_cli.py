@@ -569,9 +569,9 @@ class KernelRunnerTests(unittest.TestCase):
         every replicate back.
 
         The two properties that must survive the batch: no worker names two
-        arms -- the isolation the cuDNN soname collision makes
-        non-negotiable -- and the outer loop is still the block, so every arm
-        is measured once before any arm is measured again.
+        arms -- the isolation that keeps one arm's dependencies out of
+        another's interpreter -- and the outer loop is still the block, so
+        every arm is measured once before any arm is measured again.
         """
         captured = []
 

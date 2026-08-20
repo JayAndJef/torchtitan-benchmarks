@@ -16,10 +16,9 @@ Two modes, matching the two passes:
   fragment per replicate under ``--fragments-dir``.
 
 The timing mode is why this file exists in this shape. **One arm per process**
-is what keeps an arm's dependencies out of every other arm's interpreter: FA3
-and TransformerEngine cannot share a process at all (a cuDNN soname
-collision, see CLAUDE.md), and a build failure or a leaked CUDA context in
-one arm cannot reach another. ``--replicate-count`` moves replicates into
+is what keeps an arm's dependencies out of every other arm's interpreter: a
+build failure, a leaked CUDA context or a JIT-built CUDA extension in one arm
+cannot reach another. ``--replicate-count`` moves replicates into
 that process and never a second arm, so the isolation the split exists for is
 untouched by it. What it does cost is stated where the parent chooses the
 value: ``benchmarks.kernel.runner``.

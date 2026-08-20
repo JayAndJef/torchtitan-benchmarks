@@ -2,7 +2,7 @@
 
 One dataclass, deliberately alone. ``BuiltArm`` is what every builder under
 ``benchmarks.kernel.operations`` returns and what every consumer in
-``benchmarks.kernel.engine`` accepts -- the five family modules construct it,
+``benchmarks.kernel.engine`` accepts -- every family module constructs it,
 ``measurement`` times its closures, ``correctness`` calls its validity hook,
 and ``run`` assembles the result from both. Eight modules across two packages
 touch it and nothing else about either.

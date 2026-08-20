@@ -554,18 +554,21 @@ class ClassificationCompletenessTest(unittest.TestCase):
 # The reason to care is not tidiness. Per-arm process isolation -- running
 # each arm in its own interpreter so a build failure or a CUDA context leak in
 # one cannot affect another -- requires that the supervising engine be
-# importable without any arm's dependencies. Today FA3 and TransformerEngine
-# cannot share a process at all (a cuDNN soname collision, see CLAUDE.md), so
-# this is a live constraint rather than a hypothetical one.
+# importable without any arm's dependencies. That is a live constraint on its
+# own: an arm may need a C++20 compiler the host has not configured, and the
+# supervisor must import without paying for it. It does NOT rest on FA3 and
+# TransformerEngine being unable to share a process -- that claim was measured
+# and refuted on 2026-08-20 (reports/20260820-te-fa3-coexist.md, and see
+# CLAUDE.md).
 ENGINE_DIRECTORY = "benchmarks/kernel/engine/"
 ENGINE_FORBIDDEN_IMPORTS = (
     "benchmarks.kernel.operations",
     "benchmarks.kernel.registry",
 )
 
-# The declaration side of the same edge: neither the types nor the five
-# scenarios may reach the builders they name, which is what makes the builder
-# paths strings in the first place.
+# The declaration side of the same edge: neither the types nor the scenarios
+# may reach the builders they name, which is what makes the builder paths
+# strings in the first place.
 DECLARATION_MODULES = ("benchmarks.kernel.schema", "benchmarks.kernel.registry")
 
 # The third edge of the same constraint, one level down. The two above keep
@@ -575,12 +578,11 @@ DECLARATION_MODULES = ("benchmarks.kernel.schema", "benchmarks.kernel.registry")
 # builds. Every family module imports torch, which is unavoidable and shared,
 # but an implementation import at module scope is paid by every arm in the
 # family -- so the whole family's dependencies land in every one of its
-# processes. That is not a tidiness argument: FA3 and TransformerEngine cannot
-# share a process (a cuDNN soname collision, see CLAUDE.md), and importing
-# ``te_rope_override`` JIT-builds a CUDA extension needing a C++20 compiler
-# the run may not have configured. ``attention.py`` has always followed this
-# rule, for the FA3 half of exactly that reason; the rest of the package
-# follows it now.
+# processes. That is not a tidiness argument: importing ``te_rope_override``
+# JIT-builds a CUDA extension needing a C++20 compiler the run may not have
+# configured, and every deferred import is one an unrelated arm stops paying
+# for. ``attention.py`` has always followed this rule; the rest of the
+# package follows it now.
 #
 # The rule is per *scope*, not per module: these names are welcome inside a
 # builder body, and ``all_imports`` is deliberately not used here.
