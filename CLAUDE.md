@@ -729,10 +729,17 @@ the same treatment; only `flash_attention_3` is wrapped explicitly. All three
 arms are therefore compiled, just by different mechanisms, and
 `KernelArm.compiled` records it.
 
-**There is no TE arm in either attention scenario.** Two independent blockers,
-both verified: TE and the FA3 varlen path cannot share a process (the cuDNN
-soname collision above), which rules TE out of the single-process h2h; and
-TE wraps `DotProductAttention.forward` in `torch.compiler.disable`
+**There is no TE arm in either attention scenario, and one of the two reasons
+given for that has been refuted.** The file used to claim TE and the FA3
+varlen path cannot share a process, citing a cuDNN soname collision. That was
+measured on 2026-08-20 and **it does not hold**: both libraries import and run
+real attention kernels in one process, in both import orders, dense and THD
+varlen alike, under the conditions `run_bench.sh` creates. Evidence:
+`reports/20260820-te-fa3-coexist.md`. So process sharing blocks nothing, and
+a kernel-bench TE attention arm is not ruled out by it.
+
+The other blocker stands, and it is an e2e blocker only: TE wraps
+`DotProductAttention.forward` in `torch.compiler.disable`
 (`transformer_engine/pytorch/jit.py`), which the fork's
 `fullgraph=True` per-block compile (`distributed/compile.py:58`) refuses,
 ruling it out of e2e. The second is not absolute -- with graph breaks allowed
@@ -910,10 +917,13 @@ own family module.
   arm. **`run_correctness_pass` is the exception, and it is a live
   constraint**: it builds *every* arm of the scenario in one interpreter,
   because ten of the sixteen arms name another arm as their correctness
-  reference and a check needs both sides at once. So the first scenario
-  holding both a TransformerEngine arm and an FA3 arm -- which cannot share a
-  process at all -- dies in the correctness worker, and splitting the checks
-  per arm is the work that unblocks it.
+  reference and a check needs both sides at once. It builds one arm at a
+  time and drops it before the next, so the pass is bounded by the largest
+  single arm rather than by their sum. The scenario that was expected to
+  force a per-arm split -- one holding both a TransformerEngine arm and an
+  FA3 arm -- does not: the two were measured to coexist in one process
+  (`reports/20260820-te-fa3-coexist.md`). The split may still be wanted, but
+  nothing is waiting on it.
   `benchmarks/kernel/engine/run.py`'s `run_kernel_scenario` composes the same
   two passes in a single process for the GPU smoke test; the runner never
   calls it.

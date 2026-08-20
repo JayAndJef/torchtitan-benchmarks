@@ -325,11 +325,12 @@ def run_correctness_pass(
     of its three arms fits alone: three bf16 expert copies of about 11.8 GiB,
     plus a weight gradient of the same size per arm.
 
-    This does not remove the reason a *pair* of arms may still need separate
-    processes. TransformerEngine and the FA3 varlen path cannot share an
-    interpreter at all -- a cuDNN soname collision -- and freeing memory does
-    not make an import succeed. That split lands with the first scenario that
-    declares such a pair.
+    The pair that was expected to force separate processes does not.
+    TransformerEngine and the FA3 varlen path were measured to import and run
+    together in one interpreter, in both orders
+    (``reports/20260820-te-fa3-coexist.md``, 2026-08-20). A per-arm process
+    split may still be wanted for other reasons; no declared scenario needs
+    one.
     """
     inputs = _prepare(scenario, shape, workload, options)
     with phase("reference_build", _sync):

@@ -9,11 +9,14 @@ Megatron, FlashAttention or Helion there.
 The reason is per-arm process isolation. Each arm is built in its own
 interpreter, so a process must pay only for the one arm it builds. A
 module-scope import defeats that: it drags every arm's dependencies into
-every arm's process, and the collisions are real rather than hypothetical.
-FA3 and TransformerEngine cannot share a process at all -- a cuDNN soname
-collision, recorded in CLAUDE.md -- and importing ``te_rope_override``
-JIT-builds a CUDA extension that needs a C++20 compiler the run may not have
-configured.
+every arm's process. The cost is the reason, and it is enough on its own --
+importing ``te_rope_override`` JIT-builds a CUDA extension that needs a C++20
+compiler the run may not have configured, and megatron and torchtitan each
+pull a large tree an unrelated arm should never pay for.
+
+This file used to cite FA3 and TransformerEngine as a hard collision. That
+claim was measured on 2026-08-20 and refuted
+(``reports/20260820-te-fa3-coexist.md``); the rule stands on cost alone.
 
 ``tests/test_import_boundaries.py`` section 3 pins the rule.
 """
