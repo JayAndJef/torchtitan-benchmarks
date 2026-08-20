@@ -1586,10 +1586,14 @@ The kernel scenarios additionally depend on:
 - `HelionCosSinRoPE` from `torchtitan.overrides.helion_rope` and the op
   `torchtitan::helion_cossin_rope_bwd`, plus the marker kernel name
   `_helion__rope_cos_sin_fwd` the fallback guard greps for
-- `FusedGroupedExperts`, `silu_and_mul_forward_kernel`,
-  `silu_and_mul_backward_kernel` from `torchtitan.overrides.fused_swiglu` --
-  no longer benchmarked; only `tests/test_swiglu.py` imports them as the
-  bitwise ground truth for the combined-layout kernels
+- `FusedGroupedExperts`, `silu_and_mul_op`, `silu_and_mul_forward_kernel`,
+  `silu_and_mul_backward_kernel` from `torchtitan.overrides.fused_swiglu`.
+  `FusedGroupedExperts` is the `expert_mlp/titan/fused_grouped_experts` arm
+  (`benchmarks/kernel/operations/expert_mlp.py`), which exists so both Piper
+  arms are published against the w13 fusion TorchTitan already ships rather
+  than against unfused experts. It calls `silu_and_mul_op`, which calls the
+  two kernels. `tests/test_swiglu.py` also imports them as the bitwise
+  ground truth for the combined-layout kernels
 - `QKVLinear` / `FusedQKVLinear` / `Linear` from `torchtitan.models.common`,
   and the fused module's state-dict merge hook (arms rely on
   `fused.load_state_dict(unfused.state_dict())` producing bit-identical
