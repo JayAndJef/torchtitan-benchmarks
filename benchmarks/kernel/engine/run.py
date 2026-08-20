@@ -328,9 +328,23 @@ def run_correctness_pass(
     The pair that was expected to force separate processes does not.
     TransformerEngine and the FA3 varlen path were measured to import and run
     together in one interpreter, in both orders
-    (``reports/20260820-te-fa3-coexist.md``, 2026-08-20). A per-arm process
-    split may still be wanted for other reasons; no declared scenario needs
-    one.
+    (``reports/20260820-te-fa3-coexist.md``, 2026-08-20).
+
+    **That claim stands, and the sentence that used to follow it does not.**
+    It said no declared scenario needs a per-arm split. ``attention_core``
+    does, on any host that has cuDNN in ``/usr/lib64``, and its first run
+    found this on 2026-08-20
+    (``reports/20260820-attention_core-firstrun.md``). TransformerEngine
+    binds the system cuDNN, torch then refuses to report a cuDNN version,
+    and ``torch.nn.attention.varlen`` asks for one on every call -- so the
+    titan FA3 arm cannot build after a megatron arm in the same interpreter.
+    The kernels never conflict; the version bookkeeping does, which is why
+    the coexistence measurement did not see it.
+
+    A per-arm split would remove the need for the environment workaround
+    that scenario's module documents, because TE and the varlen path would
+    then never share an interpreter. Fixing the environment removes it too.
+    Neither is done here; the choice is recorded rather than made.
     """
     inputs = _prepare(scenario, shape, workload, options)
     with phase("reference_build", _sync):
