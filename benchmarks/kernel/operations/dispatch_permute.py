@@ -110,15 +110,12 @@ achievable and the only metric that sees the failure. The gradients are
 accumulations of ``top_k`` bf16 values and round, so they are gated with
 ``max_rel_l2`` -- and that gate is **not** the permutation gate.
 
-**The scenario itself is not in the registry yet.** This module ships ahead
-of its declaration: the ``KernelScenario``, the ``KernelArm`` roster and the
-``CorrectnessCheck`` literals described above live in
-``reports/20260819-partc/decl/dispatch_permute.decl.py`` until a merge agent
-pastes them into ``benchmarks/kernel/registry.py``. So every statement here
-about what "the scenario declares" describes that fragment, not a name any
-import can resolve today, and none of the engine's declaration gates --
-the mode check at ``engine/run.py``, the ``eager_reason`` rule in
-``schema.py`` -- runs against this module until the paste lands.
+**The scenario is declared.** ``KERNEL_SCENARIOS["dispatch_permute"]``
+holds it (``benchmarks/kernel/registry.py:2005``) with the five arms
+described above, so every statement here about what "the scenario declares"
+is checkable by import, and the engine's declaration gates -- the mode check
+in ``engine/run.py``, the ``eager_reason`` rule in ``schema.py`` -- run
+against this module like any other.
 
 **Both engines permute into the same order, and that is what makes the
 cross-engine bitwise gate legitimate.** TorchTitan sorts the flattened
