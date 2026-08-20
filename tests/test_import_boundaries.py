@@ -136,6 +136,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.e2e.megatron.data",
     "benchmarks.kernel.operations.attention",
     "benchmarks.kernel.operations.attn_out_proj",
+    "benchmarks.kernel.operations.attn_residual",
     "benchmarks.kernel.operations.common",
     "benchmarks.kernel.operations.cross_entropy",
     "benchmarks.kernel.operations.embedding_stage",
