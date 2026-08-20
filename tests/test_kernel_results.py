@@ -14,7 +14,11 @@ from benchmarks.kernel.results.merge import (
     BURST_RESIDUAL_FLAG,
     _burst_residual,
 )
-from benchmarks.kernel.results.reporting import render_kernel_results
+from benchmarks.kernel.registry import KERNEL_SCENARIOS
+from benchmarks.kernel.results.reporting import (
+    ARM_FIELD,
+    render_kernel_results,
+)
 from benchmarks.kernel.results.schema import (
     ArmResult,
     CorrectnessResult,
@@ -538,6 +542,22 @@ class ScenarioDescriptionReportingTests(unittest.TestCase):
         body = [line for line in rendered.splitlines() if line.startswith("word")]
         self.assertGreater(len(body), 1)
         self.assertTrue(all(len(line) <= 78 for line in body), body)
+
+
+class ArmColumnWidthTests(unittest.TestCase):
+    def test_the_arm_column_fits_every_declared_arm_name(self) -> None:
+        """A name wider than the field pushes the rest of its row right.
+
+        The table is read by eye, so a misaligned row is read as a different
+        column. The field was 22 while two declared names were already 28,
+        and the MoE scenarios brought a 31.
+        """
+        longest = max(
+            (arm.name for scenario in KERNEL_SCENARIOS.values()
+             for arm in scenario.arms),
+            key=len,
+        )
+        self.assertGreaterEqual(ARM_FIELD, len(longest), longest)
 
 
 if __name__ == "__main__":
