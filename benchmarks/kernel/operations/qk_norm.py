@@ -92,12 +92,18 @@ engines read the same numbers in the same order, and TE flattens the leading
 dimensions after the copy, so the reduction is identical. The correctness
 gates are unchanged.
 
-**One cost is a harness artifact and is named rather than hidden.** Each arm
-holds three independent leaf sets, and a megatron set now carries a whole
-fused buffer (16 MiB at the default workload) plus the query copy (8 MiB)
-where it used to carry a q/k pair (12 MiB). The ``mcore/base`` arm's
-``peak_memory_gib`` therefore sits about 36 MiB above where it sat, for a
-reason that belongs to the three leaf sets and not to megatron.
+**Two memory costs are harness artifacts, and both are named rather than
+hidden.** At the default workload the inputs grow by 12 MiB for **every** arm
+in the scenario: the fused buffer is 16 MiB and the contiguous ``k_SBNH`` it
+replaces was 4 MiB. On top of that, ``mcore/base`` holds three independent
+leaf sets, and a megatron set now carries a whole fused buffer (16 MiB) plus
+the query copy (8 MiB) where it used to carry a q/k pair (12 MiB) -- 36 MiB
+more. So ``peak_memory_gib`` rises about 12 MiB on ``titan`` and
+``copy_floor`` and about 48 MiB on ``mcore/base``, and the difference between
+the two belongs to the three leaf sets rather than to megatron. Sharing one
+buffer across the three sets would remove it and was declined: three
+independent sets is what keeps one mode's gradient out of another mode's
+leaf, and ``attention_core`` clones per set for the same reason.
 
 **Compile treatment differs by engine, and the declaration records it.** The
 titan arm runs under ``torch.compile(fullgraph=True)``, because that is what
