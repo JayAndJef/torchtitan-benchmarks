@@ -870,17 +870,49 @@ TEST_CENSUS = {
     # the fp64 reference, both arm builders and the guards that refuse a norm
     # the spec resolved to something other than a real one.
     "test_kernel_qk_norm": 17,
+    # Scenario 4, the cross-engine rope roster that replaced the
+    # single-engine one in place: 35 covering the packed-document inputs in
+    # both engine-native forms, the fp64 reference, all five arm builders and
+    # the two guards the roster needs -- the marker guard that refuses a titan
+    # override which fell back to the stock path, and the branch check that
+    # refuses mcore/no_rope_fusion at batch 1, where megatron rotates by
+    # global document offsets and computes a different rotation.
+    "test_kernel_rope": 35,
     # Scenario 6, the first cross-engine GEMM: 21 covering the shared inputs
     # and their two native layouts, the fp64 reference, both arm builders, and
     # the guards that refuse an mcore module of the wrong class, the wrong
     # shape or more than one rank -- the last being what would make the arm
     # inert rather than wrong.
     "test_kernel_attn_out_proj": 21,
+    # Scenario 7, the first within-engine-only scenario, and the guard-heavy
+    # module at 51: 7 pin the profile delta at exactly one field and the arm
+    # roster, 8 the shared inputs and the fp64 reference, 6 the bandwidth
+    # floor, 7 the shared closures, and 23 the three build guards -- one of
+    # which pins what the exact-add guard CANNOT see, because addition
+    # commutes bit for bit and an operand swap therefore passes it. The guards
+    # carry the weight because the scenario declines its cross-engine row on
+    # the strength of one claim -- both engines compute residual + attn_out --
+    # and because an unfused arm that resolved to the compiled callable would
+    # publish two labels for one implementation, which no correctness gate can
+    # see. The floor tests carry the other weight: the published row is a
+    # dispatch comparison, and without the floor nothing separates it from a
+    # kernel result.
+    "test_kernel_attn_residual": 51,
     # Scenario 8: 18 covering the shared inputs, the fp64 reference, the
     # floor's traffic, both arm closures, and the two refusals that keep the
     # arm honest -- an epsilon the two engines do not share, and a module
     # whose forward returns the residual tuple the fused variant produces.
     "test_kernel_ffn_norm": 18,
+    # Scenario 13: 26 covering the shared inputs, the fp64 reference, the
+    # profile delta, the bandwidth floor and the closures the three
+    # implementation arms share -- plus ten that pin the megatron and
+    # torchtitan source lines the scenario's "both engines compute one add"
+    # claim rests on. They are read as text rather than imported, because
+    # ``megatron.core`` pulls in TransformerEngine and costs the suite about
+    # nine seconds. One of the ten pins which transformer-layer class this
+    # build instantiates, which is what decides whether the reflatten
+    # ordering the module states applies at all.
+    "test_kernel_moe_residual": 36,
     # Scenario 14: 22 covering the shared inputs, the fp64 reference, the
     # floor's traffic and both arm closures -- plus the titan extraction,
     # which is one config read here because the norm is a model-level module
@@ -910,6 +942,16 @@ TEST_CENSUS = {
     # so no timed sample runs on the declared logits, and that megatron as
     # NVIDIA ships it is mcore/no_ce_fusion rather than mcore/ce_native.
     "test_kernel_cross_entropy": 33,
+    # Scenario 15: 33 covering the shared inputs, the fp64 reference, both
+    # arm builders and the two layouts. A block of them pins the two claims
+    # that invert an obvious reading of the row -- that the megatron arm is
+    # ColumnParallelLinear and not TransformerEngine, which the guard proves
+    # by refusing a stand-in named for the TE class, and that the titan arm
+    # is eager because apply_compile cannot reach a sibling of layers. Two
+    # more pin the one wrong module no correctness gate can see: an uncast
+    # fp32 weight passes the 2e-2 rel_l2 gate, because the bf16 quantization
+    # of the activation dominates the metric.
+    "test_kernel_lm_head_projection": 33,
     # +3 with the isolation report: that the honest state reaches the reader,
     # that a batched run is marked above the table, and that a renamed
     # interval still prints, with a mark that says it is a lower bound.
@@ -966,7 +1008,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 483
+TEST_CENSUS_TOTAL = 638
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
