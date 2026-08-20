@@ -99,11 +99,14 @@ reads ``sp_size = 1`` at ``world_size=1``, so ``seq_pad`` and
 launches no kernel.
 
 **A permute is a gather, so the permutation gate is bitwise and the
-gradient gate is not.** A norm-based metric cannot see a permutation that
-moves the right values to the wrong places. With ``N`` output rows, swapping
-one pair of them gives ``||a - b|| / ||b|| ~ sqrt(2 / N)``, which is 1.6e-2 at
-the default workload -- **below** the 2e-2 gate every neighbouring scenario
-uses. A single misplaced row would therefore pass a tolerance gate. Both
+gradient gate is not.** A norm-based metric sees a permutation only when the
+workload is small enough. With ``N`` output rows, swapping one pair of them
+gives ``||a - b|| / ||b|| ~ 2 / sqrt(N)``. That is 2.2e-2 at the default
+workload (``N = 8192``), just **above** the 2e-2 gate every neighbouring
+scenario uses -- but it **falls as the workload grows**, and reaches 1.6e-2 at
+batch 8. So a tolerance gate catches a misplaced row at one batch size and
+misses it at the next, while the flags that set batch and sequence length are
+the operator's to change. A bitwise gate does not depend on the workload. Both
 engines produce the permuted tokens by a pure copy (``index_select`` on the
 torch path, a TE kernel on the fused one), so bitwise equality is both
 achievable and the only metric that sees the failure. The gradients are

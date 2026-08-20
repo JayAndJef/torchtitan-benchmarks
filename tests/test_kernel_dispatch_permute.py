@@ -34,6 +34,7 @@ mcore build, so a wiring error raises there rather than reaching a number.
 """
 
 import functools
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -409,26 +410,44 @@ class PermutationOrderTests(unittest.TestCase):
         ]
         self.assertTrue(torch.equal(local_probs, expected))
 
-    def test_a_norm_gate_cannot_see_one_misplaced_row(self) -> None:
+    def test_a_norm_gate_sees_one_misplaced_row_only_at_a_small_workload(
+        self,
+    ) -> None:
         """The arithmetic that makes the permutation gate bitwise.
 
-        Swapping one pair of rows in the permuted buffer changes the relative
-        L2 error by about ``sqrt(2 / N)``. At the **default** workload -- batch
-        4, sequence 1024, top_k 2, so N = 8192 -- that is about 1.6e-2, below
-        the 2e-2 gate every neighbouring cross-engine scenario uses. The test
-        runs the real numbers rather than asserting the formula.
+        Swapping one pair of rows changes the relative L2 error by about
+        ``2 / sqrt(N)``, not ``sqrt(2 / N)``. At the default workload
+        (batch 4, sequence 1024, top_k 2, so ``N = 8192``) that is 2.2e-2,
+        just **above** the 2e-2 gate. Doubling the batch halves ``sqrt(N)``'s
+        growth rate against the gate and drops it to 1.6e-2, **below** it.
+
+        So a tolerance gate catches a misplaced row at one batch size and
+        misses it at the next. That workload dependence is the argument for
+        the bitwise gate, and it is what this test pins. The row width is the
+        model dim, not a narrow stand-in: a narrow row does not shrink the
+        ratio, it widens its spread, and at width 8 this measurement lands
+        below the gate for about half of all seeds. At the model dim both
+        assertions below hold for every one of 60 seeds measured: batch 4
+        spans 0.0211 to 0.0232, and batch 8 spans 0.0150 to 0.0164.
         """
         shape = PIPER_SHAPES["normal"]
-        slots = 4 * 1024 * shape.top_k
         generator = torch.Generator(device="cpu")
         generator.manual_seed(0)
-        # One column is enough: the ratio is over rows, and a narrower row only
-        # makes each row's contribution smaller in absolute terms.
-        truth = torch.randn((slots, 8), generator=generator)
-        swapped = truth.clone()
-        swapped[[0, 1]] = swapped[[1, 0]]
-        self.assertLess(_rel_l2(swapped, truth), 2e-2)
-        self.assertFalse(torch.equal(swapped, truth))
+        measured = {}
+        for batch in (4, 8):
+            slots = batch * 1024 * shape.top_k
+            truth = torch.randn((slots, shape.dim), generator=generator)
+            swapped = truth.clone()
+            swapped[[0, 1]] = swapped[[1, 0]]
+            measured[batch] = _rel_l2(swapped, truth)
+            self.assertFalse(torch.equal(swapped, truth))
+            # The closed form the docstring states. One swapped pair is a
+            # single draw, not an average, so it deviates by a few percent;
+            # 10% covers the worst of 60 seeds measured at this width.
+            closed_form = 2 / math.sqrt(slots)
+            self.assertLess(abs(measured[batch] - closed_form) / closed_form, 0.10)
+        self.assertGreater(measured[4], 2e-2)
+        self.assertLess(measured[8], 2e-2)
 
 
 class ReferenceTests(unittest.TestCase):

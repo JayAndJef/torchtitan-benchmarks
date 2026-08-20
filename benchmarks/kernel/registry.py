@@ -1939,12 +1939,13 @@ MOE_ROUTER = KernelScenario(
 # permuted buffers by a pure copy -- an index_select on the torch path, a TE
 # kernel on the fused one -- and bitwise equality is achievable rather than
 # strict. It is also the only metric that can police the failure. A norm-based
-# gate cannot see a permutation that moved the right values to the wrong
-# places: with N output rows, swapping one pair gives
-# ||a - b|| / ||b|| ~ sqrt(2 / N), which is 1.6e-2 at the default workload --
-# BELOW the 2e-2 gate every neighbouring scenario uses. One misplaced row
-# would pass a tolerance gate, and the row it misplaces feeds the expert GEMM
-# in scenario 11.
+# gate sees a permutation only at a small enough workload: with N output rows,
+# swapping one pair gives ||a - b|| / ||b|| ~ 2 / sqrt(N). That is 2.2e-2 at
+# the default workload, just ABOVE the 2e-2 gate every neighbouring scenario
+# uses -- and it FALLS as the workload grows, reaching 1.6e-2 at batch 8. A
+# tolerance gate would therefore catch a misplaced row at one batch size and
+# miss it at the next, and the row it misplaces feeds the expert GEMM in
+# scenario 11. A bitwise gate does not depend on the workload.
 DISPATCH_PERMUTE_PERMUTATION_GATE = CorrectnessCheck(
     kind="bitwise",
     reference="fp64",
