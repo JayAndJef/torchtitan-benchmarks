@@ -139,6 +139,7 @@ from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     WEIGHT_STD,
     _compile_module,
+    _navigate,
     _randn,
     _require_grads,
     _reset_grads,
@@ -214,14 +215,6 @@ def mcore_attention_path(layer: int = MCORE_LAYER) -> str:
     suffix = ".linear_qkv.weight"
     assert name.endswith(suffix)
     return name[: -len(suffix)]
-
-
-def _navigate(root: object, path: str) -> Any:
-    """Walk a dotted attribute path, indexing on a numeric segment."""
-    node = root
-    for segment in path.split("."):
-        node = node[int(segment)] if segment.isdigit() else getattr(node, segment)
-    return node
 
 
 @dataclass

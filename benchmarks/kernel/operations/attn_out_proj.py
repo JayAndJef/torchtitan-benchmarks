@@ -87,7 +87,7 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -97,6 +97,8 @@ from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     WEIGHT_STD,
     _compile_module,
+    _navigate,
+    _projection_arm,
     _randn,
     _reset_grads,
     initialize_megatron_single_rank,
@@ -148,14 +150,6 @@ def mcore_module_path(layer: int = MCORE_LAYER) -> str:
     name = MCORE_WEIGHT_NAME.format(layer=layer)
     assert name.endswith(".weight")
     return name[: -len(".weight")]
-
-
-def _navigate(root: object, path: str) -> Any:
-    """Walk a dotted attribute path, indexing on a numeric segment."""
-    node = root
-    for segment in path.split("."):
-        node = node[int(segment)] if segment.isdigit() else getattr(node, segment)
-    return node
 
 
 @dataclass
@@ -218,57 +212,6 @@ def attn_out_proj_reference(
         "weight_grad": grad64.reshape(-1, shape.dim).transpose(0, 1)
         @ x64.reshape(-1, in_features),
     }
-
-
-def _projection_arm(
-    *,
-    name: str,
-    weight_owner: nn.Module,
-    call: Callable[[torch.Tensor], torch.Tensor],
-    x_native: torch.Tensor,
-    grad_native: torch.Tensor,
-    canonical_in: tuple[int, ...],
-    canonical_out: tuple[int, ...],
-    notes: dict[str, Any] | None = None,
-) -> BuiltArm:
-    """Forward and forward+backward over one engine's native tensor shape.
-
-    ``x_native`` and ``grad_native`` are already in the shape that engine's
-    module expects, because a reshape inside a timed closure would be timed as
-    the projection. ``canonical_in`` and ``canonical_out`` put the outputs
-    back into ``[B, L, *]`` for the gates, which run outside the timed region.
-
-    ``weight_owner`` is the uncompiled module. The titan arm times a
-    ``torch.compile`` wrapper, and the parameters the gradients land on belong
-    to the module inside it.
-    """
-    forward_leaf = x_native.clone().requires_grad_()
-    round_trip_leaf = x_native.clone().requires_grad_()
-    check_leaf = x_native.clone().requires_grad_()
-
-    def forward():
-        return call(forward_leaf)
-
-    def forward_backward() -> None:
-        _reset_grads(round_trip_leaf, weight_owner)
-        torch.autograd.backward(call(round_trip_leaf), grad_native)
-
-    def correctness_outputs() -> dict[str, torch.Tensor]:
-        _reset_grads(check_leaf, weight_owner)
-        out = call(check_leaf)
-        torch.autograd.backward(out, grad_native)
-        return {
-            "out": out.detach().reshape(canonical_out),
-            "x_grad": check_leaf.grad.reshape(canonical_in),
-            "weight_grad": weight_owner.weight.grad,
-        }
-
-    return BuiltArm(
-        name=name,
-        calls={"forward": forward, "forward_backward": forward_backward},
-        correctness_outputs=correctness_outputs,
-        notes=dict(notes or {}),
-    )
 
 
 def build_attn_out_proj_titan(

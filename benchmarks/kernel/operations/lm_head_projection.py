@@ -147,18 +147,17 @@ keeps the roster uniform. Backward cost stays recoverable as
 Every torchtitan and megatron import is deferred into a builder body, so a
 process that measures one arm never imports the other arm's stack.
 
-``_projection_arm`` and ``_navigate`` duplicate helpers ``attn_out_proj.py``
-and ``qkv_prep.py`` already own. Hoisting them into
-``benchmarks/kernel/operations/common.py`` is the right move and it is not
-made here, because parallel work is live in that file. The merge note for
-this scenario records it.
+``_projection_arm`` and ``_navigate`` come from
+``benchmarks/kernel/operations/common.py``, which ``attn_out_proj.py`` and
+``qkv_prep.py`` read them from too. This module held a copy of each while the
+four Part C branches ran in parallel; the merge removed both copies.
 """
 
 from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -166,6 +165,8 @@ import torch.nn.functional as F
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    _navigate,
+    _projection_arm,
     _randn,
     _reset_grads,
     initialize_megatron_single_rank,
@@ -209,14 +210,6 @@ def mcore_module_path() -> str:
     """
     assert MCORE_WEIGHT_NAME.endswith(".weight")
     return MCORE_WEIGHT_NAME[: -len(".weight")]
-
-
-def _navigate(root: object, path: str) -> Any:
-    """Walk a dotted attribute path."""
-    node = root
-    for segment in path.split("."):
-        node = getattr(node, segment)
-    return node
 
 
 @dataclass
@@ -288,59 +281,6 @@ def lm_head_projection_reference(
         "weight_grad": grad64.reshape(-1, shape.vocab_size).transpose(0, 1)
         @ x64.reshape(-1, shape.dim),
     }
-
-
-def _projection_arm(
-    *,
-    name: str,
-    weight_owner: nn.Module,
-    call: Callable[[torch.Tensor], torch.Tensor],
-    x_native: torch.Tensor,
-    grad_native: torch.Tensor,
-    canonical_in: tuple[int, ...],
-    canonical_out: tuple[int, ...],
-    notes: dict[str, Any] | None = None,
-) -> BuiltArm:
-    """Forward and forward+backward over one engine's native tensor shape.
-
-    ``x_native`` and ``grad_native`` are already in the shape that engine's
-    module expects, because a reshape inside a timed closure would be timed as
-    the projection. ``canonical_in`` and ``canonical_out`` put the outputs
-    back into ``[batch, seq_len, *]`` for the gates, which run outside the
-    timed region.
-
-    The gradients are cleared before every ``forward_backward``. Without that
-    the weight gradient would accumulate across a burst of thousands of calls,
-    and the arm would time an addition over ``[vocab_size, dim]`` on top of
-    the GEMM.
-    """
-    forward_leaf = x_native.clone().requires_grad_()
-    round_trip_leaf = x_native.clone().requires_grad_()
-    check_leaf = x_native.clone().requires_grad_()
-
-    def forward():
-        return call(forward_leaf)
-
-    def forward_backward() -> None:
-        _reset_grads(round_trip_leaf, weight_owner)
-        torch.autograd.backward(call(round_trip_leaf), grad_native)
-
-    def correctness_outputs() -> dict[str, torch.Tensor]:
-        _reset_grads(check_leaf, weight_owner)
-        out = call(check_leaf)
-        torch.autograd.backward(out, grad_native)
-        return {
-            "out": out.detach().reshape(canonical_out),
-            "x_grad": check_leaf.grad.reshape(canonical_in),
-            "weight_grad": weight_owner.weight.grad,
-        }
-
-    return BuiltArm(
-        name=name,
-        calls={"forward": forward, "forward_backward": forward_backward},
-        correctness_outputs=correctness_outputs,
-        notes=dict(notes or {}),
-    )
 
 
 def titan_lm_head_module(shape: PiperShape, device: torch.device):

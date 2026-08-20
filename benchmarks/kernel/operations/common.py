@@ -1,6 +1,6 @@
 """The pieces every kernel family's builders need and none of them owns.
 
-Six unrelated-looking helpers held together by one fact: each has three or
+Eight unrelated-looking helpers held together by one fact: each has three or
 more of the family modules as consumers, so leaving any of them in a family
 module would make ``rope`` a dependency of ``attention``, or ``swiglu`` of
 ``qkv``.
@@ -20,6 +20,10 @@ module would make ``rope`` a dependency of ``attention``, or ``swiglu`` of
   inverted the swiglu verdict outright.
 * ``_assert_kernel_marker`` -- the silent-fallback guard the rope overrides
   and all three attention arms depend on.
+* ``_navigate`` -- walks a dotted attribute path down a built model
+  (attn_out_proj, qkv_prep, lm_head_projection).
+* ``_projection_arm`` -- the timed closures every cross-engine linear shares
+  (attn_out_proj, lm_head_projection).
 * ``initialize_megatron_single_rank`` -- the process-global state every
   megatron-core arm needs before a ``GPTModel`` builds. Seven family modules
   call it.
@@ -51,10 +55,13 @@ from __future__ import annotations
 
 import os
 import socket
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn
 from torch.profiler import ProfilerActivity, profile
+
+from benchmarks.kernel.engine.arm import BuiltArm
 
 
 WEIGHT_STD = 0.02
@@ -162,6 +169,77 @@ def _assert_kernel_marker(closure, marker: str, arm: str) -> None:
             f"{arm}: marker kernel {marker!r} absent from a profiled call; "
             f"the override fell back to the stock path"
         )
+
+
+def _navigate(root: object, path: str) -> Any:
+    """Walk a dotted attribute path, indexing on a numeric segment.
+
+    Every cross-engine arm reaches its megatron module this way, from a path
+    the scenario derives from the weight name it already owns. The numeric
+    segment is what ``decoder.layers.0.self_attention.linear_proj`` needs;
+    a path that names no layer -- ``output_layer`` -- takes the same call.
+    """
+    node = root
+    for segment in path.split("."):
+        node = node[int(segment)] if segment.isdigit() else getattr(node, segment)
+    return node
+
+
+def _projection_arm(
+    *,
+    name: str,
+    weight_owner: nn.Module,
+    call: Callable[[torch.Tensor], torch.Tensor],
+    x_native: torch.Tensor,
+    grad_native: torch.Tensor,
+    canonical_in: tuple[int, ...],
+    canonical_out: tuple[int, ...],
+    notes: dict[str, Any] | None = None,
+) -> BuiltArm:
+    """Forward and forward+backward over one engine's native tensor shape.
+
+    ``x_native`` and ``grad_native`` are already in the shape that engine's
+    module expects, because a reshape inside a timed closure would be timed as
+    the projection. ``canonical_in`` and ``canonical_out`` put the outputs
+    back into ``[batch, seq_len, *]`` for the gates, which run outside the
+    timed region.
+
+    ``weight_owner`` is the uncompiled module. A compiled arm times a
+    ``torch.compile`` wrapper, and the parameters the gradients land on belong
+    to the module inside it.
+
+    The gradients are cleared before every ``forward_backward``. Without that
+    the weight gradient would accumulate across a burst of thousands of calls,
+    and the arm would time an addition over the whole weight on top of the
+    GEMM.
+    """
+    forward_leaf = x_native.clone().requires_grad_()
+    round_trip_leaf = x_native.clone().requires_grad_()
+    check_leaf = x_native.clone().requires_grad_()
+
+    def forward():
+        return call(forward_leaf)
+
+    def forward_backward() -> None:
+        _reset_grads(round_trip_leaf, weight_owner)
+        torch.autograd.backward(call(round_trip_leaf), grad_native)
+
+    def correctness_outputs() -> dict[str, torch.Tensor]:
+        _reset_grads(check_leaf, weight_owner)
+        out = call(check_leaf)
+        torch.autograd.backward(out, grad_native)
+        return {
+            "out": out.detach().reshape(canonical_out),
+            "x_grad": check_leaf.grad.reshape(canonical_in),
+            "weight_grad": weight_owner.weight.grad,
+        }
+
+    return BuiltArm(
+        name=name,
+        calls={"forward": forward, "forward_backward": forward_backward},
+        correctness_outputs=correctness_outputs,
+        notes=dict(notes or {}),
+    )
 
 
 def _free_port() -> int:
