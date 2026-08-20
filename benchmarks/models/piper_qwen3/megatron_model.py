@@ -35,9 +35,14 @@ Precision is plain bf16: params_dtype bf16 plus a blanket .bfloat16() after
 construction (torch-norm/TE-norm params otherwise materialize fp32), no
 autocast, no fp32 masters.
 
-This module resolves the profile's encoded torch values (``"silu"``,
-``"bfloat16"``) and constructs. It is worker-side: it may import torch and
-megatron, and the registry it reads may not.
+This module resolves the profile's encoded values (``"silu"``,
+``"bfloat16"``, ``"fused"``) and constructs. It is worker-side: it may import
+torch and megatron, and the registry it reads may not.
+
+``attention_backend`` is the third encoded field and the one that is not a
+torch value. It names a member of megatron's ``AttnBackend`` enum, which is
+not JSON-safe, so the parent-side registry carries the name and this module
+holds the enum.
 """
 
 from __future__ import annotations
@@ -47,6 +52,8 @@ from typing import Any
 from benchmarks.models.piper_qwen3.mcore_profiles import (
     ACTIVATION_FUNC_FIELDS,
     ACTIVATION_FUNCS,
+    ATTENTION_BACKEND_FIELDS,
+    ATTENTION_BACKENDS,
     DTYPE_FIELDS,
     DTYPES,
     McoreProfile,
@@ -90,6 +97,7 @@ def build_model(
     import torch.nn.functional as F
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+    from megatron.core.transformer.enums import AttnBackend
     from megatron.core.transformer.transformer_config import TransformerConfig
 
     activations = {"silu": F.silu, "gelu": F.gelu}
@@ -98,6 +106,12 @@ def build_model(
         "float16": torch.float16,
         "float32": torch.float32,
     }
+    # Megatron's own enum, keyed by its member names. A profile names one and
+    # this resolves it, the way it resolves "silu" and "bfloat16". Left unset,
+    # TransformerConfig defaults to AttnBackend.auto and TransformerEngine
+    # picks a backend at run time, so the profile would not say which kernel
+    # the arm measured.
+    attention_backends = {member.name: member for member in AttnBackend}
     # The registry declares the names; this module owns the objects. A name
     # added to one and not the other is a declaration nothing can build, so
     # fail here rather than at the TransformerConfig call with a torch error.
@@ -106,6 +120,10 @@ def build_model(
     )
     assert set(dtypes) == set(DTYPES), (
         "mcore_profiles.DTYPES and this resolver disagree"
+    )
+    assert set(attention_backends) == set(ATTENTION_BACKENDS), (
+        "mcore_profiles.ATTENTION_BACKENDS and megatron's AttnBackend enum "
+        "disagree; a submodule bump changed the roster"
     )
 
     kwargs = transformer_config_kwargs(
@@ -121,6 +139,9 @@ def build_model(
     for name in DTYPE_FIELDS:
         if name in kwargs:
             kwargs[name] = _resolve(dtypes, name, kwargs[name])
+    for name in ATTENTION_BACKEND_FIELDS:
+        if name in kwargs:
+            kwargs[name] = _resolve(attention_backends, name, kwargs[name])
 
     config = TransformerConfig(**kwargs)
     # Megatron derives the layer spec from the config it was just handed. That

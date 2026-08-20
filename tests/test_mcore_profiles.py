@@ -13,6 +13,7 @@ Every test here is CPU-only and imports no torch, which is the property the
 registry exists to have.
 """
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.models.piper_qwen3.mcore_profiles import (
+    ATTENTION_BACKEND_FIELDS,
+    ATTENTION_BACKENDS,
     BASE,
     FUSION_FIELDS,
     MCORE_PROFILES,
@@ -243,6 +246,55 @@ class ProfileValidationTests(unittest.TestCase):
                 BASE, name="x", description="x",
                 config_overrides={"params_dtype": "fp8"},
             )
+        with self.assertRaisesRegex(ValueError, "not a known attention"):
+            derive(
+                BASE, name="x", description="x",
+                config_overrides={"attention_backend": "cudnn"},
+            )
+
+    def test_every_attention_backend_name_is_a_megatron_enum_member(
+        self,
+    ) -> None:
+        """The names the registry offers are megatron's own, spelled its way.
+
+        This module imports no torch and no megatron, so it reads the enum
+        out of the pinned submodule as text. A submodule bump that renames or
+        drops a member fails here, on CPU, rather than inside a GPU worker
+        that has already built a model.
+        ``megatron_model.build_model`` asserts the same equality against the
+        imported enum, which is the run-time half of this check.
+        """
+        source = (
+            Path(__file__).resolve().parent.parent
+            / "third_party"
+            / "Megatron-LM"
+            / "megatron"
+            / "core"
+            / "transformer"
+            / "enums.py"
+        ).read_text()
+        body = source.split("class AttnBackend", 1)[1].split("class ", 1)[0]
+        members = re.findall(r"^\s{4}(\w+) = \d+$", body, flags=re.MULTILINE)
+        self.assertEqual(sorted(members), sorted(ATTENTION_BACKENDS))
+
+    def test_a_named_attention_backend_reaches_the_config_kwargs(self) -> None:
+        """The name travels as a name, and nothing here turns it into an enum.
+
+        ``ATTENTION_BACKEND_FIELDS`` is what ``megatron_model.build_model``
+        walks to resolve it. A field added to a profile but missing from that
+        tuple would arrive at ``TransformerConfig`` as a string, which
+        megatron compares against enum members and never matches.
+        """
+        profile = derive(
+            BASE,
+            name="pinned",
+            description="pinned",
+            config_overrides={"attention_backend": "fused"},
+        )
+        kwargs = transformer_config_kwargs(shape=NORMAL, profile=profile)
+        self.assertEqual(kwargs["attention_backend"], "fused")
+        self.assertIn("attention_backend", ATTENTION_BACKEND_FIELDS)
+        self.assertNotIn("attention_backend", BASE.config_overrides)
 
     def test_a_delta_names_only_what_it_changes(self) -> None:
         """A delta that restated 28 flags would hide its own difference."""

@@ -1079,7 +1079,12 @@ TEST_CENSUS = {
     # dual-delivery field set on one side only is refused -- 5 for the
     # driver's declared-state check, and 1 that the builder takes no default
     # profile.
-    "test_mcore_profiles": 18,
+    # +2 for the attention-backend encoding: that an unknown backend name is
+    # refused like an unknown activation, that the five names the registry
+    # offers are megatron's own AttnBackend members read out of the pinned
+    # submodule, and that a named backend travels to the config kwargs as a
+    # name for megatron_model.build_model to resolve.
+    "test_mcore_profiles": 20,
     "test_megatron_data": 5,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
@@ -1105,7 +1110,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 887
+TEST_CENSUS_TOTAL = 889
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

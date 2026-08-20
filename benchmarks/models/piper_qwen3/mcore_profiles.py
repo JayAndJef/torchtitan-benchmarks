@@ -51,8 +51,20 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 ACTIVATION_FUNCS = ("silu", "gelu")
 DTYPES = ("bfloat16", "float16", "float32")
 
+# The five members of megatron's own ``AttnBackend`` enum
+# (``megatron/core/transformer/enums.py:51-58``), encoded as their names. The
+# enum is not JSON-safe, and this module is parent-side and torch-free, so a
+# profile names the backend and ``megatron_model.build_model`` resolves it.
+#
+# ``TransformerConfig`` defaults the field to ``AttnBackend.auto``
+# (``transformer_config.py:144``), which lets TransformerEngine choose at run
+# time. A profile that names one instead is what makes the choice a property
+# of the arm rather than of the host.
+ATTENTION_BACKENDS = ("flash", "fused", "unfused", "local", "auto")
+
 ACTIVATION_FUNC_FIELDS = ("activation_func",)
 DTYPE_FIELDS = ("params_dtype", "pipeline_dtype")
+ATTENTION_BACKEND_FIELDS = ("attention_backend",)
 
 # The fields a run reports and checks against what its profile declares.
 # Megatron's real defaults live in its argparse layer, which constructing
@@ -104,6 +116,15 @@ class McoreProfile:
                     f"profile {self.name!r}: {name}={value!r} is not a known "
                     f"dtype name. Available: {', '.join(DTYPES)}"
                 )
+        for name in ATTENTION_BACKEND_FIELDS:
+            value = self.config_overrides.get(name)
+            if value is not None and value not in ATTENTION_BACKENDS:
+                raise ValueError(
+                    f"profile {self.name!r}: {name}={value!r} is not a known "
+                    "attention backend name. Available: "
+                    f"{', '.join(ATTENTION_BACKENDS)}"
+                )
+
     def describe(self) -> dict[str, Any]:
         """Flat JSON-safe provenance record for the manifest."""
         return {
