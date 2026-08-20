@@ -103,7 +103,7 @@ class InputsTests(unittest.TestCase):
         self.assertEqual(tuple(inputs.norm_weight.shape), (TINY.dim,))
         # Activations are bf16 because both engines run plain bf16. Every
         # parameter stays fp32 so each arm rounds it exactly once, the way
-        # ``qkv`` and ``ffn_norm`` do.
+        # ``expert_mlp`` and ``ffn_norm`` do.
         self.assertEqual(inputs.x.dtype, torch.bfloat16)
         self.assertEqual(inputs.grad_q.dtype, torch.bfloat16)
         self.assertEqual(inputs.weight_state["wq.weight"].dtype, torch.float32)
@@ -792,7 +792,7 @@ class QkvPrepArmTests(unittest.TestCase):
 
         TE's ``LayerNormLinear`` backward clears its saved statistics
         (``layernorm_linear.py:1113-1114``), so the retained-graph trick the
-        ``rope`` and ``qkv`` scenarios use cannot run twice. All three arms
+        ``rope`` and ``expert_mlp`` scenarios use cannot run twice. All three arms
         drop the mode, which keeps them comparable; backward cost stays
         recoverable as ``forward_backward`` minus ``forward``.
         """

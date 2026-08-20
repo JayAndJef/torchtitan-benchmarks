@@ -321,7 +321,7 @@ class ReferenceTests(unittest.TestCase):
         )
 
     def test_the_truth_holds_the_weights_the_arms_hold(self) -> None:
-        """The fp64 truth quantizes to bf16 first, as ``qkv`` does.
+        """The fp64 truth quantizes to bf16 first, as ``qkv_prep`` does.
 
         A truth built from the unrounded fp32 weights would charge every arm
         for an input cast none of them performs.

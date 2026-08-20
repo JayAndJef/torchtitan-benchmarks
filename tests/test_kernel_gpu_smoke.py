@@ -73,9 +73,6 @@ class KernelScenarioSmokeTests(unittest.TestCase):
     def test_swiglu(self) -> None:
         self._run("swiglu")
 
-    def test_qkv(self) -> None:
-        self._run("qkv")
-
     def test_lm_head(self) -> None:
         self._run("lm_head")
 

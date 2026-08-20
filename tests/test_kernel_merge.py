@@ -38,9 +38,9 @@ from benchmarks.kernel.schema import (
 )
 
 
-SCENARIO = "qkv"
-ANCHOR = "baseline"
-ARM = "fused_qkv"
+SCENARIO = "lm_head_projection"
+ANCHOR = "mcore/base"
+ARM = "titan"
 REPLICATES = 3
 
 
@@ -268,9 +268,9 @@ class WithinProcessIntervalTests(unittest.TestCase):
 # ``ffn_norm`` is the scenario that exercises every compile treatment at once:
 # ``copy_floor`` is eager because a bandwidth floor is not an implementation,
 # ``mcore/base`` is eager because megatron compiles no whole layer, and
-# ``titan`` is compiled. ``qkv`` above cannot distinguish them -- both its arms
-# are compiled -- so a merge that dropped the treatment entirely would leave
-# these tests green if they used it.
+# ``titan`` is compiled. ``lm_head_projection`` above cannot distinguish them
+# -- both its arms are eager -- so a merge that dropped the treatment entirely
+# would leave these tests green if they used it.
 TREATMENT_SCENARIO = "ffn_norm"
 TREATMENT_ANCHOR = "mcore/base"
 

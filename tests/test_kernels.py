@@ -112,10 +112,10 @@ class RegistryTests(unittest.TestCase):
         )
 
     def test_a_scenario_may_declare_that_it_publishes_no_ratio(self) -> None:
-        scenario = kernel_scenario_by_name("qkv")
+        scenario = kernel_scenario_by_name("lm_head_projection")
         self.assertEqual(replace(scenario, comparisons=()).comparison_pairs(), ())
         with self.assertRaisesRegex(ValueError, "Unknown arm"):
-            replace(scenario, comparisons=(("fused_qkv", "nope"),))
+            replace(scenario, comparisons=(("titan", "nope"),))
 
     def test_a_declared_mode_must_be_one_the_timing_pass_runs(self) -> None:
         """The declaration is authoritative, so it has to be legal itself.
@@ -127,7 +127,7 @@ class RegistryTests(unittest.TestCase):
         raises later in ``_heaviest_mode``; a floor skips the memory pass and
         reaches the merge silently, with nothing in it.
         """
-        scenario = kernel_scenario_by_name("qkv")
+        scenario = kernel_scenario_by_name("lm_head_projection")
         with self.assertRaisesRegex(ValueError, "unknown mode"):
             replace(
                 scenario,
@@ -275,7 +275,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_only_te_requires_gcc_toolset(self) -> None:
         self.assertTrue(kernel_scenario_by_name("rope").requires_gcc_toolset)
-        for name in ("swiglu", "qkv", "lm_head"):
+        for name in ("swiglu", "lm_head", "qkv_prep"):
             self.assertFalse(
                 kernel_scenario_by_name(name).requires_gcc_toolset
             )
@@ -361,9 +361,8 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         swiglu = shape_summary("swiglu", shape, workload)
         self.assertEqual(swiglu["x"], [8192, 1024])
         self.assertEqual(swiglu["tokens_per_expert"], [2048] * 4)
-        qkv = shape_summary("qkv", shape, workload)
-        self.assertEqual(qkv["wqkv"], [2048, 1024])
-        self.assertEqual(qkv["wk"], [512, 1024])
+        qkv_prep = shape_summary("qkv_prep", shape, workload)
+        self.assertEqual(qkv_prep["wqkv"], [2048, 1024])
         lm_head = shape_summary("lm_head", shape, workload)
         self.assertEqual(lm_head["tokens"], 4096)
         self.assertEqual(lm_head["weight"], [151936, 1024])
@@ -970,16 +969,16 @@ class WorkerArgumentTests(unittest.TestCase):
 
     def test_a_timing_pass_needs_a_fragments_directory(self) -> None:
         message = self.error_for(
-            "--scenario", "qkv",
+            "--scenario", "lm_head_projection",
             "--mode", "timing",
-            "--arm", "baseline",
+            "--arm", "titan",
             "--replicate", "0",
         )
         self.assertIn("--mode timing requires --fragments-dir", message)
 
     def test_a_timing_pass_needs_an_arm_and_a_replicate(self) -> None:
         message = self.error_for(
-            "--scenario", "qkv",
+            "--scenario", "lm_head_projection",
             "--mode", "timing",
             "--fragments-dir", "/tmp/fragments",
         )
@@ -987,9 +986,9 @@ class WorkerArgumentTests(unittest.TestCase):
 
     def test_a_block_covers_at_least_one_replicate(self) -> None:
         message = self.error_for(
-            "--scenario", "qkv",
+            "--scenario", "lm_head_projection",
             "--mode", "timing",
-            "--arm", "baseline",
+            "--arm", "titan",
             "--replicate", "0",
             "--fragments-dir", "/tmp/fragments",
             "--replicate-count", "0",
@@ -997,7 +996,9 @@ class WorkerArgumentTests(unittest.TestCase):
         self.assertIn("--replicate-count must be >= 1", message)
 
     def test_a_correctness_pass_needs_a_fragment_path(self) -> None:
-        message = self.error_for("--scenario", "qkv", "--mode", "correctness")
+        message = self.error_for(
+            "--scenario", "lm_head_projection", "--mode", "correctness"
+        )
         self.assertIn("--mode correctness requires --fragment", message)
 
     def test_a_well_formed_timing_argv_is_accepted(self) -> None:
@@ -1007,15 +1008,15 @@ class WorkerArgumentTests(unittest.TestCase):
 
         args = parse_args(
             [
-                "--scenario", "qkv",
+                "--scenario", "lm_head_projection",
                 "--mode", "timing",
-                "--arm", "baseline",
+                "--arm", "titan",
                 "--replicate", "2",
                 "--replicate-count", "3",
                 "--fragments-dir", "/tmp/fragments",
             ]
         )
-        self.assertEqual(args.arm, "baseline")
+        self.assertEqual(args.arm, "titan")
         self.assertEqual(args.replicate, 2)
         self.assertEqual(args.replicate_count, 3)
         self.assertEqual(args.fragments_dir, Path("/tmp/fragments"))

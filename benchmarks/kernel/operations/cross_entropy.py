@@ -172,7 +172,7 @@ The other two **could** expose it and do not:
 everywhere for comparability**: a scenario where two arms carry a third row
 and four do not publishes a column most of the roster cannot fill, and the
 two that could would be the only arms whose backward is measured without its
-forward. ``attention``, ``attn_out_proj`` and ``final_norm`` drop the mode for
+forward. ``attention_core``, ``attn_out_proj`` and ``final_norm`` drop the mode for
 their own reasons; backward cost stays recoverable as the difference of the
 two declared modes.
 
@@ -418,7 +418,7 @@ def cross_entropy_reference(
     ``F.cross_entropy(inputs.logits.double(), ...)`` -- allocates an fp64 copy
     of the whole logit tensor (4.64 GiB at the default workload), an fp64
     log-softmax of the same size, and an fp64 gradient, so it asks for about
-    14 GiB to check a tensor the arms hold in 1.16. The ``attention``
+    14 GiB to check a tensor the arms hold in 1.16. The ``attention_core``
     scenario's per-(row, kv group) reference exists for the same reason.
 
     Here the loop holds ``REFERENCE_ROW_CHUNK`` rows at a time: 256 rows of

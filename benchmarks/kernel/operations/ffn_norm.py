@@ -47,9 +47,9 @@ tensor, and neither pays a transpose.
 backward calls ``clear_tensor_data(x)`` and ``clear_tensor_data(rstdevs)``
 (``rmsnorm.py:238-239``), which replaces each saved tensor with an empty one
 (``transformer_engine/pytorch/utils.py:54-75``). The retained-graph trick the
-rope and qkv scenarios use re-runs backward over one graph, so the second call
-would read cleared tensors. ``attention`` drops the mode for the same class of
-reason. Dropping it from **both** arms keeps them comparable, and backward
+rope and expert_mlp scenarios use re-runs backward over one graph, so the
+second call would read cleared tensors. ``attention_core`` drops the mode for
+the same class of reason. Dropping it from **both** arms keeps them comparable, and backward
 cost stays recoverable as ``forward_backward`` minus ``forward``.
 
 Every torchtitan, megatron and TransformerEngine import is deferred into the
@@ -213,8 +213,8 @@ def _norm_arm(
     Both arms run this same code over their own module, so the comparison
     measures the two modules and nothing about how each arm was written.
 
-    ``forward`` runs over a leaf that requires grad, matching ``qkv`` and
-    ``attention``: that is the condition production runs in, and TE selects a
+    ``forward`` runs over a leaf that requires grad, matching ``qkv_prep``
+    and ``attention_core``: that is the condition production runs in, and TE selects a
     different SM margin for an inference call (``rmsnorm.py:186``).
     """
     forward_leaf = inputs.x.clone().requires_grad_()
@@ -287,7 +287,7 @@ def build_ffn_norm_titan(
     the epsilon and the parameter initialization come from upstream rather than
     from a value retyped here. No ``Trainer.Config`` extraction is needed: the
     module under test is one config node with no surrounding trainer state, and
-    this is the same direct build ``qkv`` uses for ``QKVLinear``.
+    this is the same direct build ``qkv_prep`` uses for ``QKVLinear``.
     """
     from torchtitan.models.qwen3 import _qwen3_norm
 

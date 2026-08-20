@@ -25,9 +25,9 @@ fuses the RMSNorm into the GEMM's prologue, and no public entry point runs the
 GEMM alone or the norm alone. So a partition that put the norm outside would
 have to split a module megatron does not split, and the megatron arm would
 measure something megatron never runs. The norm therefore sits inside, on both
-sides. The cost is that the re-homed ``qkv`` arms gain a norm: **a number from
-this scenario is not comparable to a number from the ``qkv`` scenario**, and
-the scenario ``description`` says so.
+sides. The cost is that the re-homed projection arms gain a norm: **a number
+from this scenario is not comparable to a projection timed without a norm**,
+and the scenario ``description`` says so.
 
 **The scenario ends at separate q/k/v, so both engines' layout work is
 timed.** TorchTitan's fused path splits the packed buffer and then
@@ -118,7 +118,7 @@ and ``:1724-1742`` builds ``None`` from it), and
 megatron's own view, ``SplitAlongDim`` and reshape.
 
 **There is no isolated ``backward`` mode, and there cannot be one.** The
-retained-graph trick the ``rope`` and ``qkv`` scenarios use re-runs one
+retained-graph trick the ``rope`` and ``expert_mlp`` scenarios use re-runs one
 backward graph many times. TE's ``LayerNormLinear`` backward frees what it
 saved on the way out -- ``clear_tensor_data(mu)`` and
 ``clear_tensor_data(rsigma)`` at

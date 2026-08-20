@@ -67,7 +67,6 @@ SWIGLU_INDUCTOR_OVERRIDE = (
 KERNEL_ARMS_MODULES = {
     "rope": "benchmarks.kernel.operations.rope",
     "swiglu": "benchmarks.kernel.operations.swiglu",
-    "qkv": "benchmarks.kernel.operations.qkv",
     "lm_head": "benchmarks.kernel.operations.lm_head",
     "embedding_stage": "benchmarks.kernel.operations.embedding_stage",
     "qkv_prep": "benchmarks.kernel.operations.qkv_prep",
@@ -135,7 +134,6 @@ KERNEL_INVENTORY = {
         "titan/te",
     ),
     "swiglu": ("baseline", "piper_optimized_triton", "piper_optimized_inductor"),
-    "qkv": ("baseline", "fused_qkv"),
     "lm_head": (
         "baseline",
         "fused_linear_ce",
@@ -253,7 +251,6 @@ KERNEL_INVENTORY = {
 KERNEL_BASELINE_ARMS = {
     "rope": "mcore/base",
     "swiglu": "baseline",
-    "qkv": "baseline",
     "lm_head": "baseline",
     # The anchor is mcore/base at every cross-engine scenario that publishes a
     # cross-engine row. Several of them hold mcore-only variant arms that can
@@ -309,7 +306,6 @@ KERNEL_BASELINE_ARMS = {
 # for byte.
 KERNEL_TO_E2E_SCENARIO = {
     "swiglu": "piper1b_swiglu",
-    "qkv": "piper1b_qkv",
     "lm_head": "piper1b_lm_head",
 }
 # A bandwidth floor has no end-to-end counterpart, so it is excluded from the
@@ -925,7 +921,10 @@ TEST_CENSUS = {
     # that a selection missing the anchor, a reference or a real arm name is
     # refused rather than repaired.
     "test_kernel_cli": 31,
-    "test_kernel_gpu_smoke": 4,
+    # -1 with the deletion of the single-engine ``qkv`` scenario: the
+    # smoke test names one scenario per test, and this one had no
+    # scenario left to name.
+    "test_kernel_gpu_smoke": 3,
     # Added when the merge got a direct caller: every other merge assertion
     # reaches it through execute_kernel_run, which spawns replicate-major and
     # therefore never hands _ordered_replicates the arrival order it exists
@@ -1156,7 +1155,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 992
+TEST_CENSUS_TOTAL = 991
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

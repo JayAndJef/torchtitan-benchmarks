@@ -278,59 +278,6 @@ SWIGLU = KernelScenario(
 )
 
 
-QKV = KernelScenario(
-    name="qkv",
-    description="QKV projection: separate Q/KV GEMMs vs one fused GEMM.",
-    inputs_builder="benchmarks.kernel.operations.qkv:qkv_inputs",
-    reference_builder="benchmarks.kernel.operations.qkv:qkv_reference",
-    baseline_arm="baseline",
-    arms=(
-        KernelArm(
-            name="baseline",
-            description="TorchTitan QKVLinear: separate Q and KV GEMMs",
-            builder="benchmarks.kernel.operations.qkv:build_qkv_baseline",
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "v_out"),
-                    max_rel_l2=2e-2,
-                ),
-            ),
-        ),
-        KernelArm(
-            name="fused_qkv",
-            description="TorchTitan FusedQKVLinear: one wqkv GEMM plus split",
-            builder="benchmarks.kernel.operations.qkv:build_qkv_fused_qkv",
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "v_out"),
-                    max_rel_l2=2e-2,
-                ),
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="baseline",
-                    outputs=("q_out", "k_out", "v_out", "x_grad"),
-                    max_rel_l2=2e-2,
-                ),
-                CorrectnessCheck(
-                    kind="bitwise",
-                    reference="baseline",
-                    outputs=("q_out", "k_out", "v_out"),
-                    informational=True,
-                ),
-            ),
-        ),
-    ),
-)
-
-
 LM_HEAD = KernelScenario(
     name="lm_head",
     description="LM head + loss: full logits vs fused and TE-derived CE.",
@@ -570,8 +517,8 @@ EMBEDDING_STAGE = KernelScenario(
                     outputs=("out", "weight_grad_rows", "weight_grad_norm"),
                     max_rel_l2=2e-2,
                 ),
-                # Recorded, not enforced, exactly as the qkv scenario records
-                # its bitwise row. A gather is a copy: both engines call
+                # Recorded, not enforced, exactly as the qkv_prep scenario
+                # records its bitwise row. A gather is a copy: both engines call
                 # F.embedding on the same bf16 table with the same ids, so the
                 # forward outputs should be bit-identical, and this states that
                 # claim in the results rather than leaving it implied by a
@@ -644,9 +591,10 @@ QKV_PREP = KernelScenario(
         "arms are compiled (fullgraph=True) and the megatron arm is eager, "
         "which is how each engine runs it. THE NORM IS INSIDE THE SCENARIO ON "
         "BOTH ENGINES, because megatron fuses it into linear_qkv and exposes "
-        "no way to time either half alone -- so these numbers are NOT "
-        "comparable to the qkv scenario's, whose arms are the same projections "
-        "without a norm. The cut ends at three separate [B, L, N, H] tensors, "
+        "no way to time either half alone -- so a number here is the norm "
+        "and the projection together, and it is NOT comparable to a "
+        "projection timed without a norm. The cut ends at three separate "
+        "[B, L, N, H] tensors, "
         "so titan's split and megatron's view/SplitAlongDim/reshape are both "
         "timed. THE TWO ENGINES COMPUTE THE SAME FUNCTION BUT DO NOT "
         "MATERIALIZE THE SAME TENSORS: SplitAlongDim is torch.split off the "
@@ -764,9 +712,8 @@ QKV_PREP = KernelScenario(
             compiled=True,
             correctness=(
                 QKV_PREP_GATE,
-                # The enforcing arm-to-arm check, matching what the existing
-                # qkv scenario gives its own fused arm. The fp64 gate alone does
-                # not cover this: it bounds each arm against the truth at 2e-2,
+                # The enforcing arm-to-arm check on the fused/unfused pair.
+                # The fp64 gate alone does not cover this: it bounds each arm against the truth at 2e-2,
                 # which bounds the *pair* only transitively, at 4e-2 -- and the
                 # pair is exactly what the published ("titan/unfused_qkv",
                 # "titan") row is a ratio of. Direction follows the same rule as
@@ -791,9 +738,9 @@ QKV_PREP = KernelScenario(
                     ),
                     max_rel_l2=2e-2,
                 ),
-                # Informational, not enforcing, and carried for exactly the
-                # reason the qkv scenario carries its own: with identical
-                # weights the fused and unfused paths *should* agree bitwise,
+                # Informational, not enforcing, and carried for one reason:
+                # with identical weights the fused and unfused paths
+                # *should* agree bitwise,
                 # and for a while they did, until compiled GEMM epilogues broke
                 # bit-identity. Recording the difference without failing the run
                 # keeps a change that restores or further degrades exact
@@ -895,8 +842,8 @@ QK_NORM = KernelScenario(
             # No isolated backward. TE's operation fuser clears its saved
             # tensors while it runs backward (ops/fuser.py:225,258) and TE's
             # RMSNorm calls clear_tensor_data on both of them at the end of
-            # op_backward, so the retained-graph re-run rope and qkv use
-            # raises here. Both arms drop the mode and stay comparable;
+            # op_backward, so the retained-graph re-run rope and expert_mlp
+            # use raises here. Both arms drop the mode and stay comparable;
             # backward cost is forward_backward minus forward.
             modes=("forward", "forward_backward"),
             eager_reason=(
@@ -981,8 +928,8 @@ QK_NORM = KernelScenario(
 )
 
 
-# One GEMM and two gradients, at the tolerance the qkv scenario already uses
-# for the same class of operation.
+# One GEMM and two gradients, at the tolerance qkv_prep already uses for the
+# same class of operation.
 ATTN_OUT_PROJ_GATE = CorrectnessCheck(
     kind="tolerance",
     reference="fp64",
@@ -1104,8 +1051,8 @@ ATTN_RESIDUAL_AGREEMENT_GATE = CorrectnessCheck(
     max_rel_l2=2e-2,
 )
 
-# Recorded, not enforced, as the qkv and embedding_stage scenarios record
-# theirs. The three arms should agree bitwise: the exact sum of two bf16
+# Recorded, not enforced, as the qkv_prep and embedding_stage scenarios
+# record theirs. The three arms should agree bitwise: the exact sum of two bf16
 # values fits in fp32, every torch backend accumulates a bf16 add in fp32,
 # and so the correctly rounded bf16 result is the only result any of them can
 # produce. This row is the published evidence for the declined cross-engine
@@ -1114,7 +1061,8 @@ ATTN_RESIDUAL_AGREEMENT_GATE = CorrectnessCheck(
 #
 # Informational rather than enforcing, because the claim is unmeasured: no
 # arm of this scenario has run on a GPU, and CLAUDE.md records that compiled
-# GEMM epilogues once broke a bit-identity the qkv scenario expected. An add
+# GEMM epilogues once broke a bit-identity the fused/unfused QKV pair
+# expected. An add
 # has no epilogue, so the expectation is stronger here -- but the honest
 # order is to record it, run it, and promote it only if the hardware agrees.
 ATTN_RESIDUAL_BITWISE_GATE = CorrectnessCheck(
@@ -2662,7 +2610,7 @@ MOE_COMBINE_TITAN_GATE = CorrectnessCheck(
 
 # The within-engine check, and the premise of both published rows: each delta
 # changes the implementation and not the arithmetic. Enforced rather than
-# informational, because unlike the qkv fused/unfused pair these arms are not
+# informational, because unlike the qkv_prep fused/unfused pair these arms
 # expected to be bit-identical -- TE's fused unpermute and torch's scatter_add
 # may accumulate in a different order -- but they must agree to bf16
 # tolerance, and a delta that changed the result is a delta that changed the
@@ -3067,7 +3015,7 @@ MOE_RESIDUAL = KernelScenario(
                 # The within-engine check, and the one that states the
                 # published row's premise: the fusion flag changes the
                 # implementation and not the arithmetic. Informational,
-                # following the qkv precedent -- a compiled region may
+                # following the qkv_prep precedent -- a compiled region may
                 # legitimately round differently from the eager one, so
                 # equality is recorded rather than enforced while
                 # MOE_RESIDUAL_GATE still enforces closeness on both arms.
@@ -3966,7 +3914,6 @@ KERNEL_SCENARIOS = {
     for scenario in (
         ROPE,
         SWIGLU,
-        QKV,
         LM_HEAD,
         EMBEDDING_STAGE,
         QKV_PREP,

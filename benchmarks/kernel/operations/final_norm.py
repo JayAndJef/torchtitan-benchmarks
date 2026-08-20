@@ -71,7 +71,7 @@ forbids that twice over: ``restore_from_func_ctx`` clears
 ``ops/fuser.py:220``), and ``op_backward`` frees the saved activations with
 ``clear_tensor_data`` (``ops/basic/rmsnorm.py:238-239``). Both arms therefore
 declare ``forward`` and ``forward_backward`` only, exactly as the
-``attention`` scenario does. Backward cost stays recoverable as the
+``attention_core`` scenario does. Backward cost stays recoverable as the
 difference.
 
 Every implementation import is deferred into the builder that needs it. One

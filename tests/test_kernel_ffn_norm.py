@@ -144,7 +144,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertTrue(torch.equal(reference["weight_grad"], module.weight.grad))
 
     def test_the_reference_holds_the_gain_the_arms_hold(self) -> None:
-        """The fp64 truth quantizes the gain to bf16 first, as ``qkv`` does.
+        """The fp64 truth quantizes the gain to bf16 first, as ``qkv_prep`` does.
 
         An fp64 truth built from the unrounded fp32 gain would charge both arms
         for an input cast neither performs, and the difference is measurable.

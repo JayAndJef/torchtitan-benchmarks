@@ -584,16 +584,18 @@ def _dispatch_permute_arm(
     one mode's gradient state reach another mode's timing.
 
     **There is no isolated ``backward`` mode, on any arm.** The retained-graph
-    trick ``rope`` and ``qkv`` use re-runs one backward graph several times,
+    trick ``rope`` and ``expert_mlp`` use re-runs one backward graph several
+    times,
     and this scenario cannot: the megatron arms reach TransformerEngine's own
     ``permute`` autograd functions, whose saved-tensor lifetime under a
     repeated backward is unverified here and unverifiable without a GPU.
-    ``ffn_norm`` and ``attention`` drop the mode for the same class of reason.
+    ``ffn_norm`` and ``attention_core`` drop the mode for the same class of
+    reason.
     Dropping it from **every** arm keeps them comparable, and the backward cost
     stays recoverable as ``forward_backward`` minus ``forward``.
 
-    ``forward`` runs over leaves that require a gradient, matching ``qkv``,
-    ``ffn_norm`` and ``attention``: that is the condition production runs in,
+    ``forward`` runs over leaves that require a gradient, matching
+    ``qkv_prep``, ``ffn_norm`` and ``attention_core``: that is the condition production runs in,
     and an inference-mode call would let either engine skip the bookkeeping a
     training step pays for.
     """

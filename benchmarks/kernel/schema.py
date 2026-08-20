@@ -431,15 +431,6 @@ def shape_summary(
             "x": [rows, shape.dim],
             "tokens_per_expert": [per_expert] * shape.num_experts,
         }
-    if scenario_name == "qkv":
-        kv_out = shape.n_kv_heads * shape.head_dim
-        return {
-            "x": [batch, seq, shape.dim],
-            "wq": [shape.n_heads * shape.head_dim, shape.dim],
-            "wk": [kv_out, shape.dim],
-            "wv": [kv_out, shape.dim],
-            "wqkv": [shape.qkv_out_features, shape.dim],
-        }
     if scenario_name == "lm_head":
         return {
             "hidden": [batch, seq, shape.dim],

@@ -736,7 +736,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("qkv",),
+                    scenario_names=("lm_head_projection",),
                     replicates=5,
                     replicates_per_process=2,
                     out_dir=out_dir,
@@ -746,7 +746,10 @@ class KernelRunnerTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        arms = [arm.name for arm in kernel_scenario_by_name("qkv").arms]
+        arms = [
+            arm.name
+            for arm in kernel_scenario_by_name("lm_head_projection").arms
+        ]
         timing = [
             (
                 argv[argv.index("--arm") + 1],
@@ -793,7 +796,7 @@ class KernelRunnerTests(unittest.TestCase):
         however few processes lost it.
         """
         fake_process = fragment_writer(
-            skip_timing=(("qkv", "fused_qkv", 3),)
+            skip_timing=(("lm_head_projection", "titan", 3),)
         )
         events = []
         metadata_patch, pinning_patch = patched_environment()
@@ -801,7 +804,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("qkv",),
+                    scenario_names=("lm_head_projection",),
                     replicates=4,
                     replicates_per_process=2,
                     out_dir=Path(temporary) / "kernels",
@@ -812,10 +815,12 @@ class KernelRunnerTests(unittest.TestCase):
             )
         self.assertTrue(outcomes[0].failed)
         self.assertEqual(
-            outcomes[0].failed_passes, ("fused_qkv r2", "fused_qkv r3")
+            outcomes[0].failed_passes, ("titan r2", "titan r3")
         )
-        self.assertEqual(outcomes[0].result.arms["fused_qkv"].status, "failed")
-        self.assertEqual(outcomes[0].result.arms["baseline"].status, "ok")
+        self.assertEqual(outcomes[0].result.arms["titan"].status, "failed")
+        self.assertEqual(
+            outcomes[0].result.arms["mcore/base"].status, "ok"
+        )
         # Each one is also named as it happens. The outcome above is what the
         # merge reads; this is what the operator watching a long run sees, and
         # the docstring's claim is about the second.
@@ -825,8 +830,8 @@ class KernelRunnerTests(unittest.TestCase):
             if "wrote no fragment" in event.message
         ]
         self.assertEqual(len(lost), 2)
-        self.assertTrue(any("fused_qkv r2" in message for message in lost))
-        self.assertTrue(any("fused_qkv r3" in message for message in lost))
+        self.assertTrue(any("titan r2" in message for message in lost))
+        self.assertTrue(any("titan r3" in message for message in lost))
 
     def test_the_compiler_environment_is_resolved_once_per_run(self) -> None:
         """It shells out to bash, and the answer cannot change between two
@@ -1037,7 +1042,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("qkv",),
+                    scenario_names=("lm_head_projection",),
                     replicates=2,
                     out_dir=Path(temporary) / "kernels",
                 ),
@@ -1048,7 +1053,7 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertFalse(outcomes[0].failed)
         self.assertEqual(
             {name: arm.status for name, arm in outcomes[0].result.arms.items()},
-            {"baseline": "ok", "fused_qkv": "ok"},
+            {"mcore/base": "ok", "titan": "ok"},
         )
         self.assertTrue(
             any(
@@ -1229,7 +1234,7 @@ class KernelRunnerTests(unittest.TestCase):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
                     gpu="7",
-                    scenario_names=("qkv",),
+                    scenario_names=("lm_head_projection",),
                     replicates=3,
                     out_dir=Path(temporary) / "kernels",
                 ),
@@ -1237,7 +1242,9 @@ class KernelRunnerTests(unittest.TestCase):
                 environment={"PATH": "/usr/bin"},
             )
         result = outcomes[0].result
-        anchor = result.arms[kernel_scenario_by_name("qkv").baseline_arm]
+        anchor = result.arms[
+            kernel_scenario_by_name("lm_head_projection").baseline_arm
+        ]
         forward = anchor.modes["forward"]
         self.assertEqual(len(forward.replicates_us), 3)
         # timing_fragment offsets each replicate's samples by its index.
