@@ -77,6 +77,7 @@ KERNEL_ARMS_MODULES = {
     "attn_residual": "benchmarks.kernel.operations.attn_residual",
     "ffn_norm": "benchmarks.kernel.operations.ffn_norm",
     "moe_router": "benchmarks.kernel.operations.moe_router",
+    "dispatch_permute": "benchmarks.kernel.operations.dispatch_permute",
     "moe_residual": "benchmarks.kernel.operations.moe_residual",
     "final_norm": "benchmarks.kernel.operations.final_norm",
     "lm_head_projection": "benchmarks.kernel.operations.lm_head_projection",
@@ -174,6 +175,15 @@ KERNEL_INVENTORY = {
         "mcore/router_bf16",
         "titan",
     ),
+    # Scenario 10. Five arms and a cross-engine row: both engines permute the
+    # same rows into the same order, which a bitwise gate enforces.
+    "dispatch_permute": (
+        "copy_floor",
+        "mcore/base",
+        "mcore/no_permute_fusion",
+        "mcore/dispatcher_alltoall",
+        "titan",
+    ),
     # Scenario 13, the twin of attn_residual at the other bda call site. Four
     # arms, one published row, and the row is within megatron for the same
     # reason.
@@ -221,6 +231,7 @@ KERNEL_BASELINE_ARMS = {
     "attn_residual": "mcore/base",
     "ffn_norm": "mcore/base",
     "moe_router": "mcore/base",
+    "dispatch_permute": "mcore/base",
     "moe_residual": "mcore/base",
     "final_norm": "mcore/base",
     "lm_head_projection": "mcore/base",

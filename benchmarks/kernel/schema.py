@@ -134,12 +134,22 @@ def validate_shape_and_workload(
 def routing_divides_evenly(
     shape: PiperShape, workload: KernelWorkload
 ) -> bool:
-    """Whether swiglu's synthetic workload routes rows evenly across experts.
+    """Whether a scenario's synthetic workload routes rows evenly.
 
-    Scenario-scoped on purpose: only the swiglu inputs builder hands every
-    expert an equal slice of ``batch * seq_len * top_k`` rows, so an uneven
-    split is that scenario's problem and must not fail rope, qkv, lm_head or
-    attention.
+    Scenario-scoped on purpose. Several inputs builders hand every expert an
+    equal slice of ``batch * seq_len * top_k`` rows, and each of them declares
+    ``requires_balanced_routing``; an uneven split is those scenarios'
+    problem and must not fail a scenario that never splits rows at all.
+    ``KernelScenario.requires_balanced_routing`` is the roster, and
+    ``tests/test_kernels.py`` pins it exhaustively, so this function names no
+    scenario itself.
+
+    It tests the weaker of the two conditions such a builder may need. A
+    builder that also needs ``batch * seq_len`` to divide by ``num_experts``
+    -- ``dispatch_permute`` does, because its per-token expert offsets come
+    from a permutation reduced modulo the expert count -- asserts that itself,
+    with named numbers. Moving the stronger condition here would make
+    ``swiglu`` skip workloads it can measure.
     """
     return (
         workload.batch * workload.seq_len * shape.top_k
@@ -681,5 +691,45 @@ def shape_summary(
             # against one 8 MiB read. This scenario is bandwidth-and-dispatch
             # bound, not compute bound, and this is the number that says so.
             "gate_gemm_flops": 2 * tokens * shape.dim * shape.num_experts,
+        }
+    if scenario_name == "dispatch_permute":
+        rows = batch * seq * shape.top_k
+        return {
+            # The canonical hidden states, and the two views the engines
+            # take of that one buffer. Both are free views of one contiguous
+            # allocation, taken at build time, so neither engine is charged
+            # a layout conversion inside a timed closure: megatron's
+            # dispatch_preprocess immediately does hidden_states.view(-1, D)
+            # (token_dispatcher.py:274) and titan's RoutedExperts.forward
+            # does x_BLD.view(T, D) (moe.py:144).
+            "x_titan_BLD": [batch, seq, shape.dim],
+            "x_mcore_TBD": [batch * seq, 1, shape.dim],
+            # The routing decision, in the two forms the engines consume.
+            # They hold the same values: probs_TE[t, ids[t, k]] equals
+            # scores_TK[t, k] exactly, and probs_TE is zero off-route. Both
+            # are fp32 on both engines -- megatron's base profile sets
+            # moe_router_dtype="fp32" and titan softmaxes its gate in fp32 --
+            # so this scenario carries no precision difference. Scenario 9's
+            # cross-engine row does; this one does not.
+            "topk_expert_ids_titan_TK": [batch * seq, shape.top_k],
+            "topk_scores_titan_TK": [batch * seq, shape.top_k],
+            "probs_mcore_TE": [batch * seq, shape.num_experts],
+            "routing_map_mcore_TE": [batch * seq, shape.num_experts],
+            # What the cut produces, and the shape every downstream scenario
+            # reads. The row count is the whole point of the guard every arm
+            # carries: an identity dispatch returns batch * seq rows, and
+            # this cut produces batch * seq * top_k.
+            "permuted_tokens": [rows, shape.dim],
+            "permuted_probs": [rows],
+            # The split is exact by construction, so this is a list of equal
+            # counts rather than a length. An uneven split skips the
+            # scenario loudly; it is never capped or rounded.
+            "tokens_per_expert": (
+                [rows // shape.num_experts] * shape.num_experts
+            ),
+            # What the kernel actually moves. A permute is a gather, so the
+            # copied elements are the whole of its device work, and the
+            # x_floor column is read against this number.
+            "permuted_elements": rows * shape.dim,
         }
     raise ValueError(f"Unknown kernel scenario {scenario_name!r}")

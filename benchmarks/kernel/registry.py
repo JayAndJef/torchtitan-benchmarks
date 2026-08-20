@@ -1916,6 +1916,315 @@ MOE_ROUTER = KernelScenario(
 )
 
 
+# The permutation gates are BITWISE, and that is a decision about what a
+# permutation is rather than a claim about how good these kernels are.
+#
+# A permute moves bits and computes nothing, so both engines produce the
+# permuted buffers by a pure copy -- an index_select on the torch path, a TE
+# kernel on the fused one -- and bitwise equality is achievable rather than
+# strict. It is also the only metric that can police the failure. A norm-based
+# gate cannot see a permutation that moved the right values to the wrong
+# places: with N output rows, swapping one pair gives
+# ||a - b|| / ||b|| ~ sqrt(2 / N), which is 1.6e-2 at the default workload --
+# BELOW the 2e-2 gate every neighbouring scenario uses. One misplaced row
+# would pass a tolerance gate, and the row it misplaces feeds the expert GEMM
+# in scenario 11.
+DISPATCH_PERMUTE_PERMUTATION_GATE = CorrectnessCheck(
+    kind="bitwise",
+    reference="fp64",
+    outputs=("permuted_tokens", "permuted_probs", "tokens_per_expert"),
+)
+
+# The gradient gates are NOT the permutation gate, and the split is
+# deliberate. The gradient of a gather is a scatter-add: x_grad accumulates
+# top_k output-gradient rows per token in bf16 and rounds, so it cannot be
+# bitwise against an fp64 truth. probs_grad is a pure scatter of distinct
+# values and rounds nothing, but it is gated the same way, because a gate that
+# enforced bitwise equality on one gradient and not the other would assert
+# something about the implementation that this scenario has not checked.
+DISPATCH_PERMUTE_GRADIENT_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("x_grad", "probs_grad"),
+    max_rel_l2=2e-2,
+)
+
+# The cross-engine permutation gate. It is what makes the published ratio a
+# comparison of two implementations of one function rather than of two
+# different functions, and it is bitwise for the reason above.
+#
+# The two engines reach the same permutation by constructions that look
+# nothing alike. TorchTitan sorts the flattened [T, K] expert-id tensor with a
+# stable ASCENDING argsort (torchtitan/models/common/token_dispatcher.py:
+# 93-95). Megatron transposes the [T, E] routing map, flattens it, and sorts
+# with a stable DESCENDING one (megatron/core/transformer/moe/moe_utils.py:
+# 468-475). Both come out expert-major and, within one expert, in ascending
+# token order -- a token reaches a given expert at most once, so the flat-slot
+# order is the token order. tests/test_kernel_dispatch_permute.py transcribes
+# both from the pinned sources and checks them against a third derivation that
+# is neither engine's.
+#
+# It sits on the TITAN arm and references mcore/base, never the reverse.
+# resolve_arm_skips closes the skip set over correctness references, so a
+# check pointing from the anchor at titan would let a skipped titan arm take
+# the anchor down with it -- and losing the anchor costs the whole scenario.
+DISPATCH_PERMUTE_CROSS_ENGINE_PERMUTATION_GATE = CorrectnessCheck(
+    kind="bitwise",
+    reference="mcore/base",
+    outputs=("permuted_tokens", "permuted_probs", "tokens_per_expert"),
+)
+
+# The cross-engine gradient gate. Tolerance rather than bitwise, because the
+# two engines may accumulate the scatter-add in a different order and bf16
+# addition is not associative.
+DISPATCH_PERMUTE_CROSS_ENGINE_GRADIENT_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=("x_grad", "probs_grad"),
+    max_rel_l2=2e-2,
+)
+
+
+DISPATCH_PERMUTE = KernelScenario(
+    name="dispatch_permute",
+    description=(
+        "The step that turns a routing decision into an expert-major token "
+        "buffer: TorchTitan's routing-map and counts construction plus "
+        "token_dispatcher.dispatch, against megatron-core's MoELayer."
+        "preprocess plus ALL THREE dispatch phases (dispatch_preprocess, "
+        "token_dispatch, dispatch_postprocess). The triple is the cut because "
+        "MoEAllGatherTokenDispatcher.token_dispatch is guarded by 'tp_size > "
+        "1 or ep_size > 1' (token_dispatcher.py:282) and is therefore the "
+        "IDENTITY at world_size=1: a cut on MoELayer.dispatch alone would "
+        "measure a zero on the megatron side and would read as a spectacular "
+        "win. permute() runs in dispatch_postprocess. Every arm carries a "
+        "guard that RAISES unless the measured call really permuted. "
+        "THIS SCENARIO'S NUMBER IS DEVICE TIME PLUS HOST SERIALIZATION, and "
+        "only on the megatron side: dispatch_postprocess runs a blocking "
+        ".cpu() on the per-expert counts every call (token_dispatcher.py:317) "
+        "and TorchTitan has no counterpart, so a burst cannot pipeline "
+        "through it and per-call time stops falling with --burst-k on one "
+        "engine alone. The cost is real and megatron pays it at every layer "
+        "of every step, but a reader who takes the ratio for a kernel-speed "
+        "comparison has read it wrong. The titan arm is compiled "
+        "(fullgraph=True) and every mcore arm is eager, which is what each "
+        "engine does end to end, so the cross-engine row compares two compile "
+        "treatments as well as two implementations. One boundary is "
+        "asymmetric and is charged to TorchTitan: megatron's router returns "
+        "the one-hot map with the probabilities, so the map is built inside "
+        "scenario 9, while titan builds it here -- two to three extra kernel "
+        "launches on the titan side in a scenario that is dispatch-bound. "
+        "Read scenario 9's row beside this one. copy_floor is the bandwidth "
+        "reference: a permute is a gather, so if the arms sit near the floor "
+        "the ratios compare how close four implementations get to the memory "
+        "bus and no ratio here is a kernel-quality claim. Two further columns "
+        "are not like-for-like, and no arm can be charged for either. "
+        "peak_memory_gib: megatron's dispatchers keep a call's intermediates "
+        "on the instance (self.local_map, self.local_probs, "
+        "self.reversed_local_input_permutation_mapping) where TorchTitan's "
+        "returns a frozen LocalDispatchMetadata and stores nothing, so in "
+        "forward mode the megatron arms hold state the titan arm does not. "
+        "x_floor: the floor copies a contiguous buffer and does no gather, so "
+        "it understates the device work every arm does and overstates every "
+        "arm's distance from the bus -- and on the megatron arms that "
+        "distance is dominated by the host sync above rather than by device "
+        "inefficiency."
+    ),
+    inputs_builder=(
+        "benchmarks.kernel.operations.dispatch_permute:dispatch_permute_inputs"
+    ),
+    reference_builder=(
+        "benchmarks.kernel.operations.dispatch_permute:"
+        "dispatch_permute_reference"
+    ),
+    baseline_arm="mcore/base",
+    # The synthetic routing decision hands every expert an equal slice of
+    # batch * seq_len * top_k. An uneven split must skip this scenario
+    # loudly -- named numbers, a recorded error, a nonzero exit -- rather than
+    # be capped or rounded, exactly as swiglu already does. See merge note 2:
+    # this flag is what breaks test_only_swiglu_needs_balanced_routing, and
+    # widening that test is the fix.
+    requires_balanced_routing=True,
+    # Explicit and exhaustive. It is the same set the schema would derive, and
+    # it is written out anyway: a cross-engine scenario states which rows it
+    # publishes rather than inheriting them, and each row below answers a
+    # different question.
+    comparisons=(
+        # The scenario's reason to exist, and the row Rule 5 governs. Both
+        # sides do the same work -- build the expert-major buffer -- and the
+        # megatron side additionally blocks on a device-to-host copy that the
+        # titan side does not have.
+        ("titan", "mcore/base"),
+        # Within megatron: what TransformerEngine's permutation fusion is
+        # worth. It is a PART of this scenario and not the whole of it. Under
+        # the allgather dispatcher the cut holds exactly one read site of
+        # moe_permute_fusion -- permute() in dispatch_postprocess
+        # (token_dispatcher.py:324) -- beside MoELayer.preprocess, the
+        # local_map and local_probs slices, the .cpu() at :317 and the by-hand
+        # probability permutation at :328-330. So the row is diluted by
+        # everything the flag does not touch and UNDERSTATES the fusion.
+        ("mcore/no_permute_fusion", "mcore/base"),
+        # Within megatron: the dispatcher's local permute and sync strategy.
+        # NOT communication -- see the arm's own description.
+        ("mcore/dispatcher_alltoall", "mcore/base"),
+    ),
+    arms=(
+        KernelArm(
+            name="copy_floor",
+            description=(
+                "One read and one write of the permuted [N, D] buffer: the "
+                "bandwidth floor for the forward traffic at this shape. It is "
+                "a LOWER bound and the direction of the bias is known -- the "
+                "floor reads a contiguous buffer where the arms gather N rows "
+                "scattered through a [T, D] one, so the floor understates the "
+                "device work and the x_floor column overstates the distance "
+                "between an arm and the device"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.dispatch_permute:"
+                "build_dispatch_permute_copy_floor"
+            ),
+            modes=("forward",),
+            is_floor=True,
+            eager_reason=(
+                "a bandwidth floor, not an implementation: compiling a copy "
+                "would measure Inductor rather than the bus"
+            ),
+        ),
+        KernelArm(
+            name="mcore/base",
+            description=(
+                "megatron-core MoELayer.preprocess plus all three dispatch "
+                "phases, off a real GPTModel: the allgather token dispatcher "
+                "with TransformerEngine's permutation fusion on, which is "
+                "what the e2e megatron arm runs. Eager. Its number includes a "
+                "blocking device-to-host copy of the per-expert counts "
+                "(token_dispatcher.py:317), which runs on every call"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.dispatch_permute:"
+                "build_dispatch_permute_mcore_base"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "megatron compiles no whole transformer layer, and no method "
+                "this closure calls carries @jit_fuser: token_dispatcher.py "
+                "holds exactly one such decorator (:1860), on "
+                "MoEFlexTokenDispatcher.dispatch_preprocess, and that class "
+                "cannot be built at world_size=1 (:1775,1793 assert "
+                "tp_size * ep_size > 1). So this arm is eager all the way "
+                "down, and compiling it would measure a treatment megatron "
+                "never applies"
+            ),
+            correctness=(
+                DISPATCH_PERMUTE_PERMUTATION_GATE,
+                DISPATCH_PERMUTE_GRADIENT_GATE,
+            ),
+        ),
+        KernelArm(
+            name="mcore/no_permute_fusion",
+            description=(
+                "megatron with moe_permute_fusion=False: permute() falls from "
+                "TransformerEngine's fused kernel (moe_utils.py:404-410) to "
+                "the torch path (:461-486) -- a transpose plus contiguous, a "
+                "stable descending argsort, a slice, a modulo and an "
+                "index_select. Same permutation, different implementation. "
+                "The flag has ONE read site inside this cut, so the row "
+                "against the anchor is diluted by preprocess, the map slices "
+                "and the device-to-host copy, and it understates what the "
+                "fusion is worth to the permute itself"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.dispatch_permute:"
+                "build_dispatch_permute_mcore_no_permute_fusion"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "the same reason as mcore/base: megatron compiles no whole "
+                "transformer layer, and the torch permute path this arm takes "
+                "carries no @jit_fuser either"
+            ),
+            correctness=(
+                DISPATCH_PERMUTE_PERMUTATION_GATE,
+                DISPATCH_PERMUTE_GRADIENT_GATE,
+            ),
+        ),
+        KernelArm(
+            name="mcore/dispatcher_alltoall",
+            description=(
+                "megatron with the alltoall token dispatcher instead of the "
+                "allgather one. THE COLLECTIVE IS INERT AT world_size=1 AND "
+                "THE CLASS IS NOT: _AllToAll.forward returns its input "
+                "unchanged at one rank (tensor_parallel/mappings.py:433-435), "
+                "so this arm measures the dispatcher's LOCAL permute and sync "
+                "strategy and NEVER communication. Three differences, all "
+                "local: it permutes in dispatch_preprocess "
+                "(token_dispatcher.py:655-677) rather than in "
+                "dispatch_postprocess; it passes probs=probs into permute "
+                "(:671) so ONE fused kernel permutes tokens and probabilities "
+                "together, where the allgather dispatcher permutes the "
+                "probabilities by hand afterwards with "
+                ".T.contiguous().masked_select(...) (:328-330); and it issues "
+                "its device-to-host copies on a side stream at "
+                "cuda_dtoh_point and waits at cuda_sync_point (:918-955), "
+                "where the allgather dispatcher's .cpu() at :317 is "
+                "unconditional and blocking. One extra piece of local work "
+                "has no counterpart on the anchor and may DOMINATE this row: "
+                "with num_local_experts > 1, dispatch_postprocess calls "
+                "sort_chunks_by_idxs (:778-785), and at one rank the index "
+                "vector is the identity, so the rows come out in the anchor's "
+                "order while a full [T*K, D] read and write -- about 16 MiB "
+                "each way at the normal shape -- is still done and still "
+                "costs. Read this row as a property of running the alltoall "
+                "dispatcher at one rank, not as a dispatcher design verdict"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.dispatch_permute:"
+                "build_dispatch_permute_mcore_dispatcher_alltoall"
+            ),
+            modes=("forward", "forward_backward"),
+            eager_reason=(
+                "the same reason as mcore/base: megatron compiles no whole "
+                "transformer layer, and neither dispatcher class carries a "
+                "@jit_fuser method this closure reaches"
+            ),
+            correctness=(
+                DISPATCH_PERMUTE_PERMUTATION_GATE,
+                DISPATCH_PERMUTE_GRADIENT_GATE,
+            ),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan's routing-map and per-expert-counts construction "
+                "(moe.py:465-470) plus token_dispatcher.dispatch "
+                "(moe.py:144-157), under torch.compile(fullgraph=True), which "
+                "is the production treatment -- the whole of MoE.forward sits "
+                "inside the per-block compile apply_compile wraps around each "
+                "Qwen3TransformerBlock. The dispatcher is the production "
+                "AllToAllTokenDispatcher with ep_mesh=None, which takes the "
+                "LocalTokenDispatcher branch by an explicit test "
+                "(token_dispatcher.py:415-421) rather than by accident. This "
+                "arm is charged the routing-map construction that megatron "
+                "does inside scenario 9"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.dispatch_permute:"
+                "build_dispatch_permute_titan"
+            ),
+            modes=("forward", "forward_backward"),
+            compiled=True,
+            correctness=(
+                DISPATCH_PERMUTE_PERMUTATION_GATE,
+                DISPATCH_PERMUTE_GRADIENT_GATE,
+                DISPATCH_PERMUTE_CROSS_ENGINE_PERMUTATION_GATE,
+                DISPATCH_PERMUTE_CROSS_ENGINE_GRADIENT_GATE,
+            ),
+        ),
+    ),
+)
+
+
 # The gate every arm faces, and rel_l2 rather than a ULP metric. An add is not
 # a reduction, but the hazard CLAUDE.md's ULP rule names is CANCELLATION, and
 # the reduction is only where that rule met it first. ``residual + x`` on two
@@ -2695,6 +3004,7 @@ KERNEL_SCENARIOS = {
         ATTN_RESIDUAL,
         FFN_NORM,
         MOE_ROUTER,
+        DISPATCH_PERMUTE,
         MOE_RESIDUAL,
         FINAL_NORM,
         LM_HEAD_PROJECTION,

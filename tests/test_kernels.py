@@ -226,13 +226,25 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown arm"):
             kernel_scenario_by_name("rope").arm("nope")
 
-    def test_only_swiglu_needs_balanced_routing(self) -> None:
+    def test_the_balanced_routing_flag_is_set_exactly_where_it_is_needed(
+        self,
+    ) -> None:
+        """Every scenario that hands each expert an equal slice, and no other.
+
+        The flag is what makes an uneven expert split skip the scenario
+        LOUDLY -- named numbers, a recorded error, a nonzero exit
+        (``benchmarks/kernel/runner.py``) -- instead of routing rows the arms
+        never built. A scenario that needs it and does not set it crashes
+        inside its inputs builder; one that sets it and does not need it
+        skips workloads it could have measured. The literal is exhaustive on
+        purpose, so both directions are a failure here.
+        """
         balanced = {
             scenario.name
             for scenario in KERNEL_SCENARIOS.values()
             if scenario.requires_balanced_routing
         }
-        self.assertEqual(balanced, {"swiglu"})
+        self.assertEqual(balanced, {"swiglu", "dispatch_permute"})
 
 
 class ShapeAndWorkloadTests(unittest.TestCase):
