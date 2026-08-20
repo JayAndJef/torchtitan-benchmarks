@@ -1217,6 +1217,35 @@ class SpanCliTests(unittest.TestCase):
         # scenario of its own: the plan derives them from the range.
         self.assertEqual(allowed.exit_code, 0, allowed.output)
 
+    def test_scenarios_lists_the_span_roster_even_when_it_is_empty(
+        self,
+    ) -> None:
+        """A span is the one unit that is not a default.
+
+        A reader who never sees the heading has no way to learn that --span
+        exists, so the heading prints whether or not a span is declared.
+        """
+        from benchmarks.cli.main import cli
+
+        empty = CliRunner().invoke(cli, ["scenarios"])
+        self.assertEqual(empty.exit_code, 0, empty.output)
+        self.assertIn("kernel spans (kernel-bench --span)", empty.output)
+        self.assertIn("(none declared)", empty.output)
+
+        span = make_span()
+        with declared(span):
+            listed = CliRunner().invoke(cli, ["scenarios"])
+        self.assertEqual(listed.exit_code, 0, listed.output)
+        self.assertIn(
+            "test_expert_combine [replaces expert_mlp + moe_combine]",
+            listed.output,
+        )
+        # What each arm is compared against, which is the half a reader
+        # cannot infer from the range.
+        self.assertIn(
+            "against expert_mlp/titan + moe_combine/titan", listed.output
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
