@@ -117,7 +117,16 @@ E2E_INVENTORY = {
 }
 
 KERNEL_INVENTORY = {
-    "rope": ("copy_floor", "baseline", "helion", "te"),
+    # Cross-engine since scenario 4 replaced the single-engine roster in
+    # place: two megatron THD arms and the three re-homed titan arms. It
+    # declares no floor, and it is no longer in KERNEL_TO_E2E_SCENARIO.
+    "rope": (
+        "mcore/base",
+        "mcore/no_rope_fusion",
+        "titan",
+        "titan/helion",
+        "titan/te",
+    ),
     "swiglu": ("baseline", "piper_optimized_triton", "piper_optimized_inductor"),
     "qkv": ("baseline", "fused_qkv"),
     "lm_head": (
@@ -153,7 +162,7 @@ KERNEL_INVENTORY = {
 }
 
 KERNEL_BASELINE_ARMS = {
-    "rope": "baseline",
+    "rope": "mcore/base",
     "swiglu": "baseline",
     "qkv": "baseline",
     "lm_head": "baseline",

@@ -45,97 +45,183 @@ from benchmarks.kernel.schema import (
 )
 
 
+# The gate every arm carries against the fp64 truth. RoPE is elementwise, so a
+# max-based metric would be legitimate here -- but rel_l2 is the repository
+# default and it is the only metric all five arms can share, because the two
+# engines do not compute the rotation at the same width. Titan's CosSinRoPE
+# upcasts q and k to fp32 and casts back
+# (torchtitan/models/common/rope.py:335-343); megatron's UNFUSED path casts
+# cos/sin down to the input dtype and multiplies in bf16
+# (rope_utils.py:132-136). Both fused paths compute in float inside the
+# kernel. 2e-2 is the value every other cross-engine scenario uses.
+ROPE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("q_out", "k_out", "dq", "dk"),
+    max_rel_l2=2e-2,
+)
+
+# The historical accuracy gate of the three titan arms, carried across the
+# re-homing unchanged. RoPE is elementwise, so the mean-ULP metric is valid
+# here (CLAUDE.md forbids it on reductions, not on this), and the arms have
+# reported ~0.24 mean bf16 ULP against a 1.0 bound for as long as the
+# scenario has existed. Dropping it while re-homing the arms would weaken an
+# existing gate for no reason.
+#
+# It is deliberately NOT declared on the two mcore arms. mcore/no_rope_fusion
+# multiplies by a bf16 cos/sin, so its mean ULP is not the titan arms' number,
+# and no measured value exists to bound it. A gate whose threshold was
+# guessed is worse than the rel_l2 gate that already enforces.
+ROPE_ULP_GATE = CorrectnessCheck(
+    kind="fp64_ulp",
+    reference="fp64",
+    outputs=("q_out", "k_out", "dq", "dk"),
+    max_mean_ulp=1.0,
+)
+
+# Every cross-engine check is declared ON the titan arms and REFERENCES the
+# anchor, never the reverse. ``resolve_arm_skips`` closes the skip set over
+# correctness references (runner.py:268-306), so a check pointing outward from
+# the anchor would let a skipped titan arm take the anchor down with it -- and
+# losing the anchor writes no results at all (runner.py:497-511), because
+# every row is a ratio against it. Informational, because the two fp64 gates
+# already enforce and are stronger: each arm is right in absolute terms, which
+# bounds the distance between them.
+#
+# One frozen instance shared by three arms, as registry.py's sibling gates
+# already are (QKV_PREP_GATE, ATTN_OUT_PROJ_GATE). CorrectnessCheck is a
+# frozen dataclass, so sharing is safe and a factory function would be the odd
+# one out in that file.
+ROPE_CROSS_ENGINE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=("q_out", "k_out", "dq", "dk"),
+    max_rel_l2=2e-2,
+    informational=True,
+)
+
+
 ROPE = KernelScenario(
     name="rope",
-    description="TorchTitan CosSinRoPE vs Helion and TE RoPE kernels, BSHD bf16.",
+    description=(
+        "Rotary position embedding on q and k (titan GQAttention.rope vs "
+        "megatron apply_rotary_pos_emb): TorchTitan's CosSinRoPE, Helion and "
+        "local TE-port kernels under torch.compile against megatron's THD "
+        "path run eager. THE TWO ENGINES SHARE THEIR INNER ARITHMETIC AND "
+        "NOTHING ABOVE IT: components/rope/te_rope_standalone.cu copies TE's "
+        "fused_rope block functions but adds its own __global__ and its own "
+        "BSHD launch configuration, while megatron at THD uses TE's THD "
+        "launcher, whose grid is a function of the document count. So the "
+        "cross-engine row is two implementations of one rotation, and it is "
+        "neither a kernel-quality result nor a pure host-wrapper "
+        "comparison. This number HOLDS host serialization on one arm (plan "
+        "rule 5): mcore/no_rope_fusion runs _apply_rotary_pos_emb_thd, which "
+        "is two device-to-host syncs and a Python loop over the packed "
+        "documents, so its number scales with the document count and is not "
+        "'unfused TE'. Megatron's per-step rotary_pos_emb build is hoisted to "
+        "build time and charged to neither arm; RotaryEmbedding.forward is "
+        "lru_cached, so what is hoisted is a cache lookup after the first "
+        "step."
+    ),
     inputs_builder="benchmarks.kernel.operations.rope:rope_inputs",
     reference_builder="benchmarks.kernel.operations.rope:rope_reference",
-    baseline_arm="baseline",
+    baseline_arm="mcore/base",
     arms=(
         KernelArm(
-            name="copy_floor",
-            description="q/k copy_ pair: the bandwidth floor for this shape",
-            builder="benchmarks.kernel.operations.rope:build_rope_copy_floor",
-            modes=("forward",),
-            is_floor=True,
+            name="mcore/base",
+            description=(
+                "megatron apply_rotary_pos_emb with apply_rope_fusion=True: "
+                "TE's fused_apply_rotary_pos_emb_thd on THD tensors, eager "
+                "as megatron runs it"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.rope:build_rope_mcore_base"
+            ),
+            modes=("forward", "backward"),
             eager_reason=(
-                "a bandwidth floor, not an implementation: it measures what "
-                "the memory traffic alone costs, and compiling a pair of "
-                "copies would measure Inductor instead"
+                "megatron compiles no whole transformer layer, and "
+                "rope_utils.py carries no jit_fuser decoration either, so "
+                "this call is eager end to end; compiling it would measure a "
+                "treatment megatron never applies"
             ),
+            correctness=(ROPE_GATE,),
         ),
         KernelArm(
-            name="baseline",
-            description="TorchTitan CosSinRoPE (backward via autograd)",
-            builder="benchmarks.kernel.operations.rope:build_rope_baseline",
+            name="mcore/no_rope_fusion",
+            description=(
+                "megatron with apply_rope_fusion=False: at THD that is "
+                "_apply_rotary_pos_emb_thd, a .tolist() sync plus a Python "
+                "loop over the packed documents -- NOT an unfused TE kernel, "
+                "and the number scales with the document count. Refuses to "
+                "build at batch 1, where megatron takes its other branch and "
+                "rotates by global offsets instead"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.rope:"
+                "build_rope_mcore_no_rope_fusion"
+            ),
+            modes=("forward", "backward"),
+            eager_reason=(
+                "the same reason as mcore/base, and more strongly: this path "
+                "is a Python loop whose host cost is the thing under "
+                "measurement, so compiling it would erase the effect"
+            ),
+            correctness=(ROPE_GATE,),
+        ),
+        KernelArm(
+            name="titan",
+            description=(
+                "TorchTitan CosSinRoPE on BSHD tensors, under "
+                "torch.compile(fullgraph=True) as the per-block compile "
+                "gives it end to end"
+            ),
+            builder="benchmarks.kernel.operations.rope:build_rope_titan",
             modes=("forward", "backward"),
             compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="fp64_ulp",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "dq", "dk"),
-                    max_mean_ulp=1.0,
-                ),
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "dq", "dk"),
-                    max_rel_l2=2e-2,
-                ),
-            ),
+            correctness=(ROPE_GATE, ROPE_ULP_GATE, ROPE_CROSS_ENGINE_GATE),
         ),
         KernelArm(
-            name="helion",
-            description="TorchTitan HelionCosSinRoPE kernel",
-            builder="benchmarks.kernel.operations.rope:build_rope_helion",
+            name="titan/helion",
+            description=(
+                "TorchTitan HelionCosSinRoPE: the cache gather and the "
+                "rotation fused into one Helion kernel, marker-guarded "
+                "because it degrades to the stock path rather than failing"
+            ),
+            builder=(
+                "benchmarks.kernel.operations.rope:build_rope_titan_helion"
+            ),
             modes=("forward", "backward"),
             compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="fp64_ulp",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "dq", "dk"),
-                    max_mean_ulp=1.0,
-                ),
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "dq", "dk"),
-                    max_rel_l2=2e-2,
-                ),
-            ),
+            correctness=(ROPE_GATE, ROPE_ULP_GATE, ROPE_CROSS_ENGINE_GATE),
         ),
         KernelArm(
-            name="te",
-            description="TransformerEngine RoPE CUDA kernel (positions path)",
-            builder="benchmarks.kernel.operations.rope:build_rope_te",
+            name="titan/te",
+            description=(
+                "our local CUDA port of TE's fused RoPE against titan's "
+                "positions interface -- NOT the installed TransformerEngine. "
+                "It copies TE's inner block functions and adds its own "
+                "__global__ and its own BSHD launch, so the row against "
+                "mcore/base shares the arithmetic and not the addressing or "
+                "the grid; marker-guarded, and needs a C++20 host compiler"
+            ),
+            builder="benchmarks.kernel.operations.rope:build_rope_titan_te",
             modes=("forward", "backward"),
+            # Per ARM, not per scenario: without gcc-13 this scenario still
+            # measures the other four arms. resolve_arm_skips drops this one
+            # alone, and no other arm names it as a correctness reference.
             requires_gcc_toolset=True,
             compiled=True,
-            correctness=(
-                CorrectnessCheck(
-                    kind="fp64_ulp",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "dq", "dk"),
-                    max_mean_ulp=1.0,
-                ),
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="fp64",
-                    outputs=("q_out", "k_out", "dq", "dk"),
-                    max_rel_l2=2e-2,
-                ),
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="helion",
-                    outputs=("q_out", "k_out"),
-                    max_rel_l2=2e-2,
-                    informational=True,
-                ),
-            ),
+            correctness=(ROPE_GATE, ROPE_ULP_GATE, ROPE_CROSS_ENGINE_GATE),
         ),
     ),
+    # comparisons left at None: the derived set is exactly the four rows this
+    # scenario publishes. Three are cross-engine (each titan arm against
+    # mcore/base) and one is within-engine (mcore/no_rope_fusion against
+    # mcore/base), which is the whole reason that arm exists. There is no
+    # floor to exclude: the cross-engine roster retires rope/copy_floor,
+    # because a bandwidth floor answers no cross-engine question. The suite's
+    # only x_floor test moved to qk_norm with it, and this scenario no longer
+    # reports an x_floor column at all.
 )
 
 
@@ -1485,7 +1571,7 @@ CROSS_ENTROPY = KernelScenario(
                 "difference between this arm and ce_native"
             ),
             # is_floor stays False because this is a real megatron code path,
-            # not a synthetic bandwidth bound like rope/copy_floor. It is NOT
+            # not a synthetic bandwidth bound like qk_norm/copy_floor. It is NOT
             # because a floor would lose its comparison row: with an explicit
             # ``comparisons`` tuple, ``comparison_pairs()`` returns it verbatim
             # and consults ``is_floor`` only in the derived branch. What

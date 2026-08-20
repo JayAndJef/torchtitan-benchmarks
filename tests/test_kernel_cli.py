@@ -88,8 +88,9 @@ def timing_fragment(
     ``measured=False`` is the arm that ran and timed nothing: the worker
     completed and wrote its fragment, and every mode in it is empty.
 
-    ``bytes_moved`` is what the parent turns into the GB/s column. Only the
-    rope builders report it, so it defaults to None as most arms write it.
+    ``bytes_moved`` is what the parent turns into the GB/s column. Only a
+    bandwidth floor and its neighbours report it, so it defaults to None as
+    most arms write it.
     ``scale`` multiplies the samples, which is how one arm is given a
     different median from its neighbours.
     """
@@ -349,9 +350,11 @@ class KernelRunnerTests(unittest.TestCase):
         """An arm whose reference is skipped is skipped too. Timing an arm
         that nothing checked is the silent wrongness the gates exist for.
 
-        No scenario reaches this today -- rope's ``te`` is a referrer, never a
-        reference -- so the closure is guarding the roster's growth, and the
-        synthetic scenario is how it gets exercised at all.
+        No scenario reaches this today. The only arm with a requirement is
+        rope's ``titan/te``, and it is a referrer -- it points at
+        ``mcore/base``, which needs no compiler -- never a reference. So the
+        closure is guarding the roster's growth, and the synthetic scenario
+        is how it gets exercised at all.
         """
 
         def arm(name, requires_gcc=False, reference=None):
@@ -403,7 +406,7 @@ class KernelRunnerTests(unittest.TestCase):
 
     def test_a_broken_compiler_env_costs_the_te_arm_only(self) -> None:
         """The requirement belongs to the arm. Rope still measures its other
-        three arms, which the former scenario-level check threw away."""
+        four arms, which the former scenario-level check threw away."""
         fake_process = fragment_writer()
 
         metadata_patch, pinning_patch = patched_environment()
@@ -425,10 +428,10 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertFalse(by_name["rope"].failed)
         self.assertFalse(by_name["swiglu"].failed)
         arms = by_name["rope"].result.arms
-        self.assertEqual(arms["te"].status, "skipped")
-        self.assertIn("compiler environment", arms["te"].status_reason)
-        self.assertEqual(arms["te"].modes, {})
-        for name in ("baseline", "helion", "copy_floor"):
+        self.assertEqual(arms["titan/te"].status, "skipped")
+        self.assertIn("compiler environment", arms["titan/te"].status_reason)
+        self.assertEqual(arms["titan/te"].modes, {})
+        for name in ("mcore/base", "mcore/no_rope_fusion", "titan", "titan/helion"):
             self.assertEqual(arms[name].status, "ok", name)
 
     def test_a_skipped_arm_is_spawned_in_neither_pass(self) -> None:
@@ -458,20 +461,25 @@ class KernelRunnerTests(unittest.TestCase):
             manifest = json.loads((out_dir / "manifest.json").read_text())
         self.assertEqual(commands[0][commands[0].index("--mode") + 1], "correctness")
         self.assertEqual(
-            commands[0][commands[0].index("--skip-arm") + 1], "te"
+            commands[0][commands[0].index("--skip-arm") + 1], "titan/te"
         )
         timed = {
             command[command.index("--arm") + 1] for command in commands[1:]
         }
-        self.assertEqual(timed, {"copy_floor", "baseline", "helion"})
+        self.assertEqual(
+            timed,
+            {"mcore/base", "mcore/no_rope_fusion", "titan", "titan/helion"},
+        )
 
         # The manifest says so on its own. "arms" is the registry roster and
-        # still lists te, so without this a reader must diff it against
+        # still lists titan/te, so without this a reader must diff it against
         # "commands" to learn that the arm never ran.
         self.assertEqual(manifest["schema_version"], 6)
-        self.assertEqual(list(manifest["skipped_arms"]), ["te"])
-        self.assertIn("compiler environment", manifest["skipped_arms"]["te"])
-        self.assertIn("te", [arm["name"] for arm in manifest["arms"]])
+        self.assertEqual(list(manifest["skipped_arms"]), ["titan/te"])
+        self.assertIn(
+            "compiler environment", manifest["skipped_arms"]["titan/te"]
+        )
+        self.assertIn("titan/te", [arm["name"] for arm in manifest["arms"]])
 
     def test_worker_command_carries_pinning_env_and_manifest(self) -> None:
         captured = []
@@ -727,9 +735,9 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertFalse(by_name["swiglu"].failed)
         self.assertFalse(by_name["rope"].failed)
         arms = by_name["rope"].result.arms
-        self.assertEqual(arms["te"].status, "skipped")
-        self.assertIn("C++20 host compiler", arms["te"].status_reason)
-        self.assertEqual(arms["baseline"].status, "ok")
+        self.assertEqual(arms["titan/te"].status, "skipped")
+        self.assertIn("C++20 host compiler", arms["titan/te"].status_reason)
+        self.assertEqual(arms["titan"].status, "ok")
 
     def test_unbalanced_routing_skips_only_swiglu(self) -> None:
         """An odd batch x seq_len breaks swiglu's balanced split (rows =

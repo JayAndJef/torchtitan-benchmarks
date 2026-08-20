@@ -67,14 +67,28 @@ class RegistryTests(unittest.TestCase):
         keeping; the two branches of ``comparison_pairs`` are.
 
         So each branch is checked against a scenario that takes it. ``rope``
-        derives: every arm faces the anchor, the anchor is not compared with
-        itself, and the floor is left out. ``attn_out_proj`` declares: the
-        published rows are its tuple, verbatim and in order."""
+        derives: every arm faces the anchor and the anchor is not compared
+        with itself. ``qk_norm`` derives too and additionally shows that a
+        floor is left out, which ``rope`` cannot show since it retired its
+        own. ``attn_out_proj`` declares: the published rows are its tuple,
+        verbatim and in order."""
         rope = kernel_scenario_by_name("rope")
         self.assertIsNone(rope.comparisons)
         self.assertEqual(
             rope.comparison_pairs(),
-            (("helion", "baseline"), ("te", "baseline")),
+            (
+                ("mcore/no_rope_fusion", "mcore/base"),
+                ("titan", "mcore/base"),
+                ("titan/helion", "mcore/base"),
+                ("titan/te", "mcore/base"),
+            ),
+        )
+
+        floored = kernel_scenario_by_name("qk_norm")
+        self.assertIsNone(floored.comparisons)
+        self.assertIn("copy_floor", [arm.name for arm in floored.arms])
+        self.assertEqual(
+            floored.comparison_pairs(), (("titan", "mcore/base"),)
         )
 
         cross_engine = kernel_scenario_by_name("attn_out_proj")
@@ -90,8 +104,10 @@ class RegistryTests(unittest.TestCase):
         # Written against rope, where the derived set has two rows and this
         # one has none of them.
         self.assertEqual(
-            replace(rope, comparisons=(("te", "helion"),)).comparison_pairs(),
-            (("te", "helion"),),
+            replace(
+                rope, comparisons=(("titan/te", "titan/helion"),)
+            ).comparison_pairs(),
+            (("titan/te", "titan/helion"),),
         )
 
     def test_a_scenario_may_declare_that_it_publishes_no_ratio(self) -> None:
@@ -171,17 +187,19 @@ class RegistryTests(unittest.TestCase):
         afterwards. A companion test that walked the registry asserting the
         same thing would never fail: an offending arm cannot be imported."""
         rope = kernel_scenario_by_name("rope")
-        floor, compiled = rope.arm("copy_floor"), rope.arm("baseline")
-        # The anchor stays in both tuples: __post_init__ resolves it first,
-        # so dropping it would raise "Unknown arm" and the assertion below
-        # would pass for the wrong reason.
+        eager, compiled = rope.arm("mcore/base"), rope.arm("titan")
+        # The anchor is the eager arm here, and it stays in both tuples:
+        # __post_init__ resolves the anchor first, so dropping it would raise
+        # "Unknown arm" and the assertions below would pass for the wrong
+        # reason. It is a megatron arm rather than the retired floor, which
+        # is the case this docstring says now matters.
         with self.assertRaisesRegex(ValueError, "declares no eager_reason"):
             replace(
-                rope, arms=(replace(floor, eager_reason=None), compiled)
+                rope, arms=(replace(eager, eager_reason=None), compiled)
             )
         with self.assertRaisesRegex(ValueError, "is compiled but declares"):
             replace(
-                rope, arms=(floor, replace(compiled, eager_reason="because"))
+                rope, arms=(eager, replace(compiled, eager_reason="because"))
             )
 
     def test_every_arm_has_a_description(self) -> None:
@@ -231,8 +249,15 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         self.assertEqual(lm_head["tokens"], 4096)
         self.assertEqual(lm_head["weight"], [151936, 1024])
         rope = shape_summary("rope", shape, workload)
-        self.assertEqual(rope["q"], [4, 1024, 16, 64])
-        self.assertEqual(rope["k"], [4, 1024, 8, 64])
+        # Both engine-native forms, and the THD pair is a view of the BLNH
+        # pair rather than a second allocation.
+        self.assertEqual(rope["q_titan_BLNH"], [4, 1024, 16, 64])
+        self.assertEqual(rope["k_titan_BLNH"], [4, 1024, 8, 64])
+        self.assertEqual(rope["q_mcore_THD"], [4096, 16, 64])
+        self.assertEqual(rope["k_mcore_THD"], [4096, 8, 64])
+        self.assertEqual(rope["cu_seqlens_total"], 4096)
+        self.assertEqual(rope["mcore_freqs"], [1024, 1, 1, 64])
+        self.assertEqual(rope["rotated_rows"], 4096 * 24)
 
     def test_model_size_selects_the_geometry_not_the_workload(self) -> None:
         shape, workload = resolve_shape_and_workload(model_size="huge")

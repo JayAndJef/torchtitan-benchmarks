@@ -119,8 +119,10 @@ sides of the published row run one bf16 add on the same tensors, so their
 device work is equal and the ratio is entirely host dispatch. The floor gives
 that claim a second, independent reading. One bf16 add at ``normal``, batch
 4, sequence 1024 moves 24 MiB -- two reads and one write of an 8 MiB tensor --
-which is exactly the traffic ``rope/copy_floor`` moves, and CLAUDE.md records
-that floor's measured device cost as 11-13 us. It is a copy, so it moves two thirds of the
+which is exactly the traffic the retired ``rope/copy_floor`` moved, and
+CLAUDE.md records that floor's measured device cost as 11-13 us. That figure
+is history: scenario 4 replaced the rope roster and the floor went with it,
+so nothing re-measures it here. It is a copy, so it moves two thirds of the
 add's bytes and understates the device by the same third --
 ``build_attn_residual_copy_floor`` states the 1.5x correction and the
 direction of the bias.

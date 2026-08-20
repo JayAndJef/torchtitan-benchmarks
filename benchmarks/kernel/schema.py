@@ -241,7 +241,7 @@ class KernelArm:
     **An eager arm states why it is eager.** ``compiled=False`` requires an
     ``eager_reason``, and ``compiled=True`` forbids one. The reasons are not
     interchangeable, and a reader who cannot tell them apart will misread the
-    row: ``rope/copy_floor`` is eager because a bandwidth floor is not an
+    row: ``qk_norm/copy_floor`` is eager because a bandwidth floor is not an
     implementation, while a megatron-core arm is eager because megatron
     compiles no whole layer end to end, and a TorchTitan module that sits
     outside every compiled region -- ``Decoder.norm`` and its siblings, which
@@ -392,10 +392,26 @@ def shape_summary(
     batch, seq = workload.batch, workload.seq_len
     if scenario_name == "rope":
         return {
-            "q": [batch, seq, shape.n_heads, shape.head_dim],
-            "k": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            # Both forms, because both are read. The THD pair is a view of the
+            # BLNH pair and not a second allocation: [B, L, N, H] is contiguous,
+            # so [B*L, N, H] is the same storage in the same order, and this
+            # scenario charges no layout conversion to either engine.
+            "q_titan_BLNH": [batch, seq, shape.n_heads, shape.head_dim],
+            "k_titan_BLNH": [batch, seq, shape.n_kv_heads, shape.head_dim],
+            "q_mcore_THD": [batch * seq, shape.n_heads, shape.head_dim],
+            "k_mcore_THD": [batch * seq, shape.n_kv_heads, shape.head_dim],
+            # The two spellings of one packing: positions is what titan's modules
+            # index with, cu_seqlens is what megatron's THD path derives the same
+            # positions from. The document count is a property of the seeded
+            # draw, so only the token total is derivable here.
             "positions": [batch, seq],
-            "table_rows": shape.max_seq_len,
+            "cu_seqlens_total": batch * seq,
+            # Titan precomputes a table of max_seq_len rows; megatron builds one
+            # of rotary_seq_len rows per step, which our driver pins to seq_len.
+            # Both cover every position, and neither number is the other's.
+            "titan_table_rows": shape.max_seq_len,
+            "mcore_freqs": [seq, 1, 1, shape.head_dim],
+            "rotated_rows": batch * seq * (shape.n_heads + shape.n_kv_heads),
         }
     if scenario_name == "swiglu":
         rows = batch * seq * shape.top_k
