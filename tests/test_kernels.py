@@ -2,6 +2,7 @@
 
 import contextlib
 import importlib
+import inspect
 import io
 import sys
 import unittest
@@ -150,6 +151,76 @@ class RegistryTests(unittest.TestCase):
         for arm in scenario.arms:
             self.assertEqual(arm.modes, ("forward", "forward_backward"))
             self.assertTrue(arm.compiled, arm.name)
+
+    def test_attention_core_arms(self) -> None:
+        scenario = KERNEL_SCENARIOS["attention_core"]
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            [
+                "mcore/base",
+                "mcore/attn_flash3",
+                "mcore/attn_unfused",
+                "titan",
+                "titan/flex_flash",
+                "titan/flash_attention_3",
+            ],
+        )
+        self.assertEqual(scenario.baseline_arm, "mcore/base")
+        for arm in scenario.arms:
+            # No isolated backward on either engine: TE's FusedAttnFunc and
+            # FlexAttention both need the forward to build the graph.
+            self.assertEqual(arm.modes, ("forward", "forward_backward"))
+            # The compile treatment is per arm and is not derivable from the
+            # engine, but at this scenario it happens to split by it: megatron
+            # compiles no whole layer, and all three titan modules compile.
+            self.assertEqual(arm.compiled, not arm.name.startswith("mcore/"))
+
+    def test_every_attention_core_arm_has_exactly_one_opponent(self) -> None:
+        """``reporting.py`` prints one comparison row per (arm, mode).
+
+        It builds ``{(row["arm"], row["mode"]): row}``, so a second opponent
+        for one arm overwrites the first and the table silently loses a row.
+        """
+        scenario = KERNEL_SCENARIOS["attention_core"]
+        opponents: dict[str, list[str]] = {}
+        for arm, against in scenario.comparison_pairs():
+            opponents.setdefault(arm, []).append(against)
+        for arm, against in opponents.items():
+            self.assertEqual(len(against), 1, f"{arm} -> {against}")
+        # Every arm but the anchor is compared, and nothing compares to itself.
+        self.assertEqual(
+            set(opponents),
+            {arm.name for arm in scenario.arms} - {scenario.baseline_arm},
+        )
+        for arm, (against,) in opponents.items():
+            self.assertNotEqual(arm, against)
+
+    def test_the_attention_core_registry_agrees_with_its_own_module(self) -> None:
+        """The two copies of the arm roster, pinned against each other.
+
+        ``operations/attention_core.py`` holds ``ARM_NAMES`` and the registry
+        repeats every name as a literal. A mutation pass showed what an
+        unpinned second copy costs: a builder wired to another arm's name
+        publishes that arm's kernel under this arm's label, and nothing here
+        noticed. ``BuilderWiringTests`` closes the builder side; this closes
+        the registry side.
+        """
+        from benchmarks.kernel.engine.run import resolve_symbol
+        from benchmarks.kernel.operations import attention_core
+
+        scenario = KERNEL_SCENARIOS["attention_core"]
+        self.assertEqual(
+            tuple(arm.name for arm in scenario.arms), attention_core.ARM_NAMES
+        )
+        for arm in scenario.arms:
+            with self.subTest(arm=arm.name):
+                builder = resolve_symbol(arm.builder)
+                self.assertIs(
+                    builder, getattr(attention_core, builder.__name__)
+                )
+                # The builder's own source must name the arm it is declared
+                # against, which is what makes a cross-wiring visible here.
+                self.assertIn(arm.name, inspect.getsource(builder))
 
     def test_builder_paths_resolve_without_importing_torch(self) -> None:
         # Both declaration modules must stay torch-free; the dotted paths just
