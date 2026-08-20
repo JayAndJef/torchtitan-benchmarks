@@ -332,11 +332,14 @@ def run_correctness_pass(
 
     **That claim stands, and the sentence that used to follow it does not.**
     It said no declared scenario needs a per-arm split. ``attention_core``
-    does, on any host that has cuDNN in ``/usr/lib64``, and its first run
+    does, on any host whose system cuDNN carries a lower minor version
+    than the one torch was compiled against (the test is
+    ``runtime_minor >= compile_minor``,
+    ``torch/backends/cudnn/__init__.py:54``), and its first run
     found this on 2026-08-20
     (``reports/20260820-attention_core-firstrun.md``). TransformerEngine
     binds the system cuDNN, torch then refuses to report a cuDNN version,
-    and ``torch.nn.attention.varlen`` asks for one on every call -- so the
+    and ``torch.nn.attention.varlen`` asks for one -- so the
     titan FA3 arm cannot build after a megatron arm in the same interpreter.
     The kernels never conflict; the version bookkeeping does, which is why
     the coexistence measurement did not see it.

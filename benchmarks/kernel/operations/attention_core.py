@@ -193,9 +193,15 @@ The mechanism, and every step of it was observed:
 * ``torch.backends.cudnn.version()`` then reports 9.23.2 and
   ``backends/cudnn/__init__.py`` raises, because torch wants
   ``runtime_minor >= compile_minor``.
-* ``torch.nn.attention.varlen`` asks for that version on every call
-  (``_should_use_cudnn``), so torchtitan's ``VarlenAttention`` cannot run in
-  a process that has imported TE.
+* ``torch.nn.attention.varlen`` asks for that version in
+  ``_should_use_cudnn``, which is ``@lru_cache``d (``varlen.py:29``) and so
+  asks once per device index. One raise is enough: torchtitan's
+  ``VarlenAttention`` cannot run in a process that has imported TE.
+
+The system library is ``libcudnn9-cuda-12`` (``rpm -qf``), so this is a
+**CUDA 12 build inside a cu13 process**. ``megatron_bootstrap.py:57``
+already sets ``CUDNN_FRONTEND_CUDART_LIB_NAME=libcudart.so.13`` for that
+same mismatch, arrived at independently and never connected to this.
 
 **cuDNN is the only library that splits.** ``libcublas``, ``libcublasLt``,
 ``libcudart`` and ``libnccl`` all resolve to the venv wheels in the same
@@ -210,9 +216,21 @@ Two workarounds exist and they are not equivalent. Prepending
 other change -- but it moves TE off the 9.23.2 every published megatron
 number was taken with, and no manifest records a cuDNN version, so that
 boundary would be invisible. ``PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1``
-leaves TE on 9.23.2 and only stops torch refusing to answer; it selects no
-kernel here, because ``_can_use_cudnn`` rejects this arm on ``enable_gqa``
-before the version is used. Do **not** initialize torch's cuDNN before TE
+leaves TE on 9.23.2 and only stops torch refusing to answer: the version
+read returns 92302 rather than raising
+(``torch/backends/cudnn/__init__.py:58``). It selects no kernel here, but
+**not** for the reason this file gave until 2026-08-20. The version read is
+the *first* test in ``_can_use_cudnn`` (``varlen.py:54``), not a later one,
+and the predicate that actually rejects this arm is the fourth,
+``window_size != [-1, -1]`` (``varlen.py:60``), because torchtitan passes
+``(-1, 0)``. ``enable_gqa`` is the fifth test and never decides it. The
+outcome holds and the gate values stand; the stated mechanism was wrong.
+
+**The flag is not confined to the process you set it in.**
+``benchmarks/execution/environment.py:56`` builds the child environment as
+``dict(environment or os.environ)``, so an exported flag reaches *every*
+worker. A timing run started from a shell that exports it publishes every
+number under it. Do **not** initialize torch's cuDNN before TE
 imports as a third option: that loads the wheel's ``libcudnn_graph.so.9``
 and leaves TE running a 9.24.0 graph engine against 9.23.2 ops, which is a
 combination nobody tests.
