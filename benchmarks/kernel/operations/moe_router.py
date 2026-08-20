@@ -72,7 +72,10 @@ autocast casts BOTH operands up, so ``F.linear`` materializes a full fp32
 copy of the ``[B, L, D]`` hidden state and runs an fp32 GEMM; megatron hands
 TE the **bf16** operands and asks only for an fp32 output
 (``moe_utils.py:1380-1381``; only the ``te_general_gemm is None`` fallback at
-``:1383-1388`` upcasts). Numerically that changes nothing -- a bf16 value
+``:1383-1388`` upcasts, and ``_assert_mcore_gating_gemm_takes_the_te_path``
+refuses to build a megatron arm on that branch, because
+``mcore_bytes_moved`` describes the TE branch and nothing else).
+Numerically that changes nothing -- a bf16 value
 upcasts to fp32 exactly, so the two GEMMs sum the same exact products and
 differ only in accumulation order. **In cost it changes everything this
 scenario measures**: the upcast is 4N bytes written and 4N read where the
@@ -385,7 +388,10 @@ def moe_router_inputs(
         # bf16 [B, L, D] hidden state is materialized as a full fp32 copy
         # before the GEMM runs. Megatron never does this -- router_gating_
         # linear hands TE the bf16 operands and asks only for an fp32 output
-        # (moe_utils.py:1380-1381).
+        # (moe_utils.py:1380-1381). That branch is not assumed: the torch.mm
+        # fallback at :1383-1388 makes the same fp32 copy, so
+        # _assert_mcore_gating_gemm_takes_the_te_path raises rather than let
+        # mcore_bytes_moved describe a path the arm did not run.
         #
         # So titan reads x (2N bytes), writes the fp32 copy (4N) and reads it
         # back in the mm (4N), which is 5 * x_bytes, plus its own three
@@ -1101,6 +1107,67 @@ def _assert_te_router_fusion_is_reachable(arm: str) -> None:
         )
 
 
+def _assert_mcore_gating_gemm_takes_the_te_path(arm: str, router: Any) -> None:
+    """Refuse a megatron arm whose gate GEMM would upcast BOTH operands.
+
+    ``mcore_bytes_moved`` is a DECLARED constant, and what it declares is the
+    TransformerEngine branch of ``RouterGatingLinearFunction.forward``
+    (``moe_utils.py:1380-1382``): TE receives the bf16 operands and returns an
+    fp32 output, so the arm reads the hidden state once.
+
+    The ``elif`` below it (``moe_utils.py:1383-1388``) is a different cost. It
+    runs ``inp.to(router_dtype)``, which materializes a full fp32 copy of the
+    ``[T, D]`` hidden state -- the same copy titan's autocast makes, and the
+    copy this scenario's headline finding says megatron does NOT make. On that
+    branch ``mcore_bytes_moved`` is about five times too small, so the GB/s
+    column is about five times too high, and the finding inverts from "titan
+    moves five times more" into "the two engines move the same". Nothing in a
+    run would say so, because the byte count is declared rather than measured.
+
+    **This is a cost guard and not a correctness guard.** A bf16 value upcasts
+    to fp32 exactly, so both branches sum the same products and differ only in
+    accumulation order. No gate can see the difference, which is why a guard
+    has to.
+
+    Both halves of megatron's own condition are checked, because both select
+    the same ``elif``:
+
+    * ``te_general_gemm is None``. Every fused symbol in ``moe_utils`` is
+      bound to ``None`` together when TransformerEngine does not import
+      (``moe_utils.py:35-61``), so a worker that cannot load TE takes the
+      fallback silently.
+    * ``router_dtype == torch.float64``. No profile sets it today -- ``BASE``
+      routes fp32 and ``ROUTER_BF16`` routes the input dtype -- and a future
+      fp64 profile would take the fallback with TE present.
+
+    The dtype is read off the BUILT config, the way ``Router.gating`` reads it
+    (``router.py:105-111``), rather than off the profile, so a delta that did
+    not take is caught here too.
+    """
+    from megatron.core.transformer.moe import moe_utils
+
+    if getattr(moe_utils, "te_general_gemm", None) is None:
+        raise RuntimeError(
+            f"{arm}: megatron bound te_general_gemm to None, so "
+            "RouterGatingLinearFunction takes the torch.mm fallback "
+            "(moe_utils.py:1383-1388). That branch upcasts BOTH operands and "
+            "materializes an fp32 copy of the hidden state, which is the copy "
+            "mcore_bytes_moved declares megatron does not make -- the GB/s and "
+            "x_floor columns would be about 5x wrong and this scenario's "
+            "cross-engine finding would invert. TransformerEngine must import "
+            "in this worker."
+        )
+    if router.config.moe_router_dtype == "fp64":
+        raise RuntimeError(
+            f"{arm}: moe_router_dtype is 'fp64', so "
+            "RouterGatingLinearFunction skips TE and takes the torch.mm "
+            "fallback (moe_utils.py:1380,1383-1388) even with "
+            "TransformerEngine present. That branch upcasts both operands, "
+            "which mcore_bytes_moved does not describe. Declare a byte count "
+            "for that path before measuring an fp64 router."
+        )
+
+
 def _release_untimed_moe_submodules(moe_layer: Any, arm: str) -> int:
     """Drop the expert weights, which this scenario never calls.
 
@@ -1165,6 +1232,7 @@ def _build_mcore_arm(
     moe_layer = _navigate(model, mcore_moe_layer_path())
     router = moe_layer.router
     notes = _assert_mcore_router(arm, moe_layer, router, shape)
+    _assert_mcore_gating_gemm_takes_the_te_path(arm, router)
     if profile.config_overrides.get("moe_router_fusion", False):
         _assert_te_router_fusion_is_reachable(arm)
 

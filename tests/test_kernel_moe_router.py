@@ -44,6 +44,7 @@ import torch
 import torch.nn as nn
 
 from benchmarks.kernel.operations.moe_router import (
+    _assert_mcore_gating_gemm_takes_the_te_path,
     _assert_mcore_router,
     _assert_te_router_fusion_is_reachable,
     _assert_titan_router_config,
@@ -981,6 +982,67 @@ class WeightMapTests(unittest.TestCase):
                 mcore_transformer_layer_path() + "."
             )
         )
+
+
+class GatingGemmPathTests(unittest.TestCase):
+    """The branch ``mcore_bytes_moved`` describes, and the one it does not.
+
+    ``RouterGatingLinearFunction.forward`` has two branches that compute the
+    same numbers at different costs, so no correctness gate separates them.
+    The guard is the only thing that can.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not _megatron_available():
+            raise unittest.SkipTest(
+                "the pinned Megatron-LM submodule is not checked out"
+            )
+
+    def test_a_gate_gemm_that_would_upcast_both_operands_is_refused(
+        self,
+    ) -> None:
+        """The cost claim this scenario is built on, made checkable.
+
+        With ``te_general_gemm`` unbound, ``RouterGatingLinearFunction`` takes
+        the ``torch.mm`` fallback, which upcasts both operands and makes the
+        fp32 copy of the hidden state that ``mcore_bytes_moved`` declares
+        megatron does not make. The numbers stay right and the byte count goes
+        about 5x wrong, so only a guard can see it.
+        """
+        from megatron.core.transformer.moe import moe_utils
+
+        _, router = _fake_mcore_router(MCORE_BASE_ARM_NAME)
+        with mock.patch.object(moe_utils, "te_general_gemm", None):
+            with self.assertRaises(RuntimeError) as caught:
+                _assert_mcore_gating_gemm_takes_the_te_path(
+                    MCORE_BASE_ARM_NAME, router
+                )
+        message = str(caught.exception)
+        self.assertIn("te_general_gemm", message)
+        self.assertIn("mcore_bytes_moved", message)
+
+    def test_an_fp64_router_is_refused_even_with_te_present(self) -> None:
+        """The second half of megatron's own condition, which selects the same
+        fallback. No profile sets fp64 today; one that did would upcast with
+        TransformerEngine present and loaded."""
+        _, router = _fake_mcore_router(MCORE_BASE_ARM_NAME)
+        router.config.moe_router_dtype = "fp64"
+        with self.assertRaises(RuntimeError) as caught:
+            _assert_mcore_gating_gemm_takes_the_te_path(
+                MCORE_BASE_ARM_NAME, router
+            )
+        self.assertIn("fp64", str(caught.exception))
+
+    def test_the_declared_arms_pass_the_gate_gemm_guard(self) -> None:
+        """Non-vacuity: the guard must accept what the registry declares.
+
+        A guard that refused every arm would also pass the two tests above.
+        """
+        for arm in MCORE_ARM_PROFILES:
+            with self.subTest(arm=arm):
+                _, router = _fake_mcore_router(arm)
+                _assert_mcore_gating_gemm_takes_the_te_path(arm, router)
 
 
 class TeFusionReachabilityTests(unittest.TestCase):
