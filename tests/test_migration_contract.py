@@ -177,13 +177,35 @@ KERNEL_BASELINE_ARMS = {
 # Arm names deliberately match across the two registries wherever the same
 # implementation is measured at two scopes (CLAUDE.md, "Scenarios and arms").
 # copy_floor is a bandwidth floor with no end-to-end counterpart.
+#
+# **Only a single-engine kernel scenario can appear here.** The pairing means
+# "one roster, measured at two scopes", and a cross-engine scenario has no
+# such roster: its arms are named ``engine/profile`` and half of them are
+# megatron, which the e2e side spells piper1b_megatron/baseline rather than
+# piper1b_<family>/<arm>. That is why none of embedding_stage, qkv_prep,
+# qk_norm, attn_out_proj, ffn_norm, final_norm, cross_entropy, attn_residual,
+# moe_residual or lm_head_projection is listed.
+#
+# ``rope`` left this table when it became cross-engine. Its kernel arms are
+# now mcore/base, mcore/no_rope_fusion, titan, titan/helion and titan/te,
+# against an e2e piper1b_rope that still runs baseline, helion and te. The
+# two are no longer one roster, so the map stops claiming they are. The e2e
+# ids are deliberately NOT renamed to match: they name directories under
+# out/, keys in every manifest.json and results.json, and every published
+# rope number, and this file's own section 1 requires them to survive byte
+# for byte.
 KERNEL_TO_E2E_SCENARIO = {
-    "rope": "piper1b_rope",
     "swiglu": "piper1b_swiglu",
     "qkv": "piper1b_qkv",
     "lm_head": "piper1b_lm_head",
     "attention": "piper1b_attention",
 }
+# A bandwidth floor has no end-to-end counterpart, so it is excluded from the
+# pairing above. No scenario the map still holds declares one today -- rope
+# was the last, and it left with copy_floor -- so the subtraction is empty
+# until a mapped scenario adds a floor. The rule is kept rather than the
+# set widened: KERNEL_ONLY_ARMS means "a floor", and it may never be used to
+# absorb an arm a rename left unpaired.
 KERNEL_ONLY_ARMS = frozenset({"copy_floor"})
 
 
