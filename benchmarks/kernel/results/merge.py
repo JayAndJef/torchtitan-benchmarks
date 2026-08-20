@@ -1,4 +1,11 @@
-"""Assemble one scenario's results from the fragments its workers wrote.
+"""Assemble one measurement unit's results from its workers' fragments.
+
+A **scenario** cuts the model at one boundary and ranks the implementations
+there; a **span** fuses across a cut, so it is declared over an ordered
+scenario range and its claim is the span against the **sum of the scenarios
+it replaces**. Both are merged here, and they share ``_assemble_arms``:
+an arm is an arm either way. What differs is the second total, which only
+``merge_kernel_span_fragments`` assembles.
 
 Per-arm process isolation means no single process ever holds the whole
 scenario: one worker gates every arm for correctness, and each timing worker
@@ -47,7 +54,7 @@ replicates carry ``None``. The merge reads them from that fragment alone.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from statistics import median
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -56,16 +63,20 @@ from benchmarks.artifacts.summaries import summarize
 from benchmarks.kernel.engine.statistics import (
     KERNEL_SIGNIFICANCE_METHODOLOGY,
     kernel_comparison,
+    span_comparison,
 )
 from benchmarks.kernel.results.schema import (
     ArmResult,
     CorrectnessResult,
     KernelScenarioResult,
+    KernelSpanResult,
     ModeResult,
+    SpanPartResult,
 )
 from benchmarks.kernel.schema import (
     CORRECTNESS_FRAGMENT_KIND,
     KernelScenario,
+    KernelSpan,
     KernelWorkload,
     MODES,
     shape_summary,
@@ -110,6 +121,29 @@ KERNEL_MEASUREMENT_METHODOLOGY = {
     "gc_paused_during_timing": True,
     "first_burst_discarded": True,
     "units": "microseconds",
+}
+
+
+# What a span file says about its own second total, beside the numbers. A
+# reader of the printed table sees the caption; a reader of the file sees
+# this.
+KERNEL_SPAN_METHODOLOGY = {
+    "span_claim": "span_against_the_sum_of_the_scenarios_it_replaces",
+    "span_parts_note": (
+        "the parts total is summed at the REPLICATE level: per replicate it "
+        "is the sum of each part arm's median in that replicate. Samples are "
+        "not paired across scenarios -- sample i of one and sample i of the "
+        "next are unrelated bursts from different sweeps -- so an "
+        "element-wise sum would invent a pairing that does not exist. The "
+        "span and its parts were measured in separate sweeps of ONE run, so "
+        "replicate r of each shares an index but not a moment: drift between "
+        "the sweeps lands in the ratio instead of cancelling. Every interval "
+        "on a parts_comparisons row is therefore published as cross_sweep_ "
+        "and never under the honest name. Welch, Mann-Whitney and Cohen's d "
+        "are absent from those rows on purpose: the parts side is one summed "
+        "value per replicate, and a two-sample test between it and the "
+        "span's pooled bursts is a diagnostic of nothing."
+    ),
 }
 
 
@@ -275,46 +309,41 @@ def _burst_residual(
     return (penultimate - last) / last
 
 
-def merge_kernel_fragments(
-    *,
-    scenario: KernelScenario,
-    shape: PiperShape,
-    workload: KernelWorkload,
-    hardware: str,
-    replicates: int,
-    samples_per_replicate: int,
-    burst_k: int,
-    warmup_calls: int,
-    seed: int,
-    correctness: dict[str, Any],
-    timings: Sequence[dict[str, Any]],
-    timings_ran: bool = True,
-    skipped: Mapping[str, str] = MappingProxyType({}),
-    replicates_per_process: int = 1,
-) -> KernelScenarioResult:
-    """Build the scenario result from one correctness and N timing fragments.
+@dataclass(frozen=True)
+class AssembledArms:
+    """What both merges get out of one unit's timing fragments.
 
-    Raises ``ValueError`` when the anchor arm has no complete replicate set,
-    when it was skipped, or when every replicate it did write is empty: every
-    comparison is a ratio against it, so there is nothing coherent to write.
-
-    ``timings_ran=False`` records a scenario whose gates failed, so no timing
-    worker was ever launched. The file still carries the correctness rows --
-    a failed gate is the result -- and ``replicates`` still records what was
-    requested rather than the zero that ran, because the request is what the
-    reader needs in order to repeat it.
-
-    ``skipped`` maps an arm this host never launched to the reason. The arm
-    still appears in the file, with ``status="skipped"``, because an absent
-    arm and an undeclared arm read identically.
+    ``samples`` is replicate-major per arm per mode and is what every
+    comparison reads. ``arm_results`` is the roster the file publishes,
+    every declared arm in declaration order with its status.
     """
-    _require_kind(correctness, CORRECTNESS_FRAGMENT_KIND)
-    if scenario.baseline_arm in skipped:
-        raise ValueError(
-            f"{scenario.name}: the anchor arm {scenario.baseline_arm!r} was "
-            f"skipped ({skipped[scenario.baseline_arm]}). Every comparison "
-            "is a ratio against it, so no results are written."
-        )
+
+    arm_results: dict[str, ArmResult]
+    samples: dict[str, dict[str, list[list[float]]]]
+    warnings: list[str]
+
+
+def _assemble_arms(
+    unit: KernelScenario | KernelSpan,
+    *,
+    replicates: int,
+    timings: Sequence[dict[str, Any]],
+    timings_ran: bool,
+    skipped: Mapping[str, str],
+) -> AssembledArms:
+    """Turn one unit's fragments into a roster and its samples.
+
+    Shared by the scenario merge and the span merge, because an arm is an
+    arm: a span's arms carry the same statuses, the same modes, the same
+    declared compile treatment and the same anchor rule. What differs is
+    only what surrounds them, which is why the two merges stay separate
+    functions below.
+
+    ``unit`` is a ``KernelScenario`` or a ``KernelSpan``. Only ``name``,
+    ``arms``, ``baseline_arm`` and ``arm()`` are read, and ``KernelSpan``
+    forwards all four -- it is not a ``KernelScenario`` and must never be
+    handed to something that expects one.
+    """
     grouped = _by_arm(timings)
     warnings: list[str] = []
     if not timings_ran:
@@ -325,7 +354,7 @@ def merge_kernel_fragments(
 
     complete: dict[str, list[dict[str, Any]]] = {}
     lost: dict[str, str] = {}
-    for arm in scenario.arms if timings_ran else ():
+    for arm in unit.arms if timings_ran else ():
         if arm.name in skipped:
             continue
         ordered = _ordered_replicates(grouped.get(arm.name, {}), replicates)
@@ -335,9 +364,9 @@ def merge_kernel_fragments(
                 f"{found} of {replicates} replicates produced a fragment, so "
                 "this arm carries no timings"
             )
-            if arm.name == scenario.baseline_arm:
+            if arm.name == unit.baseline_arm:
                 raise ValueError(
-                    f"{scenario.name}: the anchor arm {arm.name!r} produced "
+                    f"{unit.name}: the anchor arm {arm.name!r} produced "
                     f"{found} of {replicates} replicates. Every comparison is "
                     "a ratio against it, so no results are written rather "
                     "than a table with no ratios in it."
@@ -357,9 +386,9 @@ def merge_kernel_fragments(
     # simply vanished. ``--samples-per-replicate 0`` reaches this state, and
     # so does a declared mode the timing pass never times.
     unmeasured = {name for name, modes in samples.items() if not modes}
-    if scenario.baseline_arm in unmeasured:
+    if unit.baseline_arm in unmeasured:
         raise ValueError(
-            f"{scenario.name}: the anchor arm {scenario.baseline_arm!r} "
+            f"{unit.name}: the anchor arm {unit.baseline_arm!r} "
             "produced no samples in any declared mode. Every comparison is a "
             "ratio against it, so no results are written rather than a table "
             "with no ratios in it."
@@ -367,9 +396,7 @@ def merge_kernel_fragments(
     # Declared, not reported by the fragment: a floor is a property of the
     # arm the registry describes, and the x-floor column belongs to a reader
     # who has the registry and no GPU.
-    floor_arms = {
-        name for name in complete if scenario.arm(name).is_floor
-    }
+    floor_arms = {name for name in complete if unit.arm(name).is_floor}
     floor_medians = {
         mode: median(value for replicate in modes[mode] for value in replicate)
         for name, modes in samples.items()
@@ -381,7 +408,7 @@ def merge_kernel_fragments(
     # host could not run and an arm the registry never declared must not read
     # the same way, and at schema 3 both were simply absent.
     arm_results: dict[str, ArmResult] = {}
-    for declaration in scenario.arms:
+    for declaration in unit.arms:
         name = declaration.name
         if name not in complete:
             if name in skipped:
@@ -447,15 +474,28 @@ def merge_kernel_fragments(
             compiled=declaration.compiled,
             eager_reason=declaration.eager_reason,
         )
+    return AssembledArms(
+        arm_results=arm_results, samples=samples, warnings=warnings
+    )
 
-    # Which rows exist is declared by the scenario, never inferred here. A
-    # scenario whose two sides are not a like-for-like cut says so by
-    # declaring no pair, and this loop then writes no ratio -- where the
-    # former per-arm ``compare_to`` could only redirect a row, not decline
-    # one. An arm absent from ``samples`` was already warned about above, or
-    # the gates failed and nothing was timed.
+
+def _within_unit_comparisons(
+    unit: KernelScenario | KernelSpan,
+    samples: dict[str, dict[str, list[list[float]]]],
+    warnings: list[str],
+    replicates_per_process: int,
+) -> list[dict[str, Any]]:
+    """The declared arm-against-arm rows, for a scenario or inside a span.
+
+    Which rows exist is declared by the unit, never inferred here. A unit
+    whose two sides are not a like-for-like cut says so by declaring no
+    pair, and this loop then writes no ratio -- where the former per-arm
+    ``compare_to`` could only redirect a row, not decline one. An arm absent
+    from ``samples`` was already warned about, or the gates failed and
+    nothing was timed.
+    """
     comparisons: list[dict[str, Any]] = []
-    for arm_name, opponent in scenario.comparison_pairs():
+    for arm_name, opponent in unit.comparison_pairs():
         if arm_name not in samples:
             continue
         if opponent not in samples:
@@ -488,6 +528,60 @@ def merge_kernel_fragments(
             if replicates_per_process > 1:
                 _rename_degraded_ci(row)
             comparisons.append(row)
+    return comparisons
+
+
+def merge_kernel_fragments(
+    *,
+    scenario: KernelScenario,
+    shape: PiperShape,
+    workload: KernelWorkload,
+    hardware: str,
+    replicates: int,
+    samples_per_replicate: int,
+    burst_k: int,
+    warmup_calls: int,
+    seed: int,
+    correctness: dict[str, Any],
+    timings: Sequence[dict[str, Any]],
+    timings_ran: bool = True,
+    skipped: Mapping[str, str] = MappingProxyType({}),
+    replicates_per_process: int = 1,
+) -> KernelScenarioResult:
+    """Build the scenario result from one correctness and N timing fragments.
+
+    Raises ``ValueError`` when the anchor arm has no complete replicate set,
+    when it was skipped, or when every replicate it did write is empty: every
+    comparison is a ratio against it, so there is nothing coherent to write.
+
+    ``timings_ran=False`` records a scenario whose gates failed, so no timing
+    worker was ever launched. The file still carries the correctness rows --
+    a failed gate is the result -- and ``replicates`` still records what was
+    requested rather than the zero that ran, because the request is what the
+    reader needs in order to repeat it.
+
+    ``skipped`` maps an arm this host never launched to the reason. The arm
+    still appears in the file, with ``status="skipped"``, because an absent
+    arm and an undeclared arm read identically.
+    """
+    _require_kind(correctness, CORRECTNESS_FRAGMENT_KIND)
+    if scenario.baseline_arm in skipped:
+        raise ValueError(
+            f"{scenario.name}: the anchor arm {scenario.baseline_arm!r} was "
+            f"skipped ({skipped[scenario.baseline_arm]}). Every comparison "
+            "is a ratio against it, so no results are written."
+        )
+    assembled = _assemble_arms(
+        scenario,
+        replicates=replicates,
+        timings=timings,
+        timings_ran=timings_ran,
+        skipped=skipped,
+    )
+    warnings = assembled.warnings
+    comparisons = _within_unit_comparisons(
+        scenario, assembled.samples, warnings, replicates_per_process
+    )
 
     return KernelScenarioResult(
         scenario=scenario.name,
@@ -501,7 +595,7 @@ def merge_kernel_fragments(
         burst_k=burst_k,
         warmup_calls=warmup_calls,
         seed=seed,
-        arms=arm_results,
+        arms=assembled.arm_results,
         comparisons=comparisons,
         correctness=[
             CorrectnessResult(**row) for row in correctness["rows"]
@@ -515,4 +609,237 @@ def merge_kernel_fragments(
         environment=dict(correctness["environment"]),
         warnings=tuple(warnings),
         description=scenario.description
+    )
+
+
+@dataclass(frozen=True)
+class MeasuredScenario:
+    """One enclosed scenario's result, and where it was written.
+
+    The path travels with the result because the span file records it: the
+    parts total is a number that file did not take, so a reader needs to be
+    told where it came from.
+    """
+
+    result: KernelScenarioResult
+    results_path: str
+
+
+def _part_replicate_medians(
+    arm: ArmResult, replicates: int, label: str
+) -> dict[str, tuple[float, ...]]:
+    """One part arm's per-replicate median, per mode.
+
+    Raises on a replicate count that does not match the span's. One
+    ``KernelRunRequest`` produces both sides of a span, so the counts cannot
+    differ unless two runs were assembled by hand -- and index ``r`` would
+    then pair two different replicates, which is the one thing the pairing
+    exists to prevent. That is a wiring error rather than a data condition,
+    so it raises rather than warning.
+    """
+    medians: dict[str, tuple[float, ...]] = {}
+    for mode, result in arm.modes.items():
+        if len(result.replicates_us) != replicates:
+            raise ValueError(
+                f"{label} measured {len(result.replicates_us)} replicates of "
+                f"{mode!r} against the span's {replicates}. A span and its "
+                "parts are paired by replicate index, so two different counts "
+                "cannot be summed."
+            )
+        medians[mode] = tuple(
+            median(replicate) for replicate in result.replicates_us
+        )
+    return medians
+
+
+def _span_parts(
+    span: KernelSpan,
+    arm_name: str,
+    parts: Mapping[str, MeasuredScenario],
+    replicates: int,
+    warnings: list[str],
+) -> tuple[SpanPartResult, ...] | None:
+    """Every term of one span arm's parts total, or None if one is missing.
+
+    A missing term is warned about and costs that arm its claim. It does not
+    cost the span its other arms, and it does not cost the span its
+    within-span comparisons -- those are measured entirely inside the span
+    and are unaffected by a scenario that failed elsewhere in the run. This
+    mirrors the scenario merge, where a missing *opponent* costs one row and
+    a missing *anchor* costs the file.
+    """
+    collected: list[SpanPartResult] = []
+    for scenario_name, part_arm in span.parts_for(arm_name):
+        measured = parts.get(scenario_name)
+        if measured is None:
+            warnings.append(
+                f"{arm_name}: the enclosed scenario {scenario_name!r} "
+                "produced no results, so this arm carries no parts total"
+            )
+            return None
+        part = measured.result.arms.get(part_arm)
+        if part is None or part.status != "ok":
+            state = "is absent" if part is None else f"is {part.status}"
+            warnings.append(
+                f"{arm_name}: its part {scenario_name}/{part_arm} {state}, "
+                "so this arm carries no parts total"
+            )
+            return None
+        collected.append(
+            SpanPartResult(
+                scenario=scenario_name,
+                arm=part_arm,
+                replicate_medians_us=_part_replicate_medians(
+                    part, replicates, f"{scenario_name}/{part_arm}"
+                ),
+                results_path=measured.results_path,
+            )
+        )
+    return tuple(collected)
+
+
+def merge_kernel_span_fragments(
+    *,
+    span: KernelSpan,
+    shape: PiperShape,
+    workload: KernelWorkload,
+    hardware: str,
+    replicates: int,
+    samples_per_replicate: int,
+    burst_k: int,
+    warmup_calls: int,
+    seed: int,
+    correctness: dict[str, Any],
+    timings: Sequence[dict[str, Any]],
+    parts: Mapping[str, MeasuredScenario],
+    timings_ran: bool = True,
+    skipped: Mapping[str, str] = MappingProxyType({}),
+    replicates_per_process: int = 1,
+) -> KernelSpanResult:
+    """Build a span result: the span's own measurement, and the parts sum.
+
+    The span's arms are merged exactly as a scenario's are -- same fragments,
+    same statuses, same anchor rule -- and then the second total is assembled
+    from ``parts``, which holds the results of the scenarios the span
+    replaces. **They come from the same run.** One ``KernelRunRequest``
+    produced both sides, so the hardware, shape, workload, seed, ``burst_k``,
+    replicate count, NUMA pinning and ``benchmarks_git_rev`` are identical by
+    construction rather than by a re-check. Re-reading an older run's
+    ``results.json`` would have made every one of those a thing to verify,
+    and would have left the ratio with no replicate pairing at all.
+
+    Raises when **no** span arm gets a parts total. A span whose claim is
+    missing for every arm is a scenario wearing a span's name, and a file
+    that states neither total's ratio reads like a span that declared none --
+    which is the same failure anchor loss raises for above.
+    """
+    _require_kind(correctness, CORRECTNESS_FRAGMENT_KIND)
+    if span.baseline_arm in skipped:
+        raise ValueError(
+            f"{span.name}: the anchor arm {span.baseline_arm!r} was "
+            f"skipped ({skipped[span.baseline_arm]}). Every within-span "
+            "comparison is a ratio against it, so no results are written."
+        )
+    assembled = _assemble_arms(
+        span,
+        replicates=replicates,
+        timings=timings,
+        timings_ran=timings_ran,
+        skipped=skipped,
+    )
+    warnings = assembled.warnings
+    comparisons = _within_unit_comparisons(
+        span, assembled.samples, warnings, replicates_per_process
+    )
+
+    span_parts: dict[str, tuple[SpanPartResult, ...]] = {}
+    parts_comparisons: list[dict[str, Any]] = []
+    for arm_name, modes in assembled.samples.items():
+        if not modes:
+            continue
+        collected = _span_parts(span, arm_name, parts, replicates, warnings)
+        if collected is None:
+            continue
+        span_parts[arm_name] = collected
+        for mode, replicate_samples in modes.items():
+            absent = [
+                part.scenario
+                for part in collected
+                if mode not in part.replicate_medians_us
+            ]
+            if absent:
+                # Refused at declaration time by ``validate_span_parts``, so
+                # reaching this means a part measured less than it declared.
+                # That is a per-mode absence rather than a lost measurement,
+                # so it costs the row and not the arm.
+                warnings.append(
+                    f"{arm_name}: no {mode} in {', '.join(absent)}, so that "
+                    "mode's parts total would sum fewer terms than the range "
+                    "holds and no row is written"
+                )
+                continue
+            totals = [
+                sum(
+                    part.replicate_medians_us[mode][index]
+                    for part in collected
+                )
+                for index in range(replicates)
+            ]
+            row: dict[str, Any] = {
+                "arm": arm_name,
+                "mode": mode,
+                # Named, not implied: a reader must be able to re-derive the
+                # sum without the registry.
+                "parts": [
+                    f"{part.scenario}/{part.arm}" for part in collected
+                ],
+            }
+            row.update(span_comparison(totals, replicate_samples))
+            parts_comparisons.append(row)
+
+    if not span_parts:
+        raise ValueError(
+            f"{span.name}: no arm carries a parts total, so this file would "
+            "state the span's own number and no claim about it. A span "
+            "measures itself against the sum of "
+            f"{', '.join(span.scenarios)}; without that sum there is nothing "
+            "a span says that a scenario does not."
+        )
+
+    return KernelSpanResult(
+        span=span.name,
+        scenarios=span.scenarios,
+        hardware=hardware,
+        model_size=shape.name,
+        model_shape=shape.describe(seq_len=workload.seq_len),
+        workload=asdict(workload),
+        # Keyed by enclosed scenario. A span's inputs are the first cut's and
+        # its outputs are the last cut's, so no single entry describes it and
+        # ``shape_summary`` knows scenario names only.
+        shapes={
+            name: shape_summary(name, shape, workload)
+            for name in span.scenarios
+        },
+        replicates=replicates,
+        samples_per_replicate=samples_per_replicate,
+        burst_k=burst_k,
+        warmup_calls=warmup_calls,
+        seed=seed,
+        arms=assembled.arm_results,
+        parts=span_parts,
+        comparisons=comparisons,
+        parts_comparisons=parts_comparisons,
+        correctness=[
+            CorrectnessResult(**row) for row in correctness["rows"]
+        ],
+        all_correctness_passed=bool(correctness["all_passed"]),
+        methodology={
+            **KERNEL_SIGNIFICANCE_METHODOLOGY,
+            **KERNEL_MEASUREMENT_METHODOLOGY,
+            **_isolation(replicates_per_process),
+            **KERNEL_SPAN_METHODOLOGY,
+        },
+        environment=dict(correctness["environment"]),
+        warnings=tuple(warnings),
+        description=span.description,
     )

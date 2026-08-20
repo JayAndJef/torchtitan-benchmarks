@@ -944,7 +944,12 @@ TEST_CENSUS = {
     # and not a scenario, its two totals live in separate fields, its
     # claim is a separate list from the within-span comparisons, and
     # each kind of file refuses the other's reader.
-    "test_kernel_spans": 25,
+    # +10 with the merge: that the parts total is summed per replicate,
+    # that the breakdown reaches the file, that the claim carries a
+    # renamed interval and no two-sample test, that a missing part
+    # costs one arm its claim, and that a span with no claim at all
+    # is refused.
+    "test_kernel_spans": 35,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them. +3 for
@@ -1152,7 +1157,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 990
+TEST_CENSUS_TOTAL = 1000
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

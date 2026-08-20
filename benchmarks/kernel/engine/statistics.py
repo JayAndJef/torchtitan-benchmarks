@@ -121,6 +121,74 @@ def bootstrap_ratio_ci(
     }
 
 
+def span_comparison(
+    parts_per_replicate: list[float], span_replicates: list[list[float]]
+) -> dict[str, float | int | None]:
+    """A span against the sum of the scenarios it replaces.
+
+    A span is an implementation that fuses across a scenario cut, so its
+    claim is not an arm against an arm. One side of it is a **sum over
+    scenarios** and has no arm, no samples and no distribution of its own:
+    per replicate it is the sum of each part arm's median in that replicate.
+
+    Three consequences, and each is why this is a separate function rather
+    than a call into ``kernel_comparison``.
+
+    * **The interval is renamed.** The span and its parts are measured in
+      separate sweeps of one run, so replicate ``r`` of each shares an index
+      but not a moment. Drift between the sweeps lands in the ratio instead
+      of cancelling, which is a weaker pairing than a scenario's
+      replicate-major sweep gives. So the interval and the spread are
+      published as ``cross_sweep_``, and a reader of ``ratio_ci_low`` finds
+      nothing rather than a number taken under weaker conditions. The point
+      estimates keep their honest names: drift is a source of error in them,
+      not a redefinition of them, which is the same call the within-process
+      rename makes.
+    * **Welch, Mann-Whitney and Cohen's d are absent.** The parts side is one
+      summed value per replicate -- five numbers at the default -- against
+      the span's pooled bursts, which are two hundred. A two-sample test
+      between five synthetic sums and two hundred raw bursts is not a
+      distribution diagnostic of anything. Their absence is by construction
+      here, so no later edit can restore them by forgetting to delete them.
+    * **The sum is at the replicate level, never the sample level.** Sample
+      ``i`` of one scenario and sample ``i`` of the next are unrelated bursts
+      from different sweeps; adding them element-wise would invent a pairing
+      that does not exist.
+
+    A ratio below 1.0 says the span costs less than the sum of the cuts it
+    replaces, which is the claim a span exists to make.
+    """
+    base = [[value] for value in parts_per_replicate]
+    interval = bootstrap_ratio_ci(_log_ratios(base, span_replicates))
+    parts_median = statistics.median(parts_per_replicate) if base else None
+    span_medians = [
+        statistics.median(replicate)
+        for replicate in span_replicates
+        if replicate
+    ]
+    span_median = statistics.median(span_medians) if span_medians else None
+    return {
+        "n_replicates": interval["replicates"],
+        # Both sides read the same way: the median across replicates of that
+        # replicate's own value. The parts side has no pooled samples to take
+        # a pooled median over, so using one on the span side would compare
+        # two different estimators.
+        "span_median_us": span_median,
+        "parts_median_us": parts_median,
+        "median_ratio": (
+            span_median / parts_median
+            if span_median is not None and parts_median
+            else None
+        ),
+        "ratio": interval["ratio"],
+        "cross_sweep_ratio_ci_low": interval["ratio_ci_low"],
+        "cross_sweep_ratio_ci_high": interval["ratio_ci_high"],
+        "cross_sweep_replicate_ratio_spread": interval[
+            "replicate_ratio_spread"
+        ],
+    }
+
+
 def kernel_comparison(
     base_replicates: list[list[float]], arm_replicates: list[list[float]]
 ) -> dict[str, float | int | None]:

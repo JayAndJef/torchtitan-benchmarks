@@ -24,6 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.summaries import summarize
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
+from benchmarks.kernel.results.merge import (
+    MeasuredScenario,
+    merge_kernel_span_fragments,
+)
 from benchmarks.kernel.results.schema import (
     ArmResult,
     CorrectnessResult,
@@ -36,10 +40,13 @@ from benchmarks.kernel.results.schema import (
     write_kernel_results,
 )
 from benchmarks.kernel.schema import (
+    CORRECTNESS_FRAGMENT_KIND,
     KernelArm,
     KernelScenario,
     KernelSpan,
     SpanParts,
+    TIMING_FRAGMENT_KIND,
+    resolve_shape_and_workload,
     validate_span_parts,
 )
 from benchmarks.kernel.spans import KERNEL_SPANS, kernel_span_by_name
@@ -559,6 +566,305 @@ class SpanResultsSchemaTests(unittest.TestCase):
                     path.write_text(json.dumps(payload))
                     with self.assertRaisesRegex(ValueError, "unsupported"):
                         load_kernel_results(path)
+
+
+
+SPAN_REPLICATES = 3
+
+
+def span_correctness_fragment() -> dict:
+    return {
+        "kind": CORRECTNESS_FRAGMENT_KIND,
+        "scenario": "test_expert_combine",
+        "rows": [],
+        "all_passed": True,
+        "environment": {"device": "Test GPU", "torch_version": "test"},
+    }
+
+
+def span_timing_fragment(arm: str, replicate: int, value: float) -> dict:
+    return {
+        "kind": TIMING_FRAGMENT_KIND,
+        "scenario": "test_expert_combine",
+        "arm": arm,
+        "replicate": replicate,
+        "modes": {
+            mode: [value, value]
+            for mode in ("forward", "forward_backward")
+        },
+        "bytes_moved": None,
+        "peak_memory_gib": 1.5 if replicate == 0 else None,
+        "burst_us_per_call": None,
+    }
+
+
+def measured_part(
+    scenario: str, arm: str, per_replicate: tuple[float, ...]
+) -> KernelScenarioResult:
+    """A part scenario's result, carrying one arm at known per-replicate values."""
+    modes = {
+        mode: ModeResult(
+            summary=summarize([value for value in per_replicate]),
+            replicates_us=tuple((value, value) for value in per_replicate),
+        )
+        for mode in ("forward", "forward_backward")
+    }
+    return KernelScenarioResult(
+        scenario=scenario,
+        hardware="test-gpu",
+        model_size="normal",
+        model_shape={"name": "normal"},
+        workload={"batch": 4, "seq_len": 1024},
+        shapes={},
+        replicates=len(per_replicate),
+        samples_per_replicate=2,
+        burst_k=16,
+        warmup_calls=1,
+        seed=0,
+        arms={arm: ArmResult(name=arm, modes=modes)},
+        comparisons=[],
+        correctness=[],
+        all_correctness_passed=True,
+        methodology={},
+        environment={},
+    )
+
+
+def merge_span(
+    *,
+    span: KernelSpan | None = None,
+    timings: list[dict] | None = None,
+    parts: dict[str, MeasuredScenario] | None = None,
+    replicates: int = SPAN_REPLICATES,
+):
+    shape, workload = resolve_shape_and_workload()
+    if timings is None:
+        # Values that drift with the replicate, so the within-span
+        # comparison is not a test between two identical samples, and so a
+        # mis-paired replicate would change the answer rather than
+        # reproduce it.
+        timings = [
+            span_timing_fragment(
+                arm,
+                replicate,
+                (30.0 if arm == "mcore/base" else 36.0) + replicate,
+            )
+            for replicate in range(replicates)
+            for arm in ("mcore/base", "titan")
+        ]
+    if parts is None:
+        parts = {
+            "expert_mlp": MeasuredScenario(
+                result=measured_part(
+                    "expert_mlp",
+                    "mcore/base",
+                    tuple(20.0 + 0.6 * r for r in range(replicates)),
+                ),
+                results_path="out/x/kernels/expert_mlp/hw/results.json",
+            ),
+            "moe_combine": MeasuredScenario(
+                result=measured_part(
+                    "moe_combine",
+                    "mcore/base",
+                    tuple(10.0 + 0.4 * r for r in range(replicates)),
+                ),
+                results_path="out/x/kernels/moe_combine/hw/results.json",
+            ),
+        }
+    return merge_kernel_span_fragments(
+        span=span or make_span(),
+        shape=shape,
+        workload=workload,
+        hardware="test-gpu",
+        replicates=replicates,
+        samples_per_replicate=2,
+        burst_k=16,
+        warmup_calls=1,
+        seed=0,
+        correctness=span_correctness_fragment(),
+        timings=timings,
+        parts=parts,
+    )
+
+
+class SpanMergeTests(unittest.TestCase):
+    """The parent assembles the second total, from the same run's scenarios."""
+
+    def test_the_parts_total_is_the_sum_of_the_scenarios(self) -> None:
+        """(20.0 + 0.6r) + (10.0 + 0.4r) against a span of 30.0 + r.
+
+        The two sides agree replicate by replicate, so the ratio is 1.0 --
+        the honest verdict on a span that costs exactly what its cuts cost
+        separately. It reads 1.0 only if the sum is taken per replicate; a
+        mis-paired index would not.
+        """
+        result = merge_span()
+        row = next(
+            row
+            for row in result.parts_comparisons
+            if row["arm"] == "mcore/base" and row["mode"] == "forward"
+        )
+        self.assertAlmostEqual(row["parts_median_us"], 31.0)
+        self.assertAlmostEqual(row["span_median_us"], 31.0)
+        self.assertAlmostEqual(row["median_ratio"], 1.0)
+        self.assertAlmostEqual(row["ratio"], 1.0)
+        self.assertEqual(row["n_replicates"], SPAN_REPLICATES)
+        self.assertEqual(
+            row["parts"], ["expert_mlp/mcore/base", "moe_combine/mcore/base"]
+        )
+
+    def test_the_parts_breakdown_reaches_the_file(self) -> None:
+        """So the sum is auditable and not merely asserted."""
+        parts = merge_span().parts["mcore/base"]
+        self.assertEqual(
+            [(part.scenario, part.arm) for part in parts],
+            [("expert_mlp", "mcore/base"), ("moe_combine", "mcore/base")],
+        )
+        self.assertEqual(
+            parts[0].replicate_medians_us["forward"], (20.0, 20.6, 21.2)
+        )
+        self.assertTrue(parts[1].results_path.endswith("results.json"))
+
+    def test_the_claim_carries_a_cross_sweep_interval_and_no_honest_one(
+        self,
+    ) -> None:
+        """The span and its parts were measured in separate sweeps.
+
+        Replicate r of each shares an index but not a moment, so drift
+        between the sweeps lands in the ratio instead of cancelling. A reader
+        of ``ratio_ci_low`` must find nothing.
+        """
+        row = merge_span().parts_comparisons[0]
+        self.assertNotIn("ratio_ci_low", row)
+        self.assertNotIn("ratio_ci_high", row)
+        self.assertNotIn("replicate_ratio_spread", row)
+        self.assertIn("cross_sweep_ratio_ci_low", row)
+        self.assertIn("cross_sweep_ratio_ci_high", row)
+        self.assertIn("cross_sweep_replicate_ratio_spread", row)
+
+    def test_the_claim_carries_no_two_sample_test(self) -> None:
+        """The parts side is one summed value per replicate.
+
+        A Welch or Mann-Whitney between three synthetic sums and the span's
+        pooled bursts is a diagnostic of nothing, so the row does not carry
+        one at all.
+        """
+        row = merge_span().parts_comparisons[0]
+        for absent in ("welch_p", "mwu_p", "cohens_d", "n_base", "n_arm"):
+            self.assertNotIn(absent, row)
+
+    def test_the_within_span_rows_keep_the_honest_names(self) -> None:
+        """They are measured entirely inside the span's own sweep."""
+        row = merge_span().comparisons[0]
+        self.assertEqual(row["opponent"], "mcore/base")
+        self.assertIn("ratio_ci_low", row)
+        self.assertIn("welch_p", row)
+
+    def test_the_span_records_the_range_and_every_cut_it_crosses(self) -> None:
+        result = merge_span()
+        self.assertEqual(result.span, "test_expert_combine")
+        self.assertEqual(result.scenarios, ("expert_mlp", "moe_combine"))
+        self.assertEqual(
+            sorted(result.shapes), ["expert_mlp", "moe_combine"]
+        )
+        self.assertIn("span_claim", result.methodology)
+
+    def test_a_missing_part_costs_that_arm_its_claim_and_nothing_more(
+        self,
+    ) -> None:
+        """The mirror of a missing opponent in a scenario.
+
+        ``titan``'s parts are absent from both scenario results, so it
+        carries no claim. ``mcore/base`` still does, and the within-span
+        comparison still stands: it was measured inside the span and a
+        scenario that failed elsewhere in the run cannot reach it.
+        """
+        result = merge_span()
+        self.assertIn("mcore/base", result.parts)
+        self.assertNotIn("titan", result.parts)
+        self.assertTrue(
+            any(
+                "titan" in warning and "no parts total" in warning
+                for warning in result.warnings
+            )
+        )
+        self.assertTrue(result.comparisons)
+
+    def test_a_span_with_no_claim_at_all_is_refused(self) -> None:
+        """A scenario wearing a span's name.
+
+        The same failure anchor loss raises for: a file that states the
+        span's own number and nothing about it reads like a span that
+        declared no claim.
+        """
+        with self.assertRaises(ValueError) as caught:
+            merge_span(parts={})
+        self.assertIn("no arm carries a parts total", str(caught.exception))
+
+    def test_a_part_measured_at_another_replicate_count_is_refused(
+        self,
+    ) -> None:
+        """One request produces both sides, so the counts cannot differ.
+
+        Index r would otherwise pair two different replicates, which is the
+        one thing the pairing exists to prevent. A wiring error, not a data
+        condition, so it raises.
+        """
+        parts = {
+            "expert_mlp": MeasuredScenario(
+                result=measured_part("expert_mlp", "mcore/base", (20.0, 21.0)),
+                results_path="a",
+            ),
+            "moe_combine": MeasuredScenario(
+                result=measured_part(
+                    "moe_combine",
+                    "mcore/base",
+                    tuple(10.0 + r for r in range(SPAN_REPLICATES)),
+                ),
+                results_path="b",
+            ),
+        }
+        with self.assertRaises(ValueError) as caught:
+            merge_span(parts=parts)
+        self.assertIn("paired by replicate index", str(caught.exception))
+
+    def test_a_failed_part_arm_is_not_summed(self) -> None:
+        """A part with a status other than ``ok`` measured nothing usable."""
+        broken = measured_part(
+            "moe_combine",
+            "mcore/base",
+            tuple(10.0 + r for r in range(SPAN_REPLICATES)),
+        )
+        broken = KernelScenarioResult(
+            **{
+                **{
+                    field: getattr(broken, field)
+                    for field in broken.__dataclass_fields__
+                },
+                "arms": {
+                    "mcore/base": ArmResult(
+                        name="mcore/base",
+                        modes={},
+                        status="failed",
+                        status_reason="lost every replicate",
+                    )
+                },
+            }
+        )
+        parts = {
+            "expert_mlp": MeasuredScenario(
+                result=measured_part(
+                    "expert_mlp",
+                    "mcore/base",
+                    tuple(20.0 + r for r in range(SPAN_REPLICATES)),
+                ),
+                results_path="a",
+            ),
+            "moe_combine": MeasuredScenario(result=broken, results_path="b"),
+        }
+        with self.assertRaises(ValueError) as caught:
+            merge_span(parts=parts)
+        self.assertIn("no arm carries a parts total", str(caught.exception))
 
 
 if __name__ == "__main__":
