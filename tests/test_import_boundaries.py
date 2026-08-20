@@ -543,7 +543,7 @@ class ClassificationCompletenessTest(unittest.TestCase):
 # ``benchmarks.kernel.engine`` builds arms from dotted "module:function"
 # strings resolved by ``resolve_symbol`` inside the worker, so an operations
 # module imports the engine and never the reverse. It takes the scenario
-# *types* from ``benchmarks.kernel.schema`` rather than the five scenario
+# *types* from ``benchmarks.kernel.schema`` rather than the scenario
 # *instances* from ``benchmarks.kernel.registry``, which is the edge that
 # keeps the first property true: colocating a scenario constant with its
 # family's builders is a natural-looking change, and with an engine ->
