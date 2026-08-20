@@ -836,6 +836,14 @@ def clear_te_attention_environment() -> None:
     on that assertion rather than reconfiguring. Megatron's own message names
     this as the fix. The correctness pass builds every arm of a scenario in
     one process, so this runs before every megatron build here.
+
+    One TransformerEngine read is NOT undone by this, and it is harmless:
+    ``utils.py:66`` caches ``NVTE_FLASH_ATTN`` in a module global at import
+    time. Its only reader is ``:1472``, which gates a block of
+    ``logger.warning`` calls about uninstalled FlashAttention versions. The
+    selection itself reads the environment afresh on every call
+    (``utils.py:457-463``), so a value frozen by whichever arm imported TE
+    first changes no measurement.
     """
     for name in TE_ATTENTION_ENVIRONMENT:
         os.environ.pop(name, None)
@@ -1064,9 +1072,16 @@ def _backend_verdict(
             "reachable, so an arm that falls through publishes one kernel "
             "under another's label"
         )
+    # The generation is reported only when FlashAttention was actually
+    # selected. TE leaves ``flash_attention_backend`` set to the version it
+    # WOULD have used even on a call it gave to cuDNN -- observed on this
+    # host under ``attention_backend=auto``, where the record reads
+    # ``use_flash_attention=False`` beside ``flash_attention_backend=3.0.0``
+    # -- so copying it unconditionally would put "FlashAttention 3" in a
+    # cuDNN arm's provenance.
     return {
         "te_selected_backend": selected,
-        "te_flash_generation": generation,
+        "te_flash_generation": generation if flash else None,
     }
 
 

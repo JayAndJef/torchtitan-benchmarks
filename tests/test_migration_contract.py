@@ -950,7 +950,9 @@ TEST_CENSUS = {
     # the refutation this roster rests on: TransformerEngine reads no
     # NVTE_FLASH_ATTN_V variable, so megatron's flash_attention_version is
     # inert and the generation cannot be an arm.
-    "test_kernel_attention_core": 51,
+    # +1 for the FlashAttention version TE leaves beside a cuDNN verdict,
+    # which a fused arm must not record as its own.
+    "test_kernel_attention_core": 52,
     # Scenario 4, the cross-engine rope roster that replaced the
     # single-engine one in place: 35 covering the packed-document inputs in
     # both engine-native forms, the fp64 reference, all five arm builders and
@@ -1124,7 +1126,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 940
+TEST_CENSUS_TOTAL = 941
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -822,6 +822,34 @@ class BackendVerdictTests(unittest.TestCase):
                 TINY,
             )
 
+    def test_a_fused_arm_records_no_flash_generation(self) -> None:
+        """TE leaves a FlashAttention version beside a cuDNN verdict.
+
+        Observed on this host under ``attention_backend=auto``: the record
+        reads ``use_flash_attention=False`` and
+        ``flash_attention_backend=3.0.0`` together, because TE resolved the
+        version it would have used before its Hopper policy declined it.
+        Copying the field unconditionally would put "FlashAttention 3" in a
+        cuDNN arm's recorded provenance.
+        """
+        notes = _backend_verdict(
+            "mcore/base",
+            "fused",
+            te_record(
+                fused=True, fused_backend="NVTE_F16", flash_version="3.0.0"
+            ),
+            TINY,
+        )
+        self.assertEqual(notes["te_selected_backend"], "FusedAttention NVTE_F16")
+        self.assertIsNone(notes["te_flash_generation"])
+        flash = _backend_verdict(
+            "mcore/attn_flash3",
+            "flash3",
+            te_record(flash=True, flash_version="3.0.0"),
+            TINY,
+        )
+        self.assertEqual(flash["te_flash_generation"], 3)
+
     def test_the_flash_generation_is_read_from_a_version_object(self) -> None:
         """TE stores a packaging version, not a string, and may change that."""
         from packaging.version import Version
