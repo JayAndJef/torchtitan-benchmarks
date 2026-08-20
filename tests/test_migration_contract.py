@@ -1022,7 +1022,10 @@ TEST_CENSUS = {
     # +3 with the isolation report: that the honest state reaches the reader,
     # that a batched run is marked above the table, and that a renamed
     # interval still prints, with a mark that says it is a lower bound.
-    "test_kernel_results": 13,
+    # +3 with the scenario description reaching the printed table: that it
+    # prints above the tables, that a scenario without one grows no blank
+    # block, and that a long one wraps.
+    "test_kernel_results": 16,
     # 19 pre-bump, +3 net: the Wilcoxon pair became five tests covering the
     # bootstrap CI, the single-replicate case and reproducibility. +1 for the
     # scenario's rejection of a mode name MODES does not hold, +1 for
@@ -1075,7 +1078,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 638
+TEST_CENSUS_TOTAL = 641
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
