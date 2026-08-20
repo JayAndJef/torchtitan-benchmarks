@@ -12,7 +12,8 @@ scenario: one worker gates every arm for correctness, and each timing worker
 times exactly one arm -- one replicate of it at the default, a block of
 consecutive replicates above ``replicates_per_process`` 1, and never a second
 arm at any value. Each writes a small JSON fragment, one per replicate. This
-module is what turns that pile back into a ``KernelScenarioResult``.
+module is what turns that pile back into a ``KernelScenarioResult`` or, for a
+span, a ``KernelSpanResult``.
 
 It runs in the **parent**, and it is torch-free. That is not incidental --
 the parent is the only process that sees every fragment, so it is the only

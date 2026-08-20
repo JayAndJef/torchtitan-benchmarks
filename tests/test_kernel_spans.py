@@ -432,6 +432,9 @@ def sample_span_result() -> KernelSpanResult:
                 ),
             )
         },
+        # Every key ``kernel_comparison`` returns, because the renderer reads
+        # them by subscript: a row missing one is a wiring bug and must
+        # raise rather than print a blank.
         comparisons=[
             {
                 "arm": "mcore/base",
@@ -440,12 +443,19 @@ def sample_span_result() -> KernelSpanResult:
                 "median_ratio": 1.2,
                 "ratio_ci_low": 1.1,
                 "ratio_ci_high": 1.3,
+                "welch_p": 0.5,
+                "mwu_p": 0.4,
+                "cohens_d": 0.1,
             }
         ],
         parts_comparisons=[
             {
                 "arm": "mcore/base",
                 "mode": "forward",
+                "parts": [
+                    "expert_mlp/mcore/base",
+                    "moe_combine/mcore/base",
+                ],
                 "span_median_us": 30.0,
                 "parts_median_us": 30.0,
                 "median_ratio": 1.0,
