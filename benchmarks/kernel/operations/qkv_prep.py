@@ -58,7 +58,10 @@ than equalized.** For a non-FP8 tensor ``SplitAlongDim.forward`` is
 ``torch.split`` and returns views (TE
 ``pytorch/utils.py:437-440``), and megatron reshapes only the query. So
 megatron hands ``key`` and ``value`` on as non-contiguous strided views and
-never materializes them, while titan materializes all three. At the default
+never materializes them **inside this cut**, while titan materializes all
+three. (``key`` stops being a view immediately after it, at ``k_layernorm``;
+``value`` stays one all the way into attention. See the deferral note
+below.) At the default
 workload (batch 4, seq 1024, ``normal``, bf16) the forward copies are
 ``B*L*n_heads*head_dim*2 = 8 MiB`` for q and ``B*L*n_kv_heads*head_dim*2 =
 4 MiB`` each for k and v, so ``mcore/base`` pays 8 MiB, ``titan`` pays 16 MiB
@@ -68,11 +71,30 @@ asymmetry.
 
 Both engines really do this, so measuring it is correct and equalizing it
 would be the distortion. What a reader needs is the consequence: megatron
-does not avoid the cost, it **defers** it to whoever consumes the strided
-views, which is ``attention_core`` (scenario 5) for megatron and nowhere for
-titan. The sixteen scenarios therefore sum correctly, but this row read alone
-overstates titan's projection cost by roughly 8 MiB per direction of traffic
-that megatron will pay later. The scenario ``description`` says so.
+does not avoid the cost, it **defers** it -- and the two halves are deferred
+to two different places.
+
+* **The value's 4 MiB lands in ``attention_core`` (scenario 5).** Nothing
+  reassigns ``value`` between here and ``core_attention``, so it arrives
+  there as this strided view. TransformerEngine does not recognize the
+  layout and copies it inside the timed call
+  (``dot_product_attention/utils.py:2428-2431``). That scenario builds the
+  fused buffer and hands its megatron arms the same strided value, so the
+  cost is timed where the engine pays it.
+* **The key's 4 MiB is absorbed by ``k_layernorm``, and today it is timed
+  NOWHERE.** ``BASE`` sets ``qk_layernorm: True``, so ``k_layernorm`` is a
+  real norm, and ``attention.py:1929`` reassigns ``key`` to its contiguous
+  output. The read of the strided key is therefore the norm's cost, which
+  belongs to scenario 3, ``qk_norm`` -- but ``qk_norm_inputs`` materializes
+  both engines' layouts contiguously, so no arm there moves it.
+  ``attention_core`` declines to double-book it. **Owed work**: give
+  ``qk_norm``'s megatron arm a strided key, in that scenario.
+
+So the scenarios sum to 4 MiB of this traffic today, not 8. This row read
+alone still overstates titan's projection cost, by roughly 8 MiB per
+direction; megatron pays half of that later and the other half is currently
+unmeasured. The scenario ``description`` in ``registry.py`` still carries the
+older wording and needs the same correction.
 
 **The qk norms are excluded, and excluding them takes an explicit step.**
 ``get_query_key_value_tensors`` also applies ``q_layernorm`` and

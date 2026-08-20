@@ -26,7 +26,23 @@ and TorchTitan in BSD, but the norm reduces over the last dimension alone and
 treats every leading dimension as a row. ``qk_norm_inputs`` materializes both
 layouts up front, each contiguous, so each engine reads its native form and
 neither pays a transpose. The two forms hold the same rows of the same length,
-so the work is equal. ``correctness_outputs`` maps the megatron outputs back
+so the work is equal.
+
+**One consequence is a gap in the partition, and it is recorded here rather
+than hidden.** In the engine megatron's ``key`` reaches ``k_layernorm`` as a
+non-contiguous strided view of the fused QKV buffer -- ``qkv_prep`` declares
+that asymmetry, and ``get_query_key_value_tensors`` reassigns ``key`` to this
+norm's contiguous output (``transformer/attention.py:1929``). So the read of
+the strided key, about 4 MiB per forward at the default workload, is really
+this norm's cost. Because the contiguous key above is what the megatron arm
+receives, **no scenario times it**: ``attention_core`` measures only the
+value's half and says so, and declines to double-book the key's.
+
+**Owed work**: hand this scenario's megatron arm a strided key, the way
+``attention_core`` hands its arms a strided value. That is a change to the
+inputs builder here, and it needs the same treatment ``attention_core`` gave
+its leaves -- ``Tensor.clone()`` silently returns a contiguous tensor for a
+non-dense view, so a cloned input would delete the effect. ``correctness_outputs`` maps the megatron outputs back
 to BLNH, outside the timed region.
 
 **Compile treatment differs by engine, and the declaration records it.** The
