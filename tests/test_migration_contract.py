@@ -940,7 +940,11 @@ TEST_CENSUS = {
     # holds one. 18 covering what the declaration refuses, the
     # registry-side cross-check that every part arm exists, and that a
     # span is not a KernelScenario.
-    "test_kernel_spans": 18,
+    # +7 with the schema 6 -> 7 bump: a span results file names a span
+    # and not a scenario, its two totals live in separate fields, its
+    # claim is a separate list from the within-span comparisons, and
+    # each kind of file refuses the other's reader.
+    "test_kernel_spans": 25,
     # 3 pre-bump, +1 for the assertion that the replicate boundaries
     # survive the round trip -- they are the repetition unit the bootstrap
     # CI is taken over, and a flat sample list cannot express them. +3 for
@@ -1148,7 +1152,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 983
+TEST_CENSUS_TOTAL = 990
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
