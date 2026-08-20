@@ -681,7 +681,8 @@ class MissingGradientTests(unittest.TestCase):
         outputs = _weight_grad_outputs("arm", qkv, norm)
         self.assertIs(outputs["qkv_weight_grad"], qkv)
         self.assertIs(outputs["norm_weight_grad"], norm)
-        self.assertIsNone(_require_grads("arm", {"a": torch.zeros(1)}))
+        present = {"a": torch.zeros(1)}
+        self.assertIs(_require_grads("arm", present), present)
 
 
 class _ThreeWayProjection(nn.Module):

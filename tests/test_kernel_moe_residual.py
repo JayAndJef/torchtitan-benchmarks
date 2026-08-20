@@ -40,7 +40,7 @@ import torch.nn.functional as F
 
 from benchmarks.execution.paths import TITAN_DIR
 from benchmarks.kernel.operations.moe_residual import (
-    _require_both_gradients,
+    _require_grads,
     _residual_add,
     _residual_arm,
     build_moe_residual_copy_floor,
@@ -343,7 +343,7 @@ class GuardTests(unittest.TestCase):
     def test_a_missing_gradient_is_named_rather_than_dereferenced(self) -> None:
         """An operation that ignored an operand is the failure this catches."""
         with self.assertRaisesRegex(RuntimeError, "residual_grad, x_grad"):
-            _require_both_gradients(
+            _require_grads(
                 "stand_in",
                 {"out": torch.zeros(1), "x_grad": None, "residual_grad": None},
             )
@@ -354,7 +354,7 @@ class GuardTests(unittest.TestCase):
             "x_grad": torch.ones(1),
             "residual_grad": torch.ones(1),
         }
-        self.assertIs(_require_both_gradients("stand_in", outputs), outputs)
+        self.assertIs(_require_grads("stand_in", outputs), outputs)
 
 
 class PinnedSourceTests(unittest.TestCase):

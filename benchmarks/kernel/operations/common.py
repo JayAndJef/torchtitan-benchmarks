@@ -1,6 +1,6 @@
 """The pieces every kernel family's builders need and none of them owns.
 
-Five unrelated-looking helpers held together by one fact: each has three or
+Six unrelated-looking helpers held together by one fact: each has three or
 more of the family modules as consumers, so leaving any of them in a family
 module would make ``rope`` a dependency of ``attention``, or ``swiglu`` of
 ``qkv``.
@@ -11,6 +11,9 @@ module would make ``rope`` a dependency of ``attention``, or ``swiglu`` of
   not depend on the dtype the caller happened to ask for.
 * ``_reset_grads`` -- clears leaf and parameter grads between timed calls
   (swiglu, qkv, attention).
+* ``_require_grads`` -- turns a gradient the backward never produced into a
+  named failure (ffn_norm, qkv_prep, embedding_stage, attn_residual,
+  moe_residual).
 * ``_compile_module`` -- the production compile treatment, ``fullgraph=True``.
   Applying it is a measurement decision, not a convenience: eager isolation
   races custom ops against materialization costs Inductor deletes, which
@@ -94,6 +97,43 @@ def _reset_grads(*tensors: torch.Tensor | nn.Module) -> None:
                 parameter.grad = None
         else:
             item.grad = None
+
+
+# What a missing gradient means when no call site says otherwise. Every caller
+# that has a sharper sentence passes it as ``detail``; the sentence is the
+# only part of the message that ever differed between the five copies this
+# helper replaced.
+MISSING_GRADIENT_DETAIL = (
+    "the correctness gate cannot compare a tensor that does not exist"
+)
+
+
+def _require_grads(
+    arm: str,
+    outputs: dict[str, torch.Tensor | None],
+    detail: str = MISSING_GRADIENT_DETAIL,
+) -> dict[str, torch.Tensor]:
+    """Turn a missing gradient into a named failure, not an AttributeError.
+
+    ``outputs`` is the correctness dictionary the arm is about to return, so
+    the check runs over exactly the tensors the gates compare. The dictionary
+    comes back unchanged, which lets a caller write ``return
+    _require_grads(name, {...})`` instead of naming it twice. A caller that
+    wants only the guard may discard the result.
+
+    ``detail`` is the second half of the message, and it is what each cut
+    knows and this module does not. A residual add whose backward reached one
+    operand is not the same failure as a norm whose gain took no gradient,
+    and the sentence a reader needs names the operation rather than the
+    helper. The default says what is true of every caller.
+    """
+    missing = sorted(name for name, value in outputs.items() if value is None)
+    if missing:
+        raise RuntimeError(
+            f"{arm}: backward produced no gradient for {', '.join(missing)}; "
+            f"{detail}"
+        )
+    return outputs
 
 
 def _compile_module(module: nn.Module) -> nn.Module:

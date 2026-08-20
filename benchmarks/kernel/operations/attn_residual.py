@@ -151,6 +151,7 @@ from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     _randn,
     _randn_like,
+    _require_grads,
     _reset_grads,
     initialize_megatron_single_rank,
 )
@@ -548,26 +549,22 @@ def _residual_arm(
         _reset_grads(check_attn, check_residual)
         out = check_call()
         torch.autograd.backward(out, grad_native)
-        missing = sorted(
-            label
-            for label, leaf in (
-                ("attn_out_grad", check_attn),
-                ("residual_grad", check_residual),
-            )
-            if leaf.grad is None
+        return _require_grads(
+            name,
+            {
+                "out": out.detach().reshape(canonical),
+                "attn_out_grad": None
+                if check_attn.grad is None
+                else check_attn.grad.reshape(canonical),
+                "residual_grad": None
+                if check_residual.grad is None
+                else check_residual.grad.reshape(canonical),
+            },
+            detail=(
+                "the call detached an operand, so the arm does not carry the "
+                "residual stream this scenario measures"
+            ),
         )
-        if missing:
-            raise RuntimeError(
-                f"{name}: backward produced no gradient for "
-                f"{', '.join(missing)}; the call detached an operand, so the "
-                "arm does not carry the residual stream this scenario "
-                "measures"
-            )
-        return {
-            "out": out.detach().reshape(canonical),
-            "attn_out_grad": check_attn.grad.reshape(canonical),
-            "residual_grad": check_residual.grad.reshape(canonical),
-        }
 
     return BuiltArm(
         name=name,

@@ -153,6 +153,7 @@ from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     _randn,
     _randn_like,
+    _require_grads,
     _reset_grads,
     initialize_megatron_single_rank,
 )
@@ -259,29 +260,6 @@ def moe_residual_reference(
     }
 
 
-def _require_both_gradients(
-    arm: str, outputs: dict[str, torch.Tensor | None]
-) -> dict[str, torch.Tensor]:
-    """Refuse an arm that produced no gradient for one of the two operands.
-
-    An add that ignores an operand is the failure this catches, and megatron
-    has a spelling of it: ``TransformerLayerSubmodules.mlp_bda`` defaults to
-    ``IdentityFuncOp`` (``transformer_layer.py:280``), whose call returns a
-    function that hands back its first argument and discards the rest
-    (``identity_op.py:35-40``). An arm wired that way drops the residual
-    entirely and would read as a spectacular win rather than as a bug.
-    ``_assert_mcore_bda`` refuses it at build time; this is the second net,
-    and it covers the titan arm too.
-    """
-    missing = sorted(name for name, value in outputs.items() if value is None)
-    if missing:
-        raise RuntimeError(
-            f"{arm}: no gradient reached {', '.join(missing)}; the operation "
-            "did not consume both operands, so it is not a residual add"
-        )
-    return outputs
-
-
 def _residual_arm(
     *,
     name: str,
@@ -336,7 +314,15 @@ def _residual_arm(
         _reset_grads(check_x, check_residual)
         out = call(check_x, check_residual)
         torch.autograd.backward(out, grad_native)
-        return _require_both_gradients(
+        # ``IdentityFuncOp`` is the failure this names: megatron's
+        # ``TransformerLayerSubmodules.mlp_bda`` defaults to it
+        # (``transformer_layer.py:280``), and its call returns a function that
+        # hands back its first argument and discards the rest
+        # (``identity_op.py:35-40``). An arm wired that way drops the residual
+        # entirely and would read as a spectacular win rather than as a bug.
+        # ``_assert_mcore_bda`` refuses it at build time; this is the second
+        # net, and it covers the titan arm too.
+        return _require_grads(
             name,
             {
                 "out": out.detach().reshape(canonical),
@@ -347,6 +333,10 @@ def _residual_arm(
                 if check_residual.grad is None
                 else check_residual.grad.reshape(canonical),
             },
+            detail=(
+                "the operation did not consume both operands, so it is not a "
+                "residual add"
+            ),
         )
 
     return BuiltArm(

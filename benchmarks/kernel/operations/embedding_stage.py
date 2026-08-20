@@ -148,6 +148,7 @@ from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
     WEIGHT_STD,
     _randn,
+    _require_grads,
     _reset_grads,
     initialize_megatron_single_rank,
 )
@@ -421,12 +422,11 @@ def _embedding_stage_arm(
         _reset_grads(module)
         out = call(tokens_native)
         torch.autograd.backward(out, grad_native)
-        grad = weight.grad
-        if grad is None:
-            raise RuntimeError(
-                f"{name}: backward left the embedding table without a "
-                "gradient, so nothing gates the scatter-add"
-            )
+        grad = _require_grads(
+            name,
+            {"weight_grad": weight.grad},
+            detail="nothing gates the scatter-add this stage is measured for",
+        )["weight_grad"]
         return {
             "out": to_canonical(out.detach()),
             "weight_grad_rows": grad.index_select(0, touched_ids),

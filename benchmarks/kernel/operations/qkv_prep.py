@@ -140,6 +140,7 @@ from benchmarks.kernel.operations.common import (
     WEIGHT_STD,
     _compile_module,
     _randn,
+    _require_grads,
     _reset_grads,
     initialize_megatron_single_rank,
 )
@@ -352,23 +353,13 @@ def qkv_prep_reference(
     }
 
 
-def _require_grads(arm: str, outputs: dict[str, torch.Tensor | None]) -> None:
-    """Turn a missing gradient into a named failure, not an AttributeError."""
-    missing = sorted(name for name, value in outputs.items() if value is None)
-    if missing:
-        raise RuntimeError(
-            f"{arm}: backward produced no gradient for {', '.join(missing)}; "
-            "the correctness gate cannot compare a tensor that does not exist"
-        )
-
-
 def _weight_grad_outputs(
     arm: str, qkv_grad: torch.Tensor | None, norm_grad: torch.Tensor | None
 ) -> dict[str, torch.Tensor]:
     """The two canonical weight gradients, checked for existence first."""
-    outputs = {"qkv_weight_grad": qkv_grad, "norm_weight_grad": norm_grad}
-    _require_grads(arm, outputs)
-    return outputs
+    return _require_grads(
+        arm, {"qkv_weight_grad": qkv_grad, "norm_weight_grad": norm_grad}
+    )
 
 
 def _qkv_prep_arm(

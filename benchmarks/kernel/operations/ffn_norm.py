@@ -72,6 +72,7 @@ from benchmarks.kernel.operations.common import (
     _compile_module,
     _randn,
     _randn_like,
+    _require_grads,
     _reset_grads,
     initialize_megatron_single_rank,
 )
@@ -199,17 +200,6 @@ def _require_a_real_norm(module, probe: torch.Tensor, arm: str) -> None:
             "layer has no experts; an identity arm reads as a win, not as a "
             "bug."
         )
-
-
-def _require_grads(arm: str, outputs: dict[str, torch.Tensor | None]) -> dict:
-    """Turn a missing gradient into a named failure, not an AttributeError."""
-    missing = sorted(name for name, value in outputs.items() if value is None)
-    if missing:
-        raise RuntimeError(
-            f"{arm}: backward produced no gradient for {', '.join(missing)}; "
-            "the correctness gate cannot compare a tensor that does not exist"
-        )
-    return outputs
 
 
 def _norm_arm(
