@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import textwrap
+
 from benchmarks.artifacts.summaries import _pvalue, _value
 from benchmarks.kernel.results.merge import BURST_RESIDUAL_FLAG
 from benchmarks.kernel.results.schema import KernelScenarioResult
@@ -84,6 +86,32 @@ def _isolation_lines(result: KernelScenarioResult) -> list[str]:
     return lines
 
 
+def _description_lines(result: KernelScenarioResult) -> list[str]:
+    """The scenario's own description, printed above its tables.
+
+    **A scenario that declares no cross-engine ratio has to be able to say so
+    where the numbers are read.** ``description`` reached ``results.json`` and
+    nothing else: this renderer never looked at it. That is harmless while
+    every description is informational, and it stops being harmless the moment
+    one of them carries a prohibition.
+
+    ``expert_mlp`` is the first scenario in that class. Its two engines compute
+    two different functions at the cut -- megatron applies the routing
+    probabilities inside the experts and titan applies them in combine -- so it
+    declares its ``comparisons`` explicitly and publishes no row between the
+    engines. But the per-mode table still lists all eight arms in one column,
+    four ``mcore/*`` above four ``titan/*``, each with a median. Two of those
+    medians must not be divided, and before this the only place that said so
+    was a JSON field nobody reading the table has open.
+
+    Wrapped rather than printed raw, because a description that states a
+    prohibition is a paragraph and not a label.
+    """
+    if not result.description:
+        return []
+    return ["", *textwrap.wrap(result.description.strip(), width=78), ""]
+
+
 def render_kernel_results(result: KernelScenarioResult) -> str:
     """Render one kernel scenario: per-mode timings and correctness gates."""
     shapes = "  ".join(
@@ -97,6 +125,7 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
         f"samples, burst k={result.burst_k}, "
         f"warmup={result.warmup_calls} calls, seed={result.seed}",
         *_isolation_lines(result),
+        *_description_lines(result),
     ]
     lines.extend(f"WARNING: {warning}" for warning in result.warnings)
 

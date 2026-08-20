@@ -90,9 +90,22 @@ def build_titan_model(
     """The registry's Qwen3 model, built on ``device`` in ``dtype``.
 
     ``dtype`` is delivered as the default dtype during construction rather
-    than by casting afterwards, which is how the run itself gets plain bf16:
-    there is no autocast and no mixed-precision wrapper anywhere in this
-    execution model, so ``training.dtype`` is the whole dtype story.
+    than by casting afterwards, because that is what the trainer does:
+    ``trainer.py:299-303`` opens ``utils.set_default_dtype`` around
+    ``model_config.build()``. Constructing in bf16 also never allocates the
+    fp32 parameters a later cast would have to make first.
+
+    The default dtype is process-global, so the ``finally`` restores it. The
+    correctness pass builds every arm in one interpreter, and a leaked bf16
+    default would change every tensor a later arm creates -- including the
+    fp64 references the attention gates compare against.
+
+    **This does not make ``training.dtype`` the whole dtype story.** There is
+    no mixed-precision wrapper and no autocast in ``parallelize_piper1b``, but
+    upstream wraps the MoE router gate in ``torch.autocast(dtype=float32)``
+    (``models/common/moe.py:292``), and this model has MoE on every layer. An
+    arm that times the router times an fp32 GEMM, and the fp32 copy of the
+    hidden state that autocast materializes to feed it.
 
     ``seed`` is set before ``init_states`` so two processes that build the
     same arm get the same parameters. Kernel-bench relies on that: the

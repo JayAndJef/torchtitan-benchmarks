@@ -499,5 +499,46 @@ class IsolationReportingTests(unittest.TestCase):
         self.assertIn("~[1.0100,1.0900]", batched)
 
 
+class ScenarioDescriptionReportingTests(unittest.TestCase):
+    """The description must reach the reader of the table, not only the file.
+
+    A scenario whose two engines compute different functions at the cut
+    publishes no cross-engine ratio, and says so in its description. Its table
+    still prints every arm's median in one column, so the prohibition has to
+    print beside them. Before this it reached results.json alone.
+    """
+
+    def test_the_description_prints_above_the_tables(self) -> None:
+        result = replace(
+            sample_result(),
+            description=(
+                "THIS SCENARIO PUBLISHES NO CROSS-ENGINE RATIO, AND NO READER "
+                "MAY FORM ONE BY DIVIDING TWO MEDIANS."
+            ),
+        )
+        rendered = render_kernel_results(result)
+        self.assertIn("NO CROSS-ENGINE RATIO", rendered)
+        # Above the tables: a warning printed under the numbers it forbids has
+        # already been disobeyed.
+        self.assertLess(
+            rendered.index("NO CROSS-ENGINE RATIO"),
+            rendered.index("median"),
+        )
+
+    def test_a_scenario_with_no_description_prints_no_blank_block(self) -> None:
+        """Every existing scenario predates the field; none may grow a gap."""
+        rendered = render_kernel_results(replace(sample_result(), description=None))
+        self.assertNotIn("\n\n\n", rendered)
+
+    def test_a_long_description_is_wrapped_rather_than_printed_raw(self) -> None:
+        """It states a prohibition, so it is a paragraph and not a label."""
+        rendered = render_kernel_results(
+            replace(sample_result(), description="word " * 200)
+        )
+        body = [line for line in rendered.splitlines() if line.startswith("word")]
+        self.assertGreater(len(body), 1)
+        self.assertTrue(all(len(line) <= 78 for line in body), body)
+
+
 if __name__ == "__main__":
     unittest.main()
