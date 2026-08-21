@@ -511,9 +511,36 @@ out/<timestamp>/<scenario>/<hardware>/
 
 `manifest.json` `hardware_metadata` records `requested_gpu`, `nvidia_smi`,
 `cpu_pinning`, `torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev`,
-`megatron_git_rev`, `te_version`. Always cite `torchtitan_git_rev`,
+`megatron_git_rev`, `te_version`, `cudnn_torch_build` and
+`cudnn_loader_resolves`. Always cite `torchtitan_git_rev`,
 `torch_version`, `compile_mode`, and `ac_mode` when reporting numbers --
-plus `megatron_git_rev` and `te_version` for the megatron scenario.
+plus `megatron_git_rev`, `te_version` and the two cuDNN fields for the
+megatron scenario.
+
+#### Which cuDNN a megatron arm runs is a host property
+
+TransformerEngine's `libtransformer_engine.so` needs `libcudnn.so.9` and
+carries no `RUNPATH`, and torch loads its own cuDNN **lazily**. So on a host
+that ships cuDNN in a system directory, the loader binds **that** copy for TE
+rather than the wheel torch is pinned against. Which cuDNN a megatron arm
+ran is therefore decided by the host, not by the pin, and until 2026-08-20 no
+manifest recorded it.
+
+`hardware_metadata` now records both halves: `cudnn_torch_build` is the
+version torch was compiled against, read through `getCompileVersion` because
+`backends.cudnn.version()` **raises** in exactly the case the field exists to
+record; `cudnn_loader_resolves` is the real path the dynamic loader binds,
+probed in a subprocess. On this box the two disagree -- torch expects
+**9.24.0** and the loader binds `/usr/lib64` **9.23.2**, which `rpm -qf`
+names as `libcudnn9-cuda-12`, a **CUDA 12 build inside a cu13 process**.
+
+**The two fields are collected but not resume-gated.** Recording a boundary
+and refusing to cross it are separate decisions, and older manifests carry
+neither field. So `--resume` will still continue a run across a cuDNN change.
+Cite the fields; do not assume a comparison is safe because resume allowed
+it. Every megatron number this repo has published was taken on the host's
+cuDNN, whatever that was, and no manifest before 2026-08-20 says which.
+
 
 ### CPU pinning
 
@@ -1896,6 +1923,16 @@ TE's cuDNN backend (`NVTE_NORM_*_USE_CUDNN=1`) -- keep it in any process
 that imports TE here. Without apex, megatron's standalone norms are torch
 RMSNorm (its own spec fallback); the qkv-input norm fuses into the TE
 linear.
+
+**That routing makes the cuDNN identity a caption obligation.** Every norm
+number from this arm, and from every cross-engine kernel scenario that norms,
+is "TE norms via cuDNN backend" and not TE's fastest norm. Which cuDNN is a
+host property -- see "Which cuDNN a megatron arm runs is a host property"
+above. `megatron_bootstrap.py` also sets
+`CUDNN_FRONTEND_CUDART_LIB_NAME=libcudart.so.13` for the same class of
+mismatch, arrived at independently. A host with a native CUDA 13 driver must
+repeat the measurement.
+
 
 Under `--compile-mode cuda-graph` the arm uses Megatron's per-layer partial
 capture (`MoETransformerLayer`, `cuda_graph_modules=("moe_router",
