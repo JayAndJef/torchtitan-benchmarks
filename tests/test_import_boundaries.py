@@ -89,6 +89,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.kernel.registry",
     "benchmarks.kernel.runner",
     "benchmarks.kernel.schema",
+    # The span registry. It imports the scenario registry to check that
+    # every part arm exists, and nothing else: a span declaration is
+    # dotted strings, exactly as a scenario declaration is.
+    "benchmarks.kernel.spans",
     "benchmarks.kernel.worker",
     "benchmarks.kernel.engine.statistics",
     # Stdlib only, and it has to be: the worker imports it before it imports
@@ -98,6 +102,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.kernel.results.schema",
     "benchmarks.kernel.results.merge",
     "benchmarks.kernel.results.reporting",
+    # The span-versus-parts statistic. Parent-side work about a parent-side
+    # object: a worker is handed span.measurement and never learns that the
+    # span exists, so nothing about a span belongs under engine/.
+    "benchmarks.kernel.results.span_statistics",
     "benchmarks.models.piper_qwen3.shape",
     # Behavioural configuration is data, and data the parent must be able to
     # name, record in a manifest and diff without importing the ML stack --
@@ -559,15 +567,44 @@ class ClassificationCompletenessTest(unittest.TestCase):
 # and refuted on 2026-08-20 (reports/20260820-te-fa3-coexist.md, and see
 # CLAUDE.md).
 ENGINE_DIRECTORY = "benchmarks/kernel/engine/"
-ENGINE_FORBIDDEN_IMPORTS = (
-    "benchmarks.kernel.operations",
-    "benchmarks.kernel.registry",
+
+# **An allowlist, because the denylist it replaced had a hole in it.** The
+# rule was two banned names, ``operations`` and ``registry``, and it held only
+# while nobody added a third module that reaches the registry. Somebody did:
+# ``benchmarks.kernel.spans`` imports ``benchmarks.kernel.registry`` to check
+# that every part arm exists, so an engine -> spans import is an engine ->
+# registry import with one hop, and the banned-name check did not see it.
+#
+# So the rule is inverted. The engine may reach exactly these under
+# ``benchmarks.kernel``, and everything else -- including a module that does
+# not exist yet -- is forbidden until somebody argues it onto this list:
+#
+# * ``benchmarks.kernel.schema``: the declaration TYPES. Torch-free, and it
+#   knows that no scenario or span exists as an object.
+# * ``benchmarks.kernel.results.schema``: the result types the engine's
+#   in-process composition returns.
+# * ``benchmarks.kernel.results.merge``: allowed here because this rule is
+#   about *coupling to the arms*, and the merge couples to neither. It is
+#   still forbidden at **module scope** by its own test below, because it
+#   reaches numpy and scipy through ``engine.statistics`` and no timing
+#   worker should pay for them.
+#
+# A denylist forgets; an allowlist has to be edited on purpose.
+ENGINE_ALLOWED_KERNEL_IMPORTS = (
+    "benchmarks.kernel.engine",
+    "benchmarks.kernel.schema",
+    "benchmarks.kernel.results.schema",
+    "benchmarks.kernel.results.merge",
 )
 
 # The declaration side of the same edge: neither the types nor the scenarios
 # may reach the builders they name, which is what makes the builder paths
 # strings in the first place.
-DECLARATION_MODULES = ("benchmarks.kernel.schema", "benchmarks.kernel.registry")
+DECLARATION_MODULES = (
+    "benchmarks.kernel.schema",
+    "benchmarks.kernel.registry",
+    "benchmarks.kernel.spans",
+)
 
 # The third edge of the same constraint, one level down. The two above keep
 # the *engine* free of the arms; this one keeps each arm free of the others.
@@ -678,20 +715,89 @@ class KernelEngineImportBoundaryTest(unittest.TestCase):
         )
 
     def test_the_engine_imports_neither_the_arms_nor_the_scenario_data(self):
-        """At any scope -- a deferred import couples the packages just as much."""
+        """At any scope -- a deferred import couples the packages just as much.
+
+        Allowlisted rather than banned by name. A banned-name rule only sees
+        the names it was given, and ``benchmarks.kernel.spans`` walked
+        straight past one: it imports the registry, so an engine -> spans
+        edge is an engine -> registry edge one hop along, and adding that
+        import to ``engine/run.py`` produced no failure at all.
+        """
         violations = []
         for path in engine_source_files():
             for imported, lineno in all_imports(path):
-                for forbidden in ENGINE_FORBIDDEN_IMPORTS:
-                    if targets(imported, forbidden):
-                        violations.append(f"{path}:{lineno}: {imported}")
+                if not targets(imported, "benchmarks.kernel"):
+                    continue
+                if any(
+                    targets(imported, allowed)
+                    for allowed in ENGINE_ALLOWED_KERNEL_IMPORTS
+                ):
+                    continue
+                violations.append(f"{path}:{lineno}: {imported}")
         self.assertEqual(
             violations,
             [],
-            "the kernel engine must reach arms only as resolved BuiltArm "
-            "values and scenarios only as benchmarks.kernel.schema types:\n  "
+            "the kernel engine may import only "
+            f"{', '.join(ENGINE_ALLOWED_KERNEL_IMPORTS)} from "
+            "benchmarks.kernel: arms reach it as resolved BuiltArm values "
+            "and declarations as schema types, and anything else drags the "
+            "registry -- and every arm's dependencies behind it -- into "
+            "every worker:\n  "
             + "\n  ".join(violations),
         )
+
+    def test_the_engine_holds_no_span_declaration_type(self):
+        """A worker is handed ``span.measurement``, so spans are invisible.
+
+        The engine measures one arm in one worker and never sees a second
+        unit. Everything that makes a span a span -- the range, the parts,
+        the second total, the statistic that compares them -- is assembled
+        by the parent. ``span_comparison`` sat under ``engine/`` for a
+        while, which made "the engine gained no branch for spans" true of
+        the import graph and false of the directory.
+
+        The wall-clock phase table uses the word ``span`` for a different
+        thing entirely, so this matches the declaration types rather than
+        the word.
+        """
+        violations = []
+        for path in engine_source_files():
+            source = Path(path).read_text()
+            for name in ("KernelSpan", "SpanParts", "span_comparison"):
+                if name in source:
+                    violations.append(f"{path}: {name}")
+        self.assertEqual(
+            violations,
+            [],
+            "the kernel engine names a span declaration type; a worker "
+            "measures span.measurement, which is a KernelScenario, and the "
+            "parent assembles everything else:\n  " + "\n  ".join(violations),
+        )
+
+    def test_the_engine_allowlist_would_catch_a_registry_import(self):
+        """Negative control, on the exact hole this replaced.
+
+        The rule is only worth its lines if it fails on the imports it
+        forbids. Each of these reaches the registry -- ``spans`` by one hop
+        -- and each must be rejected by the same predicate the test above
+        applies.
+        """
+        for forbidden in (
+            "benchmarks.kernel.registry",
+            "benchmarks.kernel.spans",
+            "benchmarks.kernel.operations.rope",
+            "benchmarks.kernel.runner",
+            "benchmarks.kernel.worker",
+        ):
+            with self.subTest(module=forbidden):
+                self.assertTrue(targets(forbidden, "benchmarks.kernel"))
+                self.assertFalse(
+                    any(
+                        targets(forbidden, allowed)
+                        for allowed in ENGINE_ALLOWED_KERNEL_IMPORTS
+                    ),
+                    f"{forbidden} would pass the engine allowlist",
+                )
 
     def test_the_engine_takes_its_declaration_types_from_the_schema(self):
         """The positive half: the types it does not import from the registry
@@ -779,6 +885,44 @@ class KernelEngineImportBoundaryTest(unittest.TestCase):
             [],
             "a kernel scenario declaration imports an arm builder; builder "
             "paths are resolved by dotted string inside the worker:\n  "
+            + "\n  ".join(violations),
+        )
+
+    def test_every_arm_requirement_lives_in_a_parent_side_module(self):
+        """A requirement is resolved in the PARENT, unlike a builder.
+
+        ``resolve_arm_skips`` calls it before a GPU is claimed and before any
+        arm is built, so the module it names is imported into the torch-free
+        parent. A requirement that lived beside its family's builders would
+        put an ``operations/`` module -- and torch behind it -- into that
+        process, which is the edge per-arm process isolation cannot have.
+
+        Vacuous while no arm declares one, and that is the point: it fires
+        the moment the first declaration lands, rather than after a run has
+        paid for torch in the supervisor.
+        """
+        from benchmarks.kernel.registry import KERNEL_SCENARIOS
+        from benchmarks.kernel.spans import KERNEL_SPANS
+
+        parent_side = set(PARENT_SIDE_MODULES)
+        violations = []
+        units = list(KERNEL_SCENARIOS.values()) + [
+            span.measurement for span in KERNEL_SPANS.values()
+        ]
+        for unit in units:
+            for arm in unit.arms:
+                if arm.requirement is None:
+                    continue
+                module = arm.requirement.partition(":")[0]
+                if module not in parent_side:
+                    violations.append(
+                        f"{unit.name}/{arm.name}: {arm.requirement}"
+                    )
+        self.assertEqual(
+            violations,
+            [],
+            "an arm's requirement names a module that is not classified "
+            "parent-side; the parent resolves it before any arm is built:\n  "
             + "\n  ".join(violations),
         )
 

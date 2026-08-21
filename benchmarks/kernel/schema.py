@@ -1,13 +1,15 @@
 """What a kernel-isolation benchmark *is*, separate from which ones exist.
 
 The declaration vocabulary -- ``KernelWorkload``, ``CorrectnessCheck``,
-``KernelArm``, ``KernelScenario``, the mode tuple -- plus the arithmetic that
+``KernelArm``, ``KernelScenario``, ``KernelSpan``, the mode tuple -- plus the
+arithmetic that
 follows from a (shape, workload) pair: what a run may ask for
 (``resolve_shape_and_workload``), what it may not (``validate_shape_and_
 workload``, ``routing_divides_evenly``), and the derived tensor shapes both
 systems record (``shape_summary``). ``benchmarks.kernel.registry`` holds the
-scenarios themselves and imports from here; nothing here knows that ``rope``
-or ``attention_core`` exist as objects.
+scenarios themselves and ``benchmarks.kernel.spans`` holds the spans; both
+import from here, and nothing here knows that ``rope`` or ``attention_core``
+exist as objects.
 
 **The split is an import-graph rule, not tidiness.**
 ``benchmarks.kernel.engine`` needs these types and must never import the
@@ -35,13 +37,31 @@ already share, not a model package.
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 
 MODES = ("forward", "backward", "forward_backward")
+
+
+def resolve_symbol(path: str) -> Any:
+    """Import ``module:function`` and return the function.
+
+    Here rather than in the engine because both sides resolve a dotted path
+    now: a worker resolves an arm's builder, and the **parent** resolves an
+    arm's ``requirement``. Resolution by string is what keeps either side
+    from importing what the other needs -- the parent must never import an
+    ``operations/`` module, and the engine must never import the registry.
+    Two copies of these three lines would let the two conventions drift.
+    """
+    module_name, _, attribute = path.partition(":")
+    module = importlib.import_module(module_name)
+    return getattr(module, attribute)
+
 
 # The two fragment shapes a worker writes and the parent reads, named once.
 # They live here, in the declaration module both sides already import, rather
@@ -249,6 +269,29 @@ class KernelArm:
     ``fullgraph=True`` compile over a titan arm. Each arm's ``description``
     says which.
 
+    **A requirement that depends on the workload is declared, not
+    discovered.** ``requires_gcc_toolset`` is a property of the *host*, and
+    the parent can answer it before it knows the shape. ``requirement``
+    covers the other case: an arm this shape or this workload cannot run --
+    an unfused attention arm whose dense score tensor grows with the square
+    of the sequence length is the case that forced it. It is a dotted
+    ``module:function`` path, resolved by ``resolve_symbol`` **in the
+    parent** and called as ``predicate(shape, workload)``. It returns
+    ``None`` when the arm can run here, or the reason it cannot -- and that
+    reason is what reaches ``results.json`` as ``status_reason``, so a
+    reader learns why an arm is absent without holding the registry.
+
+    The module it names must therefore be parent-side and torch-free, like
+    this one and unlike every ``operations/`` module. A test asserts it.
+
+    **Rejected: catch the builder's exception instead.** A ``try`` around
+    the build turns a bug into a skipped arm: the roster shortens for a
+    reason nobody declared, the real cause is a log line nobody reads, and
+    the run still exits zero. A declared requirement names the condition in
+    advance, records it in the manifest and in the results, and is checked
+    before a GPU is claimed. A builder that raises for an undeclared reason
+    stays a failure, because that is what it is.
+
     **An eager arm states why it is eager.** ``compiled=False`` requires an
     ``eager_reason``, and ``compiled=True`` forbids one. The reasons are not
     interchangeable, and a reader who cannot tell them apart will misread the
@@ -280,6 +323,7 @@ class KernelArm:
     modes: tuple[str, ...]
     correctness: tuple[CorrectnessCheck, ...] = ()
     requires_gcc_toolset: bool = False
+    requirement: str | None = None
     is_floor: bool = False
     compiled: bool = False
     eager_reason: str | None = None
@@ -394,6 +438,211 @@ class KernelScenario:
     @property
     def requires_gcc_toolset(self) -> bool:
         return any(arm.requires_gcc_toolset for arm in self.arms)
+
+
+@dataclass(frozen=True)
+class SpanParts:
+    """Which arm of each enclosed scenario one span arm replaces.
+
+    ``parts`` is **positional**: one arm name per entry of
+    ``KernelSpan.scenarios``, in that order. The order is the model's own
+    order through the cuts, which is why a span declares an *ordered* range
+    rather than a set.
+
+    **The correspondence is declared, never inferred.** A span arm named
+    ``titan`` does not necessarily replace an arm named ``titan`` in each
+    enclosed scenario: the ``fused_linear_ce`` span replaces
+    ``lm_head_projection/titan`` and ``cross_entropy/titan/full_logits``, two
+    different names and neither of them the span arm's own. A span arm may
+    also name an implementation no enclosed scenario has --
+    ``mcore/fused_residual_rmsnorm`` is the fusion under test, and what it
+    replaces is ``mcore/base`` at every cut it crosses. A name-based rule
+    expresses neither case, and a name-based rule that silently found nothing
+    would publish a span with no claim in it.
+    """
+
+    arm: str
+    parts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class KernelSpan:
+    """One implementation that fuses across a scenario cut.
+
+    A scenario cuts the model at one boundary and ranks the implementations
+    at that cut. An implementation that fuses *across* a cut belongs to no
+    single scenario, so a span is declared over an **ordered scenario range**
+    and its claim is the span against the **sum of the scenarios it
+    replaces**. A span result therefore holds two totals, and
+    ``benchmarks.kernel.results.schema`` keeps them in separate fields.
+
+    **A span composes a ``KernelScenario`` rather than subclassing one.**
+    ``measurement`` is the span's own head-to-head: its arms, its inputs
+    builder, its gates, its within-span comparisons. Two things follow.
+
+    * ``benchmarks.kernel.engine`` never learns that spans exist. Both passes
+      take a ``KernelScenario``, and a span hands them ``measurement``, which
+      is one. The engine gains no import and no branch, which is what keeps
+      per-arm process isolation intact.
+    * ``isinstance(span, KernelScenario)`` is **false**. A span added to
+      ``KERNEL_SCENARIOS`` by mistake would otherwise run as a bare scenario
+      and publish one of its two totals under a name that promises both.
+
+    **A span ratio carries a bias the declaration cannot remove.** The parts
+    total pays one host dispatch chain per enclosed scenario and the span
+    pays one, and roughly 85% of a kernel number here is host dispatch. So a
+    ratio below 1.0 is fusion **plus** the N-1 chains the harness stopped
+    paying, and the effect grows with the length of the range. It is a
+    property of the range length rather than of what a span fuses, so the
+    engine states it on every span -- printed under the table and recorded in
+    the results file -- and a declaration cannot forget it.
+
+    ``scenarios`` names the range. ``parts`` says what each arm replaces; see
+    ``SpanParts``. The check that a named part arm *exists* in the named
+    scenario needs both objects at once and therefore lives in
+    ``validate_span_parts``, which the span registry calls at import --
+    ``schema.py`` may not import ``registry.py``.
+    """
+
+    measurement: KernelScenario
+    scenarios: tuple[str, ...]
+    parts: tuple[SpanParts, ...]
+
+    def __post_init__(self) -> None:
+        # At import, so a mistyped range fails when the span registry loads
+        # rather than after a GPU has measured every arm of six scenarios.
+        if len(self.scenarios) < 2:
+            raise ValueError(
+                f"{self.name}: a span replaces at least two scenarios, got "
+                f"{list(self.scenarios)}. A span over one scenario is that "
+                "scenario, and its two totals would be one number twice"
+            )
+        seen: set[str] = set()
+        for scenario_name in self.scenarios:
+            if scenario_name in seen:
+                raise ValueError(
+                    f"{self.name}: scenario {scenario_name!r} appears twice "
+                    "in the range; the parts sum would count one cut twice"
+                )
+            seen.add(scenario_name)
+        declared: dict[str, SpanParts] = {}
+        for entry in self.parts:
+            # Raises on an arm the span does not declare, with the roster in
+            # the message.
+            self.arm(entry.arm)
+            if entry.arm in declared:
+                raise ValueError(
+                    f"{self.name}: arm {entry.arm!r} declares its parts "
+                    "twice; a span arm has one claim, and two totals under "
+                    "one name say which of them is it"
+                )
+            declared[entry.arm] = entry
+            if len(entry.parts) != len(self.scenarios):
+                raise ValueError(
+                    f"{self.name}/{entry.arm}: {len(entry.parts)} part arm(s) "
+                    f"for {len(self.scenarios)} scenario(s). The "
+                    "correspondence is positional, so a short tuple drops a "
+                    "cut from the sum without saying so"
+                )
+            for scenario_name, part_arm in zip(self.scenarios, entry.parts):
+                if not part_arm.strip():
+                    raise ValueError(
+                        f"{self.name}/{entry.arm}: the part in "
+                        f"{scenario_name!r} has no name"
+                    )
+        # Every arm, because a span arm with no parts entry is an arm whose
+        # claim cannot be stated -- and stating that claim is the whole of
+        # what a span is for. An arm that wants no parts row belongs in a
+        # scenario.
+        missing = [arm.name for arm in self.arms if arm.name not in declared]
+        if missing:
+            raise ValueError(
+                f"{self.name}: arm(s) {', '.join(missing)} declare no parts. "
+                "A span arm is compared against the sum of what it replaces, "
+                "so an arm that names no parts publishes no claim"
+            )
+
+    # The roster is the span's own, so a caller that needs it does not reach
+    # through ``.measurement``. Read-only forwarding: a span never edits the
+    # scenario it holds.
+    @property
+    def name(self) -> str:
+        return self.measurement.name
+
+    @property
+    def description(self) -> str:
+        return self.measurement.description
+
+    @property
+    def arms(self) -> tuple[KernelArm, ...]:
+        return self.measurement.arms
+
+    @property
+    def baseline_arm(self) -> str:
+        return self.measurement.baseline_arm
+
+    @property
+    def requires_gcc_toolset(self) -> bool:
+        return self.measurement.requires_gcc_toolset
+
+    def arm(self, name: str) -> KernelArm:
+        return self.measurement.arm(name)
+
+    def comparison_pairs(self) -> tuple[tuple[str, str], ...]:
+        """The within-span ``(arm, opponent)`` rows, as a scenario's are.
+
+        Separate from the span-vs-parts claim, which is not an arm pair: one
+        side of it is a sum over scenarios and has no arm of its own.
+        """
+        return self.measurement.comparison_pairs()
+
+    def parts_for(self, arm_name: str) -> tuple[tuple[str, str], ...]:
+        """``(scenario, arm)`` pairs one span arm replaces, in range order."""
+        for entry in self.parts:
+            if entry.arm == arm_name:
+                return tuple(zip(self.scenarios, entry.parts))
+        raise ValueError(
+            f"{self.name}: arm {arm_name!r} declares no parts"
+        )
+
+
+def validate_span_parts(
+    span: KernelSpan, scenarios: dict[str, KernelScenario]
+) -> None:
+    """Refuse a span whose parts do not exist in the scenarios it names.
+
+    The other half of ``KernelSpan.__post_init__``, split out because it
+    needs the scenario registry and ``schema.py`` may not import it. The span
+    registry calls this at import, so a mistyped part arm fails when the
+    module loads rather than as a missing row after a GPU has run.
+
+    The mode check is the subtle one. A span arm's parts sum is per mode, so
+    a part that does not declare a mode the span arm declares contributes
+    nothing to that mode's total -- and the row would then compare the span
+    against a sum of fewer terms than the range holds. Caught here, the
+    declaration is refused; caught at merge time, it is a warning about work
+    already paid for.
+    """
+    for entry in span.parts:
+        span_arm = span.arm(entry.arm)
+        for scenario_name, part_arm in zip(span.scenarios, entry.parts):
+            scenario = scenarios.get(scenario_name)
+            if scenario is None:
+                raise ValueError(
+                    f"{span.name}: unknown scenario {scenario_name!r} in the "
+                    f"range. Available: {', '.join(sorted(scenarios))}"
+                )
+            part = scenario.arm(part_arm)
+            absent = [
+                mode for mode in span_arm.modes if mode not in part.modes
+            ]
+            if absent:
+                raise ValueError(
+                    f"{span.name}/{entry.arm} declares mode(s) "
+                    f"{', '.join(sorted(absent))} that its part "
+                    f"{scenario_name}/{part_arm} does not, so that mode's "
+                    "parts total would sum fewer terms than the range holds"
+                )
 
 
 def shape_summary(

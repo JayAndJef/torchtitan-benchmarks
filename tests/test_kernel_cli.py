@@ -26,6 +26,7 @@ from benchmarks.kernel.schema import (
     KernelArm,
     KernelScenario,
     TIMING_FRAGMENT_KIND,
+    resolve_shape_and_workload,
     timing_fragment_path,
 )
 from tests.test_kernel_results import sample_result
@@ -432,10 +433,22 @@ class KernelRunnerTests(unittest.TestCase):
                 arm("independent", reference="anchor"),
             ),
         )
+        shape, workload = resolve_shape_and_workload()
         self.assertEqual(
-            resolve_arm_skips(scenario, compiler_unavailable=None), {}
+            resolve_arm_skips(
+                scenario,
+                compiler_unavailable=None,
+                shape=shape,
+                workload=workload,
+            ),
+            {},
         )
-        skipped = resolve_arm_skips(scenario, compiler_unavailable="no gcc")
+        skipped = resolve_arm_skips(
+            scenario,
+            compiler_unavailable="no gcc",
+            shape=shape,
+            workload=workload,
+        )
         self.assertEqual(
             sorted(skipped), ["gated_on_it", "gated_on_that", "needs_compiler"]
         )
@@ -513,7 +526,8 @@ class KernelRunnerTests(unittest.TestCase):
         # The manifest says so on its own. "arms" is the registry roster and
         # still lists titan/te, so without this a reader must diff it against
         # "commands" to learn that the arm never ran.
-        self.assertEqual(manifest["schema_version"], 6)
+        self.assertEqual(manifest["schema_version"], 7)
+        self.assertEqual(manifest["unit_kind"], "scenario")
         self.assertEqual(list(manifest["skipped_arms"]), ["titan/te"])
         self.assertIn(
             "compiler environment", manifest["skipped_arms"]["titan/te"]
@@ -621,12 +635,15 @@ class KernelRunnerTests(unittest.TestCase):
                 ),
             ),
         )
+        shape, workload = resolve_shape_and_workload()
         for scenario_name, selection, expected in cases:
             with self.subTest(scenario=scenario_name, selection=selection):
                 with self.assertRaises(ValueError) as raised:
                     resolve_arm_skips(
                         kernel_scenario_by_name(scenario_name),
                         compiler_unavailable=None,
+                        shape=shape,
+                        workload=workload,
                         selected=selection,
                     )
                 for phrase in expected:
@@ -690,10 +707,16 @@ class KernelRunnerTests(unittest.TestCase):
             timing, [(arm, r) for r in range(2) for arm in arms]
         )
 
-        self.assertEqual(manifest["kind"], "kernel")
-        self.assertEqual(manifest["schema_version"], 6)
+        # Schema 7 renames the value: two kinds of unit write a manifest,
+        # and "kernel" named the family and one member of it at once.
+        self.assertEqual(manifest["kind"], "kernel_scenario")
+        self.assertEqual(manifest["schema_version"], 7)
+        self.assertIsNone(manifest["span_scenarios"])
         self.assertEqual(manifest["skipped_arms"], {})
         self.assertEqual(manifest["scenario"], "expert_mlp")
+        # And no span name in it. The two names have separate fields, so a
+        # reader of either never has to ask which roster it belongs to.
+        self.assertIsNone(manifest["span"])
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
         self.assertNotIn("spec", manifest)
         self.assertEqual(manifest["model_size"], "normal")

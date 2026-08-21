@@ -6,7 +6,10 @@ import textwrap
 
 from benchmarks.artifacts.summaries import _pvalue, _value
 from benchmarks.kernel.results.merge import BURST_RESIDUAL_FLAG
-from benchmarks.kernel.results.schema import KernelScenarioResult
+from benchmarks.kernel.results.schema import (
+    KernelScenarioResult,
+    KernelSpanResult,
+)
 from benchmarks.kernel.schema import MODES
 
 # The arm-name column. Widened from 22 when the MoE scenarios arrived: the
@@ -121,15 +124,39 @@ def _description_lines(result: KernelScenarioResult) -> list[str]:
     return ["", *textwrap.wrap(result.description.strip(), width=78), ""]
 
 
-def render_kernel_results(result: KernelScenarioResult) -> str:
-    """Render one kernel scenario: per-mode timings and correctness gates."""
-    shapes = "  ".join(
-        f"{name}={value}" for name, value in result.shapes.items()
-    )
+def _shape_lines(shapes: dict) -> list[str]:
+    """The derived shapes, one line for a scenario and one per cut for a span.
+
+    A span's ``shapes`` is keyed by enclosed scenario, because a span's inputs
+    are the first cut's and its outputs are the last cut's, so no single
+    entry describes it.
+    """
+    if shapes and all(isinstance(value, dict) for value in shapes.values()):
+        return [
+            "shapes ("
+            + name
+            + "): "
+            + "  ".join(f"{key}={value}" for key, value in entry.items())
+            for name, entry in shapes.items()
+        ]
+    return [
+        "shapes: "
+        + "  ".join(f"{name}={value}" for name, value in shapes.items())
+    ]
+
+
+def _common_lines(
+    result: KernelScenarioResult | KernelSpanResult, headline: str
+) -> list[str]:
+    """Everything both kinds of results file print, in one order.
+
+    A span's arms are arms, so its per-mode tables, its memory table, its
+    burst ladder and its gates render exactly as a scenario's do. Only the
+    headline above them and the parts table below them differ.
+    """
     lines = [
-        f"== kernel scenario: {result.scenario}   "
-        f"model size: {result.model_size}   hardware: {result.hardware} ==",
-        f"shapes: {shapes}",
+        headline,
+        *_shape_lines(result.shapes),
         f"{result.replicates} replicates x {result.samples_per_replicate} "
         f"samples, burst k={result.burst_k}, "
         f"warmup={result.warmup_calls} calls, seed={result.seed}",
@@ -283,6 +310,16 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
         else "  CORRECTNESS FAILURES PRESENT"
     )
 
+    return lines
+
+
+def render_kernel_results(result: KernelScenarioResult) -> str:
+    """Render one kernel scenario: per-mode timings and correctness gates."""
+    lines = _common_lines(
+        result,
+        f"== kernel scenario: {result.scenario}   "
+        f"model size: {result.model_size}   hardware: {result.hardware} ==",
+    )
     lines.extend(
         [
             "",
@@ -296,6 +333,116 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
             "only, and their independence assumption is not met. These are",
             "isolated-kernel numbers on synthetic inputs; never present them",
             "as end-to-end training results.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _parts_ci(row: dict) -> str:
+    """The span-versus-parts interval. Unpaired, and the heading says so.
+
+    Deliberately **not** marked with ``~``. That mark already means
+    "within-process, and therefore a lower bound" in the scenario table, and
+    one mark with two meanings is how a reader learns the wrong thing. This
+    column's heading carries the word instead: nothing pairs a span with its
+    parts, so each side is resampled on its own and the interval cancels no
+    drift.
+    """
+    low = row.get("unpaired_ratio_ci_low")
+    high = row.get("unpaired_ratio_ci_high")
+    if low is None or high is None:
+        return "-"
+    return f"[{low:.4f},{high:.4f}]"
+
+
+def render_kernel_span_results(result: KernelSpanResult) -> str:
+    """Render one span: its own timings, and the sum of what it replaces.
+
+    The arm tables above are the span's **own** measurement. The parts table
+    below is the other total, and the two are never printed in one table: a
+    reader scanning a per-mode row must not be able to take a summed number
+    for a measured one.
+
+    The caption under the parts table states the dispatch bias, and it is
+    printed on every span, unconditionally. The bias is systematic, it runs
+    in one direction, and that direction is the one a span is written to
+    support -- so a reader must meet it beside the number and not only in
+    ``results.json``.
+    """
+    lines = _common_lines(
+        result,
+        f"== kernel span: {result.span}   "
+        f"replaces: {' + '.join(result.scenarios)}   "
+        f"model size: {result.model_size}   hardware: {result.hardware} ==",
+    )
+
+    lines.extend(
+        [
+            "",
+            "against the sum of the scenarios it replaces:",
+            "  "
+            + f"{'arm':{ARM_FIELD}s} {'mode':>17s} {'span us':>10s} "
+            + f"{'parts us':>10s} {'ratio':>7s} "
+            + f"{'unpaired 95% CI':>18s}  parts",
+        ]
+    )
+    for row in result.parts_comparisons:
+        lines.append(
+            f"  {row['arm']:{ARM_FIELD}s} "
+            f"{row['mode']:>17s} "
+            f"{_value(row.get('span_median_us'), 10, 2)} "
+            f"{_value(row.get('parts_median_us'), 10, 2)} "
+            f"{_value(row.get('median_ratio'), 7, 4)} "
+            f"{_parts_ci(row):>18s}  "
+            # The terms, not only their names. The total is a sum this file
+            # asserts, and a reader must be able to add it up without
+            # opening results.json.
+            + " + ".join(
+                f"{name} {value:.2f}"
+                for name, value in zip(
+                    row.get("parts", ()), row.get("part_medians_us", ())
+                )
+            )
+        )
+    if not result.parts_comparisons:
+        lines.append("  (no arm carries a parts total)")
+
+    lines.extend(
+        [
+            "",
+            "The 'span us' column is measured. The 'parts us' column is a",
+            "SUM of each part arm's median, and the 'parts' column carries",
+            "the terms so the total adds up in front of the reader.",
+            "",
+            f"BIAS, and it favours the span. The parts total pays one host",
+            f"dispatch chain per enclosed scenario -- "
+            f"{len(result.scenarios)} of them here -- and the",
+            "span pays one. Roughly 85% of a kernel number in this repo is",
+            "host dispatch, not device time, so the parts total carries",
+            f"{len(result.scenarios) - 1} extra chain(s) that no fusion removed. "
+            "The ratio is",
+            "therefore SMALLER than fusion alone would make it, and the",
+            "effect grows with the length of the range. It is not corrected",
+            "for: nothing here measures the device time that would separate",
+            "the two. Read a ratio below 1.0 as fusion PLUS the dispatch",
+            "chains the harness stopped paying, never as fusion alone.",
+            "",
+            "NOTHING PAIRS the two sides. The runner runs each unit to",
+            "completion, so the span's replicate r and a part's replicate r",
+            "are separated by every worker in between and share nothing but",
+            "the number. The ratio is therefore a ratio of two medians and",
+            "the interval resamples each side on its own: it cancels no",
+            "drift, unlike a scenario's per-replicate interval, and it is",
+            "published as unpaired_ratio_ci_* in results.json. Do not read",
+            "the two intervals as the same statistic. No Welch, MWU or d is",
+            "computed against a sum.",
+            "",
+            "Each number is the per-call cost under back-to-back dispatch.",
+            "It is not device time: where the host cannot keep the stream",
+            "fed, the interval holds host stalls too. Run --burst and read",
+            "the residual column; a flagged arm has a k-dependent ratio.",
+            "These are isolated-kernel numbers on synthetic inputs; never",
+            "present them as end-to-end training results.",
         ]
     )
     return "\n".join(lines)

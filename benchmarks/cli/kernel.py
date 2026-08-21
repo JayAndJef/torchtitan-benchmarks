@@ -23,10 +23,15 @@ module's docstring for the other half.
 The single ``--out`` guard is here rather than in ``KernelRunRequest``
 because it is a usage error about flags, not a property of a request: without
 it, several scenarios would resolve to the same directory and overwrite each
-other's ``results.json``. Everything else this function does after the runner
-returns is reporting -- errors were already streamed through the shared
-renderer as they happened, so only the successful scenarios' reports are
-printed, and a nonzero exit summarizes the failures.
+other's ``results.json``. It refuses ``--span`` outright, because a span run
+always measures the scenarios the span replaces as well and is therefore
+never one unit. ``--arm`` refuses ``--span`` for the other half of the same
+fact: an arm name belongs to one scenario's roster, and a span run has
+several rosters, so the selection cannot say which one it names. Everything
+else this function does after the runner returns is reporting -- errors were
+already streamed through the shared renderer as they happened, so only the
+successful scenarios' reports are printed, and a nonzero exit summarizes the
+failures.
 
 Two import facts. ``from benchmarks.kernel...`` inside a module named
 ``benchmarks.cli.kernel`` resolves to the top-level package, not to this one:
@@ -45,8 +50,13 @@ import click
 
 from benchmarks.cli.rendering import _show_event
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
-from benchmarks.kernel.results.reporting import render_kernel_results
+from benchmarks.kernel.results.reporting import (
+    render_kernel_results,
+    render_kernel_span_results,
+)
+from benchmarks.kernel.results.schema import KernelSpanResult
 from benchmarks.kernel.runner import KernelRunRequest, execute_kernel_run
+from benchmarks.kernel.spans import KERNEL_SPANS
 from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 
 
@@ -70,6 +80,18 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
         "correctness reference the selected arms use. A selection that "
         "omits either is refused, not repaired: adding an arm the operator "
         "did not ask for changes what the run measures."
+    ),
+)
+@click.option(
+    "--span",
+    "span_names",
+    multiple=True,
+    type=click.Choice(list(KERNEL_SPANS)),
+    help=(
+        "Kernel span to measure; repeat per span. Default: none. A span is "
+        "compared against the SUM of the scenarios it replaces, and those "
+        "scenarios are measured in the same run -- so asking for one span "
+        "can add several scenarios to the run."
     ),
 )
 @click.option(
@@ -185,15 +207,35 @@ def kernel_bench_command(
     gpu: str,
     scenario_names: tuple[str, ...],
     arm_names: tuple[str, ...],
+    span_names: tuple[str, ...],
     out_dir: Path | None,
     **options: Any,
 ) -> None:
     """Benchmark kernel implementations head-to-head in isolation."""
-    selected = scenario_names or tuple(KERNEL_SCENARIOS)
-    if out_dir is not None and len(selected) != 1:
+    # ``--scenario`` defaults to every scenario; ``--span`` defaults to none.
+    # A span drags every scenario it encloses into the run, so a default of
+    # "all spans" would silently change what a bare invocation costs. An
+    # explicit ``--span`` with no ``--scenario`` measures that span and its
+    # range, and nothing else.
+    selected = scenario_names or (() if span_names else tuple(KERNEL_SCENARIOS))
+    if out_dir is not None and (len(selected) != 1 or span_names):
+        # A span is never allowed here, whatever else was asked for: it
+        # measures the scenarios it replaces in the same run, so a span run
+        # is always several units and they would all resolve to this one
+        # directory.
         raise click.UsageError(
-            "--out requires exactly one --scenario; otherwise scenarios would "
+            "--out requires exactly one --scenario and no --span; a span "
+            "also measures every scenario it replaces, so the units would "
             "overwrite each other"
+        )
+    # ``--arm`` and ``--span`` do not combine. A span run always measures
+    # several scenarios -- the span itself and every scenario it replaces --
+    # so one arm selection cannot say which roster it names, and a per-
+    # scenario selection has no meaning across a range.
+    if arm_names and span_names:
+        raise click.UsageError(
+            "--arm does not combine with --span; a span run measures several "
+            "scenarios and an arm selection belongs to one roster"
         )
     # An arm name belongs to one roster. Two scenarios share neither their
     # arms nor their anchor, so a selection applied to both would mean a
@@ -208,6 +250,7 @@ def kernel_bench_command(
         gpu=gpu,
         scenario_names=selected,
         arm_names=arm_names,
+        span_names=span_names,
         out_dir=out_dir,
         **options,
     )
@@ -220,7 +263,11 @@ def kernel_bench_command(
     for outcome in outcomes:
         if outcome.result is not None:
             click.echo()
-            click.echo(render_kernel_results(outcome.result))
+            click.echo(
+                render_kernel_span_results(outcome.result)
+                if isinstance(outcome.result, KernelSpanResult)
+                else render_kernel_results(outcome.result)
+            )
             click.echo(f"\nmachine-readable results: {outcome.out_dir}/results.json")
 
     failures = [outcome for outcome in outcomes if outcome.failed]

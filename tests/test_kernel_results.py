@@ -92,12 +92,14 @@ def sample_result() -> KernelScenarioResult:
 
 
 class KernelResultsTests(unittest.TestCase):
-    def test_schema_six_records_the_burst_parameters_and_statuses(self) -> None:
+    def test_schema_seven_records_the_burst_parameters_and_statuses(self) -> None:
         """Schema 3 replaced n/warmup; reusing either name is the bug.
         Schema 4 added the per-arm status. Schema 5 renamed the interval a
         batched run publishes. Schema 6 carries the declared compile
-        treatment and the scenario's own description."""
-        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 6)
+        treatment and the scenario's own description. Schema 7 renamed the
+        ``kind`` value, because spans gave the file a second shape and
+        ``"kernel"`` named the family and one member of it at once."""
+        self.assertEqual(KERNEL_RESULTS_SCHEMA_VERSION, 7)
         payload = sample_result().to_dict()
         # Schema 2's model/workload split, still asserted.
         self.assertNotIn("spec", payload)
@@ -265,7 +267,14 @@ class KernelResultsTests(unittest.TestCase):
             loaded = load_kernel_results(path)
 
         self.assertEqual(raw["schema_version"], KERNEL_RESULTS_SCHEMA_VERSION)
-        self.assertEqual(raw["kind"], "kernel")
+        # Schema 7 renames the value. "kernel" named the family and one
+        # member of it, so a RECURSIVE walk of out/ -- which meets both
+        # shapes and has "kind" as its only way to tell them apart -- would
+        # take a span total for a scenario total and sum it beside the
+        # scenarios that span replaces. A span also writes one directory
+        # deeper, but that separation guards only the readers that use the
+        # shallow glob.
+        self.assertEqual(raw["kind"], "kernel_scenario")
         self.assertEqual(loaded.model_size, result.model_size)
         self.assertEqual(loaded.workload, result.workload)
         # Non-finite floats must be nulled for strict JSON.
@@ -419,8 +428,10 @@ class KernelResultsTests(unittest.TestCase):
         # enforces exact equality, so an older file is refused rather than
         # half-read, and each bump owes this list its predecessor: 1 is the
         # pre-split schema, 2 the pre-burst one, 3 the one without a per-arm
-        # status, and 4 the one before the isolation fields.
-        for version in (1, 2, 3, 4, 99):
+        # status, 4 the one before the isolation fields, 5 the one before
+        # the declared compile treatment, and 6 the one before spans gave
+        # the file a second kind.
+        for version in (1, 2, 3, 4, 5, 6, 99):
             with tempfile.TemporaryDirectory() as temporary:
                 path = Path(temporary) / "results.json"
                 payload = sample_result().to_dict()

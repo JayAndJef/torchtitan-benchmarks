@@ -37,6 +37,7 @@ from benchmarks.cli.e2e import evaluate_command, run_all_command, run_command
 from benchmarks.cli.kernel import kernel_bench_command
 from benchmarks.e2e.registry import SCENARIOS
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
+from benchmarks.kernel.spans import KERNEL_SPANS
 
 
 @click.group()
@@ -52,11 +53,29 @@ def scenarios_command() -> None:
         click.echo(f"{scenario.name}: {scenario.description}")
         for arm in scenario.arms:
             click.echo(f"  {arm.name} — {arm.description}")
-    click.echo("\nkernel scenarios (kernel-bench):")
+    click.echo("\nkernel scenarios (kernel-bench --scenario):")
     for scenario in KERNEL_SCENARIOS.values():
         click.echo(f"{scenario.name}: {scenario.description}")
         for arm in scenario.arms:
             click.echo(f"  {arm.name} — {arm.description}")
+
+    # Listed even when the roster is empty. A span is a second kind of unit
+    # and it is the only one that is not a default, so a reader who never
+    # sees the heading has no way to learn that --span exists.
+    click.echo("\nkernel spans (kernel-bench --span):")
+    if not KERNEL_SPANS:
+        click.echo("(none declared)")
+    for span in KERNEL_SPANS.values():
+        click.echo(
+            f"{span.name} [replaces {' + '.join(span.scenarios)}]: "
+            f"{span.description}"
+        )
+        for arm in span.arms:
+            parts = " + ".join(
+                f"{scenario}/{part}" for scenario, part in span.parts_for(arm.name)
+            )
+            click.echo(f"  {arm.name} — {arm.description}")
+            click.echo(f"    against {parts}")
 
 
 cli.add_command(run_command)

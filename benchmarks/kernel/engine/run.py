@@ -78,7 +78,6 @@ be able to measure an expert split that does not cover the rows it built.
 from __future__ import annotations
 
 import gc
-import importlib
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -99,6 +98,7 @@ from benchmarks.kernel.schema import (
     KernelScenario,
     KernelWorkload,
     MODES,
+    resolve_symbol,
     routing_divides_evenly,
     TIMING_FRAGMENT_KIND,
 )
@@ -139,12 +139,6 @@ class RunOptions:
     memory_iters: int = 5
     bursts: tuple[int, ...] = (1, 4, 16, 64)
     burst_iters: int = 50
-
-
-def resolve_symbol(path: str) -> Any:
-    module_name, _, attribute = path.partition(":")
-    module = importlib.import_module(module_name)
-    return getattr(module, attribute)
 
 
 def _heaviest_mode(arm: BuiltArm) -> str:
