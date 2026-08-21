@@ -1374,5 +1374,46 @@ class SpanCliTests(unittest.TestCase):
         )
 
 
+class SpanDispatchBiasTests(unittest.TestCase):
+    """The one bias every span row carries, stated where the number is.
+
+    The parts total pays one host dispatch chain per enclosed scenario and
+    the span pays one. Roughly 85% of a kernel number in this repository is
+    host dispatch, so the parts total holds N-1 chains no fusion removed and
+    the ratio is smaller than fusion alone would make it. The direction of
+    the bias is the direction of the conclusion a span is written to
+    support, which is why it is stated rather than left to the reader.
+
+    It is a property of the range LENGTH, not of what a span fuses, so the
+    engine states it and no declaration has to remember to. These tests are
+    what stop it being deleted quietly.
+    """
+
+    def test_the_results_file_records_the_bias(self) -> None:
+        methodology = merge_span().methodology
+        self.assertIn("span_dispatch_bias", methodology)
+        note = methodology["span_dispatch_bias_note"]
+        self.assertIn("ONE HOST DISPATCH CHAIN PER ENCLOSED SCENARIO", note)
+        self.assertIn("SMALLER", note)
+        self.assertIn("never as fusion alone", note)
+
+    def test_the_printed_table_states_the_bias_and_counts_the_chains(
+        self,
+    ) -> None:
+        """With the range's own length in it, not a general remark."""
+        rendered = render_kernel_span_results(merge_span())
+        self.assertIn("BIAS, and it favours the span", rendered)
+        self.assertIn("2 of them here", rendered)
+        self.assertIn("1 extra chain(s)", rendered)
+        self.assertIn("never as fusion alone", rendered)
+
+    def test_the_bias_is_printed_on_every_span_not_only_a_long_one(
+        self,
+    ) -> None:
+        """A two-scenario span already pays it once."""
+        rendered = render_kernel_span_results(sample_span_result())
+        self.assertIn("BIAS, and it favours the span", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -362,6 +362,12 @@ def render_kernel_span_results(result: KernelSpanResult) -> str:
     below is the other total, and the two are never printed in one table: a
     reader scanning a per-mode row must not be able to take a summed number
     for a measured one.
+
+    The caption under the parts table states the dispatch bias, and it is
+    printed on every span, unconditionally. The bias is systematic, it runs
+    in one direction, and that direction is the one a span is written to
+    support -- so a reader must meet it beside the number and not only in
+    ``results.json``.
     """
     lines = _common_lines(
         result,
@@ -397,8 +403,21 @@ def render_kernel_span_results(result: KernelSpanResult) -> str:
             "",
             "The 'span us' column is measured. The 'parts us' column is a",
             "SUM: per replicate it adds each part arm's median in that",
-            "replicate, and the column is the median of those sums. A ratio",
-            "below 1.0 says the span costs less than the cuts it replaces.",
+            "replicate, and the column is the median of those sums.",
+            "",
+            f"BIAS, and it favours the span. The parts total pays one host",
+            f"dispatch chain per enclosed scenario -- "
+            f"{len(result.scenarios)} of them here -- and the",
+            "span pays one. Roughly 85% of a kernel number in this repo is",
+            "host dispatch, not device time, so the parts total carries",
+            f"{len(result.scenarios) - 1} extra chain(s) that no fusion removed. "
+            "The ratio is",
+            "therefore SMALLER than fusion alone would make it, and the",
+            "effect grows with the length of the range. It is not corrected",
+            "for: nothing here measures the device time that would separate",
+            "the two. Read a ratio below 1.0 as fusion PLUS the dispatch",
+            "chains the harness stopped paying, never as fusion alone.",
+            "",
             "The two sides were measured in separate sweeps of one run, so",
             "replicate r of each shares an index but not a moment: drift",
             "between the sweeps lands in the ratio instead of cancelling.",

@@ -487,6 +487,15 @@ class KernelSpan:
       ``KERNEL_SCENARIOS`` by mistake would otherwise run as a bare scenario
       and publish one of its two totals under a name that promises both.
 
+    **A span ratio carries a bias the declaration cannot remove.** The parts
+    total pays one host dispatch chain per enclosed scenario and the span
+    pays one, and roughly 85% of a kernel number here is host dispatch. So a
+    ratio below 1.0 is fusion **plus** the N-1 chains the harness stopped
+    paying, and the effect grows with the length of the range. It is a
+    property of the range length rather than of what a span fuses, so the
+    engine states it on every span -- printed under the table and recorded in
+    the results file -- and a declaration cannot forget it.
+
     ``scenarios`` names the range. ``parts`` says what each arm replaces; see
     ``SpanParts``. The check that a named part arm *exists* in the named
     scenario needs both objects at once and therefore lives in

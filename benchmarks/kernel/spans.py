@@ -22,6 +22,24 @@ scenario without someone writing ``.measurement``. A span that reached
 ``KERNEL_SCENARIOS`` would run as a bare scenario and publish one of its two
 totals under a name that promises both.
 
+**Every span row carries one systematic bias, and it favours the span.** The
+parts total pays one host dispatch chain per enclosed scenario; the span pays
+one. CLAUDE.md records that roughly 85% of a kernel number in this repository
+is host dispatch rather than device time, so a parts total over N scenarios
+holds N-1 extra chains that no fusion removed -- the harness stopped paying
+them because it timed one closure instead of N. The published ratio is
+therefore smaller than fusion alone would make it, and the effect grows with
+the length of the range.
+
+The bias is a property of the **range length**, not of what a span fuses, so
+the engine states it and no declaration has to remember to. It is printed
+under every span table (``benchmarks.kernel.results.reporting``) and recorded
+in every span results file (``KERNEL_SPAN_METHODOLOGY``). Nothing corrects
+for it: separating the two would need profiler-summed device time, and
+nothing in this repository measures that. A span's own ``description`` should
+still say what the fusion is, so a reader knows what the remainder of the
+ratio is supposed to be.
+
 Torch-free and parent-side, like the schema and the scenario registry: arm
 builders are dotted strings resolved inside the GPU worker, so declaring a
 span costs no import.

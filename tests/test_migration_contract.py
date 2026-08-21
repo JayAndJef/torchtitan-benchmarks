@@ -963,7 +963,10 @@ TEST_CENSUS = {
     # +3 with the mutation-resistant fixture: that the paired estimate is
     # not the unpaired one, and that both totals are auditable from the
     # file that publishes them.
-    "test_kernel_spans": 47,
+    # +3 for the dispatch-chain bias, which favours the span and is
+    # stated in the file, in the printed table, and on a short range
+    # as well as a long one.
+    "test_kernel_spans": 50,
     # The per-arm build probe. requires_gcc_toolset answers a question about
     # the HOST; KernelArm.requirement answers one about this shape and this
     # workload, which is what a sequence sweep needs and what an arm that
@@ -1179,7 +1182,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1018
+TEST_CENSUS_TOTAL = 1021
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

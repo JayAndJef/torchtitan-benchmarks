@@ -7,6 +7,17 @@ it replaces**. Both are merged here, and they share ``_assemble_arms``:
 an arm is an arm either way. What differs is the second total, which only
 ``merge_kernel_span_fragments`` assembles.
 
+**A span row carries one systematic bias, and it favours the span.** The
+parts total pays one host dispatch chain per enclosed scenario; the span pays
+one. CLAUDE.md records that roughly 85% of a kernel number here is host
+dispatch, so a parts total over N scenarios holds N-1 extra chains that no
+fusion removed. The ratio is therefore smaller than fusion alone would make
+it, and the effect grows with the length of the range.
+``KERNEL_SPAN_METHODOLOGY`` states this in every span results file, and
+``results.reporting`` states it under every printed span table. Nothing here
+corrects for it, because nothing in this repository measures the device time
+that would separate the two.
+
 Per-arm process isolation means no single process ever holds the whole
 scenario: one worker gates every arm for correctness, and each timing worker
 times exactly one arm -- one replicate of it at the default, a block of
@@ -130,6 +141,25 @@ KERNEL_MEASUREMENT_METHODOLOGY = {
 # this.
 KERNEL_SPAN_METHODOLOGY = {
     "span_claim": "span_against_the_sum_of_the_scenarios_it_replaces",
+    # The bias every span row carries, stated where the numbers are. It is
+    # systematic, it runs in one direction, and that direction is the
+    # direction of the conclusion a span is written to support.
+    "span_dispatch_bias": "parts_total_pays_one_dispatch_chain_per_scenario",
+    "span_dispatch_bias_note": (
+        "the parts total pays ONE HOST DISPATCH CHAIN PER ENCLOSED "
+        "SCENARIO; the span pays one. CLAUDE.md records that roughly 85% of "
+        "a kernel number in this repository is host dispatch rather than "
+        "device time, so a parts total over N scenarios carries N-1 extra "
+        "chains that no fusion removed -- the harness stopped paying them "
+        "because it timed one closure instead of N. The bias makes the "
+        "span/parts ratio SMALLER, which is the direction that supports the "
+        "claim a span exists to make, and it grows with the length of the "
+        "range. It is stated here and NOT corrected for: there is no "
+        "measurement in this repository that separates the two, because "
+        "nothing here measures profiler-summed device time. Read a ratio "
+        "below 1.0 as fusion PLUS the dispatch chains the harness stopped "
+        "paying, never as fusion alone."
+    ),
     "span_parts_note": (
         "the parts total is summed at the REPLICATE level: per replicate it "
         "is the sum of each part arm's median in that replicate. Samples are "
