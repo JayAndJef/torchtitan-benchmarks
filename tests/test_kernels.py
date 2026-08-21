@@ -362,7 +362,12 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         self.assertEqual(expert_mlp["x"], [8192, 1024])
         self.assertEqual(expert_mlp["tokens_per_expert"], [2048] * 4)
         qkv_prep = shape_summary("qkv_prep", shape, workload)
+        # Both weight forms, because the two titan arms hold different ones:
+        # the fused arm holds the grouped interleave and the unfused arm the
+        # three matrices it is built from. A summary that reported only one
+        # could not say which arm a weight belongs to.
         self.assertEqual(qkv_prep["wqkv"], [2048, 1024])
+        self.assertEqual(qkv_prep["wk"], [512, 1024])
         lm_head = shape_summary("lm_head", shape, workload)
         self.assertEqual(lm_head["tokens"], 4096)
         self.assertEqual(lm_head["weight"], [151936, 1024])
