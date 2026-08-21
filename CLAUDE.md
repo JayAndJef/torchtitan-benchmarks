@@ -688,11 +688,13 @@ claim needs profiler-summed device time, which nothing in this repo currently
 measures. Do not apply the replacement more loosely than the tool it replaces.
 
 The **cross-engine** case -- attributing a megatron-vs-titan gap to particular
-components -- is what the 16 cross-engine kernel scenarios are for. They are
-declarations at this rev and nothing more: **no `results.json` under `out/`
-contains the string `mcore/`**, so there is no cross-engine component number
-to cite yet. Only one of the 16, `attention_core`, has ever been built at all;
-see "No cross-engine arm has produced a number" below.
+components -- is what the 16 cross-engine kernel scenarios are for. Fifteen of
+them are declarations at this rev and nothing more. The sixteenth,
+`attention_core`, has produced **one** cell: two of its six arms, at one long
+sequence length. So there is one cross-engine component number to cite, it
+covers inner attention alone, and it is not a component breakdown of anything
+else. See "Exactly one cross-engine number exists" below.
+
 
 Measured three times on 2026-08-09, twice producing a published claim that
 had to be retracted:
@@ -831,9 +833,11 @@ cover the rows they built.
 longer exist.** On an H200 on 2026-08-19, `qkv`, `attention` and `lm_head`
 completed at `huge` with every arm `ok`, and `swiglu` ran out of memory and
 wrote no `results.json` (`out/20260819T010252Z/kernels/`). Of those four only
-`lm_head` is still a scenario. **No cross-engine arm has run at either size**,
-and no successor scenario has been probed at `huge`. Treat every scenario
-except `lm_head` at `huge` as untested rather than as working.
+`lm_head` is still a scenario. **No cross-engine arm has run at `huge`**, and
+no successor scenario has been probed there; the one cross-engine run so far
+is at `normal`. Treat every scenario except `lm_head` at `huge` as untested
+rather than as working.
+
 
 The `swiglu` run died inside `run_correctness_pass`, in the gate's fp32
 upcast, with 134 GiB of the device's 139.81 GiB already in use. **Keep that
@@ -900,24 +904,42 @@ because it publishes no cross-engine row. `./run_bench.sh scenarios` prints
 every scenario with its description. Read the registry rather than this table
 for that half.
 
-**No cross-engine arm has produced a number on this box.** 52 kernel
-`results.json` files exist under `out/`, and **not one contains the string
-`mcore/`**. Each names `rope`, `swiglu`, `qkv`, `lm_head` or `attention`, and
-three of those five scenarios are now retired. Re-check it yourself rather
-than trusting this line:
+**Exactly one cross-engine number exists**, and it is two arms of one
+scenario. 53 kernel `results.json` files exist under `out/` and **one**
+contains the string `mcore/`:
+`out/20260821T042516Z/kernels/attention_core/nvidia-h200/`. Re-derive both
+counts rather than trusting this line:
 
 ```bash
+find out -path '*kernels*' -name results.json | wc -l
 find out -path '*kernels*' -name results.json -exec grep -l "mcore/" {} +
 ```
 
-**15 of the 16 cross-engine scenarios have never been built.** No arm was
-constructed, no `_assert_mcore_*` guard ran, and no gate compared a real
+That run is a **two-arm selection**: `--arm mcore/base --arm titan` at
+`--seq-len 16384`, batch 4, `normal` shape, 5 replicates. The other four arms
+carry `status: skipped` with the selection as the reason, so the file holds 2
+comparison rows and no ratio against FA3, FA4 or the unfused arm. `titan`
+against `mcore/base`:
+
+| mode | titan / mcore/base | 95% CI | medians (us/call) |
+|---|---|---|---|
+| forward | **1.1226** | [1.1196, 1.1241] | 2071.7 against 1847.0 |
+| forward_backward | **1.1421** | [1.1357, 1.1494] | 7936.9 against 6951.5 |
+
+Titan is slower on both. **The number is quotable because the sequence
+length made both arms device-dominated**: the `--burst` ladder puts every
+residual inside +/-0.7%, far below the 2% flag, where the same two arms at
+seq 1024 are dispatch-bound and their ratio would move with `k`. Read it as
+one cell of one scenario at one long sequence, not as an engine verdict.
+
+**15 of the 16 cross-engine scenarios have still never been built.** No arm
+was constructed, no `_assert_mcore_*` guard ran, and no gate compared a real
 tensor. Only `attention_core` has been built and gated, on 2026-08-20
-(`reports/20260820-attention_core-firstrun.md`): all six arms built, all 24
-enforcing gates passed, and it produced **no timing number**, because the box
-never became idle. So the correct reading of a cross-engine scenario at this
-rev is "a declaration whose builders have never executed", which is weaker
-than "untested" and much weaker than "measured".
+(`reports/20260820-attention_core-firstrun.md`): all six arms built and all
+24 enforcing gates passed. So the correct reading of any other cross-engine
+scenario at this rev is "a declaration whose builders have never executed",
+which is weaker than "untested" and much weaker than "measured".
+
 
 The `attention_core` scenario measures **inner attention only** -- the level
 at which the implementations are substitutable, and the level that keeps it
@@ -2183,8 +2205,10 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   and takes about 40 seconds at 1124 tests.
 - **Do not let "declared" become "measured".** Most of the kernel registry has
   never executed: 15 of the 16 cross-engine scenarios have never had an arm
-  built, no cross-engine arm has produced a number, and no span has been
-  measured at all. When you write about one of those, say what it declares.
+  built, one cross-engine scenario has produced two arms at one sequence
+  length, and no span has been measured at all. When you write about one of
+  those, say what it declares.
+
 
 - **Commit in single, self-contained steps, as the work happens.** One commit
   is one logical change that leaves the tree green on its own. Do not

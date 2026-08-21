@@ -263,10 +263,12 @@ says which one it dropped. Each scenario writes a manifest and results JSON
 (with the raw per-replicate samples) under `out/<timestamp>/kernels/`.
 `./run_bench.sh scenarios` lists every scenario and arm.
 
-**No cross-engine arm has produced a number on this box.** Every kernel
-`results.json` under `out/` predates the cross-engine partition, and only one
-of the sixteen cross-engine scenarios has ever had an arm built. Read a
-cross-engine scenario as a declaration until a run says otherwise.
+**One cross-engine number exists so far**, and it covers two arms of one
+scenario: `attention_core`'s `titan` against `mcore/base` at sequence length
+16384, where titan is about 1.12x slower forward and 1.14x slower forward
+plus backward. Fifteen of the sixteen cross-engine scenarios have never had
+an arm built. Read those as declarations until a run says otherwise.
+
 
 ## Tests
 
