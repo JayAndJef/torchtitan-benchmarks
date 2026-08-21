@@ -30,7 +30,8 @@
 #   ROOT             output root (default out/matrix-<utc>)
 #   PASSES           retry passes over failed/contaminated cells (default 3)
 #   STEPS            training steps per arm (default 80)
-#   CELLS            "huge", "normal", or "all" (default all; huge runs first)
+#   CELLS            "huge", "1b", or "all" (default all; huge runs first).
+#                    "normal" is the retired spelling of "1b" and is accepted.
 #   IDLE_MEM_MIB     GPU memory below which the card counts as idle (2000)
 #   IDLE_LOAD        1-min loadavg below which the host counts as idle (60)
 #   IDLE_SETTLE      consecutive idle samples required before starting (3)
@@ -48,6 +49,15 @@ ROOT="${ROOT:-out/matrix-$(date -u +%Y%m%dT%H%M%SZ)}"
 PASSES="${PASSES:-3}"
 STEPS="${STEPS:-80}"
 CELLS="${CELLS:-all}"
+# The 1B shape was called "normal" until it took the model's own name.
+# Accept both, and name the cell directory canonically, so a collected tree
+# agrees with the manifests inside it.
+if [ "$CELLS" = normal ]; then CELLS=1b; fi
+case "$CELLS" in
+    all|huge|1b) ;;
+    *) echo "run_matrix: unknown CELLS=$CELLS (want all, huge or 1b)" >&2
+       exit 2 ;;
+esac
 IDLE_MEM_MIB="${IDLE_MEM_MIB:-2000}"
 IDLE_LOAD="${IDLE_LOAD:-60}"
 IDLE_SETTLE="${IDLE_SETTLE:-3}"
@@ -129,7 +139,7 @@ if [ "$CELLS" = all ] || [ "$CELLS" = huge ]; then
         done
     done
 fi
-if [ "$CELLS" = all ] || [ "$CELLS" = normal ]; then
+if [ "$CELLS" = all ] || [ "$CELLS" = 1b ]; then
     for ac in sac none; do
         for mode in default cuda-graph; do
             for scenario in piper1b_rope piper1b_swiglu piper1b_qkv \
@@ -137,7 +147,7 @@ if [ "$CELLS" = all ] || [ "$CELLS" = normal ]; then
                 # megatron declares supported_ac_modes=("none",); the CLI
                 # errors rather than skipping on a direct --scenario request.
                 [ "$scenario" = piper1b_megatron ] && [ "$ac" != none ] && continue
-                CELL_LIST+=("normal|$ac|$mode|$scenario")
+                CELL_LIST+=("1b|$ac|$mode|$scenario")
             done
         done
     done
