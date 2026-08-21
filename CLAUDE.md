@@ -1059,11 +1059,12 @@ own family module.
 
 ### Method
 
-- Module-scope arms (the three titan rope modules, the swiglu layer arms,
-  both qkv arms) run under `torch.compile(fullgraph=True)`, because that is
-  what they face end-to-end: eager isolation races custom ops against
+- Module-scope arms (the three titan rope modules, `expert_mlp`'s four titan
+  arms, `qkv_prep`'s two) run under `torch.compile(fullgraph=True)`, because
+  that is what they face end-to-end: eager isolation races custom ops against
   materialization costs Inductor deletes, which inverts verdicts (the
-  swiglu combined layout wins eager, loses compiled). **The treatment is per
+  combined SwiGLU layout wins eager, loses compiled). **The treatment is per
+
   arm, and the engine does not imply it.** An arm is eager only where
   `KernelArm.eager_reason` says why: every `copy_floor`, because a bandwidth
   floor is not an implementation; most megatron-core arms, because megatron
@@ -1105,8 +1106,24 @@ own family module.
   device work these shapes carry, so the method works where an arm is
   device-bound; the three module arms sit 6-19x above that floor and are
   still falling at 64, so **roughly 85% of every published rope number is
-  host dispatch**. `qkv` is dispatch-heavy in absolute terms too, but both
-  its arms are, so the effect largely cancels in the ratio.
+  host dispatch**. The retired `qkv` scenario was dispatch-heavy in absolute
+  terms too, but both its arms were, so the effect largely cancelled in the
+  ratio. That reading transfers to `qkv_prep`'s titan pair in principle, and
+  **it is not a repeat**: `qkv_prep` puts the attention-input norm inside the
+  cut, so the arms are not the ones the figure was taken on.
+- **A span ratio carries the same 85% as a bias in its own favour.** The
+  parts side pays **one host dispatch chain per enclosed scenario**, and the
+  span pays one. So a parts total over N scenarios holds N-1 extra chains
+  that no fusion removed -- the harness stopped paying them because it timed
+  one closure instead of N. The published span/parts ratio is therefore
+  **smaller** than fusion alone would make it, which is the direction that
+  supports the claim a span exists to make, and the effect grows with the
+  length of the range. It is a property of the range length rather than of
+  what a span fuses, so the engine states it on every span -- printed under
+  the table and recorded in every span `results.json` -- and nothing corrects
+  for it. Separating the two would need profiler-summed device time, which
+  nothing here measures.
+
 - **A dispatch-bound arm carries a k-dependent ratio, so its ranking is not
   a kernel result.** On the same retired rope roster, `helion` against
   `baseline` is 2.40x at k=1, 3.05x at k=16 and 3.09x at k=64. Run `--burst`; the merge derives a `residual`
@@ -1133,9 +1150,12 @@ own family module.
   the shorter arms reach their timed region, and this workload is
   host-dispatch bound, so host jitter lands inside the measured interval.
   Setting `compile_threads=1` removes the pool. Measured at n=3, median
-  us/call with the per-run standard deviation: `qkv/fused_qkv/forward`
-  248.68 +/- **9.42** against 233.37 +/- **0.82**; `rope/helion/forward`
-  261.27 +/- **29.07** against 244.64 +/- **6.47**. The standard deviation
+  us/call with the per-run standard deviation, **on two arms that no longer
+  exist under those names**: `qkv/fused_qkv/forward` (the retired `qkv`
+  scenario) 248.68 +/- **9.42** against 233.37 +/- **0.82**, and
+  `rope/helion/forward` (the retired single-engine rope roster) 261.27 +/-
+  **29.07** against 244.64 +/- **6.47**. The standard deviation
+
   falls 3x to 11x on the dispatch-bound arms and the device-bound arm is
   unmoved -- which is what 32 concurrent `import torch` processes would do.
   The medians move in both directions at n=3, so **only the variance change
@@ -1163,10 +1183,24 @@ own family module.
   assumption is not met. **Wilcoxon was removed**: it needed the per-cycle
   pairing the old round-robin provided, and at 5 replicates its exact
   two-sided minimum p is 0.0625, so it can never reject.
+- **That whole bullet is a *scenario* statement. The span statistic is
+  unpaired.** `measurement_plan` runs each unit to completion before the next
+  one starts, so a span's replicate `r` and an enclosed scenario's replicate
+  `r` are separated by every worker in between and share nothing but the
+  number. Any permutation of the parts' indices would be as justified as the
+  identity. So a span's point estimate is a ratio of two medians, each taken
+  over its own side, and the interval is an **unpaired** bootstrap that
+  resamples each side independently. It is published as
+  `unpaired_ratio_ci_low`/`_high` and never under the scenario name: it
+  cancels no drift, and the two must not be read as the same statistic.
+  Interleaving the units so the pairing would be real was **rejected** -- it
+  would make a scenario's own numbers depend on whether a span asked for it.
 - Python's garbage collector is paused during the timed region. A collection
   starves the launch queue and lands as idle time inside whichever arm's
-  interval is open; pausing it cut the swiglu module sd from ~63 us to
-  ~1.4 us and removed every 2x outlier, medians unchanged.
+  interval is open; pausing it cut the sd of the retired `swiglu` scenario's
+  module arm from ~63 us to ~1.4 us and removed every 2x outlier, medians
+  unchanged.
+
 - The first burst after the warmup synchronize is discarded (empty queue,
   systematically high).
 - No L2 flush, and **no equalization is claimed**. The old text claimed
@@ -1190,19 +1224,24 @@ own family module.
   arm's dependencies out of another arm's interpreter during measurement, and
   it is why the parent computes the ratios: no timing worker sees a second
   arm. **`run_correctness_pass` is the exception**: it gates *every* arm of
-  the scenario in one interpreter, because 35 of the 73 arms name another
+  the scenario in one interpreter, because 36 of the 71 arms name another
   arm as their correctness reference and a check needs both sides at once.
   One arm is resident at a time -- each is built, asked for its outputs, and
   dropped before the next is built -- so the pass is bounded by the largest
   single arm rather than by their sum
-  (`benchmarks/kernel/engine/run.py`). The scenario that was expected to
-  force a per-arm split -- one holding both a TransformerEngine arm and an
-  FA3 arm -- does not: the two were measured to coexist in one process
-  (`reports/20260820-te-fa3-coexist.md`). The split may still be wanted, but
-  nothing is waiting on it.
+  (`benchmarks/kernel/engine/run.py`).
+- **One declared scenario now needs a per-arm correctness split, and the
+  reason is not the one anybody predicted.** TransformerEngine and the FA3
+  varlen path were expected to collide over kernels or sonames; measured,
+  they do not (`reports/20260820-te-fa3-coexist.md`). What collides is
+  torch's cuDNN **version bookkeeping**, and it stops `attention_core`'s
+  titan FA3 arm from building after a megatron arm in the same interpreter.
+  See "The correctness pass needs a per-arm split on some hosts" above. The
+  split is not built; the workaround is an environment flag.
   `benchmarks/kernel/engine/run.py`'s `run_kernel_scenario` composes the same
   two passes in a single process for the GPU smoke test; the runner never
   calls it.
+
 - **Re-seeding is per arm build, not per process.** Inputs rebuild
   bit-identically in every worker (the inputs builder owns its generator),
   but builders consume the global RNG, so an arm built second in one process
@@ -1221,22 +1260,31 @@ own family module.
   results at all -- every comparison is a ratio against it, so the
   alternative is a table whose missing ratios look like a scenario that
   declared none.
-- **Requirements belong to the arm, not to the scenario.** Without a C++20
-  host compiler, rope loses `titan/te` and still measures its other four
-  arms; the former scenario-level `requires_gcc_toolset` check threw away
-  the whole scenario. `resolve_arm_skips` decides the set in the parent, closes it
-  over correctness references (an arm whose reference is skipped is skipped
-  too -- timing an arm nothing checked is the wrongness the gates exist for),
-  and delivers it to the correctness worker as `--skip-arm NAME`. A skipped
-  arm is spawned in neither pass. The scenario-level property survives for
-  its one honest use: asking whether anything here needs the compiler at all,
-  which is what decides whether `add_compiler_environment` runs. That call
-  shells out to bash and is now resolved **once per run**.
+- **Requirements belong to the arm, not to the scenario, and there are now
+  two kinds.** `requires_gcc_toolset` is a property of the host:
+  without a C++20 host compiler, rope loses `titan/te` and still measures its
+  other four arms, where the former scenario-level check threw away the whole
+  scenario. `KernelArm.requirement` is the other kind -- a parent-side
+  predicate called with `(shape, workload)` -- and no arm declares one yet.
+  `resolve_arm_skips` decides the set in the parent, before a GPU is claimed;
+  it resolves the operator's `--arm` choice first, then the capability
+  probes, then closes the set over correctness references (an arm whose
+  reference is skipped is skipped too -- timing an arm nothing checked is the
+  wrongness the gates exist for). It delivers the result to the correctness
+  worker as `--skip-arm NAME`, and a skipped arm is spawned in neither pass.
+  The scenario-level property survives for its one honest use: asking whether
+  anything here needs the compiler at all, which is what decides whether
+  `add_compiler_environment` runs. That call shells out to bash and is now
+  resolved **once per run**.
 - **Every declared arm reaches `results.json`, measured or not**, carrying
   `status` `ok`, `skipped` or `failed` and the reason. At schema 3 an arm
   this host could not run and an arm the registry never declared were both
   simply absent, so a reader could not tell a short roster from a complete
-  one. The skip of an *anchor* is the exception that costs the scenario.
+  one. **Read the reason, not only the status**: a `skipped` arm the operator
+  left out with `--arm` and a `skipped` arm this host cannot build are
+  different facts, and the reason string is what separates them. The skip of
+  an *anchor* is the exception that costs the scenario.
+
 
 ### Startup cost
 
