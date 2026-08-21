@@ -139,10 +139,12 @@ def validate_shape_and_workload(
     """Raise ValueError on a shape/workload pair no scenario can run.
 
     Only constraints that genuinely cross the two live here. The purely
-    geometric ones are structurally unrepresentable: ``PiperShape`` derives
-    both head counts from ``dim`` and ``head_dim``, so
-    ``n_heads * head_dim == dim`` and ``n_heads % n_kv_heads == 0`` cannot be
-    violated and there is nothing to assert.
+    geometric ones are already unreachable: ``PiperShape`` derives
+    ``n_heads`` from ``dim`` and ``head_dim`` and rejects a ``n_kv_heads``
+    that does not divide it, so ``n_heads * head_dim == dim`` and
+    ``n_heads % n_kv_heads == 0`` hold by construction and there is nothing
+    to assert. ``n_kv_heads`` is a recorded field rather than a derivation,
+    which is why the second one needs that guard.
     """
     if workload.seq_len > shape.max_seq_len:
         raise ValueError(

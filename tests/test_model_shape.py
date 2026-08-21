@@ -191,11 +191,11 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertGreater(self._table_fraction(one_layer), 0.6)
         self.assertLess(self._table_fraction(LARGE), 0.3)
 
-    def test_three_shapes_share_the_normal_parameter_split(self) -> None:
-        # normal, large and giant all hold n_layers*dim at 16384, so all
-        # three carry the same split between the two tables and the layer
-        # stack. huge is the exception, because the memory ceiling chose its
-        # dim rather than the split.
+    def test_three_shapes_share_the_1b_parameter_split(self) -> None:
+        # 1b, large and giant all hold n_layers*dim at 16384, so all three
+        # carry the same split between the two tables and the layer stack.
+        # The other three do not hold that product: huge because the memory
+        # ceiling chose its dim, 9b and 48b because piper chose theirs.
         for shape in (PIPER_1B, LARGE, GIANT):
             with self.subTest(size=shape.name):
                 self.assertEqual(shape.n_layers * shape.dim, 16384)
@@ -501,10 +501,17 @@ class PinnedShapeTests(unittest.TestCase):
     def test_every_registered_shape_is_pinned(self) -> None:
         """A new shape must write its numbers down before it can ship.
 
-        The table above is the only place a shape's geometry is stated twice,
-        and stating it twice is the point: the second statement is transcribed
-        from the model config the shape claims to be, so a derivation that is
-        wrong for that model cannot pass both.
+        The table above is the only place a shape's geometry is stated
+        twice, and stating it twice is the point: the second statement is
+        transcribed from the model config the shape claims to be, so a
+        derivation that is wrong for that model cannot pass both.
+
+        That holds for the geometry half only. ``param_count``, the three
+        ``nparams_*`` values and ``num_flops_per_token`` appear in no model
+        config and had to be computed, so for those five the table is a
+        regression pin rather than an independent statement. The independent
+        route for them is ``_counts_from_the_tensor_list`` above, which walks
+        the parameter tensors and which every registered shape must match.
         """
         self.assertEqual(set(PINNED_SHAPES), set(PIPER_SHAPES))
 
@@ -512,11 +519,11 @@ class PinnedShapeTests(unittest.TestCase):
 class ModelSizeAliasTests(unittest.TestCase):
     """``normal`` is the retired name of ``1b``, and it must keep working.
 
-    13 manifests under ``out/`` record ``"model_size": "normal"``, and every
-    manifest at schema <= 8 records no size at all and is defined to resume as
-    that shape. ``--resume`` compares the recorded string against the
-    requested one, so a rename without an alias would refuse a resume that
-    should succeed.
+    Measured under ``out/`` on 2026-08-21: 42 e2e manifests record
+    ``"model_size": "normal"``, and 88 more record no size at all and are
+    defined to resume as that shape. ``--resume`` compares the recorded
+    string against the requested one, so a rename without an alias would
+    refuse a resume that should succeed for 130 of the 144 e2e runs on disk.
     """
 
     def test_the_retired_name_resolves_to_the_same_shape(self) -> None:
@@ -700,7 +707,9 @@ class ConfigSizeClosureTests(unittest.TestCase):
                 (shape.num_experts, shape.top_k, shape.moe_hidden_dim),
                 f"{name} at {size}",
             )
-            self.assertEqual(model.vocab_size, shape.vocab_size, f"{name} at {size}")
+            self.assertEqual(
+                model.vocab_size, shape.vocab_size, f"{name} at {size}"
+            )
 
     def test_the_private_builders_require_an_explicit_shape(self) -> None:
         """No default shape on the builders every public config calls.

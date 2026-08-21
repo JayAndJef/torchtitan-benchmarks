@@ -23,29 +23,33 @@ parameter counts.
 
 **Three of the six are real piper models, and three are benchmark
 inventions. The name says which.** ``1b``, ``9b`` and ``48b`` are
-transcribed field for field from
-``/data/zejiaqi/piper/examples/models/qwen3.py``, cases ``'1B'``, ``'9B'``
-and ``'48B'``. ``large``, ``huge`` and ``giant`` are ours: each was built by
-choosing a dim and a layer count for a benchmark reason, and then applying
-the piper-1B rules to everything else.
+transcribed field for field from ``examples/models/qwen3.py`` in the piper
+checkout, cases ``'1B'``, ``'9B'`` and ``'48B'``. The absolute path of that
+checkout moves with the host. It is ``/m-coriander/coriander/jayden/piper/``
+today, and the ``/data/zejiaqi/piper/`` that ``config_registry.py`` cites is
+stale.
+
+``large``, ``huge`` and ``giant`` are ours. Each was built by choosing a dim
+and a layer count for a benchmark reason, and then applying the piper-1B
+rules to everything else.
 
 **A synthetic shape is not piper at scale, and ``huge`` is the clearest
 case.** Piper scales by adding layers and experts and by widening
 ``head_dim``, and it holds ``n_heads`` at 32 and ``n_kv_heads`` at 8 from 9B
 up -- 4:1 grouped-query attention. The synthetic shapes pin ``head_dim`` at
 64 and take ``n_heads = dim/head_dim``, so their head count grows with the
-width: ``huge`` carries 192 query heads over 96 kv heads and ``giant``
-carries 256 over 128, counts real piper never approaches, at a 2:1 ratio
-real piper stopped using after 1B. That changes the fused qkv width, the
-attention arithmetic and the kv-cache size. Read ``huge`` as a wide
-transformer block sized to fill an H200, which is what it was built to be,
-and never as piper at scale.
+width. ``huge`` carries 192 query heads over 96 kv heads, and ``giant``
+carries 256 over 128. Real piper never approaches those counts. Their 2:1
+ratio is also the ratio real piper stopped using after 1B. That changes the
+fused qkv width, the attention arithmetic and the kv-cache size. Read
+``huge`` as a wide transformer block sized to fill an H200, which is what it
+was built to be, and never as piper at scale.
 
 ``large`` and ``48b`` make the same point at one dim. Both are dim 4096
-with a 14336 expert width, and they agree on nothing else: ``head_dim`` 64
-against 128, ``n_heads`` 64 against 32, ``n_kv_heads`` 32 against 8,
-``n_layers`` 4 against 32, ``num_experts`` 4 against 8. ``large`` does not
-approximate ``48b``.
+with a 14336 expert width. They then differ in every remaining geometry
+value: ``head_dim`` 64 against 128, ``n_heads`` 64 against 32,
+``n_kv_heads`` 32 against 8, ``n_layers`` 4 against 32, ``num_experts`` 4
+against 8. ``large`` does not approximate ``48b``.
 
 The one ratio every entry below refers to: embedding + lm_head are ``2*V*D``
 parameters and one transformer layer is ``45*D^2``, so one layer against the
@@ -54,16 +58,17 @@ them is ``n_layers*dim/6753``, which is why the layer count is part of a
 shape and not a free choice.
 
 ``1b`` (real)
-    Piper 1B, verbatim: dim 1024, 16 layers, 1,066,241,024 parameters. Every number
-    this repo published before schema 9 is this shape, under its old name
-    ``normal``.
+    Piper 1B, verbatim: dim 1024, 16 layers, 1,066,241,024 parameters.
+    Every number this repo published before schema 9 is this shape, under
+    its old name ``normal``.
 
 ``large`` (synthetic)
     Four transformer layers at dim 4096, 4,264,661,504 parameters. It is the
     middle rung between ``1b`` and ``huge`` in dim and in parameter
     count. The layer count is what makes it a rung of the same model rather
-    than a different experiment: ``n_layers*dim`` is 16384 here, the product ``1b``
-    carries, so ``large`` splits its parameters exactly as ``1b`` does --
+    than a different experiment: ``n_layers*dim`` is 16384 here, the
+    product ``1b`` carries, so ``large`` splits its parameters as ``1b``
+    does --
     29% embedding tables, 71% layer stack. At one layer the ratio above is
     1.65, so a 1-layer model at dim 4096 would be 62% embedding table and the
     benchmark would measure the lm_head and the cross entropy. Four layers
@@ -76,8 +81,10 @@ shape and not a free choice.
     comparison be about a transformer block rather than about the embedding
     table. At dim 1024 a 1-layer model would be 87% embedding; at dim 12288
     the single layer is 64% of the parameters and the large majority of the
-    FLOPs. It is the one shape whose ``n_layers*dim`` is not 16384, because
-    the memory ceiling chose its dim rather than the parameter split.
+    FLOPs. Its ``n_layers*dim`` is not 16384, because the memory ceiling
+    chose its dim rather than the parameter split. It was the only such
+    shape until the real ladder arrived; ``9b`` and ``48b`` do not hold that
+    product either, because piper never chose it.
 
 ``giant`` (synthetic)
     One transformer layer at dim 16384, 17,058,349,184 parameters. The ratio
@@ -90,13 +97,14 @@ shape and not a free choice.
     constant records the memory arithmetic and what it does not cover.
 
 ``9b`` (real)
-    Piper 9B, verbatim: dim 2048, 24 layers, 9,330,201,600 parameters. The first
-    registered shape with 4:1 grouped-query attention and 8 experts.
+    Piper 9B, verbatim: dim 2048, 24 layers, 9,330,201,600 parameters. The
+    first registered shape with 4:1 grouped-query attention and 8 experts.
 
 ``48b`` (real)
-    Piper 48B, verbatim: dim 4096, 32 layers, 47,685,316,608 parameters. The first
-    registered shape with ``head_dim`` 128. Nothing has run at either, and
-    neither one's memory ceiling is known.
+    Piper 48B, verbatim: dim 4096, 32 layers, 47,685,316,608 parameters.
+    The first registered shape with ``head_dim`` 128. Nothing has run at
+    either. 9B may fit one H200 and 48B cannot; see the ``PIPER_48B``
+    constant for that arithmetic.
 
 Everything that varies per shape is a field or a derived property of
 ``PiperShape``, so registering a new shape is one ``PIPER_SHAPES`` entry and
@@ -273,9 +281,12 @@ class PiperShape:
 
         Derived because every registered shape agrees with it: piper 1B 3584,
         9B 7168 and 48B 14336 are each 3.5x their dim, and the three synthetic
-        shapes were built on the same rule. Piper 9M is the one real config
-        that breaks it (128 against 896), so registering 9M means promoting
-        this to a field.
+        shapes were built on the same rule.
+
+        Three real piper configs break it, so registering any of them means
+        promoting this to a field. 9M reads 128 against a derived 896.
+        30B-A3B and 30B-A3B-half read 768 against a derived 7168, which is a
+        9.3x error.
         """
         return self.dim * 7 // 2
 
@@ -384,8 +395,8 @@ class PiperShape:
         }
 
 
-# Piper 1B, verbatim. Every field matches
-# /data/zejiaqi/piper/examples/models/qwen3.py case '1B'.
+# Piper 1B, verbatim. Every field matches examples/models/qwen3.py case
+# '1B' in the piper checkout.
 PIPER_1B = PiperShape(
     name="1b",
     dim=1024,
@@ -479,8 +490,8 @@ GIANT = PiperShape(
     parity_gate=6e-2,
 )
 
-# Piper 9B, verbatim. Every field matches
-# /data/zejiaqi/piper/examples/models/qwen3.py case '9B'.
+# Piper 9B, verbatim. Every field matches examples/models/qwen3.py case
+# '9B' in the piper checkout.
 #
 # It is the first registered shape whose head geometry is not the 1B family's.
 # 32 query heads over 8 kv heads is 4:1 grouped-query attention, where 1B and
@@ -508,21 +519,30 @@ PIPER_9B = PiperShape(
     parity_gate=2e-2,
 )
 
-# Piper 48B, verbatim. Every field matches
-# /data/zejiaqi/piper/examples/models/qwen3.py case '48B'.
+# Piper 48B, verbatim. Every field matches examples/models/qwen3.py case
+# '48B' in the piper checkout.
 #
 # The first registered shape whose head_dim is not 64. n_heads stays 32 and
 # n_kv_heads stays 8, exactly as at 9B: piper widens the head and adds layers
 # and experts, and holds the head counts.
 #
 # It shares dim 4096 and moe_hidden_dim 14336 with the synthetic LARGE, and
-# differs in everything else -- head_dim 128 against 64, n_heads 32 against
-# 64, n_kv_heads 8 against 32, n_layers 32 against 4, num_experts 8 against 4.
-# LARGE is 48B's width with the wrong head geometry and half the experts. Do
-# not read one as an approximation of the other.
+# differs in every remaining geometry value -- head_dim 128 against 64,
+# n_heads 32 against 64, n_kv_heads 8 against 32, n_layers 32 against 4,
+# num_experts 8 against 4. LARGE is 48B's width with the wrong head geometry
+# and half the experts. Do not read one as an approximation of the other.
 #
 # VALIDATION RULE 7 IS UNTESTED AT 32 LAYERS, for the reason given on 9B: the
 # window invocation count is 160 here.
+#
+# THIS SHAPE DOES NOT FIT ONE H200, AND IT IS NOT CLOSE. 47,685,316,608
+# parameters at titan's 8 B/param of state (params 2 + grads 2 + fused-AdamW
+# m,v 4) is 355 GiB, and at megatron's 10 B/param under graph mode it is 444
+# GiB, against a 139.81 GiB device -- 2.5x to 3.2x over, before a single
+# activation. GIANT is 2.8x smaller than this and already carries an OOM
+# warning. Do not launch a sweep at 48b on one GPU; it is registered so the
+# geometry is stated once and correctly, not because it is runnable here.
+# 9B is the plausible one: 69.5 GiB titan, 86.9 GiB megatron, both unmeasured.
 PIPER_48B = PiperShape(
     name="48b",
     dim=4096,
@@ -549,11 +569,15 @@ PIPER_SHAPES: dict[str, PiperShape] = {
 # Retired ``--model-size`` names, each mapped to the key that replaced it.
 #
 # ``normal`` was the 1B shape's name until it took the real model's name. It
-# stays accepted, and it must: 13 manifests under ``out/`` record
-# ``"model_size": "normal"``, every manifest at schema <= 8 carries no
-# ``model_size`` at all and is defined to resume as that shape, and
-# ``--resume`` compares the recorded string against the requested one. A bare
-# rename would refuse a resume that should succeed.
+# stays accepted, and it must, because ``--resume`` compares the recorded
+# string against the requested one. Measured under ``out/`` on 2026-08-21:
+# 42 e2e manifests record ``"model_size": "normal"``, and 88 more carry no
+# ``model_size`` at all and are defined to resume as that shape. A bare
+# rename would refuse a resume that should succeed for 130 of the 144 e2e
+# runs on disk. (13 kernel manifests also record ``"normal"``, but
+# ``kernel-bench`` has no resume, so they are not part of this argument.)
+# Re-derive the counts rather than quoting them:
+#   grep -l '"model_size": "normal"' $(find out -name manifest.json)
 #
 # Aliases live here and not in ``PIPER_SHAPES``, so that ``PIPER_SHAPES``
 # enumerates the shapes and nothing else. The CLI's choice lists and the

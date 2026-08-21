@@ -185,9 +185,10 @@ def _resume_mismatches(
     ]
     # Defaulted lookup rather than a generic entry: schema <= 8 output
     # directories predate the axis and are still resumable as the 1B shape.
-    # Both sides go through canonical_size_name, because 13 manifests on disk
-    # record the retired name "normal" and it names the same shape as "1b".
-    # Without that, a resume of a real run would be refused over a rename.
+    # Both sides go through canonical_size_name, because 42 e2e manifests on
+    # disk record the retired name "normal" and 88 more record no size at
+    # all, and all of them name the 1B shape. Without that, a resume of a
+    # real run would be refused over a rename.
     recorded = canonical_size_name(str(manifest.get("model_size", "1b")))
     if recorded != canonical_size_name(model_size):
         mismatches.append("model_size")
