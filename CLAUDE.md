@@ -803,100 +803,204 @@ before reporting anything about it.
 
 ### Scenarios and arms
 
-**The registry declares 19 scenarios and 73 arms.** 15 of the 19 are
+**The registry declares 17 scenarios and 71 arms.** 16 of the 17 are
 cross-engine: they put megatron-core beside TorchTitan at one cut of the
-model. The other 4 -- `swiglu`, `qkv`, `lm_head` and `attention` -- are
-single-engine, and they do **not** share one fate. `swiglu` is recorded as
-superseded by `expert_mlp` and deliberately not deleted
-(`reports/20260819-partc/MERGE-half2-result.md`). Nothing supersedes
-`attention`: no declared scenario cuts inner attention cross-engine, and the
-`attention_core` scenario that would is in flight in another worktree and is
-not in this registry. Do not write that a later commit removes the four
-together; no in-tree document says so.
+model. **`lm_head` is the one single-engine scenario left.** It stays because
+its `fused_linear_ce` arm has no successor: `FusedLinearCrossEntropyLoss` owns
+the LM head, so the arm fits neither `lm_head_projection` nor
+`cross_entropy`, and the `fused_linear_ce` **span** that would hold it is not
+declared yet.
 
-**Every count in this section is the count at this HEAD**, and
-`attention_core` moves all of them at once -- scenarios, arms, the
+**Three single-engine holdovers were deleted on 2026-08-20**, each once a
+cross-engine scenario had re-homed every one of its arms: `swiglu` into
+`expert_mlp`, `qkv` into `qkv_prep`, `attention` into `attention_core`. A
+re-homed titan arm is the same code under an `engine/profile` name, so
+`swiglu/piper_optimized_triton` is now
+`expert_mlp/titan/piper_optimized_triton`. Two of the successors changed what
+the number means -- see the table under "Total kernel time cannot rank arms
+that differ in one component" -- so an old number and its successor are not
+comparable.
+
+**Every count in this section is the count at this HEAD**, and any scenario
+landing or leaving moves all of them at once -- scenarios, arms, the
 cross-engine total, the comparison and correctness tallies below. Re-derive
 rather than quote:
 
 ```bash
-.venv/bin/python -c "from benchmarks.kernel.registry import KERNEL_SCENARIOS as K; print(len(K), sum(len(s.arms) for s in K.values()))"
+.venv/bin/python -c "
+from benchmarks.kernel.registry import KERNEL_SCENARIOS as K
+from benchmarks.kernel.spans import KERNEL_SPANS
+print(len(K), sum(len(s.arms) for s in K.values()), len(KERNEL_SPANS))"
 ```
 
-The table below details the 4 holdovers plus `rope`. **It is 5 of the 19, and
-the registry is the authority.** The paragraph after the table names the other
-14.
+The table below details `rope` and `lm_head`. **It is 2 of the 17, and the
+registry is the authority.** The paragraph after the table names the other 15.
 
 | scenario | arms | modes | notes |
 |---|---|---|---|
 | `rope` | `mcore/base`*, `mcore/no_rope_fusion`, `titan`, `titan/helion`, `titan/te` | fwd, bwd | **cross-engine**: megatron's THD path eager against three compiled titan modules. `titan/te` alone needs gcc-13, and is skipped by name without it. GB/s is reported; **x-floor is not**, because the scenario declares no floor |
-| `swiglu` | `baseline`*, `piper_optimized_triton`, `piper_optimized_inductor` | fwd, bwd, fwd+bwd | whole expert layer only; both Piper arms fuse the w13 GEMM and differ in the activation (custom Triton op vs plain ops left to Inductor) |
-| `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
-| `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
-| `attention` | `baseline`*, `flex_flash`, `flash_attention_3` | fwd, fwd+bwd | inner attention only, packed-document causal masking; FA3 needs the `flash3` group, `flex_flash` the `fa4` group |
+| `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric. The last single-engine scenario |
 
-**The table above is the four single-engine holdovers, plus `rope`. It is not
-the whole registry.** `benchmarks/kernel/registry.py` declares 14 further
-cross-engine scenarios, in partition order: `embedding_stage`, `qkv_prep`,
-`qk_norm`, `attn_out_proj`, `attn_residual`, `ffn_norm`, `moe_router`,
-`dispatch_permute`, `expert_mlp`, `moe_combine`, `moe_residual`, `final_norm`,
-`lm_head_projection` and `cross_entropy`. Their arms are named `engine` or
+**The table above is not the whole registry.**
+`benchmarks/kernel/registry.py` declares 15 further cross-engine scenarios, in
+partition order: `embedding_stage`, `qkv_prep`, `qk_norm`, `attn_out_proj`,
+`attn_residual`, `ffn_norm`, `moe_router`, `dispatch_permute`, `expert_mlp`,
+`moe_combine`, `moe_residual`, `final_norm`, `lm_head_projection`,
+`cross_entropy` and `attention_core`. Their arms are named `engine` or
 `engine/profile`, except the `copy_floor` bandwidth arms. The anchor is
 `mcore/base` in every one except `expert_mlp`, which anchors on `titan`
 because it publishes no cross-engine row. `./run_bench.sh scenarios` prints
 every scenario with its description. Read the registry rather than this table
 for that half.
 
-**No cross-engine arm has produced a number on this box yet.** Every
-`results.json` under `out/` names one of the five scenarios in the table
-above, and none of them contains the string `mcore/base`. Treat the 15
-cross-engine scenarios as declarations until a run says otherwise.
+**No cross-engine arm has produced a number on this box.** 52 kernel
+`results.json` files exist under `out/`, and **not one contains the string
+`mcore/`**. Each names `rope`, `swiglu`, `qkv`, `lm_head` or `attention`, and
+three of those five scenarios are now retired. Re-check it yourself rather
+than trusting this line:
 
-The `attention` scenario measures **inner attention only** -- the level at
-which the implementations are substitutable, and the level that keeps it from
-re-measuring the projection work `qkv` already covers. All three arms consume
-the same q/k/v and the same synthetic packed-document boundaries, delivered in
-the three mask forms the backends need -- a flex `BlockMask` at the default 128
-block size, the same mask at the `(256, 128)` blocks the FLASH backend wants,
-and THD `cu_seqlens` -- all built once in the inputs builder, because
-`create_varlen_metadata_for_document` contains a device-to-host sync and
-`create_block_mask` is itself a compiled call, so none may run inside a timed
-closure. Nothing validates the FLASH block size on the torch side: it is
-forwarded verbatim into FA4's block-sparse tensors, so a mismatch surfaces
-inside FA4 rather than as a torch-level error.
+```bash
+find out -path '*kernels*' -name results.json -exec grep -l "mcore/" {} +
+```
 
-One asymmetry is deliberate and recorded rather than hidden: **`baseline` is
-not wrapped in `torch.compile`.** `FlexAttention` already holds a class-level
-compile of `flex_attention`, so wrapping it again risks a double compile or a
-graph break around its spmd context. `flex_flash` is the same module and gets
-the same treatment; only `flash_attention_3` is wrapped explicitly. All three
-arms are therefore compiled, just by different mechanisms, and
-`KernelArm.compiled` records it.
+**15 of the 16 cross-engine scenarios have never been built.** No arm was
+constructed, no `_assert_mcore_*` guard ran, and no gate compared a real
+tensor. Only `attention_core` has been built and gated, on 2026-08-20
+(`reports/20260820-attention_core-firstrun.md`): all six arms built, all 24
+enforcing gates passed, and it produced **no timing number**, because the box
+never became idle. So the correct reading of a cross-engine scenario at this
+rev is "a declaration whose builders have never executed", which is weaker
+than "untested" and much weaker than "measured".
 
-**There is no TE arm in either attention scenario, and one of the two reasons
-given for that has been refuted.** The file used to claim TE and the FA3
-varlen path cannot share a process, citing a cuDNN soname collision. That was
-measured on 2026-08-20 and **it does not hold**: both libraries import and run
-real attention kernels in one process, in both import orders, dense and THD
-varlen alike, under the conditions `run_bench.sh` creates. Evidence:
-`reports/20260820-te-fa3-coexist.md`. So process sharing blocks nothing, and
-a kernel-bench TE attention arm is not ruled out by it.
+The `attention_core` scenario measures **inner attention only** -- the level
+at which the implementations are substitutable, and the level that keeps it
+from re-measuring the projection work `qkv_prep` and `attn_out_proj` already
+cover. Its six arms are `mcore/base` (TransformerEngine's cuDNN
+FusedAttention), `mcore/attn_flash3` (TE resolving to FlashAttention 3 on
+sm90), `mcore/attn_unfused` (TE's own torch implementation), `titan`
+(FlexAttention's Triton template), `titan/flex_flash` (the same FlexAttention
+module lowered to FA4 CuTe kernels) and `titan/flash_attention_3` (FA3 varlen
+through `torch.nn.attention.varlen`).
 
-The other blocker stands, and it is an e2e blocker only: TE wraps
-`DotProductAttention.forward` in `torch.compiler.disable`
-(`transformer_engine/pytorch/jit.py`), which the fork's
-`fullgraph=True` per-block compile (`distributed/compile.py:58`) refuses,
-ruling it out of e2e. The second is not absolute -- with graph breaks allowed
-TE would run, splitting each block into ~3 graphs -- but that is a different
-compile treatment from the baseline and so not a like-for-like arm.
+Every arm consumes the same q/k/v **values** and the same synthetic
+packed-document boundaries, delivered in the three mask forms the backends
+need -- a flex `BlockMask` at the default 128 block size, the same mask at the
+`(256, 128)` blocks the FLASH backend wants, and THD `cu_seqlens` -- all built
+once in the inputs builder, because `create_varlen_metadata_for_document`
+contains a device-to-host sync and `create_block_mask` is itself a compiled
+call, so none may run inside a timed closure. Nothing validates the FLASH
+block size on the torch side: it is forwarded verbatim into FA4's
+block-sparse tensors, so a mismatch surfaces inside FA4 rather than as a
+torch-level error.
+
+**The two engines get the same values in different memory layouts, on
+purpose.** Titan gets three contiguous tensors, which is what its projection
+materializes. Megatron gets a contiguous query, a contiguous key, and one
+non-contiguous strided view -- the **value**, which is neither normed nor
+rotated and therefore never leaves the fused QKV buffer. TE does not
+recognize that layout and copies the value inside every timed megatron call.
+So a megatron number here is attention plus megatron's own layout adaptation
+for the value. The key's equal half belongs to `qk_norm`, which hands its own
+megatron arm the matching strided key, so neither scenario double-books it.
+
+**The compile treatment differs by arm, and every ratio is a comparison of
+treatments.** All three megatron arms are eager, because megatron compiles no
+whole transformer layer. `titan` and `titan/flex_flash` are compiled by
+FlexAttention's own class-level `torch.compile`, which carries
+`max_autotune` **and** `coordinate_descent_tuning`;
+`titan/flash_attention_3` gets a plain `torch.compile(fullgraph=True)` with no
+autotune. The Triton template is therefore the **only autotuned arm in the
+scenario**, and a row against it is not a kernel-quality claim on its own.
+`KernelArm.compiled` and `eager_reason` record the treatment per arm.
+
+**Which kernel each megatron arm runs is pinned by its profile and enforced
+by a guard**, because every backend computes the same function and no
+correctness gate can tell them apart. `_assert_te_selected_backend` reads
+TE's own recorded decision. On 2026-08-20 the three arms selected
+`FusedAttention`, `FlashAttention 3.0.0` and `UnfusedDotProductAttention`
+respectively. **`mcore/base` is the cuDNN arm**, because cuDNN is what
+TransformerEngine resolves to on Hopper -- so the anchor of this scenario is
+a cuDNN kernel, and every cuDNN caveat below applies to it.
+
+**There is no megatron FlashAttention-4 arm**, and there cannot be one here:
+TE prefers FA3 on sm90 whenever both are installed and no megatron setting
+reaches past that. `titan/flex_flash` therefore has no megatron opponent and
+is published against `titan`, which isolates the lowering. Expect it to lose
+on Hopper for a reason that is not about FA4: FlexAttention's packed-interval
+mask optimization is gated on compute capability 10/11, so partial blocks
+evaluate the mask per lane here.
+
+**`mcore/attn_unfused` can exhaust the device, and its OOM would take the
+whole scenario.** It materializes the score matrix over the **segment** count,
+which is `cu_seqlens.numel() - 1` and not the real document count -- 127 at
+every workload, because `cu_seqlens` is padded to 128 entries. One bf16 score
+tensor is 4.0 GiB at seq 1024, 15.9 GiB at 2048 and 63.5 GiB at 4096 on the
+normal shape, and 47.6 GiB at seq 1024 on `huge`; the arm holds three of
+those. A sweep past seq 2048 will OOM, and the correctness pass has no
+per-arm exception handling, so the whole scenario goes with it. At the
+default workload it does not: measured peak 13.47 GiB against 139.81.
+
+**The TE/FA3 coexistence question is settled, and its answer is not the one
+the file used to give.** The old text claimed TE and the FA3 varlen path
+cannot share a process, citing a cuDNN soname collision. Measured on
+2026-08-20, **that is refuted**: both libraries import and run real attention
+kernels in one interpreter, in both import orders
+(`reports/20260820-te-fa3-coexist.md`). What does block them on this host is
+narrower and real -- torch's cuDNN **version bookkeeping**. See "The
+correctness pass needs a per-arm split on some hosts" below.
 
 The fp64 reference is computed **per (row, kv group)**. A one-shot
 `[B, n_heads, L, L]` fp64 score tensor is 8.6 GiB at batch 4 / seq 4096 and
 69 GiB at batch 32, so the obvious implementation OOMs exactly at the shapes
 worth measuring. Gate the arms with `max_rel_l2` only: attention is a
-reduction, and CLAUDE.md's rule against max/ULP metrics on reductions applies.
+reduction, and this file's rule against max/ULP metrics on reductions
+applies.
+
+#### The correctness pass needs a per-arm split on some hosts
+
+`run_correctness_pass` gates every arm of a scenario in **one** interpreter,
+because a gate needs both sides at once. On this box that is what
+`attention_core` cannot do without a workaround.
+
+TransformerEngine's `libtransformer_engine.so` needs `libcudnn.so.9` and
+carries no `RUNPATH`, and torch loads its own cuDNN **lazily**. So after
+`import transformer_engine.pytorch` the loader has bound the host's cuDNN,
+not the wheel's. `torch.backends.cudnn.version()` then raises, because torch
+requires `runtime_minor >= compile_minor`. `torch.nn.attention.varlen` asks
+for that version, and the answer is `lru_cache`d, so one raise is enough:
+torchtitan's `VarlenAttention` cannot build in a process that has imported
+TE. On this host torch expects **9.24.0** and the loader binds `/usr/lib64`
+**9.23.2**, which `rpm -qf` names as `libcudnn9-cuda-12` -- **a CUDA 12 build
+inside a cu13 process**.
+
+cuDNN is the only library that splits this way: `libcublas`, `libcublasLt`,
+`libcudart` and `libnccl` all resolve to the venv wheels in the same process,
+because torch loads those eagerly. **The blocker is the correctness pass
+alone.** A timing worker holds one arm, so TE never sits beside the varlen
+path there.
+
+Two workarounds exist and they are **not** equivalent, so say which one a
+number came from:
+
+- `PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1` leaves TE on 9.23.2 -- the same
+  cuDNN every published megatron number used -- and only stops torch refusing
+  to answer. This is what the first `attention_core` gate pass used. Note
+  the flag reaches **every** worker, because the child environment is built
+  from `os.environ`, so a shell that exports it publishes every number under
+  it.
+- Prepending the venv's `nvidia/cudnn/lib` to `LD_LIBRARY_PATH` gives the
+  whole process the pinned 9.24.0 and matches the pin -- but it **moves TE
+  off 9.23.2 and therefore moves every megatron measurement in the repo**.
+
+Do **not** initialize torch's cuDNN before TE imports as a third option: TE
+then runs a 9.24.0 graph engine against 9.23.2 ops, which nobody tests.
+
+A per-arm correctness split would remove the need for either, because TE and
+the varlen path would never share an interpreter. Fixing the environment
+removes it too. Neither is done; the choice is recorded rather than made.
 
 `*` = scenario baseline. `benchmarks/kernel/registry.py` is the registry: add an
+
 arm by appending a `KernelArm` with a builder path, and a scenario by appending
 a `KernelScenario` (both declared by `benchmarks/kernel/schema.py`). Builders
 live in that family's module under `benchmarks/kernel/operations/`, one per
@@ -916,12 +1020,31 @@ nothing describes, and a floor known only to its builder could not produce
 the x-floor column, which the parent computes.
 
 **Which comparisons exist is declared too.** `KernelScenario.comparisons` is
-a tuple of `(arm, opponent)` pairs. Left `None` -- as 7 of the 19 scenarios
+a tuple of `(arm, opponent)` pairs. Left `None` -- as 4 of the 17 scenarios
 leave it -- it derives the usual set: every non-floor arm against the anchor.
 An explicit tuple is exhaustive, and the empty tuple declares a scenario that
 publishes no ratio at all, which a scenario whose two sides are not a
 like-for-like cut must be able to say. It replaces the per-arm `compare_to`,
-which could redirect a row but could not decline one.
+which could redirect a row but could not decline one. The 17 scenarios
+publish 41 comparison rows between them; no scenario declares the empty tuple
+today.
+
+**A second kind of per-arm requirement exists.** `KernelArm.requirement` is a
+dotted `module:function` path, resolved **in the parent** and called as
+`predicate(shape, workload)`. It returns `None` when the arm can run here, or
+the reason it cannot -- and that reason reaches `results.json` as
+`status_reason`, so a reader learns why an arm is absent without holding the
+registry. It differs from `requires_gcc_toolset` in what decides it:
+`requires_gcc_toolset` is a property of the **host**, answerable before the
+shape is known, and `requirement` is a property of this **shape and
+workload**. The module it names must be parent-side and torch-free, like the
+schema; a test asserts that. **No arm declares one at this rev.** The case
+that forced the field is an unfused attention arm whose score tensor grows
+with the square of the sequence length, and it is undeclared. Catching the
+builder's exception instead was rejected: a `try` around the build turns a
+bug into a skipped arm, shortens the roster for a reason nobody declared, and
+still exits zero.
+
 
 **A builder path is a string, and must stay one.** `benchmarks/kernel/engine/`
 imports `schema.py`, never `registry.py`, and never an `operations/` module:
