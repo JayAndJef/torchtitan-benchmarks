@@ -151,7 +151,10 @@ EXPERT_COMBINE = KernelSpan(
             "COMPILE TREATMENT: the megatron arm is eager and the TorchTitan "
             "arm runs under torch.compile(fullgraph=True), as each engine "
             "runs this code end to end, so the row compares two treatments "
-            "and not two kernels alone. "
+            "and not two kernels alone. THE MEGATRON SIDE IS NOT A CHOICE "
+            "THE HARNESS MADE: TransformerEngine wraps the forward of its "
+            "linear modules in no_torch_dynamo, so this arm could not be "
+            "compiled under fullgraph=True even if the harness wanted it. "
             "THE SPAN-VERSUS-PARTS ROW CARRIES A BIAS AND IT FAVOURS THE "
             "SPAN: the parts total pays one host dispatch chain per enclosed "
             "scenario -- two here -- and the span pays one, and roughly 85% "
@@ -196,8 +199,12 @@ EXPERT_COMBINE = KernelSpan(
                 modes=("forward", "forward_backward"),
                 compiled=False,
                 eager_reason=(
-                    "megatron compiles no whole transformer layer, so this "
-                    "is how megatron runs the region end to end"
+                    "this arm CANNOT be compiled under fullgraph=True: "
+                    "TEGroupedMLP calls te.pytorch.GroupedLinear.forward, "
+                    "which TransformerEngine wraps in no_torch_dynamo, and "
+                    "that decorator is torch._dynamo.disable. Megatron "
+                    "compiles no whole transformer layer either, so eager is "
+                    "what megatron runs here in any case"
                 ),
                 correctness=(EXPERT_COMBINE_GATE,),
             ),
@@ -308,7 +315,11 @@ ATTN_RESIDUAL_NORM = KernelSpan(
             "quoting the ratio. "
             "COMPILE TREATMENT: the megatron arm is eager at the point it "
             "is timed from and the TorchTitan arm runs under "
-            "torch.compile(fullgraph=True). Note that attn_residual's own "
+            "torch.compile(fullgraph=True). THE MEGATRON SIDE IS NOT A "
+            "CHOICE THE HARNESS MADE: linear_proj is te.pytorch.Linear, "
+            "whose forward TransformerEngine wraps in no_torch_dynamo, so "
+            "this arm could not be compiled under fullgraph=True even if the "
+            "harness wanted it. Note that attn_residual's own "
             "mcore/base arm declares compiled=True, because ITS timed "
             "closure calls bias_dropout_add_fused_train directly and that "
             "function is the torch.compile wrapper; here the same function "
@@ -356,9 +367,14 @@ ATTN_RESIDUAL_NORM = KernelSpan(
                 modes=("forward", "forward_backward"),
                 compiled=False,
                 eager_reason=(
-                    "megatron compiles no whole transformer layer. The "
-                    "@jit_fuser bias_dropout_add_fused_train inside the "
-                    "closure still compiles as its own region, which is "
+                    "this arm CANNOT be compiled under fullgraph=True: "
+                    "linear_proj is te.pytorch.Linear, whose forward "
+                    "TransformerEngine wraps in no_torch_dynamo, and that "
+                    "decorator is torch._dynamo.disable. The norm is not the "
+                    "blocker -- TE RMSNorm carries no such decorator. "
+                    "Megatron compiles no whole transformer layer either, "
+                    "and the @jit_fuser bias_dropout_add_fused_train inside "
+                    "the closure still compiles as its own region, which is "
                     "megatron's choice and not the harness's"
                 ),
                 correctness=(ATTN_RESIDUAL_NORM_GATE,),
@@ -548,11 +564,16 @@ FFN_NORM_TO_MOE_RESIDUAL = KernelSpan(
                 modes=("forward_backward",),
                 compiled=False,
                 eager_reason=(
-                    "megatron compiles no whole transformer layer. The "
-                    "@jit_fuser regions inside the range -- the router and "
-                    "bias_dropout_add_fused_train -- still compile as their "
-                    "own regions, which is megatron's choice and not the "
-                    "harness's"
+                    "this arm CANNOT be compiled under fullgraph=True: the "
+                    "range holds TEGroupedMLP, and "
+                    "te.pytorch.GroupedLinear.forward is wrapped in "
+                    "no_torch_dynamo, which is torch._dynamo.disable. The "
+                    "norms are not the blocker -- TE RMSNorm carries no such "
+                    "decorator. Megatron compiles no whole transformer layer "
+                    "either, and the @jit_fuser regions inside the range -- "
+                    "the router and bias_dropout_add_fused_train -- still "
+                    "compile as their own regions, which is megatron's "
+                    "choice and not the harness's"
                 ),
             ),
             KernelArm(
@@ -571,8 +592,11 @@ FFN_NORM_TO_MOE_RESIDUAL = KernelSpan(
                 modes=("forward_backward",),
                 compiled=False,
                 eager_reason=(
-                    "the same treatment as the arm it is measured against; "
-                    "the flag changes a norm module, not a compile scope"
+                    "the same treatment as the arm it is measured against, "
+                    "and for the same reason: the range holds "
+                    "te.pytorch.GroupedLinear.forward, which no_torch_dynamo "
+                    "disables. The flag changes a norm module, not a compile "
+                    "scope"
                 ),
                 correctness=(
                     FUSED_RESIDUAL_RMSNORM_GATE,
