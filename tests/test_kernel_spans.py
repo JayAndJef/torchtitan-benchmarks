@@ -5,13 +5,15 @@ to no single scenario, so it is declared over an ordered scenario range and
 its claim is the span against the **sum of the scenarios it replaces**. Two
 totals, and a reader must be able to see both.
 
-**No span is declared in ``benchmarks/kernel/spans.py`` at this rev**, and
-declaring the five that the cross-engine partition wants is a separate piece
-of work. So the span under test here is synthetic: it is declared in this
-file, over two scenarios the registry really holds, naming arms those
-scenarios really declare. That is deliberate. A test that built its own
+**The span under test here is synthetic**: it is declared in this file, over
+two scenarios the registry really holds, naming arms those scenarios really
+declare. That is deliberate, and it stays true now that
+``benchmarks/kernel/spans.py`` declares real spans. A test that built its own
 scenarios too would prove the span type agrees with itself and nothing about
-whether a span can be declared over the real partition.
+whether a span can be declared over the real partition; a test that used the
+real spans would fail on the day one of them is renamed, for a reason that
+has nothing to do with the mechanism. The declared roster is pinned one file
+over, in ``tests/test_kernel_span_declarations.py``.
 """
 
 import json
@@ -358,22 +360,32 @@ class SpanTypeIsNotAScenarioTests(unittest.TestCase):
         self.assertNotIsInstance(make_span(), KernelScenario)
         self.assertIsInstance(make_span().measurement, KernelScenario)
 
-    def test_the_span_registry_is_empty_and_disjoint_from_the_scenarios(
+    def test_the_span_roster_is_disjoint_from_the_scenario_roster(
         self,
     ) -> None:
-        """The mechanism landed before any declaration, deliberately.
+        """A name in both rosters would be measured twice in one run.
 
-        The disjointness half is the one that keeps mattering after the five
-        spans are declared: a name in both rosters would be measured twice,
-        once with its parts and once without.
+        Once as a scenario, without its parts, and once as the span, with
+        them -- and ``--scenario`` and ``--span`` would each accept it.
+        ``benchmarks.kernel.spans`` refuses the collision at import, so the
+        rule lives in the registry and not only here.
         """
-        self.assertEqual(KERNEL_SPANS, {})
         self.assertEqual(set(KERNEL_SPANS) & set(KERNEL_SCENARIOS), set())
 
     def test_an_unknown_span_name_names_what_is_available(self) -> None:
         with self.assertRaises(ValueError) as caught:
+            kernel_span_by_name("no_such_span")
+        message = str(caught.exception)
+        self.assertIn("no_such_span", message)
+        for name in KERNEL_SPANS:
+            self.assertIn(name, message)
+        # And the empty roster still names itself, rather than ending the
+        # sentence after "Available:".
+        with mock.patch.dict(
+            "benchmarks.kernel.spans.KERNEL_SPANS", {}, clear=True
+        ), self.assertRaises(ValueError) as empty:
             kernel_span_by_name("expert_combine")
-        self.assertIn("(none declared)", str(caught.exception))
+        self.assertIn("(none declared)", str(empty.exception))
 
 
 
@@ -1358,8 +1370,8 @@ class SpanCliTests(unittest.TestCase):
 
         It measures every scenario the span replaces as well, so they would
         all resolve to the one directory --out names. The choice list is
-        widened here because no span is declared at this rev; the guard
-        under test is the one after the parse.
+        widened here because the span under test is synthetic and is not in
+        the declared roster; the guard under test is the one after the parse.
         """
         span = make_span()
         option = next(
@@ -1391,8 +1403,9 @@ class SpanCliTests(unittest.TestCase):
         A span run measures the span and every scenario the span replaces,
         so it holds several rosters. One arm selection cannot say which of
         them it names, and a per-scenario selection has no meaning across a
-        range. The choice list is widened here because no span is declared
-        at this rev; the guard under test is the one after the parse.
+        range. The choice list is widened here because the span under test is
+        synthetic and is not in the declared roster; the guard under test is
+        the one after the parse.
         """
         span = make_span()
         option = next(
@@ -1430,7 +1443,10 @@ class SpanCliTests(unittest.TestCase):
         """
         from benchmarks.cli.main import cli
 
-        empty = CliRunner().invoke(cli, ["scenarios"])
+        with mock.patch.dict(
+            "benchmarks.kernel.spans.KERNEL_SPANS", {}, clear=True
+        ):
+            empty = CliRunner().invoke(cli, ["scenarios"])
         self.assertEqual(empty.exit_code, 0, empty.output)
         self.assertIn("kernel spans (kernel-bench --span)", empty.output)
         self.assertIn("(none declared)", empty.output)

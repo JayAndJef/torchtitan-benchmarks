@@ -977,6 +977,31 @@ TEST_CENSUS = {
     # the two flags do not combine, because a span run holds several
     # rosters and one arm selection cannot say which of them it names.
     "test_kernel_spans": 51,
+    # The spans this repository DECLARES, as opposed to the span type. Its
+    # sibling above proves the mechanism against a synthetic span; this one
+    # reads the real roster and asks whether each declaration still says a
+    # true thing about the live registry -- which is the half that goes
+    # stale when a scenario is renamed or an arm is re-homed. 11 generic
+    # over every declared span (the roster pin, the disjointness guard, the
+    # part arms and their modes, the builder module rule, and the two
+    # captions every span owes its reader) and 6 for expert_combine, whose
+    # cross-engine row is the reason the span type exists at all.
+    # +7 for attn_residual_norm, whose range is 6+7+8 because titan's
+    # residual add fuses FORWARD into the next norm's prologue -- a 6+7
+    # span would cut on the wrong side and land at 1.0.
+    # +8 for ffn_norm_to_moe_residual, the mcore-only backward-only span,
+    # whose eight cover the range its residual sets, that both arms are
+    # backward-mode only, and that a single-engine span over six
+    # cross-engine scenarios sums only the arms its SpanParts name.
+    # +7 for fused_linear_ce, the titan-only span whose loss owns the LM
+    # head: its parts share neither name with its arm, it publishes no
+    # within-span row, and the compile treatment of the projection moves
+    # across the cut and reaches the ratio.
+    # +7 for chunked_ce, upstream's actual default over that same range:
+    # that the two spans share a range without colliding, that their arm
+    # names stay distinct, that this one is eager where it is timed from,
+    # and that its sequence requirement is declared and costs the span.
+    "test_kernel_span_declarations": 47,
     # The per-arm build probe. requires_gcc_toolset answers a question about
     # the HOST; KernelArm.requirement answers one about this shape and this
     # workload, which is what a sequence sweep needs and what an arm that
@@ -1213,7 +1238,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1056
+TEST_CENSUS_TOTAL = 1103
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
