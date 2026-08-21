@@ -29,12 +29,48 @@ from benchmarks.e2e.runner import RunRequest, execute_run
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import (
+    GIANT,
     HUGE,
+    LARGE,
     NORMAL,
     PIPER_SHAPES,
     PiperShape,
 )
 from tests.test_runner import _SAC_LINE, _compiled_line
+
+
+def _counts_from_the_tensor_list(shape) -> tuple[int, int, int]:
+    """Count the parameters tensor by tensor, as a state dict enumerates them.
+
+    A second route to the numbers ``PiperShape``'s closed form returns, and
+    the route that lets a new shape be derived rather than transcribed. The
+    closed form writes the fused QKV as ``2*D*D``; this counts
+    ``qkv_out_features*D``, so the head geometry reaches the total here and a
+    head-count error cannot cancel. The test below checks this helper against
+    the four numbers a real ``normal`` run logs, which is what gives it the
+    authority to derive the counts of the shapes no run has produced.
+    """
+    tables = 2 * shape.vocab_size * shape.dim  # tok_embeddings + lm_head
+    per_layer_dense = (
+        shape.dim  # attention_norm
+        + shape.qkv_out_features * shape.dim  # fused qkv
+        + 2 * shape.head_dim  # q_norm + k_norm
+        + shape.dim * shape.dim  # wo
+        + shape.dim  # ffn_norm
+    )
+    router = shape.num_experts * shape.dim
+    one_expert = 3 * shape.moe_hidden_dim * shape.dim  # w1 + w2 + w3
+    dense = tables + shape.dim + shape.n_layers * per_layer_dense
+    sparse = shape.n_layers * (router + shape.num_experts * one_expert)
+    active = dense + shape.n_layers * (router + shape.top_k * one_expert)
+    return dense, sparse, active
+
+
+def _flops_from_the_tensor_list(shape, seq_len: int) -> int:
+    """The tflops/MFU denominator, off the same tensor list."""
+    matmul = _counts_from_the_tensor_list(shape)[2] - shape.vocab_size * shape.dim
+    attention = 6 * shape.n_layers * shape.n_heads * 2 * shape.head_dim * seq_len
+    return 6 * matmul + attention
 
 
 class ShapeArithmeticTests(unittest.TestCase):
@@ -58,6 +94,109 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(NORMAL.qkv_out_features, 2048)
         self.assertEqual(NORMAL.heads_per_group, 2)
         self.assertTrue(NORMAL.supports_block_regions)
+
+    def test_the_tensor_by_tensor_count_reproduces_a_real_run(self) -> None:
+        # The helper earns its authority here, against the same logged
+        # numbers the test above pins, and then derives the shapes no run has
+        # produced.
+        self.assertEqual(
+            _counts_from_the_tensor_list(NORMAL),
+            (361_532_416, 704_708_608, 713_919_488),
+        )
+        self.assertEqual(
+            _flops_from_the_tensor_list(NORMAL, 1024), 3_551_348_736
+        )
+
+    def test_every_registered_shape_agrees_with_the_tensor_list(self) -> None:
+        """Every shape's counts, derived a second way rather than pasted.
+
+        The two new shapes have no run to pin them against, so this is what
+        stands in for one: a count that walks the parameter tensors must
+        agree with the closed form at every registered size.
+        """
+        for name, shape in PIPER_SHAPES.items():
+            with self.subTest(size=name):
+                dense, sparse, active = _counts_from_the_tensor_list(shape)
+                self.assertEqual(shape.nparams_dense, dense)
+                self.assertEqual(shape.nparams_sparse, sparse)
+                self.assertEqual(shape.nparams_active, active)
+                self.assertEqual(shape.param_count, dense + sparse)
+                self.assertEqual(
+                    shape.num_flops_per_token(1024),
+                    _flops_from_the_tensor_list(shape, 1024),
+                )
+
+    def test_large_geometry_is_derived_not_hardcoded(self) -> None:
+        self.assertEqual((LARGE.dim, LARGE.n_layers), (4096, 4))
+        self.assertEqual(LARGE.n_heads, LARGE.dim // 64)
+        self.assertEqual(LARGE.n_kv_heads, LARGE.n_heads // 2)
+        self.assertEqual(LARGE.moe_hidden_dim, LARGE.dim * 7 // 2)
+        self.assertEqual(LARGE.qkv_out_features, 2 * LARGE.dim)
+        self.assertEqual(LARGE.head_dim, NORMAL.head_dim)
+        self.assertEqual(LARGE.vocab_size, NORMAL.vocab_size)
+        # Four layers, so this is the only shape above normal whose block
+        # graphs stay identifiable and whose runs validation rule 7 guards.
+        self.assertTrue(LARGE.supports_block_regions)
+
+    def test_giant_geometry_is_derived_not_hardcoded(self) -> None:
+        self.assertEqual((GIANT.dim, GIANT.n_layers), (16384, 1))
+        self.assertEqual(GIANT.n_heads, GIANT.dim // 64)
+        self.assertEqual(GIANT.n_kv_heads, GIANT.n_heads // 2)
+        self.assertEqual(GIANT.moe_hidden_dim, GIANT.dim * 7 // 2)
+        self.assertEqual(GIANT.qkv_out_features, 2 * GIANT.dim)
+        self.assertEqual(GIANT.head_dim, NORMAL.head_dim)
+        self.assertEqual(GIANT.vocab_size, NORMAL.vocab_size)
+        # One layer, so the same region argument the huge shape makes.
+        self.assertFalse(GIANT.supports_block_regions)
+        # 6753/dim is 0.41 here, further below 1.0 than huge's 0.55.
+        self.assertLess(
+            2 * GIANT.vocab_size / (45 * GIANT.dim),
+            2 * HUGE.vocab_size / (45 * HUGE.dim),
+        )
+
+    def test_the_layer_count_keeps_the_tables_out_of_the_way(self) -> None:
+        """Why large is four layers and not one.
+
+        At dim 4096 one layer is 45*D^2 against 2*V*D of tables, a ratio of
+        1.65, so a 1-layer model there is mostly embedding table and the
+        benchmark measures the lm_head and the cross entropy. Four layers
+        move 71% of the parameters into the layer stack.
+        """
+        one_layer = PiperShape(name="probe", dim=LARGE.dim, n_layers=1)
+        self.assertGreater(self._table_fraction(one_layer), 0.6)
+        self.assertLess(self._table_fraction(LARGE), 0.3)
+
+    def test_three_shapes_share_the_normal_parameter_split(self) -> None:
+        # normal, large and giant all hold n_layers*dim at 16384, so all
+        # three carry the same split between the two tables and the layer
+        # stack. huge is the exception, because the memory ceiling chose its
+        # dim rather than the split.
+        for shape in (NORMAL, LARGE, GIANT):
+            with self.subTest(size=shape.name):
+                self.assertEqual(shape.n_layers * shape.dim, 16384)
+                self.assertAlmostEqual(
+                    self._table_fraction(shape), 0.292, places=3
+                )
+        self.assertNotEqual(HUGE.n_layers * HUGE.dim, 16384)
+
+    def test_the_registry_is_declared_smallest_to_largest(self) -> None:
+        """The order the module docstring states, pinned.
+
+        The names do not carry it -- ``huge`` < ``giant`` is not self-evident
+        -- so the declaration order is the statement, and this is what keeps
+        a later insertion from breaking it.
+        """
+        self.assertEqual(
+            tuple(PIPER_SHAPES), ("normal", "large", "huge", "giant")
+        )
+        counts = [shape.param_count for shape in PIPER_SHAPES.values()]
+        self.assertEqual(counts, sorted(counts))
+        self.assertEqual(len(set(counts)), len(counts))
+
+    @staticmethod
+    def _table_fraction(shape) -> float:
+        """Embedding plus lm_head, as a fraction of every parameter."""
+        return 2 * shape.vocab_size * shape.dim / shape.param_count
 
     def test_huge_geometry_is_derived_not_hardcoded(self) -> None:
         self.assertEqual(HUGE.n_layers, 1)
@@ -101,6 +240,8 @@ class ShapeArithmeticTests(unittest.TestCase):
         # only because bf16 accumulation scales with the reduction length.
         self.assertEqual(NORMAL.parity_gate, 2e-2)
         self.assertEqual(HUGE.parity_gate, 5e-2)
+        self.assertEqual(LARGE.parity_gate, 3e-2)
+        self.assertEqual(GIANT.parity_gate, 6e-2)
         self.assertEqual(
             PiperShape(name="probe", dim=1024, n_layers=2).parity_gate, 2e-2
         )
@@ -108,6 +249,25 @@ class ShapeArithmeticTests(unittest.TestCase):
             self.assertEqual(
                 shape.describe(seq_len=1024)["parity_gate"], shape.parity_gate
             )
+
+    def test_the_unverified_gates_follow_the_measured_ones(self) -> None:
+        """The two new gates are estimates, and this states the estimate.
+
+        Nothing has measured large or giant. The two measured shapes fit
+        rel_l2 = 5.5e-3 * sqrt(dim/1024) to within 7% (normal 5.5e-3 at dim
+        1024, huge 2.03e-2 at dim 12288 against 1.9e-2 predicted). Each new
+        gate sits above that prediction by at least the 2.46x margin huge
+        keeps over its own measurement, and below 4x it, so neither gate is
+        so wide that it would pass a real layout error.
+        """
+        for shape in (LARGE, GIANT):
+            with self.subTest(size=shape.name):
+                predicted = 5.5e-3 * (shape.dim / NORMAL.dim) ** 0.5
+                self.assertGreater(shape.parity_gate, 2.4 * predicted)
+                self.assertLess(shape.parity_gate, 4.0 * predicted)
+        # A wider shape never gets a tighter gate.
+        gates = [shape.parity_gate for shape in PIPER_SHAPES.values()]
+        self.assertEqual(gates, sorted(gates))
 
 
 class ConfigSizeClosureTests(unittest.TestCase):

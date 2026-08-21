@@ -1186,8 +1186,11 @@ TEST_CENSUS = {
     "test_megatron_weights": 11,
     # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
     # the symmetric twin of the titan builders' one, added when the megatron
-    # side stopped defaulting to the normal shape.
-    "test_model_shape": 26,
+    # side stopped defaulting to the normal shape. +8 for the large and giant
+    # shapes: a tensor-by-tensor parameter count that derives what no run has
+    # logged, the two geometry tests, the layer-count and parameter-split
+    # arguments, the declaration order, and the estimated parity gates.
+    "test_model_shape": 34,
     "test_profile_regions": 19,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
@@ -1210,7 +1213,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1048
+TEST_CENSUS_TOTAL = 1056
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

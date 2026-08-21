@@ -10,21 +10,54 @@ Deliberately imports nothing but ``dataclasses``. Modules across
 ``benchmarks/`` and ``tools/`` import this module, several of them in
 processes that must not pull in torch or torchtitan.
 
-Two shapes are registered:
+Four shapes are registered. The order, smallest to largest by parameter
+count, is ``normal`` < ``large`` < ``huge`` < ``giant``. The names do not
+carry that order on their own, so read it here: ``giant`` is above ``huge``.
+``PIPER_SHAPES`` lists the shapes in that same order, and
+``tests/test_model_shape.py`` asserts both the order and the ascending
+parameter counts.
+
+The one ratio every entry below refers to: embedding + lm_head are ``2*V*D``
+parameters and one transformer layer is ``45*D^2``, so one layer against the
+two tables is ``2*151936/(45*D) = 6753/D``. The whole layer stack against
+them is ``n_layers*dim/6753``, which is why the layer count is part of a
+shape and not a free choice.
 
 ``normal``
     The historical piper-1B model: dim 1024, 16 layers, 1,066,241,024
     parameters. Every number this repo published before schema 9 is this
     shape.
 
+``large``
+    Four transformer layers at dim 4096, 4,264,661,504 parameters. It is the
+    middle rung between ``normal`` and ``huge`` in dim and in parameter
+    count. The layer count is what makes it a rung of the same model rather
+    than a different experiment: ``n_layers*dim`` is 16384 here, the product ``normal``
+    carries, so ``large`` splits its parameters exactly as ``normal`` does --
+    29% embedding tables, 71% layer stack. At one layer the ratio above is
+    1.65, so a 1-layer model at dim 4096 would be 62% embedding table and the
+    benchmark would measure the lm_head and the cross entropy. Four layers
+    also keep ``supports_block_regions`` True, so ``large`` is the only shape
+    above ``normal`` that validation rule 7 still guards.
+
 ``huge``
     One transformer layer at a much larger width, sized to fill an H200 (see
     ``reports/``'s memory-ceiling ladder). It exists to make the cuda-graph
     comparison be about a transformer block rather than about the embedding
-    table: embedding + lm_head are ``2*V*D`` parameters and one layer is
-    ``45*D^2``, so their ratio is ``2*151936/(45*D) = 6753/D``. At dim 1024 a
-    1-layer model would be 87% embedding; at dim 12288 the single layer is
-    64% of the parameters and the large majority of the FLOPs.
+    table. At dim 1024 a 1-layer model would be 87% embedding; at dim 12288
+    the single layer is 64% of the parameters and the large majority of the
+    FLOPs. It is the one shape whose ``n_layers*dim`` is not 16384, because
+    the memory ceiling chose its dim rather than the parameter split.
+
+``giant``
+    One transformer layer at dim 16384, 17,058,349,184 parameters. The ratio
+    above is 0.41 here, so the ``huge`` argument holds with room to spare,
+    and ``n_layers*dim`` is 16384 again, so ``giant`` carries the ``normal``
+    parameter split.
+
+    This shape is declared from estimates. No scenario has run at it, in
+    either system, and the first run can run out of memory. The ``GIANT``
+    constant records the memory arithmetic and what it does not cover.
 
 Everything that varies per shape is a field or a derived property of
 ``PiperShape``, so registering a new shape is one ``PIPER_SHAPES`` entry and
@@ -221,8 +254,67 @@ HUGE = PiperShape(
     parity_gate=5e-2,
 )
 
+# The middle rung: between normal and huge in dim and in parameter count.
+# n_layers*dim is
+# 16384, the product the normal shape carries, so large reproduces the normal
+# shape's parameter split exactly: 29% embedding tables, 71% layer stack. The
+# layer count is what buys that. At dim 4096 the 6753/D ratio is 1.65, so a
+# 1-layer model here would be 62% embedding table, and the benchmark would
+# measure the lm_head and the cross entropy rather than a transformer block.
+# Four layers also keep supports_block_regions True.
+#
+# No scenario has run at this shape, in either system.
+LARGE = PiperShape(
+    name="large",
+    dim=4096,
+    n_layers=4,
+    # UNVERIFIED. Nothing has measured this shape's logit rel_l2. The two
+    # measured shapes fit rel_l2 = 5.5e-3 * sqrt(dim/1024) to within 7%
+    # (normal 5.5e-3 at dim 1024; huge 2.03e-2 at dim 12288 against 1.9e-2
+    # predicted), which puts dim 4096 near 1.2e-2. 3e-2 keeps the 2.46x margin
+    # huge keeps over its own measurement. Two anchors cannot separate the
+    # width term from a depth term -- normal is 16 layers at dim 1024 and huge
+    # is 1 layer at dim 12288 -- and this shape is 4 layers, so the estimate
+    # is weaker here than the number alone suggests. Run
+    # tools/megatron_parity_check.py --model-size large before any parity
+    # claim, and --fp32-reference before you change this value.
+    parity_gate=3e-2,
+)
+
+# Above huge, and declared from arithmetic alone. n_layers*dim is 16384, so
+# giant carries the normal shape's parameter split, and the 6753/D ratio is
+# 0.41, so huge's one-layer argument holds with room to spare.
+#
+# NOTHING HAS MEASURED THIS SHAPE. No e2e scenario and no kernel scenario has
+# run at it, and the first run can run out of memory. The binding case is the
+# expert_mlp kernel scenario, whose expert weights are
+# 3 * num_experts * moe_hidden_dim * dim elements: 21.0 GiB per arm in bf16,
+# 42.0 GiB once the weight gradient grows, against a 139.81 GiB H200. The
+# correctness gate adds an fp32 copy of the same three tensors, 42.0 GiB,
+# resident for the whole pass. That is 84 GiB before any activation. It fits
+# one arm at a time -- run_correctness_pass builds one arm at a time and drops
+# it before the next -- but swiglu already ran out of memory at huge once
+# (out/20260819T010252Z/kernels/), at 56% of these tensor sizes and before
+# that residency change. The estimate covers weights and their gradients only;
+# it covers no activation, no workspace and no allocator fragmentation.
+# Measure before you report anything about this shape.
+GIANT = PiperShape(
+    name="giant",
+    dim=16384,
+    n_layers=1,
+    # UNVERIFIED, on the same sqrt(dim) law LARGE uses: dim 16384 predicts
+    # about 2.4e-2, and 6e-2 keeps huge's 2.46x margin over it. The depth
+    # caveat on LARGE does not apply here, because giant is one layer as huge
+    # is, so the width extrapolation is the only step. Run
+    # tools/megatron_parity_check.py --model-size giant before any parity
+    # claim, and --fp32-reference before you change this value.
+    parity_gate=6e-2,
+)
+
+# Declared smallest to largest by parameter count. The names do not carry the
+# order, so the declaration does.
 PIPER_SHAPES: dict[str, PiperShape] = {
-    shape.name: shape for shape in (NORMAL, HUGE)
+    shape.name: shape for shape in (NORMAL, LARGE, HUGE, GIANT)
 }
 
 
