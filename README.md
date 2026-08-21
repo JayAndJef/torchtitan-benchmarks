@@ -20,7 +20,6 @@ the argv-driven operator scripts.
 | `benchmarks/cli/` | Click CLI and the `python -m benchmarks.cli` entry point. |
 | `benchmarks/e2e/` | End-to-end system: scenario registry, runner, subprocess launch, validation, results. Includes the Megatron-LM training driver under `e2e/megatron/`. |
 | `benchmarks/kernel/` | Kernel-isolation system: scenario registry, span registry, runner/worker, timing engine, arm builders, results. |
-
 | `benchmarks/models/piper_qwen3/` | Piper Qwen3-1B config port, model shape, and benchmark-local kernel overrides under `components/`. Also the Megatron model builder and submodule bootstrap. |
 | `benchmarks/traces/` | Chrome-trace parsing and per-region pooling. |
 | `benchmarks/artifacts/` | Manifest and run-state IO, output layout, shared sample summaries. |
@@ -142,7 +141,6 @@ Each run writes:
 ```text
 out/<timestamp>/<scenario>/<hardware>/
   manifest.json          # workload, commands, source revisions, and hardware metadata (including the two cuDNN fields)
-
   run_state.json         # resumable arm and evaluation status
   results.json           # throughput, memory, gpu kernel time, region timings
   <arm>.log              # training output

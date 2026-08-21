@@ -83,7 +83,6 @@ their names are listed once, in the provenance note below, and nowhere else.
 | path | contents |
 |---|---|
 | `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans -- the span heading prints even when the roster is empty, so a reader learns `--span` exists |
-
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |
@@ -98,9 +97,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py`. **The engine does not know that spans exist**: both passes take a `KernelScenario`, and a span hands them its own `measurement`, which is one |
 | `benchmarks/kernel/operations/` | Arm builders, one module per scenario and named after it, plus `common.py` |
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments, for a scenario and for a span), `span_statistics.py` (the span-versus-parts estimator, parent-side because one of its two sides is a sum over units the engine never sees) and `reporting.py` |
-
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the four-entry `PIPER_SHAPES` registry (`normal`, `large`, `huge`, `giant`, in ascending parameter count); both engines' single source of geometry |
-
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
 | `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
 | `benchmarks/models/piper_qwen3/mcore_profiles.py` | Megatron behaviour as data: one `McoreProfile` per variant, torch-free and parent-side |
@@ -114,7 +111,6 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/traces/` | `schema.py` (the `Region` declaration) and `extraction.py` (trace parsing, window and region pooling) |
 | `benchmarks/artifacts/` | On-disk artifacts: `layout.py` (output layout, `trace_files`, `atomic_write_json` -- the only JSON writer), `manifests.py` (the manifest schema and the resume predicate; the one module here coupled to `e2e/`), `run_state.py` (the per-arm ledger) and `summaries.py` (`SampleSummary`, shared by both systems) |
 | `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning), `provenance.py` (`hardware_metadata`, including the two cuDNN fields -- see "Which cuDNN a megatron arm runs"), `events.py` (`RunEvent`, `ProcessRunner`) |
-
 | `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), and the two argv-driven trace diagnostics `analyze.py` and `per_block.py` |
 | `tests/` | CPU + GPU unit tests. Deliberately **flat** -- every module does `sys.path.insert(0, <repo root>)` at a fixed depth, and `unittest discover -s tests` needs no `__init__.py` |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
@@ -1303,7 +1299,6 @@ Three things about a span number that must be said next to it:
   that is what they face end-to-end: eager isolation races custom ops against
   materialization costs Inductor deletes, which inverts verdicts (the
   combined SwiGLU layout wins eager, loses compiled). **The treatment is per
-
   arm, and the engine does not imply it.** An arm is eager only where
   `KernelArm.eager_reason` says why: every `copy_floor`, because a bandwidth
   floor is not an implementation; most megatron-core arms, because megatron
@@ -1394,7 +1389,6 @@ Three things about a span number that must be said next to it:
   scenario) 248.68 +/- **9.42** against 233.37 +/- **0.82**, and
   `rope/helion/forward` (the retired single-engine rope roster) 261.27 +/-
   **29.07** against 244.64 +/- **6.47**. The standard deviation
-
   falls 3x to 11x on the dispatch-bound arms and the device-bound arm is
   unmoved -- which is what 32 concurrent `import torch` processes would do.
   The medians move in both directions at n=3, so **only the variance change
@@ -1986,7 +1980,6 @@ Faithfulness guarantees, all verified:
   and 6e-2 at `giant`, **both of which are fitted predictions that no parity
   check has tested**. The wider huge gate is
   bf16 accumulation, not slack, and it is evidenced rather than assumed --
-
   `--fp32-reference` runs the same weights in fp32 and shows titan's own
   bf16 output sits 3.25e-2 from it against megatron's 3.29e-2 (ratio 1.011),
   i.e. the engines agree with each other better than either agrees with
@@ -2236,9 +2229,7 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   for the megatron scenario). `cudnn_loader_resolves` is a **speed** axis
   only: the version changes no value, measured, so cite it beside a timing
   number and never call two runs numerically incomparable for it. All are in
-
   every manifest -- check them before comparing against an older run in
-
   `out/` (manifests written before schema 6 predate the compile-mode flag
   and are `default`; before schema 8 they record the old torch-level mode
   names -- `reduce-overhead` data is comparable to `cuda-graph` for titan
