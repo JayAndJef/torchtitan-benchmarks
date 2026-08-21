@@ -1,18 +1,27 @@
 # torchtitan-benchmarks: Agent Guide
 
 Out-of-tree benchmarks for the Piper Qwen3-1B TorchTitan port. One CLI,
-two kinds of measurement:
+three kinds of measurement:
 
 1. **Declarative end-to-end scenarios** -- `./run_bench.sh run` / `run-all`,
    driven by `benchmarks/e2e/registry.py`. Runs real TorchTitan training,
    validates, and evaluates.
-2. **Declarative kernel-isolation benchmarks** -- `./run_bench.sh
+2. **Declarative kernel-isolation scenarios** -- `./run_bench.sh
    kernel-bench`, driven by `benchmarks/kernel/registry.py`. Times competing
    kernel implementations head-to-head on synthetic tensors at Piper-1B shapes.
+   A scenario cuts the model at one boundary and ranks the implementations
+   there.
+3. **Declarative kernel spans** -- `./run_bench.sh kernel-bench --span`,
+   driven by `benchmarks/kernel/spans.py`. A span is an implementation that
+   fuses **across** a scenario cut, so it belongs to no single scenario. Its
+   claim is the span against the **sum of the scenarios it replaces**. The
+   roster is empty at this rev; read the module.
 
 Never present kernel numbers as end-to-end results, or vice versa: a kernel
 that wins in isolation can be irrelevant once Inductor fuses the graph around
-it.
+it. Never present a span total as a scenario total either: the two answer
+different questions, and the span statistic is not the scenario statistic.
+
 
 ## Environment
 
@@ -74,7 +83,8 @@ their names are listed once, in the provenance note below, and nowhere else.
 
 | path | contents |
 |---|---|
-| `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group |
+| `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans -- the span heading prints even when the roster is empty, so a reader learns `--span` exists |
+
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |
@@ -82,12 +92,14 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/e2e/results.py` | Evaluation, region comparison, `results.json`, and its renderer |
 | `benchmarks/e2e/data/piper_qwen3.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
 | `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
-| `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
-| `benchmarks/kernel/registry.py` | The kernel scenarios themselves (19 at this rev, 73 arms), declared with those types |
-| `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness |
-| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py` |
+| `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, the span types `KernelSpan`/`SpanParts`/`validate_span_parts`, plus `resolve_symbol`, `resolve_shape_and_workload` and `shape_summary` |
+| `benchmarks/kernel/registry.py` | The kernel scenarios themselves (17 at this rev, 71 arms), declared with those types. Re-derive the counts; do not quote them |
+| `benchmarks/kernel/spans.py` | The kernel spans. Parent-side and torch-free, exactly as the scenario registry is. `KERNEL_SPANS` is **empty** at this rev: the mechanism landed before any declaration. It imports the scenario registry to check that each named part arm exists, which is why it is a separate module |
+| `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness. The runner also owns `measurement_plan`, which orders a run's units: every enclosed scenario ahead of its span |
+| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py`. **The engine does not know that spans exist**: both passes take a `KernelScenario`, and a span hands them its own `measurement`, which is one |
 | `benchmarks/kernel/operations/` | Arm builders, one module per scenario and named after it, plus `common.py` |
-| `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments) and `reporting.py` |
+| `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments, for a scenario and for a span), `span_statistics.py` (the span-versus-parts estimator, parent-side because one of its two sides is a sum over units the engine never sees) and `reporting.py` |
+
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
 | `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
@@ -101,7 +113,8 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/models/piper_qwen3/components/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
 | `benchmarks/traces/` | `schema.py` (the `Region` declaration) and `extraction.py` (trace parsing, window and region pooling) |
 | `benchmarks/artifacts/` | On-disk artifacts: `layout.py` (output layout, `trace_files`, `atomic_write_json` -- the only JSON writer), `manifests.py` (the manifest schema and the resume predicate; the one module here coupled to `e2e/`), `run_state.py` (the per-arm ledger) and `summaries.py` (`SampleSummary`, shared by both systems) |
-| `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning), `provenance.py` (`hardware_metadata`), `events.py` (`RunEvent`, `ProcessRunner`) |
+| `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning), `provenance.py` (`hardware_metadata`, including the two cuDNN fields -- see "Which cuDNN a megatron arm runs"), `events.py` (`RunEvent`, `ProcessRunner`) |
+
 | `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), and the two argv-driven trace diagnostics `analyze.py` and `per_block.py` |
 | `tests/` | CPU + GPU unit tests. Deliberately **flat** -- every module does `sys.path.insert(0, <repo root>)` at a fixed depth, and `unittest discover -s tests` needs no `__init__.py` |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
