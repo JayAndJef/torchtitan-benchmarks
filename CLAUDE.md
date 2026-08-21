@@ -717,6 +717,8 @@ even absent, once Inductor fuses the surrounding graph).
 | flag | default | meaning |
 |---|---|---|
 | `--scenario` (repeatable) | every scenario | subset of kernel scenarios |
+| `--arm` (repeatable) | every arm | subset of **one** scenario's arms; needs exactly one `--scenario` and refuses `--span` |
+| `--span` (repeatable) | **none** | a kernel span, plus every scenario it replaces; refuses `--out` and `--arm` |
 | `--replicates` | 5 | sweeps of every arm; the unit the CI is taken over |
 | `--replicates-per-process` | 1 | consecutive replicates of one arm per worker; above 1 the CI is renamed (see "Startup cost") |
 | `--samples-per-replicate` | 40 | timed bursts per arm per mode, per replicate |
@@ -725,21 +727,51 @@ even absent, once Inductor fuses the surrounding graph).
 | `--burst` | off | adds the 1/4/16/64 dispatch-cost diagnostic |
 | `--model-size` | `normal` | shape from `PIPER_SHAPES`; single-valued, no sweep |
 | `--batch` / `--seq-len` | 4 / 1024 | `KernelWorkload` overrides (seq <= `max_seq_len`) |
-| `--max-seq-len` | 2048 | raises the shape's seq ceiling; needed to sweep `attention` past 2048 |
+| `--max-seq-len` | 2048 | raises the shape's seq ceiling; needed to sweep `attention_core` past 2048 |
 | `--seed` | 0 | input generator seed |
 | `--hardware` | `auto` | provenance label |
-| `--out` | `out/<ts>/kernels/<scenario>/<hardware>` | single `--scenario` only |
+| `--out` | `out/<ts>/kernels/<scenario>/<hardware>` | single `--scenario`, and no `--span` |
 | `--cache-root` / `--compiler-env` | as e2e | `rope` needs the compiler env |
+
+`--replicates`, `--replicates-per-process`, `--samples-per-replicate` and
+`--burst-k` all take `IntRange(min=1)`. Each of the four used to accept a
+zero, and each broke differently and late.
 
 Unlike `run-all --all-scenarios`, a failing scenario does not abort the rest;
 every scenario is reported and the command exits nonzero if any failed.
 Deliberately ignores the `OUT`/`SEQ`/`BATCH` env vars -- flags only, so an
 e2e shell cannot leak settings into a kernel run.
 
-Four scenarios need their synthetic rows to route evenly
+**`--scenario` and `--span` default differently, and the asymmetry is
+deliberate.** `--scenario` defaults to every scenario; `--span` defaults to
+none. A span drags every scenario it encloses into the run, so a default of
+"every span" would silently change what a bare invocation costs. An explicit
+`--span` with no `--scenario` measures that span and its range, and nothing
+else.
+
+**`--arm` measures a subset of one scenario's arms.** Repeat it per arm, and
+pair it with exactly one `--scenario`; an arm name belongs to one roster, so
+a selection across two scenarios would mean a different thing in each. The
+selection **must** name the anchor arm, because every comparison is a ratio
+against it, and every correctness reference the selected arms use, because a
+gate needs both sides in one process. A selection that omits either is
+**refused, not repaired**: adding an arm the operator did not ask for changes
+what the run measures. An unknown arm name raises rather than quietly
+measuring a smaller set.
+
+Every arm the selection leaves out still reaches `results.json` and the
+manifest as `skipped`, with a reason that **names the flag**. The skip map
+therefore carries two kinds of reason now, and a reader must not take one for
+the other: the operator's choice (`--arm did not select it; this run measures
+...`) and the host's capability (no C++20 compiler, or a declared
+`KernelArm.requirement` this shape or workload fails). The selection is
+resolved first, so an arm nobody asked for keeps that reason rather than a
+capability reason it never had to meet.
+
+Three scenarios need their synthetic rows to route evenly
 (`batch * seq_len * top_k` divisible by `num_experts`), and each declares it
-with `requires_balanced_routing`: `swiglu`, `dispatch_permute`, `expert_mlp`
-and `moe_combine`. A shape/workload pair that breaks that skips those four
+with `requires_balanced_routing`: `dispatch_permute`, `expert_mlp` and
+`moe_combine`. A shape/workload pair that breaks that skips those three
 **loudly** -- named numbers, a recorded error, a nonzero exit -- rather than
 capping or rounding anything. The check is per scenario, so every other
 scenario is unaffected and still runs. The same invariant is re-asserted
@@ -747,24 +779,27 @@ inside `run_kernel_scenario`, so `python -m benchmarks.kernel.worker` and any
 other direct caller raise instead of measuring an expert split that does not
 cover the rows they built.
 
-**`--model-size huge` is probed on four scenarios only.** On an H200 on
-2026-08-19, `qkv`, `attention` and `lm_head` completed at `huge` with every
-arm `ok`, and `swiglu` ran out of memory and wrote no `results.json`
-(`out/20260819T010252Z/kernels/`). No cross-engine arm has run at either
-size. Treat every other scenario at `huge` as untested rather than as
-working.
+**`--model-size huge` has been probed on four scenarios, and three of them no
+longer exist.** On an H200 on 2026-08-19, `qkv`, `attention` and `lm_head`
+completed at `huge` with every arm `ok`, and `swiglu` ran out of memory and
+wrote no `results.json` (`out/20260819T010252Z/kernels/`). Of those four only
+`lm_head` is still a scenario. **No cross-engine arm has run at either size**,
+and no successor scenario has been probed at `huge`. Treat every scenario
+except `lm_head` at `huge` as untested rather than as working.
 
 The `swiglu` run died inside `run_correctness_pass`, in the gate's fp32
-upcast, with 134 GiB of the device's 139.81 GiB already in use. The
-arithmetic behind that: `swiglu_inputs` allocates three fp32
-`(4, 43008, 12288)` expert tensors (7.9 GiB each, 23.6 GiB of state dict,
-held for the whole run), and each of the three arms then loads its own bf16
-copy (11.8 GiB) and grows a bf16 weight gradient of the same size in
-backward. That run predates the residency change: `run_correctness_pass`
-now builds one arm at a time and drops it before the next, so the pass is
-bounded by the largest single arm rather than by their sum. Nobody has
-re-run `swiglu` at `huge` since. Measure it before reporting anything about
-it.
+upcast, with 134 GiB of the device's 139.81 GiB already in use. **Keep that
+as history and do not carry its arithmetic forward.** `swiglu_inputs` is a
+deleted symbol, its successor `expert_mlp` has 8 arms rather than 3, and four
+of those build a whole megatron `GPTModel` -- so re-pointing the name without
+re-doing the sum would publish a memory figure for a roster that does not
+exist. `benchmarks/kernel/operations/expert_mlp.py` carries its own `huge`
+arithmetic, computed for its own eight arms; cite that. The run also predates
+the residency change: `run_correctness_pass` now builds one arm at a time and
+drops it before the next, so the pass is bounded by the largest single arm
+rather than by their sum. **`expert_mlp` at `huge` is untested.** Measure it
+before reporting anything about it.
+
 
 ### Scenarios and arms
 
