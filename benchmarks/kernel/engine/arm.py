@@ -29,6 +29,8 @@ from typing import Any, Callable
 
 import torch
 
+from benchmarks.kernel.schema import Mode
+
 
 @dataclass
 class BuiltArm:
@@ -47,7 +49,7 @@ class BuiltArm:
     """
 
     name: str
-    calls: dict[str, Callable[[], object]]
+    calls: dict[Mode, Callable[[], object]]
     correctness_outputs: Callable[[], dict[str, torch.Tensor]]
     bytes_moved: int | None = None
     notes: dict[str, Any] = field(default_factory=dict)

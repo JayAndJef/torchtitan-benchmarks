@@ -40,12 +40,23 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 
-MODES = ("forward", "backward", "forward_backward")
+# The timed operations an arm may expose. ``Mode`` is the vocabulary and
+# ``MODES`` is derived from it, so the two cannot drift: adding a fourth
+# operation means editing one line, and every consumer that iterates ``MODES``
+# -- ``run_timing_pass`` and the merge's per-mode ordering -- follows.
+# ``get_args`` preserves the declared order, which is the order the results
+# file prints.
+#
+# The union is a static aid only. This repository configures no type checker,
+# so the enforcement is the runtime check in ``KernelScenario.__post_init__``,
+# which rejects an unknown mode when the registry module loads.
+Mode = Literal["forward", "backward", "forward_backward"]
+MODES: tuple[Mode, ...] = get_args(Mode)
 
 
 def resolve_symbol(path: str) -> Any:
@@ -322,7 +333,7 @@ class KernelArm:
     name: str
     description: str
     builder: str
-    modes: tuple[str, ...]
+    modes: tuple[Mode, ...]
     correctness: tuple[CorrectnessCheck, ...] = ()
     requires_gcc_toolset: bool = False
     requirement: str | None = None
