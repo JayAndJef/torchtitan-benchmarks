@@ -14,8 +14,11 @@ three kinds of measurement:
 3. **Declarative kernel spans** -- `./run_bench.sh kernel-bench --span`,
    driven by `benchmarks/kernel/spans.py`. A span is an implementation that
    fuses **across** a scenario cut, so it belongs to no single scenario. Its
-   claim is the span against the **sum of the scenarios it replaces**. The
-   roster is empty at this rev; read the module.
+   claim is the span against the **sum of the scenarios it replaces**. Five
+   spans and eight span arms at this rev. **No span has a builder**, so
+   `--span` measures the enclosed scenarios and then fails in the span's own
+   correctness worker; the declarations are the specification those builders
+   must meet.
 
 Never present kernel numbers as end-to-end results, or vice versa: a kernel
 that wins in isolation can be irrelevant once Inductor fuses the graph around
@@ -82,7 +85,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 
 | path | contents |
 |---|---|
-| `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans -- the span heading prints even when the roster is empty, so a reader learns `--span` exists |
+| `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans |
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |
@@ -92,7 +95,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
 | `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, the span types `KernelSpan`/`SpanParts`/`validate_span_parts`, plus `resolve_symbol`, `resolve_shape_and_workload` and `shape_summary` |
 | `benchmarks/kernel/registry.py` | The kernel scenarios themselves (17 at this rev, 71 arms), declared with those types. Re-derive the counts; do not quote them |
-| `benchmarks/kernel/spans.py` | The kernel spans. Parent-side and torch-free, exactly as the scenario registry is. `KERNEL_SPANS` is **empty** at this rev: the mechanism landed before any declaration. It imports the scenario registry to check that each named part arm exists, which is why it is a separate module |
+| `benchmarks/kernel/spans.py` | The kernel spans. Parent-side and torch-free, exactly as the scenario registry is. `KERNEL_SPANS` holds five spans and eight span arms at this rev, none of them with a builder. It imports the scenario registry to check that each named part arm exists, which is why it is a separate module |
 | `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness. The runner also owns `measurement_plan`, which orders a run's units: every enclosed scenario ahead of its span |
 | `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py`. **The engine does not know that spans exist**: both passes take a `KernelScenario`, and a span hands them its own `measurement`, which is one |
 | `benchmarks/kernel/operations/` | Arm builders, one module per scenario and named after it, plus `common.py` |
@@ -1228,10 +1231,14 @@ to no single scenario, so it is declared over an **ordered scenario range**,
 and its claim is the span against the **sum of the scenarios it replaces**. A
 span result therefore holds two totals.
 
-**`KERNEL_SPANS` is empty at this rev.** The mechanism landed before any
-declaration, deliberately: a span needs a runner that can launch one and a
-merge that can hold two totals, and neither existed. **Re-derive the count before this file states one.** Another branch declares
-spans now:
+**`KERNEL_SPANS` declares five spans and eight span arms at this rev**, and
+**not one of them has a builder**. Every arm's `builder` names a module under
+`benchmarks/kernel/operations/` that nobody has written, so `--span` measures
+the enclosed scenarios and then raises in the span's correctness worker at
+`resolve_symbol`. The declarations are the specification those builders must
+meet. The mechanism landed one commit ahead of the declarations, deliberately:
+a span needs a runner that can launch one and a merge that can hold two totals.
+**Re-derive the roster rather than trusting this count:**
 
 ```bash
 .venv/bin/python -c "
