@@ -101,7 +101,9 @@ scenario now collects it.** In the engine the key's 4 MiB is absorbed by
 ``k_layernorm``, which belongs to ``qk_norm``. That scenario builds the same
 fused buffer and hands its megatron arm the same kind of strided view
 (``operations/qk_norm.py``), so the key's half is timed there and this one
-declines to double-book it. The two halves together are the whole 8 MiB.
+declines to double-book it. **That ledger is prose only**: this scenario
+declares no ``bytes_moved`` on any arm and holds no ``copy_floor``, so only
+``qk_norm`` publishes a number and nothing asserts that the halves sum.
 
 Verified on CPU, because strides and TE's classifier need no device:
 ``torch.split`` of the fused buffer gives the value the strides

@@ -23,6 +23,7 @@ the megatron arm reads is checked here in full -- shape, stride and storage
 offset, against megatron's own arithmetic.
 """
 
+import ast
 import importlib.util
 import sys
 import unittest
@@ -33,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 import torch.nn.functional as F
 
+from benchmarks.kernel.operations import qk_norm
 from benchmarks.kernel.operations.qk_norm import (
     MCORE_K_NORM_ATTR,
     MCORE_Q_NORM_ATTR,
@@ -52,6 +54,7 @@ from benchmarks.kernel.operations.qk_norm import (
     qk_norm_inputs,
     qk_norm_reference,
 )
+from benchmarks.kernel.registry import KERNEL_SCENARIOS
 from benchmarks.kernel.schema import KernelWorkload, shape_summary
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
 from benchmarks.models.piper_qwen3.megatron_weights import (
@@ -567,6 +570,147 @@ class ShapeSummaryTest(unittest.TestCase):
                 "reduction_length": head_dim,
             },
         )
+
+
+    def test_the_manifest_flag_agrees_with_the_tensor_the_builder_makes(self):
+        """The provenance may not outlive the effect it describes.
+
+        ``shape_summary`` is torch-free and cannot read a tensor, so the flag
+        is derived from the two recorded widths. This is the assertion that
+        binds it to the real inputs builder. A mutation that makes the key
+        contiguous leaves the manifest still claiming a strided key, which is
+        the same silent failure the arm exists to prevent, moved one layer
+        out into the provenance. It fails here.
+        """
+        for shape, workload in (
+            (TINY, TINY_WORKLOAD),
+            (shape_by_name("normal"), KernelWorkload()),
+        ):
+            with self.subTest(shape=shape.name):
+                generator = torch.Generator(device="cpu").manual_seed(0)
+                inputs = qk_norm_inputs(
+                    shape, workload, torch.device("cpu"), generator
+                )
+                summary = shape_summary("qk_norm", shape, workload)
+                self.assertEqual(
+                    summary["k_mcore_is_a_strided_view"],
+                    not inputs.k_SBNH.is_contiguous(),
+                )
+                self.assertTrue(summary["k_mcore_is_a_strided_view"])
+                self.assertEqual(
+                    summary["qkv_mcore_fused_SBGR"],
+                    list(inputs.qkv_fused_SBGR.shape),
+                )
+                self.assertEqual(
+                    summary["k_mcore_SBNH"], list(inputs.k_SBNH.shape)
+                )
+                self.assertEqual(
+                    summary["q_mcore_SBNH"], list(inputs.q_SBNH.shape)
+                )
+
+
+class BuilderWiringTest(unittest.TestCase):
+    """Which byte count each builder hands the merge, and which arm it names.
+
+    **No test can call the megatron builder without a GPU.** It calls
+    ``initialize_megatron_single_rank``, builds a real ``GPTModel`` and reads
+    ``torch.cuda.memory_allocated``. So the builder is read instead. A swap --
+    ``mcore/base`` reporting the shared ``qk_bytes``, or the floor reporting
+    the megatron count -- passes every other test in this file and publishes a
+    GB/s column that is wrong by a third.
+
+    Reading the source is weaker than running it. It is what is available on
+    a CPU, and it is stronger than nothing. ``tests/test_kernel_attention_
+    core.py`` reads its six builders for the same reason.
+    """
+
+    #: builder name -> (arm name, the ``QkNormInputs`` field it must report)
+    WIRING = {
+        "build_qk_norm_copy_floor": ("copy_floor", "qk_bytes"),
+        "build_qk_norm_mcore_base": ("mcore/base", "mcore_qk_bytes"),
+        "build_qk_norm_titan": ("titan", "qk_bytes"),
+    }
+
+    @staticmethod
+    def _body(name: str) -> ast.Module:
+        """The builder's body, with its docstring removed.
+
+        The docstrings name the other arms on purpose -- they explain the
+        comparison -- so a search over them would find every arm name in
+        every builder.
+        """
+        tree = ast.parse(Path(qk_norm.__file__).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                body = list(node.body)
+                if (
+                    body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    body = body[1:]
+                return ast.Module(body=body, type_ignores=[])
+        raise AssertionError(f"no builder named {name}")
+
+    @classmethod
+    def _bytes_moved_fields(cls, name: str) -> list:
+        """Every attribute this builder passes as ``bytes_moved=``."""
+        return [
+            keyword.value.attr
+            for node in ast.walk(cls._body(name))
+            if isinstance(node, ast.Call)
+            for keyword in node.keywords
+            if keyword.arg == "bytes_moved"
+            and isinstance(keyword.value, ast.Attribute)
+        ]
+
+    @classmethod
+    def _strings(cls, name: str) -> set:
+        return {
+            node.value
+            for node in ast.walk(cls._body(name))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+
+    def test_every_declared_arm_has_exactly_one_builder(self):
+        declared = {arm.name for arm in KERNEL_SCENARIOS["qk_norm"].arms}
+        self.assertEqual({arm for arm, _ in self.WIRING.values()}, declared)
+
+    def test_each_builder_reports_the_byte_count_its_arm_owns(self):
+        """The guard the merge cannot provide.
+
+        ``merge.py`` reads whatever the fragment carries. Nothing downstream
+        knows that ``mcore/base`` is the arm with the extra copy, so a swap
+        here is invisible everywhere else.
+        """
+        for builder, (_, field) in self.WIRING.items():
+            with self.subTest(builder=builder):
+                self.assertEqual(self._bytes_moved_fields(builder), [field])
+
+    def test_the_megatron_builder_is_the_only_one_naming_the_extra_count(self):
+        """Stated the other way round, so a second user of it also fails.
+
+        ``mcore_qk_bytes`` describes one arm's extra copy. A titan arm or a
+        floor that reported it would publish a GB/s column a third too high
+        for traffic it never moves.
+        """
+        naming = {
+            builder
+            for builder in self.WIRING
+            if "mcore_qk_bytes" in self._bytes_moved_fields(builder)
+        }
+        self.assertEqual(naming, {"build_qk_norm_mcore_base"})
+
+    def test_each_builder_names_its_own_arm(self):
+        """A builder wired to another arm's name is a wrong number."""
+        for builder, (arm, _) in self.WIRING.items():
+            with self.subTest(builder=builder):
+                strings = self._strings(builder)
+                self.assertIn(arm, strings)
+                for other, _ in self.WIRING.values():
+                    if other != arm:
+                        self.assertNotIn(other, strings)
 
 
 class CrossEngineNameTest(unittest.TestCase):

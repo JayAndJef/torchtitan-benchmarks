@@ -446,6 +446,7 @@ def shape_summary(
             "tokens": batch * seq,
         }
     if scenario_name == "qk_norm":
+        mcore_fused_row = (shape.heads_per_group + 2) * shape.head_dim
         return {
             # Both engine-native forms, because both are read, and they are
             # NOT the same tensors. Titan materializes two contiguous
@@ -461,11 +462,23 @@ def shape_summary(
                 seq,
                 batch,
                 shape.n_kv_heads,
-                (shape.heads_per_group + 2) * shape.head_dim,
+                mcore_fused_row,
             ],
             "q_mcore_SBNH": [seq, batch, shape.n_heads, shape.head_dim],
             "k_mcore_SBNH": [seq, batch, shape.n_kv_heads, shape.head_dim],
-            "k_mcore_is_a_strided_view": True,
+            # Derived from the two widths above, never asserted as a literal.
+            # The key stays a view of the fused buffer, so it is strided
+            # exactly while that buffer's row is wider than the key's own
+            # slice. A literal True would keep claiming a strided key after
+            # the inputs builder stopped producing one, which is the silent
+            # failure the whole arm exists to prevent, one layer out.
+            #
+            # This module is torch-free and may not import an operations
+            # module, so it cannot read the tensor itself. The binding to the
+            # real tensor is a test:
+            # ``tests/test_kernel_qk_norm.py`` compares this value against
+            # ``not qk_norm_inputs(...).k_SBNH.is_contiguous()``.
+            "k_mcore_is_a_strided_view": mcore_fused_row != shape.head_dim,
             "weight": [shape.head_dim],
             # The reduction runs over the last dimension alone, so every
             # leading dimension is a row count. This is the number that says

@@ -59,25 +59,54 @@ before the norm kernel launches. At the default workload the key holds 4 MiB,
 so the mcore arm moves 4 MiB more of reads and 4 MiB more of writes than the
 titan arm. ``mcore_qk_bytes`` declares that, and the ``mcore/base`` arm reports
 it as its own ``bytes_moved``, following ``moe_router``: a per-arm count makes
-the GB/s column show the asymmetry instead of absorbing it. ``x_floor`` is a
-ratio of times and is unaffected.
+the GB/s column show the asymmetry instead of absorbing it.
+
+**Read this arm's ``x_floor`` against 1.33, not against 1.0.** The column is
+``mode_median / floor_median`` (``results/merge.py:430``), so the arithmetic
+reads no ``bytes_moved`` at all and nothing about the formula changed. The
+**interpretation** did. ``copy_floor`` copies 24 MiB and ``mcore/base`` moves
+32 MiB, so an ``mcore/base`` running at exactly the floor's bandwidth reads
+``x_floor`` about 32/24 = **1.33**. The usual test -- x_floor near 1.0 means
+the arm is at the bus -- is therefore wrong for this one arm, and only for
+it: ``titan`` and the floor declare the same count and still read against
+1.0. Divide an ``mcore/base`` x_floor by 1.33 to recover the usual reading.
+The scenario ``description`` says the same thing, because a reader of
+``results.json`` holds no module docstring.
 
 **The charge is asymmetric per arm and symmetric per partition, and that is
-the point.** CLAUDE.md asks for a layout conversion to be declared on both
-engines when it sits inside the module under test and cannot be hoisted. Here
-it sits inside the module under test on one engine only, and the reason is not
-harness convenience: titan's ``qkv_linear`` materializes a contiguous ``xk``
-before ``k_norm`` ever runs, and ``qkv_prep`` already charges titan for that
-materialization. Giving the titan norm a strided key too would invent work
-titan does not do, and it would book the same 4 MiB against titan twice. So
+the point.** The partition plan asks, in its layout table, for a layout
+conversion to be declared on both engines when it sits inside the module
+under test and cannot be hoisted. That rule is the plan's and is written
+nowhere in CLAUDE.md; the reasoning below stands on its own either way.
+
+The rule governs a conversion the harness introduces by choosing a cut. This
+one is not that. It sits inside the module under test on one engine only, and
+the reason is the engine: titan's ``qkv_linear`` materializes a contiguous
+``xk`` before ``k_norm`` ever runs, and ``qkv_prep`` already charges titan for
+that materialization. Giving the titan norm a strided key too would invent
+work titan does not do, and it would book the same key against titan twice. So
 each engine pays this materialization exactly once across the partition --
-titan in ``qkv_prep``, megatron here -- and the partition sums.
+titan in ``qkv_prep``, megatron here.
 
 **What this closes.** ``qkv_prep`` declares that megatron defers its split
 copy to whoever consumes the strided views. The value's half is timed by
 ``attention_core``; the key's half was timed nowhere, because this scenario
-fed its megatron arm a contiguous key. It is timed here now, so the two halves
-of the deferral are both collected and the scenarios sum to the whole 8 MiB.
+fed its megatron arm a contiguous key. It is timed here now, so both halves of
+the deferral are collected.
+
+**That ledger is prose, and no test can check it.** ``attention_core``
+declares no ``bytes_moved`` on any arm and holds no ``copy_floor``, so only
+this scenario publishes a number for its half. The two cannot disagree
+numerically, because there is nothing to disagree with. Read "the partition
+sums" as a statement about which module measures which tensor, never as an
+arithmetic identity that some assertion enforces.
+
+**Two conventions for the same tensor, named every time.** The key holds
+4 MiB. Moving it costs 8 MiB of traffic, because ``qk_bytes`` counts one read
+plus one write. ``qkv_prep`` and ``attention_core`` speak in tensor size and
+say 4 MiB; ``mcore_qk_bytes`` speaks in traffic and adds 8 MiB. Both are
+right. Never put the two numbers side by side without naming which convention
+each one uses.
 
 **A cloned input would delete the effect, silently.** ``Tensor.clone()``
 preserves a layout only for a tensor that is non-overlapping **and** dense. A

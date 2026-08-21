@@ -948,10 +948,13 @@ TEST_CENSUS = {
     # +1 for the one-sidedness -- a flat ladder is not a device-bound
     # verdict, which rope backward demonstrates.
     # Scenario 3 of the cross-engine partition, and the first module here
-    # to build both engines: 17 covering the shared inputs, the two layouts,
+    # to build both engines: 35 covering the shared inputs, the two layouts,
     # the fp64 reference, both arm builders and the guards that refuse a norm
-    # the spec resolved to something other than a real one.
-    "test_kernel_qk_norm": 30,
+    # the spec resolved to something other than a real one. 18 of the 35
+    # arrived with megatron's strided key: the layout of every tensor the
+    # megatron arm reads, the leaf sets that must carry it, the manifest flag
+    # that describes it, and the builder wiring that reports its byte count.
+    "test_kernel_qk_norm": 35,
     # Scenario 5, the last of the cross-engine partition, and the one whose
     # arms no correctness gate can tell apart: cuDNN, FlashAttention and the
     # unfused path all compute attention, so a megatron arm that fell through
@@ -1153,7 +1156,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 988
+TEST_CENSUS_TOTAL = 993
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

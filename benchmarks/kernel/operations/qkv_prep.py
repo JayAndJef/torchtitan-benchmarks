@@ -92,9 +92,14 @@ to two different places.
   closure. ``attention_core`` declines to double-book it.
 
 So the two halves are deferred to two scenarios and **both are now
-collected**: the scenarios sum to the whole 8 MiB. This row read alone still
-overstates titan's projection cost, by roughly 8 MiB per direction, because
-megatron pays that traffic in two later scenarios rather than here.
+collected**. This row read alone still overstates titan's projection cost, by
+roughly 8 MiB per direction, because megatron pays that traffic in two later
+scenarios rather than here.
+
+**That ledger is prose, and nothing checks it.** ``attention_core`` declares
+no ``bytes_moved`` on any arm and holds no ``copy_floor``, so only ``qk_norm``
+publishes a number for its half. "The halves sum" is a statement about which
+module measures which tensor. No assertion enforces it.
 
 **The qk norms are excluded, and excluding them takes an explicit step.**
 ``get_query_key_value_tensors`` also applies ``q_layernorm`` and
