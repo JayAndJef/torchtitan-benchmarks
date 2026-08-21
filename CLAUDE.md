@@ -1057,7 +1057,84 @@ isolation cannot have. `tests/test_import_boundaries.py` section 3 asserts both
 halves; `tests/test_migration_contract.py` pins each scenario's builders to its
 own family module.
 
+### Spans
+
+**A span is an implementation that fuses across a scenario cut.** It belongs
+to no single scenario, so it is declared over an **ordered scenario range**,
+and its claim is the span against the **sum of the scenarios it replaces**. A
+span result therefore holds two totals.
+
+**`KERNEL_SPANS` is empty at this rev.** The mechanism landed before any
+declaration, deliberately: a span needs a runner that can launch one and a
+merge that can hold two totals, and neither existed. **Re-derive the count
+before you write one down** -- spans are being declared while this file is
+being written:
+
+```bash
+.venv/bin/python -c "
+from benchmarks.kernel.spans import KERNEL_SPANS
+print(len(KERNEL_SPANS), sorted(KERNEL_SPANS))"
+```
+
+**No span has ever been measured.** The engine has never run on a GPU, and
+every number in its tests is synthetic.
+
+How a span is declared. `benchmarks/kernel/spans.py` holds the roster;
+`KernelSpan` and `SpanParts` live in `benchmarks/kernel/schema.py` beside the
+scenario types.
+
+- `measurement` is the span's own head-to-head, and it is a `KernelScenario`.
+  A span **composes** one rather than subclassing it, so
+  `isinstance(span, KernelScenario)` is False and a span added to
+  `KERNEL_SCENARIOS` by mistake cannot run as a bare scenario. It is also
+  what keeps `benchmarks/kernel/engine/` free of any knowledge that spans
+  exist: both passes take a `KernelScenario`, and a span hands them
+  `measurement`.
+- `scenarios` is the range, in the model's own order, and it must hold at
+  least two entries with no repeat.
+- `parts` says what each span arm replaces, **positionally**: one arm name per
+  entry of `scenarios`, in that order. The correspondence is declared and
+  never inferred, because a span arm named `titan` does not necessarily
+  replace an arm named `titan` at each cut, and a span arm may name an
+  implementation no enclosed scenario has.
+- Every span arm must declare a `parts` entry. An arm with no parts row is an
+  arm whose claim cannot be stated, and stating that claim is the whole of
+  what a span is for.
+- `validate_span_parts` runs at **import**, so a part arm that does not exist
+  fails when the module loads rather than as an absent row after a GPU has
+  measured every arm of the span and of every scenario it encloses.
+
+How a span runs. `--span NAME` is repeatable and defaults to none. Asking for
+one span can add several scenarios to the run: `measurement_plan` puts every
+enclosed scenario **ahead of** its span, and each scenario once however many
+spans enclose it. That ordering is what makes the two sides share a run.
+`--out` refuses a span outright, because a span run is always several units
+and they would all resolve to one directory; `--arm` refuses it too, because
+an arm name belongs to one roster.
+
+What a span publishes. A span writes a `kernel_span` results file whose
+`arms` holds the span's **own** measurement, whose `parts` holds the other
+side keyed by span arm, whose `comparisons` keeps its scenario meaning (arm
+against arm, both measured inside the span), and whose `parts_comparisons`
+holds the span-versus-parts claim under its own name. A reader who opens one
+and finds the other has opened the wrong field.
+
+Three things about a span number that must be said next to it:
+
+1. **The statistic is unpaired.** See "Method" -- the interval is
+   `unpaired_ratio_ci_low`/`_high` and it cancels no drift.
+2. **The ratio is biased in the span's favour**, by one host dispatch chain
+   per enclosed scenario beyond the first. See "Method".
+3. **An incomplete parts side costs one row, not the whole file.** A part
+   that lost its measurement costs that span arm its parts total; a part that
+   measured fewer modes than it declared costs that mode's row, and both are
+   recorded as warnings. The loud failure is kept for the case where **no**
+   span arm carries a parts total: that file would state the span's own
+   number and no claim about it, which is a scenario wearing a span's name.
+
+
 ### Method
+
 
 - Module-scope arms (the three titan rope modules, `expert_mlp`'s four titan
   arms, `qkv_prep`'s two) run under `torch.compile(fullgraph=True)`, because
