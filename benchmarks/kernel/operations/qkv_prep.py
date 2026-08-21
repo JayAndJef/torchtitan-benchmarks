@@ -117,17 +117,31 @@ and ``:1724-1742`` builds ``None`` from it), and
 ``get_query_key_value_tensors`` already branches on it. The arm still runs
 megatron's own view, ``SplitAlongDim`` and reshape.
 
-**There is no isolated ``backward`` mode, and there cannot be one.** The
-retained-graph trick the ``rope`` and ``expert_mlp`` scenarios use re-runs one
-backward graph many times. TE's ``LayerNormLinear`` backward frees what it
-saved on the way out -- ``clear_tensor_data(mu)`` and
-``clear_tensor_data(rsigma)`` at
+**The isolated ``backward`` mode is on the two titan arms and not on the
+megatron one.** The retained-graph trick the ``rope`` and ``expert_mlp``
+scenarios use re-runs one backward graph many times. TE's
+``LayerNormLinear`` backward frees what it saved on the way out --
+``clear_tensor_data(mu)`` and ``clear_tensor_data(rsigma)`` at
 ``transformer_engine/pytorch/module/layernorm_linear.py:1113-1114``, plus
-``ln_out`` at ``:1047`` and ``:1050`` -- so a second pass reads cleared
-tensors.
-Both engines drop the mode, which keeps the arms comparable, and backward cost
-stays recoverable as ``forward_backward`` minus ``forward``.
-``attn_out_proj`` and ``ffn_norm`` drop it for the same class of reason.
+``ln_out`` at ``:1047`` and ``:1050`` -- so a second pass over the megatron
+arm reads cleared tensors. Nothing on the titan side does that: both titan
+arms are a torchtitan ``RMSNorm`` in front of a ``QKVLinear`` or a
+``FusedQKVLinear``, under one ``torch.compile(fullgraph=True)``, and the
+worker clears ``torch._functorch.config.donated_buffer`` precisely so a
+compiled backward graph can be re-run.
+
+**The asymmetry costs the cross-engine row nothing, and it is the reason the
+mode is here.** ``KernelArm.modes`` is per arm, and the merge writes a
+comparison row only for a mode BOTH sides declare
+(``benchmarks/kernel/results/merge.py``). So ``titan`` against
+``mcore/base`` publishes ``forward`` and ``forward_backward``, exactly as it
+did before, and the within-titan ``titan/unfused_qkv`` against ``titan`` row
+publishes ``backward`` as well. That third row is what the retired ``qkv``
+scenario measured and what dropping the mode from both arms would delete;
+``expert_mlp`` declares the same asymmetry, for the same reason.
+Megatron's backward cost stays recoverable as ``forward_backward`` minus
+``forward``. ``attn_out_proj`` and ``ffn_norm`` drop the mode on both arms,
+which is the right answer where the losing side is the only side.
 
 **All three arms hold the same weights, through the map that already owns the
 correspondence.** ``benchmarks/models/piper_qwen3/megatron_weights.py`` pairs
@@ -394,9 +408,10 @@ def _qkv_prep_arm(
     canonical_in: tuple[int, ...],
     canonical_out: tuple[tuple[int, ...], ...],
     weight_grads: Callable[[], dict[str, torch.Tensor]],
+    isolated_backward: bool = False,
     notes: dict[str, Any] | None = None,
 ) -> BuiltArm:
-    """Forward and forward+backward over one engine's native tensor shape.
+    """The timed closures over one engine's native tensor shape.
 
     Every arm runs this same code over its own callable, so the comparison
     measures the two engines and nothing about how each arm was written.
@@ -410,6 +425,17 @@ def _qkv_prep_arm(
     ``owner`` is the module whose parameter gradients are cleared between
     calls. For a compiled titan arm that is the module *inside* the compile
     wrapper, because that is where the parameters live.
+
+    ``isolated_backward`` adds the third closure, and **only the two titan
+    arms take it**. It runs ``torch.autograd.backward`` over a graph the
+    build retained, so backward kernels are timed without a forward in front
+    of them; the megatron arm cannot, because TE's ``LayerNormLinear``
+    backward frees what it saved on the way out. ``KernelArm.modes`` is per
+    arm, so the asymmetry costs the cross-engine row nothing: the merge
+    writes a comparison only for a mode BOTH sides declare
+    (``benchmarks/kernel/results/merge.py``), so titan against mcore/base
+    publishes ``forward`` and ``forward_backward``, and the within-titan
+    fused-against-unfused row publishes ``backward`` as well.
     """
     forward_leaf = x_native.clone().requires_grad_()
     round_trip_leaf = x_native.clone().requires_grad_()
@@ -435,9 +461,27 @@ def _qkv_prep_arm(
             **weight_grads(),
         }
 
+    calls: dict[str, Callable[[], Any]] = {
+        "forward": forward,
+        "forward_backward": forward_backward,
+    }
+    if isolated_backward:
+        # Built here rather than lazily: the retained graph must exist before
+        # the first timed call, and building it inside the closure would time
+        # a forward under a backward label. The leaf is this closure's own,
+        # so no other mode's gradient state reaches it.
+        backward_leaf = x_native.clone().requires_grad_()
+        retained = call(backward_leaf)
+
+        def backward() -> None:
+            _reset_grads(backward_leaf, owner)
+            torch.autograd.backward(retained, grads_native, retain_graph=True)
+
+        calls["backward"] = backward
+
     return BuiltArm(
         name=name,
-        calls={"forward": forward, "forward_backward": forward_backward},
+        calls=calls,
         correctness_outputs=correctness_outputs,
         notes=dict(notes or {}),
     )
@@ -506,9 +550,8 @@ def _build_titan_arm(
 
     The load order matters. Both modules are built in fp32 and loaded from the
     fp32 shared tensors, then cast to bf16 in one step, so the two titan arms
-    and the megatron arm all round the same fp32 values once. ``_finalize_qkv``
-    in ``qkv.py`` does the same, and it is what lets the fused arm's
-    state-dict merge hook see unquantized values.
+    and the megatron arm all round the same fp32 values once. That order is
+    what lets the fused arm's state-dict merge hook see unquantized values.
     """
     attention_norm = _titan_norm(shape, inputs)
     module = _TitanQkvPrep(attention_norm, qkv_linear)
@@ -534,6 +577,7 @@ def _build_titan_arm(
             tuple(inputs.grad_v.shape),
         ),
         weight_grads=grads,
+        isolated_backward=True,
         notes=notes,
     )
 

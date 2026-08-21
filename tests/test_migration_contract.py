@@ -1040,7 +1040,12 @@ TEST_CENSUS = {
     # rank. A block of them pins the materialization asymmetry the scenario
     # declares rather than equalizes -- which arm copies q, k and v, and which
     # hands on a strided view.
-    "test_kernel_qkv_prep": 40,
+    # +1 net when the isolated backward the retired ``qkv`` scenario measured
+    # was restored to the two titan arms: the one test that pinned "no
+    # isolated backward, on any arm" became two, one per side of the
+    # asymmetry, and the titan one calls the closure twice because the timing
+    # pass does.
+    "test_kernel_qkv_prep": 41,
     # Scenario 16: 33 covering the shared logits and both layouts, the fp64
     # reference, all six arm builders and the label preparation both engines
     # are charged. A block of them pins the two claims a reader would
@@ -1161,7 +1166,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 990
+TEST_CENSUS_TOTAL = 991
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -738,7 +738,12 @@ class TitanCompositionTests(unittest.TestCase):
 class QkvPrepArmTests(unittest.TestCase):
     """The helper all three arms are built from, on plain torch modules."""
 
-    def _arm(self, native: str, return_owner: bool = False):
+    def _arm(
+        self,
+        native: str,
+        return_owner: bool = False,
+        isolated_backward: bool = False,
+    ):
         torch.manual_seed(0)
         dim, n_heads, n_kv, head_dim = 8, 2, 1, 4
         batch, seq = 2, 3
@@ -784,21 +789,46 @@ class QkvPrepArmTests(unittest.TestCase):
                 (batch, seq, n_kv, head_dim),
             ),
             weight_grads=weight_grads,
+            isolated_backward=isolated_backward,
         )
         return (arm, module) if return_owner else arm
 
-    def test_the_arm_exposes_the_two_declared_modes_and_no_third(self) -> None:
-        """There is no isolated ``backward`` mode, on any arm.
-
-        TE's ``LayerNormLinear`` backward clears its saved statistics
+    def test_the_megatron_arm_has_no_isolated_backward(self) -> None:
+        """TE's ``LayerNormLinear`` backward clears its saved statistics
         (``layernorm_linear.py:1113-1114``), so the retained-graph trick the
-        ``rope`` and ``expert_mlp`` scenarios use cannot run twice. All three arms
-        drop the mode, which keeps them comparable; backward cost stays
-        recoverable as ``forward_backward`` minus ``forward``.
+        ``rope`` and ``expert_mlp`` scenarios use cannot run twice on it.
+        The default is therefore the two-mode arm, and the megatron builder
+        takes it; its backward cost stays recoverable as ``forward_backward``
+        minus ``forward``.
         """
         self.assertEqual(
-            sorted(self._arm("titan").calls), ["forward", "forward_backward"]
+            sorted(self._arm("mcore").calls), ["forward", "forward_backward"]
         )
+
+    def test_a_titan_arm_adds_a_backward_that_re_runs(self) -> None:
+        """The mode the retired ``qkv`` scenario measured, restored.
+
+        ``KernelArm.modes`` is per arm, so a titan arm may declare
+        ``backward`` while the megatron arm does not. Two properties matter
+        and neither is the declaration: the closure must exist, because
+        ``_seeded_build`` refuses an arm whose calls do not match its
+        declared modes exactly; and it must survive being called more than
+        once, because the timing pass calls it once per burst over one
+        retained graph. A closure that consumed its graph would raise on the
+        second call rather than measure anything.
+        """
+        arm, module = self._arm(
+            "titan", return_owner=True, isolated_backward=True
+        )
+        self.assertEqual(
+            sorted(arm.calls),
+            ["backward", "forward", "forward_backward"],
+        )
+        for call in range(2):
+            with self.subTest(call=call):
+                arm.calls["backward"]()
+                self.assertIsNotNone(module.attention_norm.weight.grad)
+                self.assertIsNotNone(module.qkv_linear.wq.weight.grad)
 
     def test_both_native_layouts_produce_identical_canonical_outputs(
         self,

@@ -598,6 +598,24 @@ QKV_PREP = KernelScenario(
                 "benchmarks.kernel.operations.qkv_prep"
                 ":build_qkv_prep_mcore_base"
             ),
+            # No isolated backward ON THIS ARM. The retained-graph trick the
+            # timing pass uses re-runs one backward graph many times, and
+            # TE's LayerNormLinear backward frees what it saved on the way
+            # out (clear_tensor_data on mu and rsigma,
+            # transformer_engine/pytorch/module/layernorm_linear.py:1113-
+            # 1114), so a second pass would read cleared storage.
+            #
+            # THE TWO TITAN ARMS KEEP THE MODE, and that asymmetry is
+            # deliberate. KernelArm.modes is per arm, and the merge writes a
+            # comparison row only for a mode both sides declare, so the
+            # cross-engine row publishes forward and forward_backward while
+            # the within-titan fused-against-unfused row also publishes
+            # backward. Dropping it from titan as well would buy the
+            # cross-engine row nothing and would delete the isolated
+            # backward numbers the retired qkv scenario published --
+            # expert_mlp declares the same asymmetry for the same reason.
+            # Megatron's backward cost stays recoverable as
+            # forward_backward minus forward.
             modes=("forward", "forward_backward"),
             eager_reason=(
                 "megatron compiles no whole transformer layer, so every TE "
@@ -616,7 +634,10 @@ QKV_PREP = KernelScenario(
             builder=(
                 "benchmarks.kernel.operations.qkv_prep:build_qkv_prep_titan"
             ),
-            modes=("forward", "forward_backward"),
+            # All three modes, unlike mcore/base. See the comment on that
+            # arm: the isolated backward is a titan-side capability, and
+            # KernelArm.modes is per arm.
+            modes=MODES,
             compiled=True,
             correctness=(
                 QKV_PREP_GATE,
@@ -659,13 +680,14 @@ QKV_PREP = KernelScenario(
                 "benchmarks.kernel.operations.qkv_prep"
                 ":build_qkv_prep_titan_unfused_qkv"
             ),
-            modes=("forward", "forward_backward"),
+            modes=MODES,
             compiled=True,
             correctness=(
                 QKV_PREP_GATE,
                 # The enforcing arm-to-arm check on the fused/unfused pair.
-                # The fp64 gate alone does not cover this: it bounds each arm against the truth at 2e-2,
-                # which bounds the *pair* only transitively, at 4e-2 -- and the
+                # The fp64 gate alone does not cover this: it bounds each
+                # arm against the truth at 2e-2, which bounds the *pair*
+                # only transitively, at 4e-2 -- and the
                 # pair is exactly what the published ("titan/unfused_qkv",
                 # "titan") row is a ratio of. Direction follows the same rule as
                 # the cross-engine check: the reference is the row's opponent,
