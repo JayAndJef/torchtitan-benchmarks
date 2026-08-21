@@ -212,12 +212,29 @@ find them already mapped. The cuDNN split is an accident of lazy loading,
 and its consequence is that **which cuDNN every megatron arm in this repo
 runs is decided by the host, not by the pin**.
 
-Two workarounds exist and they are not equivalent. Prepending
-``.venv/lib/python3.10/site-packages/nvidia/cudnn/lib`` to
-``LD_LIBRARY_PATH`` gives the whole process the pinned 9.24.0 and needs no
-other change -- but it moves TE off the 9.23.2 every published megatron
-number was taken with, and no manifest records a cuDNN version, so that
-boundary would be invisible. ``PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1``
+**Measured on 2026-08-21, and it settles two questions this file used to
+leave open** (``reports/20260821-cudnn-version-comparison.md``).
+
+*The version changes no value.* Every correctness gate row matches to the
+float64 bit pattern under 9.23.2 and 9.24.0, and the raw output bytes of all
+eight tensors hash identically. TE selects the same backend either way
+(``NVTE_F16_arbitrary_seqlen``). So the cuDNN version is **not a
+comparability boundary for numbers**, and no published megatron figure is
+numerically wrong because of it.
+
+*``LD_LIBRARY_PATH`` alone does not move TE, and is worse than doing
+nothing.* TE binds cuDNN in Python before any ``DT_NEEDED`` resolution:
+``transformer_engine/common/__init__.py:345`` tries the system copy first,
+and its last resort at ``:330`` is ``ctypes.CDLL("libcudnn.so",
+RTLD_GLOBAL)`` -- the **unversioned** name. The wheel directory ships only
+``libcudnn.so.9``, so the loader skips it and takes ``/usr/lib64``.
+``RTLD_GLOBAL`` then captures TE's own entries. Setting only
+``LD_LIBRARY_PATH`` leaves torch reporting 9.24.0 while TE still runs
+9.23.2, which is a silent split in the opposite direction. Moving the whole
+process needs ``CUDNN_PATH`` **and** ``LD_LIBRARY_PATH`` together; that
+combination was measured to leave zero ``/usr/lib64/libcudnn`` mappings.
+
+``PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1``
 leaves TE on 9.23.2 and only stops torch refusing to answer: the version
 read returns 92302 rather than raising
 (``torch/backends/cudnn/__init__.py:58``). It selects no kernel here, but
