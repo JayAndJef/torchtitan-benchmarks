@@ -247,16 +247,23 @@ class ExpertCombineTests(unittest.TestCase):
                     [],
                 )
 
-    def test_the_gate_crosses_the_boundary_the_two_scenarios_refuse(
+    def test_the_check_crosses_the_boundary_the_two_scenarios_refuse(
         self,
     ) -> None:
-        """A cross-engine ratio needs a cross-engine gate under it.
+        """A cross-engine ratio needs a cross-engine check under it.
 
         Inside ``expert_mlp`` and ``moe_combine`` the two engines carry
-        different correctness output names on purpose, so no gate can cross
+        different correctness output names on purpose, so no check can cross
         either cut. Here they carry the same names and the titan arm is
-        gated against ``mcore/base``: if the two engines do not agree at
+        compared against ``mcore/base``: if the two engines do not agree at
         this enclosure, the enclosure is wrong and the ratio means nothing.
+
+        It is **informational**, and the declaration says why. No arm has
+        run, and the repository's rule for an unmeasured cross-engine
+        expectation is to record it and promote it only if the hardware
+        agrees. The arithmetic agrees: both arms carry an fp64 gate at 2e-2,
+        so the triangle inequality allows 4e-2 between them, and a cross-arm
+        bound at 2e-2 can fail while both gates pass.
         """
         titan = self.span().arm("titan")
         references = [check.reference for check in titan.correctness]
@@ -271,7 +278,7 @@ class ExpertCombineTests(unittest.TestCase):
         self.assertEqual(
             set(cross.outputs), set(mcore.correctness[0].outputs)
         )
-        self.assertFalse(cross.informational)
+        self.assertTrue(cross.informational)
 
     def test_it_declares_the_balanced_routing_its_scenarios_declare(
         self,
@@ -352,11 +359,20 @@ class AttnResidualNormTests(unittest.TestCase):
             self.span().comparison_pairs(), (("titan", "mcore/base"),)
         )
 
-    def test_the_gate_crosses_the_engines(self) -> None:
+    def test_the_check_crosses_the_engines_and_does_not_enforce(
+        self,
+    ) -> None:
+        """Informational for the reasons ``expert_combine`` states."""
         titan = self.span().arm("titan")
         references = [check.reference for check in titan.correctness]
         self.assertIn("mcore/base", references)
         self.assertIn("fp64", references)
+        cross = next(
+            check
+            for check in titan.correctness
+            if check.reference == "mcore/base"
+        )
+        self.assertTrue(cross.informational)
 
     def test_the_two_weights_carry_distinct_gradient_names(self) -> None:
         """``weight_grad`` names one tensor, and this cut crosses two.

@@ -91,15 +91,35 @@ EXPERT_COMBINE_GATE = CorrectnessCheck(
     max_rel_l2=2e-2,
 )
 
-# The gate that earns the cross-engine row. If megatron and TorchTitan agree
+# The check that earns the cross-engine row. If megatron and TorchTitan agree
 # here to 2e-2 then both have applied the routing probabilities exactly once,
 # which is the claim the span is built on; if they do not, the enclosure is
 # wrong and the ratio means nothing.
+#
+# Informational, not enforcing, and two reasons agree.
+#
+# The repository's own rule for an unmeasured claim is the first.
+# ``registry.py``'s ATTN_RESIDUAL_BITWISE_GATE records it: record a
+# cross-engine expectation, run it, and promote it only if the hardware
+# agrees. No arm of this span has run.
+#
+# The arithmetic is the second. Each arm already carries an fp64 gate at
+# 2e-2, so ||a - t|| and ||b - t|| are each bounded by 2e-2 * ||t||, and the
+# triangle inequality bounds ||a - b|| by 4e-2 * ||t||. A cross-arm gate at
+# 2e-2 is therefore TIGHTER than the two gates above it and can fail while
+# both of them pass. Enforcing it would cost the whole span for a reason that
+# is not a defect. Promote it once a run has justified a tolerance.
+#
+# ``attn_out_proj`` and ``ffn_norm`` enforce their cross-engine gates, so the
+# scenario registry is not consistent on this. This is the side that matches
+# the stated rule, and the comment is here so the next reader does not have
+# to re-derive which side that is.
 EXPERT_COMBINE_CROSS_ARM = CorrectnessCheck(
     kind="tolerance",
     reference="mcore/base",
     outputs=EXPERT_COMBINE_GATE.outputs,
     max_rel_l2=2e-2,
+    informational=True,
 )
 
 
@@ -120,9 +140,14 @@ EXPERT_COMBINE = KernelSpan(
             "cut alone the two engines compute different functions of the "
             "same rows -- and this span is the SMALLEST ENCLOSURE in which "
             "both engines have applied the probabilities exactly once. The "
-            "cross-engine correctness gate is what proves that: the two arms "
-            "produce the same tensors here, under the same names, where the "
-            "enclosed scenarios deliberately name theirs apart. "
+            "cross-engine correctness check is what proves that: the two "
+            "arms produce the same tensors here, under the same names, where "
+            "the enclosed scenarios deliberately name theirs apart. THAT "
+            "CHECK IS INFORMATIONAL AT THIS REV AND FAILS NOTHING, because "
+            "no arm has run and because a cross-arm bound at 2e-2 is tighter "
+            "than the two fp64 gates above it. READ IT BEFORE QUOTING THE "
+            "RATIO: a disagreement means the enclosure claim is false and the "
+            "row means nothing, and the run will still have exited zero. "
             "COMPILE TREATMENT: the megatron arm is eager and the TorchTitan "
             "arm runs under torch.compile(fullgraph=True), as each engine "
             "runs this code end to end, so the row compares two treatments "
@@ -212,6 +237,10 @@ EXPERT_COMBINE = KernelSpan(
 )
 
 
+# Two weights cross this cut, so neither may be called ``weight_grad``:
+# ``attn_out_proj`` and ``ffn_norm`` each name one that way, and a span that
+# reused the name would gate whichever of the two the builder happened to
+# return.
 ATTN_RESIDUAL_NORM_GATE = CorrectnessCheck(
     kind="tolerance",
     reference="fp64",
@@ -225,15 +254,13 @@ ATTN_RESIDUAL_NORM_GATE = CorrectnessCheck(
     max_rel_l2=2e-2,
 )
 
-# Two weights cross this cut, so neither may be called ``weight_grad``:
-# ``attn_out_proj`` and ``ffn_norm`` each name one that way, and a span that
-# reused the name would publish a gate over whichever of the two the builder
-# happened to return.
+# Informational for the same two reasons EXPERT_COMBINE_CROSS_ARM states.
 ATTN_RESIDUAL_NORM_CROSS_ARM = CorrectnessCheck(
     kind="tolerance",
     reference="mcore/base",
     outputs=ATTN_RESIDUAL_NORM_GATE.outputs,
     max_rel_l2=2e-2,
+    informational=True,
 )
 
 
@@ -271,6 +298,10 @@ ATTN_RESIDUAL_NORM = KernelSpan(
             "because TE's native RMSNorm kernels fail to launch on this "
             "box, so the megatron number is not TE's fastest norm and must "
             "not be published as 'megatron's norm'. "
+            "THE CROSS-ENGINE CHECK IS INFORMATIONAL AT THIS REV AND FAILS "
+            "NOTHING, because no arm has run and because a cross-arm bound at "
+            "2e-2 is tighter than the two fp64 gates above it. Read it before "
+            "quoting the ratio. "
             "COMPILE TREATMENT: the megatron arm is eager at the point it "
             "is timed from and the TorchTitan arm runs under "
             "torch.compile(fullgraph=True). Note that attn_residual's own "
