@@ -1545,13 +1545,29 @@ kernel-name marker** anywhere.
 
 ```
 out/<timestamp>/kernels/<scenario>/<hardware>/
-  manifest.json      # schema 6: model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/replicates_per_process/burst_k/warmup_calls/seed, commands, provenance
-  results.json       # schema 6: every declared arm with a status and its declared compile treatment, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
+  manifest.json      # schema 7: kind, unit_kind, scenario, span, model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/replicates_per_process/burst_k/warmup_calls/seed, commands, provenance
+  results.json       # schema 7: kind, every declared arm with a status and its declared compile treatment, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
   kernel_bench.log   # every worker's stdout+stderr, in spawn order
   fragments/
     correctness.json         # the gate pass
     timing__<arm>__r<N>.json # one per (arm, replicate)
+
+out/<timestamp>/kernels/spans/<span>/<hardware>/
+  manifest.json      # the same schema 7, plus span_scenarios and parts
+  results.json       # kind "kernel_span": arms, parts, comparisons, parts_comparisons
+  ...                # the same log and fragments
 ```
+
+**A span writes one directory deeper, and that is load-bearing.** Every
+statement in this file that globs `out/*/kernels/*/*/` is a **scenarios-only**
+statement: the shallow pattern cannot reach a span, which is what the extra
+directory is for. A span total and a scenario total answer different
+questions and must never be pooled by a path pattern. A **recursive** walk
+(`rglob`, `find -name results.json`) meets both shapes, and there the `kind`
+field is the only thing that separates them. `--out` refuses a span for the
+same reason: a span run is several units and they would all land in one
+directory.
+
 
 Every fragment also carries a `phases` table: the named wall-clock spans of
 the process that wrote it. A worker that measures several replicates writes
@@ -1599,10 +1615,30 @@ and two do not, most titan arms run compiled and three do not. A reader of
 `results.json` holds no registry, so a row that does not name both sides
 cannot be read. The fields were added to the dataclasses one
 commit before they reached `to_dict`, so a schema-6 file briefly had the
-shape of a schema-5 file; a round-trip test now pins both directions. The
-results loader enforces exact schema equality,
-so older files are rejected rather than half-read; the manifest is
+shape of a schema-5 file; a round-trip test now pins both directions.
+
+**Both files went 6 -> 7 together, when a second kind of unit arrived.** The
+rename that makes it a bump rather than an addition is the value of `kind`.
+It was `"kernel"` on every file, and every file was a scenario -- so the word
+named the family **and** one member of it, which is exactly how `n` and
+`warmup` went wrong at schema 3. It is now `"kernel_scenario"` or
+`"kernel_span"`. The wrong reading this prevents is concrete: a recursive
+walk of `out/` meets both shapes and has `kind` as its only way to tell them
+apart, so a reader keyed on `kind == "kernel"` would take a span total for a
+scenario total and sum it beside the scenarios the span replaces,
+double-counting the same work. Keeping `"kernel"` for scenarios and adding
+`"kernel_span"` was **rejected**: it lets such a reader keep working while
+silently skipping every span, which is the half-read the exact-equality
+loader exists to prevent. The manifest carries the same rename plus
+`unit_kind`, `span`, `span_scenarios` and `parts`; a span manifest writes its
+name in `span` and leaves `scenario` null, because a span name looked up in
+`KERNEL_SCENARIOS` finds nothing.
+
+The results loader enforces exact schema equality,
+so older files are rejected rather than half-read, and each `from_dict` also
+refuses the other kind's file; the manifest is
 write-only provenance and has no loader.
+
 
 ### Trace diagnostics
 
