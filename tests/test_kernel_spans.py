@@ -18,6 +18,7 @@ import json
 import sys
 import tempfile
 import unittest
+from statistics import median
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -616,25 +617,76 @@ class SpanResultsSchemaTests(unittest.TestCase):
 
 SPAN_REPLICATES = 3
 
+# Replicate-major samples per (unit, arm), and every property of this table
+# is load-bearing. The central claim of a span is that the parts total is the
+# **sum, per replicate, of each part arm's median in that replicate**. Three
+# wrong ways to compute it agree with the right one on a degenerate fixture,
+# so this one is built so that all four answers differ:
+#
+# * **Per-replicate medians differ across replicates.** Otherwise reversing
+#   the pairing -- span replicate r against parts replicate R-1-r -- gives
+#   the same answer, and nothing tests that the indices line up.
+# * **Samples inside a replicate are asymmetric**, so the median is not the
+#   mean and a pooled median is not the median of the per-replicate medians.
+# * **The two part arms carry their median at a different index of the raw
+#   list.** This is the subtle one. Element-wise summing two *sorted* lists
+#   of equal length puts the sum of the middles in the middle, so a
+#   sample-level sum reproduces the sum of medians exactly and the mutation
+#   is invisible. Real burst samples arrive unsorted; these are unsorted, and
+#   the two parts are unsorted differently.
+#
+# ``tests/test_kernel_spans.py`` states the four answers this produces.
+SPAN_SAMPLES = {
+    # medians 6, 12, 24. The median sits at index 0 of each raw list.
+    ("expert_mlp", "mcore/base"): (
+        (6.0, 5.0, 30.0),
+        (12.0, 11.0, 36.0),
+        (24.0, 23.0, 48.0),
+    ),
+    # medians 4, 8, 16. The median sits at index 2.
+    ("moe_combine", "mcore/base"): (
+        (1.0, 20.0, 4.0),
+        (2.0, 40.0, 8.0),
+        (3.0, 60.0, 16.0),
+    ),
+    # medians 10, 40, 40, and a pooled median of 11.0 -- deliberately not 40.
+    ("test_expert_combine", "mcore/base"): (
+        (10.0, 5.0, 11.0),
+        (40.0, 6.0, 200.0),
+        (40.0, 7.0, 201.0),
+    ),
+    # The second arm, so a span publishes more than one claim. medians 14.
+    ("expert_mlp", "titan"): ((14.0, 13.0, 40.0),) * SPAN_REPLICATES,
+    ("moe_combine", "titan"): ((2.0, 30.0, 7.0),) * SPAN_REPLICATES,
+    ("test_expert_combine", "titan"): ((14.0, 1.0, 100.0),) * SPAN_REPLICATES,
+}
+# Every other arm of the enclosed scenarios. They are measured because the
+# run measures whole scenarios, and no span names them.
+SPAN_SAMPLES_DEFAULT = ((5.0, 4.0, 9.0),) * SPAN_REPLICATES
 
-def span_correctness_fragment() -> dict:
+
+def unit_samples(unit: str, arm: str) -> tuple[tuple[float, ...], ...]:
+    return SPAN_SAMPLES.get((unit, arm), SPAN_SAMPLES_DEFAULT)
+
+
+def span_correctness_fragment(unit: str = "test_expert_combine") -> dict:
     return {
         "kind": CORRECTNESS_FRAGMENT_KIND,
-        "scenario": "test_expert_combine",
+        "scenario": unit,
         "rows": [],
         "all_passed": True,
         "environment": {"device": "Test GPU", "torch_version": "test"},
     }
 
 
-def span_timing_fragment(arm: str, replicate: int, value: float) -> dict:
+def span_timing_fragment(arm: str, replicate: int) -> dict:
     return {
         "kind": TIMING_FRAGMENT_KIND,
         "scenario": "test_expert_combine",
         "arm": arm,
         "replicate": replicate,
         "modes": {
-            mode: [value, value]
+            mode: list(unit_samples("test_expert_combine", arm)[replicate])
             for mode in ("forward", "forward_backward")
         },
         "bytes_moved": None,
@@ -644,13 +696,18 @@ def span_timing_fragment(arm: str, replicate: int, value: float) -> dict:
 
 
 def measured_part(
-    scenario: str, arm: str, per_replicate: tuple[float, ...]
+    scenario: str,
+    arm: str,
+    replicates: tuple[tuple[float, ...], ...] | None = None,
 ) -> KernelScenarioResult:
-    """A part scenario's result, carrying one arm at known per-replicate values."""
+    """A part scenario's result, carrying one arm's replicate-major samples."""
+    if replicates is None:
+        replicates = unit_samples(scenario, arm)
+    pooled = [value for replicate in replicates for value in replicate]
     modes = {
         mode: ModeResult(
-            summary=summarize([value for value in per_replicate]),
-            replicates_us=tuple((value, value) for value in per_replicate),
+            summary=summarize(pooled),
+            replicates_us=tuple(tuple(r) for r in replicates),
         )
         for mode in ("forward", "forward_backward")
     }
@@ -661,8 +718,8 @@ def measured_part(
         model_shape={"name": "normal"},
         workload={"batch": 4, "seq_len": 1024},
         shapes={},
-        replicates=len(per_replicate),
-        samples_per_replicate=2,
+        replicates=len(replicates),
+        samples_per_replicate=len(replicates[0]),
         burst_k=16,
         warmup_calls=1,
         seed=0,
@@ -684,35 +741,19 @@ def merge_span(
 ):
     shape, workload = resolve_shape_and_workload()
     if timings is None:
-        # Values that drift with the replicate, so the within-span
-        # comparison is not a test between two identical samples, and so a
-        # mis-paired replicate would change the answer rather than
-        # reproduce it.
         timings = [
-            span_timing_fragment(
-                arm,
-                replicate,
-                (30.0 if arm == "mcore/base" else 36.0) + replicate,
-            )
+            span_timing_fragment(arm, replicate)
             for replicate in range(replicates)
             for arm in ("mcore/base", "titan")
         ]
     if parts is None:
         parts = {
             "expert_mlp": MeasuredScenario(
-                result=measured_part(
-                    "expert_mlp",
-                    "mcore/base",
-                    tuple(20.0 + 0.6 * r for r in range(replicates)),
-                ),
+                result=measured_part("expert_mlp", "mcore/base"),
                 results_path="out/x/kernels/expert_mlp/hw/results.json",
             ),
             "moe_combine": MeasuredScenario(
-                result=measured_part(
-                    "moe_combine",
-                    "mcore/base",
-                    tuple(10.0 + 0.4 * r for r in range(replicates)),
-                ),
+                result=measured_part("moe_combine", "mcore/base"),
                 results_path="out/x/kernels/moe_combine/hw/results.json",
             ),
         }
@@ -722,7 +763,7 @@ def merge_span(
         workload=workload,
         hardware="test-gpu",
         replicates=replicates,
-        samples_per_replicate=2,
+        samples_per_replicate=SPAN_REPLICATES,
         burst_k=16,
         warmup_calls=1,
         seed=0,
@@ -735,13 +776,27 @@ def merge_span(
 class SpanMergeTests(unittest.TestCase):
     """The parent assembles the second total, from the same run's scenarios."""
 
-    def test_the_parts_total_is_the_sum_of_the_scenarios(self) -> None:
-        """(20.0 + 0.6r) + (10.0 + 0.4r) against a span of 30.0 + r.
+    def test_the_parts_total_is_the_sum_of_per_replicate_medians(self) -> None:
+        """The central claim, against the three ways of getting it wrong.
 
-        The two sides agree replicate by replicate, so the ratio is 1.0 --
-        the honest verdict on a span that costs exactly what its cuts cost
-        separately. It reads 1.0 only if the sum is taken per replicate; a
-        mis-paired index would not.
+        The fixture's parts are ``expert_mlp/mcore/base`` at per-replicate
+        medians 6, 12, 24 and ``moe_combine/mcore/base`` at 4, 8, 16. The
+        span itself reads 10, 40, 40. So:
+
+        =============================  ============  ============  =========
+        estimator                      parts median  span median   ratio
+        =============================  ============  ============  =========
+        per replicate, sum of medians          20.0          40.0        1.0
+        pooled medians                         20.0          11.0     (0.55)
+        parts paired in reverse                20.0          40.0        2.0
+        element-wise sum of samples            44.0          40.0      0.625
+        =============================  ============  ============  =========
+
+        Every cell in the first row is asserted below, and no two rows agree
+        in every cell -- which is what makes each mutation visible in at
+        least one assertion. ``ratio`` is the only column that moves under a
+        reversed pairing, so a test that asserted the medians alone would
+        miss it.
         """
         result = merge_span()
         row = next(
@@ -749,14 +804,80 @@ class SpanMergeTests(unittest.TestCase):
             for row in result.parts_comparisons
             if row["arm"] == "mcore/base" and row["mode"] == "forward"
         )
-        self.assertAlmostEqual(row["parts_median_us"], 31.0)
-        self.assertAlmostEqual(row["span_median_us"], 31.0)
-        self.assertAlmostEqual(row["median_ratio"], 1.0)
+        # 10 + 20 + 40 per replicate, so the median of the sums is 20.0. A
+        # pooled median or an element-wise sample sum is not 20.0.
+        self.assertAlmostEqual(row["parts_median_us"], 20.0)
+        # The median of the span's per-replicate medians. Its pooled median
+        # is 11.0.
+        self.assertAlmostEqual(row["span_median_us"], 40.0)
+        self.assertAlmostEqual(row["median_ratio"], 2.0)
+        # The paired estimate: per-replicate ratios 1.0, 2.0, 1.0. Reversing
+        # the pairing gives 0.25, 2.0, 4.0 and a point estimate of 2.0.
         self.assertAlmostEqual(row["ratio"], 1.0)
         self.assertEqual(row["n_replicates"], SPAN_REPLICATES)
         self.assertEqual(
             row["parts"], ["expert_mlp/mcore/base", "moe_combine/mcore/base"]
         )
+        self.assertLessEqual(row["cross_sweep_ratio_ci_low"], row["ratio"])
+        self.assertGreaterEqual(row["cross_sweep_ratio_ci_high"], row["ratio"])
+
+    def test_the_paired_estimate_is_not_the_unpaired_one(self) -> None:
+        """Two columns, two estimators, and the fixture separates them.
+
+        ``median_ratio`` divides the two medians and knows nothing about
+        which replicate produced which. ``ratio`` is the median of the
+        per-replicate ratios. A fixture on which they agree cannot show that
+        the file publishes both, nor which of them a reader is being handed.
+        """
+        row = next(
+            row
+            for row in merge_span().parts_comparisons
+            if row["arm"] == "mcore/base" and row["mode"] == "forward"
+        )
+        self.assertNotAlmostEqual(row["median_ratio"], row["ratio"])
+
+    def test_the_published_total_is_auditable_from_the_same_file(self) -> None:
+        """"Auditable" is a property here, not a word.
+
+        A reader recomputes the parts total from the ``parts`` block the
+        same file records, and must land on the ``parts_median_us`` the
+        claim row publishes. Nothing else in the file states the sum, so
+        without this the breakdown and the headline could disagree and no
+        test would notice.
+        """
+        result = merge_span()
+        for row in result.parts_comparisons:
+            with self.subTest(arm=row["arm"], mode=row["mode"]):
+                parts = result.parts[row["arm"]]
+                per_replicate = [
+                    sum(
+                        part.replicate_medians_us[row["mode"]][index]
+                        for part in parts
+                    )
+                    for index in range(SPAN_REPLICATES)
+                ]
+                self.assertAlmostEqual(
+                    row["parts_median_us"], median(per_replicate)
+                )
+                # And the names in the row are the names in the breakdown,
+                # in the same order, so a reader knows which terms to add.
+                self.assertEqual(
+                    row["parts"],
+                    [f"{part.scenario}/{part.arm}" for part in parts],
+                )
+
+    def test_the_span_total_is_auditable_from_its_own_samples(self) -> None:
+        """The other half. The span's raw samples are in ``arms``."""
+        result = merge_span()
+        for row in result.parts_comparisons:
+            with self.subTest(arm=row["arm"], mode=row["mode"]):
+                replicates = result.arms[row["arm"]].modes[
+                    row["mode"]
+                ].replicates_us
+                self.assertAlmostEqual(
+                    row["span_median_us"],
+                    median([median(replicate) for replicate in replicates]),
+                )
 
     def test_the_parts_breakdown_reaches_the_file(self) -> None:
         """So the sum is auditable and not merely asserted."""
@@ -766,7 +887,10 @@ class SpanMergeTests(unittest.TestCase):
             [("expert_mlp", "mcore/base"), ("moe_combine", "mcore/base")],
         )
         self.assertEqual(
-            parts[0].replicate_medians_us["forward"], (20.0, 20.6, 21.2)
+            parts[0].replicate_medians_us["forward"], (6.0, 12.0, 24.0)
+        )
+        self.assertEqual(
+            parts[1].replicate_medians_us["forward"], (4.0, 8.0, 16.0)
         )
         self.assertTrue(parts[1].results_path.endswith("results.json"))
 
@@ -857,15 +981,14 @@ class SpanMergeTests(unittest.TestCase):
         """
         parts = {
             "expert_mlp": MeasuredScenario(
-                result=measured_part("expert_mlp", "mcore/base", (20.0, 21.0)),
+                # Two replicates against the span's three.
+                result=measured_part(
+                    "expert_mlp", "mcore/base", ((20.0, 21.0), (22.0, 23.0))
+                ),
                 results_path="a",
             ),
             "moe_combine": MeasuredScenario(
-                result=measured_part(
-                    "moe_combine",
-                    "mcore/base",
-                    tuple(10.0 + r for r in range(SPAN_REPLICATES)),
-                ),
+                result=measured_part("moe_combine", "mcore/base"),
                 results_path="b",
             ),
         }
@@ -875,11 +998,7 @@ class SpanMergeTests(unittest.TestCase):
 
     def test_a_failed_part_arm_is_not_summed(self) -> None:
         """A part with a status other than ``ok`` measured nothing usable."""
-        broken = measured_part(
-            "moe_combine",
-            "mcore/base",
-            tuple(10.0 + r for r in range(SPAN_REPLICATES)),
-        )
+        broken = measured_part("moe_combine", "mcore/base")
         broken = KernelScenarioResult(
             **{
                 **{
@@ -898,11 +1017,7 @@ class SpanMergeTests(unittest.TestCase):
         )
         parts = {
             "expert_mlp": MeasuredScenario(
-                result=measured_part(
-                    "expert_mlp",
-                    "mcore/base",
-                    tuple(20.0 + r for r in range(SPAN_REPLICATES)),
-                ),
+                result=measured_part("expert_mlp", "mcore/base"),
                 results_path="a",
             ),
             "moe_combine": MeasuredScenario(result=broken, results_path="b"),
@@ -916,16 +1031,6 @@ class SpanMergeTests(unittest.TestCase):
 # One value per (unit, arm), so every median is exact and the two totals can
 # be checked by arithmetic. The samples carry a spread so the within-span
 # Welch has a variance to work with.
-UNIT_ARM_VALUE = {
-    ("expert_mlp", "mcore/base"): 20.0,
-    ("expert_mlp", "titan"): 22.0,
-    ("moe_combine", "mcore/base"): 10.0,
-    ("moe_combine", "titan"): 11.0,
-    ("test_expert_combine", "mcore/base"): 30.0,
-    ("test_expert_combine", "titan"): 30.0,
-}
-
-
 def span_run_process_runner():
     """A ``process_runner`` that plays the worker protocol for both kinds.
 
@@ -960,7 +1065,9 @@ def span_run_process_runner():
         fragments_dir = Path(command[command.index("--fragments-dir") + 1])
         arm = command[command.index("--arm") + 1]
         replicate = int(command[command.index("--replicate") + 1])
-        value = UNIT_ARM_VALUE.get((unit, arm), 5.0)
+        # The same table the direct merge tests use, so the run path and
+        # the merge path are checked against one set of expected numbers.
+        samples = list(unit_samples(unit, arm)[replicate])
         timing_fragment_path(fragments_dir, arm, replicate).write_text(
             json.dumps(
                 {
@@ -969,7 +1076,7 @@ def span_run_process_runner():
                     "arm": arm,
                     "replicate": replicate,
                     "modes": {
-                        mode_name: [value - 0.1, value, value + 0.1]
+                        mode_name: samples
                         for mode_name in declaration.arm(arm).modes
                     },
                     "bytes_moved": None,
@@ -1066,7 +1173,7 @@ class SpanRunTests(unittest.TestCase):
                     gpu="7",
                     scenario_names=(),
                     span_names=(span.name,),
-                    replicates=2,
+                    replicates=SPAN_REPLICATES,
                     timestamp="stamp",
                 ),
                 process_runner=span_run_process_runner(),
@@ -1074,7 +1181,13 @@ class SpanRunTests(unittest.TestCase):
             )
 
     def test_a_span_run_publishes_both_totals(self) -> None:
-        """30.0 measured against 20.0 + 10.0 summed, and 30.0 against 33.0."""
+        """The whole path: two scenario merges, then the span merge.
+
+        The numbers are the ones the direct merge tests pin, because the
+        run and the merge read one sample table. What this adds is that the
+        parts really came out of ``merge_kernel_fragments`` on the enclosed
+        scenarios rather than out of a hand-built result.
+        """
         span = make_span()
         with tempfile.TemporaryDirectory() as temporary:
             outcomes = self._run(span, temporary)
@@ -1091,15 +1204,19 @@ class SpanRunTests(unittest.TestCase):
                 (row["arm"], row["mode"]): row
                 for row in result.parts_comparisons
             }
-            even = rows[("mcore/base", "forward")]
-            self.assertAlmostEqual(even["span_median_us"], 30.0)
-            self.assertAlmostEqual(even["parts_median_us"], 30.0)
-            self.assertAlmostEqual(even["median_ratio"], 1.0)
+            # 6 + 4, 12 + 8, 24 + 16 per replicate, so the median is 20.0.
+            anchor = rows[("mcore/base", "forward")]
+            self.assertAlmostEqual(anchor["parts_median_us"], 20.0)
+            self.assertAlmostEqual(anchor["span_median_us"], 40.0)
+            self.assertAlmostEqual(anchor["median_ratio"], 2.0)
+            self.assertAlmostEqual(anchor["ratio"], 1.0)
 
+            # 14 + 7 per replicate against a span of 14.
             win = rows[("titan", "forward")]
-            self.assertAlmostEqual(win["span_median_us"], 30.0)
-            self.assertAlmostEqual(win["parts_median_us"], 33.0)
-            self.assertAlmostEqual(win["median_ratio"], 30.0 / 33.0)
+            self.assertAlmostEqual(win["parts_median_us"], 21.0)
+            self.assertAlmostEqual(win["span_median_us"], 14.0)
+            self.assertAlmostEqual(win["median_ratio"], 14.0 / 21.0)
+            self.assertAlmostEqual(win["ratio"], 14.0 / 21.0)
 
     def test_the_span_file_sits_apart_from_the_scenario_files(self) -> None:
         """A glob over the scenarios must not sweep up a span beside them.
@@ -1162,9 +1279,9 @@ class SpanRunTests(unittest.TestCase):
             if "expert_mlp/titan + moe_combine/titan" in line
         )
         self.assertIn("~[", row)
-        self.assertIn("30.00", row)
-        self.assertIn("33.00", row)
-        self.assertIn("0.9091", row)
+        self.assertIn("14.00", row)
+        self.assertIn("21.00", row)
+        self.assertIn("0.6667", row)
         self.assertIn("The 'parts us' column is a", rendered)
         self.assertIn("SUM", rendered)
         self.assertIn("cross_sweep_ratio_ci_*", rendered)

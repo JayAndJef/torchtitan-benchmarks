@@ -960,7 +960,10 @@ TEST_CENSUS = {
     # publishes both totals, that a span file sits apart from the
     # scenario files, that the printed table marks every interval,
     # and that a span is opt-in.
-    "test_kernel_spans": 44,
+    # +3 with the mutation-resistant fixture: that the paired estimate is
+    # not the unpaired one, and that both totals are auditable from the
+    # file that publishes them.
+    "test_kernel_spans": 47,
     # The per-arm build probe. requires_gcc_toolset answers a question about
     # the HOST; KernelArm.requirement answers one about this shape and this
     # workload, which is what a sequence sweep needs and what an arm that
@@ -1176,7 +1179,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1015
+TEST_CENSUS_TOTAL = 1018
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
