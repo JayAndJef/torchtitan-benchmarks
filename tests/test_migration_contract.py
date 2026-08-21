@@ -993,7 +993,11 @@ TEST_CENSUS = {
     # whose eight cover the range its residual sets, that both arms are
     # backward-mode only, and that a single-engine span over six
     # cross-engine scenarios sums only the arms its SpanParts name.
-    "test_kernel_span_declarations": 32,
+    # +7 for fused_linear_ce, the titan-only span whose loss owns the LM
+    # head: its parts share neither name with its arm, it publishes no
+    # within-span row, and the compile treatment of the projection moves
+    # across the cut and reaches the ratio.
+    "test_kernel_span_declarations": 39,
     # The per-arm build probe. requires_gcc_toolset answers a question about
     # the HOST; KernelArm.requirement answers one about this shape and this
     # workload, which is what a sequence sweep needs and what an arm that
@@ -1227,7 +1231,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1080
+TEST_CENSUS_TOTAL = 1087
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

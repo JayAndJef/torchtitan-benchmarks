@@ -35,6 +35,7 @@ DECLARED_SPANS = (
     "expert_combine",
     "attn_residual_norm",
     "ffn_norm_to_moe_residual",
+    "fused_linear_ce",
 )
 
 # How many enclosed scenarios each range holds, spelled as the description
@@ -499,6 +500,95 @@ class FfnNormToMoeResidualTests(unittest.TestCase):
 
     def test_it_needs_the_balanced_routing_the_moe_cuts_need(self) -> None:
         self.assertTrue(self.span().measurement.requires_balanced_routing)
+
+
+
+class FusedLinearCeTests(unittest.TestCase):
+    """15+16: the loss that owns the LM head, so it is on neither cut."""
+
+    def span(self) -> KernelSpan:
+        return KERNEL_SPANS["fused_linear_ce"]
+
+    def test_it_replaces_the_projection_and_the_loss(self) -> None:
+        self.assertEqual(
+            self.span().scenarios, ("lm_head_projection", "cross_entropy")
+        )
+
+    def test_its_parts_share_neither_name_with_the_arm(self) -> None:
+        """A name-based correspondence would find neither of them.
+
+        The arm is ``titan/fused_linear_ce``; what it replaces is
+        ``lm_head_projection/titan`` and
+        ``cross_entropy/titan/full_logits``. This is the case ``SpanParts``
+        exists for.
+        """
+        parts = self.span().parts_for("titan/fused_linear_ce")
+        self.assertEqual(
+            parts,
+            (
+                ("lm_head_projection", "titan"),
+                ("cross_entropy", "titan/full_logits"),
+            ),
+        )
+        self.assertNotIn(
+            "titan/fused_linear_ce", [part for _, part in parts]
+        )
+
+    def test_it_is_forward_backward_only(self) -> None:
+        """The loss calls backward inside ``__call__``.
+
+        There is no point at which forward has finished and backward has
+        not, so no other mode can be measured.
+        """
+        self.assertEqual(
+            self.span().arm("titan/fused_linear_ce").modes,
+            ("forward_backward",),
+        )
+
+    def test_it_publishes_no_within_span_row(self) -> None:
+        """One arm has no opponent, and the tuple says so rather than
+        leaving a reader to derive it from a roster of one."""
+        self.assertEqual(len(self.span().arms), 1)
+        self.assertEqual(self.span().measurement.comparisons, ())
+        self.assertEqual(self.span().comparison_pairs(), ())
+
+    def test_the_compile_treatment_moves_across_the_cut(self) -> None:
+        """And it reaches the published ratio, so the declaration states it.
+
+        The span arm compiles the projection with the loss, because
+        ``FusedLinearCrossEntropyLoss`` builds its numeric body under the
+        production loss compile config. On the parts side the projection is
+        eager -- ``apply_compile`` walks ``model.layers`` and ``lm_head`` is
+        a sibling of ``layers`` -- and only the loss is compiled.
+        """
+        self.assertTrue(self.span().arm("titan/fused_linear_ce").compiled)
+        self.assertFalse(
+            KERNEL_SCENARIOS["lm_head_projection"].arm("titan").compiled
+        )
+        self.assertTrue(
+            KERNEL_SCENARIOS["cross_entropy"].arm("titan/full_logits").compiled
+        )
+        self.assertIn("compile treatment", self.span().description)
+
+    def test_the_parts_side_is_not_upstreams_default(self) -> None:
+        """``full_logits`` is our baseline, and its name says so.
+
+        Every upstream qwen3 config wraps the same loss in
+        ``ChunkedLossWrapper``, which owns the head and is therefore a span
+        over this same range rather than an arm inside ``cross_entropy``.
+        """
+        self.assertEqual(
+            self.span().parts_for("titan/fused_linear_ce")[1][1],
+            "titan/full_logits",
+        )
+
+    def test_it_is_gated_against_the_fp64_truth(self) -> None:
+        """A one-arm span has no opponent to be checked against."""
+        arm = self.span().arm("titan/fused_linear_ce")
+        self.assertEqual(
+            [check.reference for check in arm.correctness], ["fp64"]
+        )
+        self.assertIsNotNone(self.span().measurement.reference_builder)
 
 
 if __name__ == "__main__":

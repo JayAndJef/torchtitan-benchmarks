@@ -528,11 +528,127 @@ FFN_NORM_TO_MOE_RESIDUAL = KernelSpan(
 )
 
 
+# One gate, against the fp64 truth, because a one-arm span has no opponent
+# to be checked against. ``loss`` sits in the same check as the gradients:
+# a loss is a scalar, so ||a-b||/||b|| is its relative error and nothing is
+# lost by sharing the metric.
+LM_HEAD_LOSS_SPAN_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=("loss", "hidden_grad", "weight_grad"),
+    max_rel_l2=2e-2,
+)
+
+
+FUSED_LINEAR_CE = KernelSpan(
+    measurement=KernelScenario(
+        name="fused_linear_ce",
+        description=(
+            "TorchTitan's FusedLinearCrossEntropyLoss, which OWNS THE LM "
+            "HEAD and therefore belongs to neither cut it crosses: the "
+            "projection is lm_head_projection's and the loss is "
+            "cross_entropy's, and this implementation runs both without "
+            "materializing the [tokens, vocab] logits between them. It "
+            "reaches the head through torchtitan's LossWithLMHead protocol "
+            "(set_lm_head), which is what makes it a span and not an arm. "
+            "forward_backward IS THE ONLY MODE, and that is a constraint "
+            "rather than a choice: the loss calls backward inside __call__, "
+            "so there is no point at which forward has finished and "
+            "backward has not. "
+            "WHAT IT REPLACES IS lm_head_projection/titan PLUS "
+            "cross_entropy/titan/full_logits -- two different names, and "
+            "neither of them this arm's own. A correspondence inferred from "
+            "the name would find neither. "
+            "THE PARTS SIDE IS NOT UPSTREAM'S DEFAULT. "
+            "cross_entropy/titan/full_logits is this repository's benchmark "
+            "baseline; every upstream qwen3 config wraps that same loss in "
+            "ChunkedLossWrapper, which owns the head too and is the "
+            "chunked_ce span over this same range. So the parts total is "
+            "TorchTitan with the logits materialized, a configuration this "
+            "repository runs and upstream does not. "
+            "THE COMPILE TREATMENT MOVES ACROSS THE CUT AND IT REACHES THE "
+            "RATIO: this loss builds its numeric body under the production "
+            "CompileConfig(components=['loss']), so the projection runs "
+            "inside a compiled region here, while on the parts side "
+            "lm_head_projection/titan is EAGER -- apply_compile walks "
+            "model.layers and lm_head is a sibling of layers -- and only "
+            "cross_entropy/titan/full_logits is compiled. The span against "
+            "parts row therefore moves the projection's compile treatment "
+            "as well as the fusion, and no number may be read as the fusion "
+            "alone. "
+            "PEAK MEMORY IS THE SECONDARY METRIC, because that is where the "
+            "two sides differ most: at vocab 151936 the logit tensor is the "
+            "largest allocation in the step, and not building it is the "
+            "claim. "
+            "THE lm_head SCENARIO HOLDS AN UNBIASED TWIN OF THIS "
+            "COMPARISON, and whoever retires it should record that: "
+            "lm_head/baseline runs F.linear and then CrossEntropyLoss in "
+            "ONE timed closure against lm_head/fused_linear_ce, so that row "
+            "pays one host dispatch chain on each side where this span's "
+            "parts side pays two. "
+            "THE SPAN-VERSUS-PARTS ROW CARRIES A BIAS AND IT FAVOURS THE "
+            "SPAN: the parts total pays one host dispatch chain per "
+            "enclosed scenario -- two here -- and the span pays one, and "
+            "roughly 85% of a kernel number in this repository is host "
+            "dispatch rather than device time. "
+            "THERE IS NO WITHIN-SPAN ROW, by declaration: one arm has no "
+            "opponent, and the whole claim is the span against the parts. "
+            "That claim is UNPAIRED -- every worker of both enclosed "
+            "scenarios separates a span replicate from the part replicate "
+            "that shares its index -- so its interval is published as "
+            "unpaired_ratio_ci_* and may never be set beside a scenario "
+            "interval as the same quantity."
+        ),
+        inputs_builder=(
+            "benchmarks.kernel.operations.fused_linear_ce"
+            ":fused_linear_ce_inputs"
+        ),
+        reference_builder=(
+            "benchmarks.kernel.operations.fused_linear_ce"
+            ":fused_linear_ce_reference"
+        ),
+        arms=(
+            KernelArm(
+                name="titan/fused_linear_ce",
+                description=(
+                    "benchmarks.models.piper_qwen3.components.lm_head."
+                    "losses.FusedLinearCrossEntropyLoss over the shared "
+                    "[vocab, dim] weight: F.linear_cross_entropy with "
+                    "reduction='sum', built with the production "
+                    "CompileConfig(components=['loss']) and given the head "
+                    "through set_lm_head"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.fused_linear_ce"
+                    ":build_fused_linear_ce_titan"
+                ),
+                modes=("forward_backward",),
+                compiled=True,
+                correctness=(LM_HEAD_LOSS_SPAN_GATE,),
+            ),
+        ),
+        baseline_arm="titan/fused_linear_ce",
+        # Explicit and empty: one arm publishes no ratio against another,
+        # and stating it here says the absence is declared rather than
+        # derived from a roster that happens to hold one name.
+        comparisons=(),
+    ),
+    scenarios=("lm_head_projection", "cross_entropy"),
+    parts=(
+        SpanParts(
+            arm="titan/fused_linear_ce",
+            parts=("titan", "titan/full_logits"),
+        ),
+    ),
+)
+
+
 KERNEL_SPANS: dict[str, KernelSpan] = {
     span.name: span for span in (
         EXPERT_COMBINE,
         ATTN_RESIDUAL_NORM,
         FFN_NORM_TO_MOE_RESIDUAL,
+        FUSED_LINEAR_CE,
     )
 }
 
