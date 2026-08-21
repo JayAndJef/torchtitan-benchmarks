@@ -44,6 +44,15 @@ Torch-free and parent-side, like the schema and the scenario registry: arm
 builders are dotted strings resolved inside the GPU worker, so declaring a
 span costs no import.
 
+**NO BUILDER EXISTS FOR ANY DECLARED SPAN YET.** A span arm's ``builder`` is
+a dotted string, and every one of them names a module under
+``benchmarks.kernel.operations`` that nobody has written. A declaration is
+therefore complete and a measurement is not: ``--span <name>`` measures every
+enclosed scenario, then dies in the span's correctness worker at
+``resolve_symbol``, because the parent plans the enclosed scenarios first.
+Read the roster below as a specification of the arms a later commit must
+build, and read no number off it.
+
 Never present these numbers as end-to-end results, and never present a span
 total as a scenario total: a span answers "what does fusing across these cuts
 buy", which no single scenario asks.
@@ -52,23 +61,187 @@ buy", which no single scenario asks.
 from __future__ import annotations
 
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
-from benchmarks.kernel.schema import KernelSpan, validate_span_parts
+from benchmarks.kernel.schema import (
+    CorrectnessCheck,
+    KernelArm,
+    KernelScenario,
+    KernelSpan,
+    SpanParts,
+    validate_span_parts,
+)
 
 
-# No span is declared at this rev. The mechanism landed first, deliberately:
-# a span declaration needs a runner that can launch one and a merge that can
-# hold two totals, and neither existed. Append a ``KernelSpan`` here to
-# declare one.
+# Both engines produce the same tensors at this cut, under the same names,
+# which is the property that makes the span honest: inside ``expert_mlp`` and
+# ``moe_combine`` the two engines carry DIFFERENT output names on purpose, so
+# that no gate can cross a boundary at which they compute different functions.
+EXPERT_COMBINE_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=(
+        "out",
+        "x_grad",
+        "probs_grad",
+        "w1_grad",
+        "w2_grad",
+        "w3_grad",
+    ),
+    max_rel_l2=2e-2,
+)
+
+# The gate that earns the cross-engine row. If megatron and TorchTitan agree
+# here to 2e-2 then both have applied the routing probabilities exactly once,
+# which is the claim the span is built on; if they do not, the enclosure is
+# wrong and the ratio means nothing.
+EXPERT_COMBINE_CROSS_ARM = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=EXPERT_COMBINE_GATE.outputs,
+    max_rel_l2=2e-2,
+)
+
+
+EXPERT_COMBINE = KernelSpan(
+    measurement=KernelScenario(
+        name="expert_combine",
+        description=(
+            "The routed-expert MLP and the combine as ONE cut, cross-engine: "
+            "megatron-core's experts call followed by its three combine "
+            "phases, against TorchTitan's inner_experts followed by "
+            "token_dispatcher.combine. THIS IS THE ONLY HONEST CROSS-ENGINE "
+            "NUMBER FOR THIS REGION, and that is why the span exists. The "
+            "routing probabilities land on OPPOSITE SIDES of the "
+            "expert_mlp/moe_combine boundary: megatron multiplies them "
+            "inside TEGroupedMLP, in weighted_bias_swiglu_impl, and "
+            "TorchTitan multiplies them in combine. So each of the two "
+            "enclosed scenarios declares no cross-engine row -- at either "
+            "cut alone the two engines compute different functions of the "
+            "same rows -- and this span is the SMALLEST ENCLOSURE in which "
+            "both engines have applied the probabilities exactly once. The "
+            "cross-engine correctness gate is what proves that: the two arms "
+            "produce the same tensors here, under the same names, where the "
+            "enclosed scenarios deliberately name theirs apart. "
+            "COMPILE TREATMENT: the megatron arm is eager and the TorchTitan "
+            "arm runs under torch.compile(fullgraph=True), as each engine "
+            "runs this code end to end, so the row compares two treatments "
+            "and not two kernels alone. "
+            "THE SPAN-VERSUS-PARTS ROW CARRIES A BIAS AND IT FAVOURS THE "
+            "SPAN: the parts total pays one host dispatch chain per enclosed "
+            "scenario -- two here -- and the span pays one, and roughly 85% "
+            "of a kernel number in this repository is host dispatch rather "
+            "than device time. Two scenarios is the shortest range any span "
+            "declares, so the bias is smallest here; it is not zero. "
+            "READ THE TWO ROWS AS TWO DIFFERENT STATISTICS. The titan "
+            "against mcore/base row is a within-span comparison, measured in "
+            "one block-major sweep and PAIRED, exactly as a scenario's row "
+            "is. The span against the parts sum is UNPAIRED -- every worker "
+            "of both enclosed scenarios separates a span replicate from the "
+            "part replicate that shares its index -- so its interval is "
+            "published as unpaired_ratio_ci_* and may never be set beside a "
+            "scenario interval as the same quantity."
+        ),
+        inputs_builder=(
+            "benchmarks.kernel.operations.expert_combine"
+            ":expert_combine_inputs"
+        ),
+        reference_builder=(
+            "benchmarks.kernel.operations.expert_combine"
+            ":expert_combine_reference"
+        ),
+        arms=(
+            KernelArm(
+                name="mcore/base",
+                description=(
+                    "megatron-core off a real GPTModel: TEGroupedMLP, whose "
+                    "fused activation kernel already folds the routing "
+                    "probabilities in, then all three combine phases of the "
+                    "allgather dispatcher. The probabilities are applied "
+                    "once, on the expert side of the cut"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.expert_combine"
+                    ":build_expert_combine_mcore_base"
+                ),
+                modes=("forward", "forward_backward"),
+                compiled=False,
+                eager_reason=(
+                    "megatron compiles no whole transformer layer, so this "
+                    "is how megatron runs the region end to end"
+                ),
+                correctness=(EXPERT_COMBINE_GATE,),
+            ),
+            KernelArm(
+                name="titan",
+                description=(
+                    "TorchTitan under torch.compile(fullgraph=True): "
+                    "GroupedExperts, then token_dispatcher.combine, which "
+                    "scores the routed rows and scatter-adds them back into "
+                    "token order. The probabilities are applied once, on the "
+                    "combine side of the cut"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.expert_combine"
+                    ":build_expert_combine_titan"
+                ),
+                modes=("forward", "forward_backward"),
+                compiled=True,
+                correctness=(
+                    EXPERT_COMBINE_GATE,
+                    EXPERT_COMBINE_CROSS_ARM,
+                ),
+            ),
+        ),
+        baseline_arm="mcore/base",
+        # The span builds its own routed rows, so it needs the same even
+        # split its two enclosed scenarios need.
+        requires_balanced_routing=True,
+        # Declared rather than derived, because this one row is the reason
+        # the span exists.
+        comparisons=(("titan", "mcore/base"),),
+    ),
+    scenarios=("expert_mlp", "moe_combine"),
+    parts=(
+        SpanParts(arm="mcore/base", parts=("mcore/base", "mcore/base")),
+        # expert_mlp anchors on ``titan`` and moe_combine on ``mcore/base``,
+        # and neither anchor decides a part: what an arm replaces is named
+        # here, per arm, and read from nowhere else.
+        SpanParts(arm="titan", parts=("titan", "titan")),
+    ),
+)
+
+
 KERNEL_SPANS: dict[str, KernelSpan] = {
-    span.name: span for span in ()
+    span.name: span for span in (
+        EXPERT_COMBINE,
+    )
 }
 
 
-for _span in KERNEL_SPANS.values():
-    # At import, so a part arm that does not exist fails when this module
-    # loads rather than as an absent row after a GPU has measured every arm
-    # of the span and of every scenario it encloses.
-    validate_span_parts(_span, KERNEL_SCENARIOS)
+def _validate_roster(
+    spans: dict[str, KernelSpan], scenarios: dict[str, KernelScenario]
+) -> None:
+    """Refuse a roster this repository cannot measure, at import.
+
+    Both halves fail here rather than after a GPU has measured every arm of
+    a span and of every scenario it encloses.
+
+    The disjointness half is the one a test cannot own. A name in both
+    rosters would be measured **twice** in one run -- once as a scenario,
+    without its parts, and once as the span, with them -- and ``--scenario``
+    and ``--span`` would each accept it. The rule belongs to the registry
+    that could break it.
+    """
+    for name, span in spans.items():
+        if name in scenarios:
+            raise ValueError(
+                f"{name!r} names both a kernel span and a kernel scenario. "
+                "The two rosters are disjoint: one run would measure that "
+                "name twice, once with its parts total and once without"
+            )
+        validate_span_parts(span, scenarios)
+
+
+_validate_roster(KERNEL_SPANS, KERNEL_SCENARIOS)
 
 
 def kernel_span_by_name(name: str) -> KernelSpan:

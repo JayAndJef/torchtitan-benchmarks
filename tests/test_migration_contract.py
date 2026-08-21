@@ -977,6 +977,16 @@ TEST_CENSUS = {
     # the two flags do not combine, because a span run holds several
     # rosters and one arm selection cannot say which of them it names.
     "test_kernel_spans": 51,
+    # The spans this repository DECLARES, as opposed to the span type. Its
+    # sibling above proves the mechanism against a synthetic span; this one
+    # reads the real roster and asks whether each declaration still says a
+    # true thing about the live registry -- which is the half that goes
+    # stale when a scenario is renamed or an arm is re-homed. 11 generic
+    # over every declared span (the roster pin, the disjointness guard, the
+    # part arms and their modes, the builder module rule, and the two
+    # captions every span owes its reader) and 6 for expert_combine, whose
+    # cross-engine row is the reason the span type exists at all.
+    "test_kernel_span_declarations": 17,
     # The per-arm build probe. requires_gcc_toolset answers a question about
     # the HOST; KernelArm.requirement answers one about this shape and this
     # workload, which is what a sequence sweep needs and what an arm that
@@ -1210,7 +1220,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1048
+TEST_CENSUS_TOTAL = 1065
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
