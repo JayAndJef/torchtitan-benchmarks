@@ -21,18 +21,44 @@ parameter counts.
 ``normal`` is the retired name of ``1b`` and still resolves to it. See
 ``MODEL_SIZE_ALIASES`` below for why it cannot simply be deleted.
 
+**Three of the six are real piper models, and three are benchmark
+inventions. The name says which.** ``1b``, ``9b`` and ``48b`` are
+transcribed field for field from
+``/data/zejiaqi/piper/examples/models/qwen3.py``, cases ``'1B'``, ``'9B'``
+and ``'48B'``. ``large``, ``huge`` and ``giant`` are ours: each was built by
+choosing a dim and a layer count for a benchmark reason, and then applying
+the piper-1B rules to everything else.
+
+**A synthetic shape is not piper at scale, and ``huge`` is the clearest
+case.** Piper scales by adding layers and experts and by widening
+``head_dim``, and it holds ``n_heads`` at 32 and ``n_kv_heads`` at 8 from 9B
+up -- 4:1 grouped-query attention. The synthetic shapes pin ``head_dim`` at
+64 and take ``n_heads = dim/head_dim``, so their head count grows with the
+width: ``huge`` carries 192 query heads over 96 kv heads and ``giant``
+carries 256 over 128, counts real piper never approaches, at a 2:1 ratio
+real piper stopped using after 1B. That changes the fused qkv width, the
+attention arithmetic and the kv-cache size. Read ``huge`` as a wide
+transformer block sized to fill an H200, which is what it was built to be,
+and never as piper at scale.
+
+``large`` and ``48b`` make the same point at one dim. Both are dim 4096
+with a 14336 expert width, and they agree on nothing else: ``head_dim`` 64
+against 128, ``n_heads`` 64 against 32, ``n_kv_heads`` 32 against 8,
+``n_layers`` 4 against 32, ``num_experts`` 4 against 8. ``large`` does not
+approximate ``48b``.
+
 The one ratio every entry below refers to: embedding + lm_head are ``2*V*D``
 parameters and one transformer layer is ``45*D^2``, so one layer against the
 two tables is ``2*151936/(45*D) = 6753/D``. The whole layer stack against
 them is ``n_layers*dim/6753``, which is why the layer count is part of a
 shape and not a free choice.
 
-``1b``
-    Piper 1B: dim 1024, 16 layers, 1,066,241,024 parameters. Every number
+``1b`` (real)
+    Piper 1B, verbatim: dim 1024, 16 layers, 1,066,241,024 parameters. Every number
     this repo published before schema 9 is this shape, under its old name
     ``normal``.
 
-``large``
+``large`` (synthetic)
     Four transformer layers at dim 4096, 4,264,661,504 parameters. It is the
     middle rung between ``1b`` and ``huge`` in dim and in parameter
     count. The layer count is what makes it a rung of the same model rather
@@ -44,7 +70,7 @@ shape and not a free choice.
     also keep ``supports_block_regions`` True, so ``large`` is the only shape
     above ``1b`` that validation rule 7 still guards.
 
-``huge``
+``huge`` (synthetic)
     One transformer layer at a much larger width, sized to fill an H200 (see
     ``reports/``'s memory-ceiling ladder). It exists to make the cuda-graph
     comparison be about a transformer block rather than about the embedding
@@ -53,7 +79,7 @@ shape and not a free choice.
     FLOPs. It is the one shape whose ``n_layers*dim`` is not 16384, because
     the memory ceiling chose its dim rather than the parameter split.
 
-``giant``
+``giant`` (synthetic)
     One transformer layer at dim 16384, 17,058,349,184 parameters. The ratio
     above is 0.41 here, so the ``huge`` argument holds with room to spare,
     and ``n_layers*dim`` is 16384 again, so ``giant`` carries the ``1b``
@@ -63,12 +89,12 @@ shape and not a free choice.
     either system, and the first run can run out of memory. The ``GIANT``
     constant records the memory arithmetic and what it does not cover.
 
-``9b``
-    Piper 9B: dim 2048, 24 layers, 9,330,201,600 parameters. The first
+``9b`` (real)
+    Piper 9B, verbatim: dim 2048, 24 layers, 9,330,201,600 parameters. The first
     registered shape with 4:1 grouped-query attention and 8 experts.
 
-``48b``
-    Piper 48B: dim 4096, 32 layers, 47,685,316,608 parameters. The first
+``48b`` (real)
+    Piper 48B, verbatim: dim 4096, 32 layers, 47,685,316,608 parameters. The first
     registered shape with ``head_dim`` 128. Nothing has run at either, and
     neither one's memory ceiling is known.
 
@@ -78,6 +104,12 @@ never an edit somewhere else. That includes the two knobs that used to be
 hardcoded per size elsewhere: ``supports_block_regions`` (derived from
 ``n_layers``) and ``parity_gate`` (a field, read by
 ``tools/megatron_parity_check.py``).
+
+Registering one also means writing its numbers into
+``tests/test_model_shape.py``'s ``PINNED_SHAPES``, which a test requires.
+That is the second statement of the geometry, and it is deliberate: it is
+transcribed from the model config the shape claims to be, so a derivation
+that is wrong for that model cannot pass both.
 
 A shape reaches TorchTitan as ``--config-arg size=<name>``, which
 ``benchmarks/e2e/launch.py`` appends to the training command and the fork's
