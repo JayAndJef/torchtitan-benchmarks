@@ -40,6 +40,8 @@ from benchmarks.models.piper_qwen3.shape import (
     MODEL_SIZE_ALIASES,
     MODEL_SIZE_CHOICES,
     PIPER_1B,
+    PIPER_9B,
+    PIPER_48B,
     PIPER_SHAPES,
     PiperShape,
     shape_by_name,
@@ -209,7 +211,8 @@ class ShapeArithmeticTests(unittest.TestCase):
         a later insertion from breaking it.
         """
         self.assertEqual(
-            tuple(PIPER_SHAPES), ("1b", "large", "huge", "giant")
+            tuple(PIPER_SHAPES),
+            ("1b", "large", "9b", "huge", "giant", "48b"),
         )
         counts = [shape.param_count for shape in PIPER_SHAPES.values()]
         self.assertEqual(counts, sorted(counts))
@@ -335,14 +338,20 @@ class ShapeArithmeticTests(unittest.TestCase):
         keeps over its own measurement, and below 4x it, so neither gate is
         so wide that it would pass a real layout error.
         """
-        for shape in (LARGE, GIANT):
+        for shape in (LARGE, GIANT, PIPER_9B, PIPER_48B):
             with self.subTest(size=shape.name):
                 predicted = 5.5e-3 * (shape.dim / PIPER_1B.dim) ** 0.5
                 self.assertGreater(shape.parity_gate, 2.4 * predicted)
                 self.assertLess(shape.parity_gate, 4.0 * predicted)
-        # A wider shape never gets a tighter gate.
-        gates = [shape.parity_gate for shape in PIPER_SHAPES.values()]
+        # A wider shape never gets a tighter gate. Ordered by dim, not by the
+        # declaration: the law reads dim alone, and the registry is ordered by
+        # parameter count, which puts 24-layer 9b above 4-layer large.
+        by_dim = sorted(PIPER_SHAPES.values(), key=lambda shape: shape.dim)
+        gates = [shape.parity_gate for shape in by_dim]
         self.assertEqual(gates, sorted(gates))
+        # large and 48b share a dim, so the law must give them one gate.
+        self.assertEqual(LARGE.dim, PIPER_48B.dim)
+        self.assertEqual(LARGE.parity_gate, PIPER_48B.parity_gate)
 
 
 # Every registered shape, transcribed. ``describe`` is what the manifest
@@ -391,6 +400,27 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "nparams_active": 2_855_375_360,
         "num_flops_per_token": 13_599_599_616,
     },
+    # Piper 9B, transcribed from examples/models/qwen3.py case '9B'.
+    "9b": {
+        "dim": 2048,
+        "n_layers": 24,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "head_dim": 64,
+        "moe_hidden_dim": 7168,
+        "num_experts": 8,
+        "top_k": 2,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 2048,
+        "supports_block_regions": True,
+        "parity_gate": 2e-2,
+        "param_count": 9_330_201_600,
+        "nparams_dense": 874_091_520,
+        "nparams_sparse": 8_456_110_080,
+        "nparams_active": 2_988_413_952,
+        "num_flops_per_token": 16_667_473_920,
+    },
     "huge": {
         "dim": 12_288,
         "n_layers": 1,
@@ -430,6 +460,27 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "nparams_sparse": 11_274_354_688,
         "nparams_active": 11_421_204_608,
         "num_flops_per_token": 53_792_637_696,
+    },
+    # Piper 48B, transcribed from examples/models/qwen3.py case '48B'.
+    "48b": {
+        "dim": 4096,
+        "n_layers": 32,
+        "n_heads": 32,
+        "n_kv_heads": 8,
+        "head_dim": 128,
+        "moe_hidden_dim": 14_336,
+        "num_experts": 8,
+        "top_k": 2,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 2048,
+        "supports_block_regions": True,
+        "parity_gate": 3e-2,
+        "param_count": 47_685_316_608,
+        "nparams_dense": 2_587_111_424,
+        "nparams_sparse": 45_098_205_184,
+        "nparams_active": 13_862_449_152,
+        "num_flops_per_token": 81_051_328_512,
     },
 }
 

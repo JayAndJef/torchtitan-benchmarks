@@ -10,9 +10,10 @@ Deliberately imports nothing but ``dataclasses``. Modules across
 ``benchmarks/`` and ``tools/`` import this module, several of them in
 processes that must not pull in torch or torchtitan.
 
-Four shapes are registered. The order, smallest to largest by parameter
-count, is ``1b`` < ``large`` < ``huge`` < ``giant``. The names do not
-carry that order on their own, so read it here: ``giant`` is above ``huge``.
+Six shapes are registered. The order, smallest to largest by parameter
+count, is ``1b`` < ``large`` < ``9b`` < ``huge`` < ``giant`` < ``48b``. The
+names do not carry that order on their own, so read it here: ``giant`` is
+above ``huge``, and the real ladder interleaves with the synthetic one.
 ``PIPER_SHAPES`` lists the shapes in that same order, and
 ``tests/test_model_shape.py`` asserts both the order and the ascending
 parameter counts.
@@ -61,6 +62,15 @@ shape and not a free choice.
     This shape is declared from estimates. No scenario has run at it, in
     either system, and the first run can run out of memory. The ``GIANT``
     constant records the memory arithmetic and what it does not cover.
+
+``9b``
+    Piper 9B: dim 2048, 24 layers, 9,330,201,600 parameters. The first
+    registered shape with 4:1 grouped-query attention and 8 experts.
+
+``48b``
+    Piper 48B: dim 4096, 32 layers, 47,685,316,608 parameters. The first
+    registered shape with ``head_dim`` 128. Nothing has run at either, and
+    neither one's memory ceiling is known.
 
 Everything that varies per shape is a field or a derived property of
 ``PiperShape``, so registering a new shape is one ``PIPER_SHAPES`` entry and
@@ -437,10 +447,71 @@ GIANT = PiperShape(
     parity_gate=6e-2,
 )
 
+# Piper 9B, verbatim. Every field matches
+# /data/zejiaqi/piper/examples/models/qwen3.py case '9B'.
+#
+# It is the first registered shape whose head geometry is not the 1B family's.
+# 32 query heads over 8 kv heads is 4:1 grouped-query attention, where 1B and
+# every synthetic shape run 2:1, so the fused qkv is 1.5x dim wide here rather
+# than 2x. It is also the first with 8 experts.
+#
+# VALIDATION RULE 7 IS UNTESTED AT 24 LAYERS. The rule identifies a compiled
+# block graph by its invocations per window, n_layers * profiler_active, which
+# is 120 here against the 80 every published regioned run has. Nobody has
+# matched 120 against a real trace. supports_block_regions is True, so a
+# regioned scenario will declare the regions and rule 7 will judge them.
+PIPER_9B = PiperShape(
+    name="9b",
+    dim=2048,
+    n_layers=24,
+    head_dim=64,
+    n_kv_heads=8,
+    num_experts=8,
+    # UNVERIFIED, on the same sqrt(dim) law LARGE and GIANT use: dim 2048
+    # predicts about 7.8e-3, and 2e-2 keeps huge's 2.46x margin over it. The
+    # depth caveat on LARGE applies here and more so -- this is 24 layers,
+    # further from both anchors than any other estimate in this file. Run
+    # tools/megatron_parity_check.py --model-size 9b before any parity claim,
+    # and --fp32-reference before you change this value.
+    parity_gate=2e-2,
+)
+
+# Piper 48B, verbatim. Every field matches
+# /data/zejiaqi/piper/examples/models/qwen3.py case '48B'.
+#
+# The first registered shape whose head_dim is not 64. n_heads stays 32 and
+# n_kv_heads stays 8, exactly as at 9B: piper widens the head and adds layers
+# and experts, and holds the head counts.
+#
+# It shares dim 4096 and moe_hidden_dim 14336 with the synthetic LARGE, and
+# differs in everything else -- head_dim 128 against 64, n_heads 32 against
+# 64, n_kv_heads 8 against 32, n_layers 32 against 4, num_experts 8 against 4.
+# LARGE is 48B's width with the wrong head geometry and half the experts. Do
+# not read one as an approximation of the other.
+#
+# VALIDATION RULE 7 IS UNTESTED AT 32 LAYERS, for the reason given on 9B: the
+# window invocation count is 160 here.
+PIPER_48B = PiperShape(
+    name="48b",
+    dim=4096,
+    n_layers=32,
+    head_dim=128,
+    n_kv_heads=8,
+    num_experts=8,
+    # UNVERIFIED, on the same law: dim 4096 predicts about 1.1e-2, and 3e-2
+    # keeps huge's 2.46x margin. It is the same gate LARGE carries, which is
+    # the arithmetic agreeing with itself -- the law reads dim alone and the
+    # two shapes share a dim. Run tools/megatron_parity_check.py --model-size
+    # 48b before any parity claim, and --fp32-reference before you change
+    # this value.
+    parity_gate=3e-2,
+)
+
 # Declared smallest to largest by parameter count. The names do not carry the
 # order, so the declaration does.
 PIPER_SHAPES: dict[str, PiperShape] = {
-    shape.name: shape for shape in (PIPER_1B, LARGE, HUGE, GIANT)
+    shape.name: shape
+    for shape in (PIPER_1B, LARGE, PIPER_9B, HUGE, GIANT, PIPER_48B)
 }
 
 # Retired ``--model-size`` names, each mapped to the key that replaced it.
