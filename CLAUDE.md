@@ -129,10 +129,14 @@ appears**, and here they appear as history, not as instructions; the
 retired-path audit allowlists it for that reason.
 
 Every manifest, `results.json` and report written **before** the flag day
-records the old module names, and they are still on disk: 197 `manifest.json`
-files under `out/`, of which 142 record `"module": "piper1b"`, 55 record
+records the old module names, and they are still on disk: 142 `manifest.json`
+files under `out/` record `"module": "piper1b"`, 55 record
 `benchmarks.kernel_arms:<builder>` kernel-arm paths, and 21 record
-`python -m megatron_baseline.train` in `commands`.
+`python -m megatron_baseline.train` in `commands`. Those three counts are
+fixed, because no new run writes a retired name. The **total** number of
+manifests under `out/` is not fixed, grows with every run, and is
+deliberately not stated here.
+
 
 **Those strings are inert history.** No module of any of those names exists any
 more, and nothing imports one: manifest `commands` is a write-only provenance
