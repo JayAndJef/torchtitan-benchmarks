@@ -1416,10 +1416,16 @@ without the ratio becoming better known. Above 1, therefore:
   and `methodology.replicates_per_process` records the value.
 - The printed table states the isolation on every run, marks the interval
   with `~`, and prints a warning that names the renamed fields.
+- A **span**'s parts row is published under `unpaired_ratio_ci_*` either way
+  and does not also take the `within_process_` rename;
+  `methodology.replicates_per_process` records the value in both files.
 
-**Its acceptance gate is outstanding.** The flag lives on one condition: more
-than a 2x end-to-end speedup on an idle box. If the verified speedup is under
-2x, remove the flag.
+**Its acceptance gate is still outstanding.** The flag lives on one
+condition: more than a 2x end-to-end speedup on an idle box. Nobody has run
+that measurement. If the verified speedup is under 2x, remove the flag. The
+measurement it rests on was taken on the retired `qkv` scenario, on a
+contended box, and may not be cited.
+
 
 **Two architectural claims are contested, and the contest is unsettled.** One
 agent measured that a fresh process does not reduce the spread of a
@@ -1448,10 +1454,13 @@ destroying it.
 - **A fork pool of pre-warmed interpreters.** Its author could not
   demonstrate timing neutrality: `rope/te/backward` read 12% high pooled in
   one experiment and 2% low in another, and two dispatch-bound measurements
-  that disagree about the sign are not a result. It was never run on
-  `attention` (the scenario whose isolation matters most, holding both FA3
-  and FA4) or on `lm_head`. It targets the same wall clock
+  that disagree about the sign are not a result. It was never run on the
+  scenario whose isolation matters most, or on `lm_head`. That scenario is
+  now `attention_core`, which holds FA3, FA4 **and** a TransformerEngine arm
+  in one correctness pass -- so the isolation argument is stronger than it
+  was, not weaker. The pool targets the same wall clock
   `--replicates-per-process` removes, and it costs a second launch path.
+
 - **A fork server**, for the same reasons and a fortiori: it never landed,
   and its own author called it not ready.
 - **`compile_threads=1`.** It removes the 32-worker pool and most of the
@@ -1478,28 +1487,31 @@ destroying it.
   drives individual dot-product outputs toward zero, and dividing their
   negligible error by that tiny magnitude reports thousands of ULPs for a
   numerically perfect kernel -- including the stock one.
-- **`bitwise`** where implementations must agree exactly. Seven scenarios
-  declare it (`qkv`, `embedding_stage`, `qkv_prep`, `attn_residual`,
-  `moe_router`, `dispatch_permute`, `moe_residual`), and whether a given
-  check *gates* depends on what it compares. It stays informational
+- **`bitwise`** where implementations must agree exactly. Six scenarios
+  declare it (`embedding_stage`, `qkv_prep`, `attn_residual`, `moe_router`,
+  `dispatch_permute`, `moe_residual`), and whether a given check *gates*
+  depends on what it compares. It stays informational
   wherever a compiled region may legitimately round differently from an
-  eager one -- the fused-vs-unfused QKV outputs are the original case -- and
-  the rel_l2 gates enforce closeness there. It **enforces** on a permutation
-  or a routing decision, in `dispatch_permute` and on `moe_router`'s
-  `selected_count`. A permutation is a gather, so a wrong one moves right
-  values to wrong places, and both engines build the permuted rows by a pure
-  copy: exact equality is achievable, and it is the metric that sees a
-  misplacement whatever the shape.
+  eager one -- the fused-vs-unfused QKV outputs are the original case, and
+  `qkv_prep/titan/unfused_qkv` still carries that informational check against
+  `qkv_prep/titan` -- and the rel_l2 gates enforce closeness there. It
+  **enforces** on a permutation or a routing decision, in `dispatch_permute`
+  and on `moe_router`'s `selected_count`. A permutation is a gather, so a
+  wrong one moves right values to wrong places, and both engines build the
+  permuted rows by a pure copy: exact equality is achievable, and it is the
+  metric that sees a misplacement whatever the shape.
 
-  **Do not justify that with the `sqrt(2/N)` figure two other files carry.**
-  Swapping one pair of `N` rows gives `max_rel_l2 ~ 2/sqrt(N)`, not
-  `sqrt(2/N)`. At the default `dispatch_permute` workload (`N = 8192`) that
-  is 2.21e-2 measured, **above** the 2e-2 gate, not below it. So a tolerance
-  gate would catch a single swap here by a 10% margin, and would stop
-  catching it as `N` grows. `benchmarks/kernel/registry.py` and
-  `benchmarks/kernel/operations/dispatch_permute.py` state the wrong form and
-  the wrong conclusion; neither is editable from here. The bitwise gate is
-  right for the reason above, not for that one.
+  **The arithmetic behind that is now stated correctly in the source, and
+  this file's warning about it is withdrawn.** Swapping one pair of `N` rows
+  gives `max_rel_l2 ~ 2/sqrt(N)`, which is 2.2e-2 at the default
+  `dispatch_permute` workload (`N = 8192`) -- **above** the 2e-2 gate rather
+  than below it, and **falling** as the workload grows, to 1.6e-2 at batch 8.
+  So a tolerance gate would catch a misplaced row at one batch size and miss
+  it at the next, while the flags that set batch and sequence length are the
+  operator's to change. `benchmarks/kernel/registry.py` and
+  `benchmarks/kernel/operations/dispatch_permute.py` both carry that form and
+  that conclusion today; the earlier `sqrt(2/N)` spelling is gone from both.
+
 
 ### Silent-fallback guard
 
@@ -1509,13 +1521,25 @@ catch a mis-timed arm. Their builders profile one call and refuse to continue
 unless the arm's marker kernel (`_helion__rope_cos_sin_fwd`,
 `fused_rope_forward_positions_kernel`) actually appears.
 
-`flex_flash` is the one arm with the *opposite* failure mode, and it still
-carries a guard. `BACKEND="FLASH"` hard-raises when `flash_attn.cute` is
-missing rather than degrading to a Triton template, so an arm that runs at all
-ran FA4 -- there is no silent fallback anywhere in that lowering. The
-`FlashAttentionForwardSm90` guard therefore protects against the *reverse*
-mistake: a future refactor quietly dropping `kernel_options` and leaving the
-arm measuring the baseline under an FA4 label.
+`attention_core/titan/flex_flash` is the one arm with the *opposite* failure
+mode, and it still carries a guard. `BACKEND="FLASH"` hard-raises when
+`flash_attn.cute` is missing rather than degrading to a Triton template, so an
+arm that runs at all ran FA4 -- there is no silent fallback anywhere in that
+lowering. The `FlashAttentionForwardSm90` marker guard therefore protects
+against the *reverse* mistake: a future refactor quietly dropping
+`kernel_options` and leaving the arm measuring the baseline under an FA4
+label. The sibling `titan/flash_attention_3` pins `FlashAttnFwdSm90` for the
+usual reason: FA3 degrades to FA2 rather than failing.
+
+**The megatron arms of `attention_core` are guarded by a different mechanism,
+and it must not be described as a marker guard.** Every attention backend
+computes the same function, so no correctness gate separates them, and
+megatron's own `flash_attention_version` field writes environment variables
+TransformerEngine 2.17.1 reads nowhere. `_assert_te_selected_backend`
+therefore reads TE's own recorded decision about the arm's own call. That is
+stronger than a trace marker, and there is deliberately **no cuDNN
+kernel-name marker** anywhere.
+
 
 ### Output layout
 
