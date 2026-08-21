@@ -417,9 +417,14 @@ EMBEDDING_STAGE = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so every module "
-                "GPTModel builds runs eager end to end; compiling this one "
-                "would measure a treatment megatron never applies"
+                "eager by choice, not by necessity: LanguageModelEmbedding "
+                "and its VocabParallelEmbedding are megatron's own modules "
+                "(models/common/embeddings/language_model_embedding.py:59) "
+                "and touch no TransformerEngine class, so no no_torch_dynamo "
+                "decorator stands in the way. The compile is declined for "
+                "fidelity: megatron compiles no whole transformer layer, so "
+                "compiling this one would measure a treatment megatron never "
+                "applies"
             ),
             correctness=(EMBEDDING_STAGE_GATE,),
         ),
@@ -618,9 +623,19 @@ QKV_PREP = KernelScenario(
             # forward_backward minus forward.
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so every TE "
-                "module it builds runs eager end to end; compiling this one "
-                "would measure a treatment megatron never applies"
+                "this arm cannot be compiled at all. TE decorates "
+                "LayerNormLinear.forward with no_torch_dynamo "
+                "(transformer_engine/pytorch/module/"
+                "layernorm_linear.py:1625), "
+                "which is torch._dynamo.disable(recursive=True) "
+                "(pytorch/jit.py:52-61), and TELayerNormColumnParallelLinear "
+                "inherits that forward "
+                "(megatron/core/extensions/transformer_engine.py:1345). Under "
+                "fullgraph=True a graph break is an error, so the compile the "
+                "titan arms take raises here instead of running. Eager is the "
+                "faithful treatment as well as the only one: megatron "
+                "compiles no whole transformer layer, so a compiled row would "
+                "measure a treatment megatron never applies"
             ),
             correctness=(QKV_PREP_GATE,),
         ),
@@ -820,9 +835,17 @@ QK_NORM = KernelScenario(
             # backward cost is forward_backward minus forward.
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so every TE "
-                "module it builds runs eager end to end; compiling this one "
-                "would measure a treatment megatron never applies"
+                "eager by choice, not by necessity: TENorm is a factory, not "
+                "a subclass, and it returns te.pytorch.RMSNorm "
+                "(megatron/core/extensions/transformer_engine.py:1018,1062). "
+                "That is TE's ops API -- class RMSNorm(_RMSNormOp) at "
+                "transformer_engine/pytorch/module/rmsnorm.py:16 -- and "
+                "nothing under transformer_engine/pytorch/ops/ carries "
+                "no_torch_dynamo. So the block that rules out the TE linear "
+                "and attention arms does not reach this one, and this arm "
+                "could run compiled. The compile is declined for fidelity: "
+                "megatron compiles no whole transformer layer, so a compiled "
+                "row would measure a treatment megatron never applies"
             ),
             correctness=(
                 CorrectnessCheck(
@@ -955,9 +978,18 @@ ATTN_OUT_PROJ = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so every TE "
-                "module it builds runs eager end to end; compiling this one "
-                "would measure a treatment megatron never applies"
+                "this arm cannot be compiled at all. TE decorates "
+                "Linear.forward with no_torch_dynamo "
+                "(transformer_engine/pytorch/module/linear.py:1773), which is "
+                "torch._dynamo.disable(recursive=True) "
+                "(pytorch/jit.py:52-61), and TERowParallelLinear inherits "
+                "that forward through TELinear "
+                "(megatron/core/extensions/transformer_engine.py:1867,1077). "
+                "Under fullgraph=True a graph break is an error, so the "
+                "compile the titan arm takes raises here instead of running. "
+                "Eager is the faithful treatment as well as the only one: "
+                "megatron compiles no whole transformer layer, so a compiled "
+                "row would measure a treatment megatron never applies"
             ),
             correctness=(ATTN_OUT_PROJ_GATE,),
         ),
@@ -1371,9 +1403,17 @@ FFN_NORM = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so every TE "
-                "module it builds runs eager end to end; compiling this one "
-                "would measure a treatment megatron never applies"
+                "eager by choice, not by necessity: TENorm is a factory, not "
+                "a subclass, and it returns te.pytorch.RMSNorm "
+                "(megatron/core/extensions/transformer_engine.py:1018,1062). "
+                "That is TE's ops API -- class RMSNorm(_RMSNormOp) at "
+                "transformer_engine/pytorch/module/rmsnorm.py:16 -- and "
+                "nothing under transformer_engine/pytorch/ops/ carries "
+                "no_torch_dynamo, so compiling this norm is possible in a way "
+                "that compiling the TE linear and attention arms is not. The "
+                "compile is declined for fidelity: megatron compiles no whole "
+                "transformer layer, so a compiled row would measure a "
+                "treatment megatron never applies"
             ),
             correctness=(
                 FFN_NORM_ACTIVATION_GATE,
@@ -2334,9 +2374,21 @@ EXPERT_MLP = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so every TE "
-                "module it builds runs eager end to end; compiling this one "
-                "would measure a treatment megatron never applies"
+                "this arm cannot be compiled at all. TE decorates "
+                "GroupedLinear.forward with no_torch_dynamo "
+                "(transformer_engine/pytorch/module/grouped_linear.py:1662), "
+                "which is torch._dynamo.disable(recursive=True) "
+                "(pytorch/jit.py:52-61), and TEGroupedMLP holds a "
+                "TEColumnParallelGroupedLinear and a "
+                "TERowParallelGroupedLinear, which both inherit that forward "
+                "through TEGroupedLinear "
+                "(megatron/core/extensions/"
+                "transformer_engine.py:2838,2890,2331). "
+                "Under fullgraph=True a graph break is an error, so the "
+                "compile the titan arms take raises here instead of running. "
+                "Eager is the faithful treatment as well as the only one: "
+                "megatron compiles no whole transformer layer, so a compiled "
+                "row would measure a treatment megatron never applies"
             ),
             correctness=(EXPERT_MLP_MCORE_GATE,),
         ),
@@ -2357,9 +2409,15 @@ EXPERT_MLP = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer; and this arm "
-                "IS the removal of a fusion, so compiling it would let "
-                "Inductor put back what the flag took away"
+                "this arm cannot be compiled at all: it holds the same "
+                "TEGroupedLinear forwards as mcore/base, and TE marks "
+                "GroupedLinear.forward torch._dynamo.disable "
+                "(transformer_engine/pytorch/module/grouped_linear.py:1662, "
+                "through pytorch/jit.py:52-61), which fullgraph=True refuses. "
+                "Two further reasons stand where the block does not: megatron "
+                "compiles no whole transformer layer, and this arm IS the "
+                "removal of a fusion, so compiling it would let Inductor put "
+                "back what the flag took away"
             ),
             correctness=(
                 EXPERT_MLP_MCORE_GATE,
@@ -2392,9 +2450,15 @@ EXPERT_MLP = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, and this arm "
-                "is TransformerEngine's own operation run the way megatron "
-                "runs it"
+                "this arm cannot be compiled at all: it holds the same "
+                "TEGroupedLinear forwards as mcore/base, and TE marks "
+                "GroupedLinear.forward torch._dynamo.disable "
+                "(transformer_engine/pytorch/module/grouped_linear.py:1662, "
+                "through pytorch/jit.py:52-61), which fullgraph=True refuses. "
+                "Eager is the faithful treatment as well: megatron compiles "
+                "no whole transformer layer, and this arm is "
+                "TransformerEngine's own operation run the way megatron runs "
+                "it"
             ),
             correctness=(
                 EXPERT_MLP_MCORE_GATE,
@@ -2425,9 +2489,19 @@ EXPERT_MLP = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer; compiling the "
-                "per-expert loop would also let Inductor recover the grouping "
-                "this arm exists to remove"
+                "this arm cannot be compiled at all, and it meets a different "
+                "block than the other three mcore arms. SequentialMLP builds "
+                "per-expert TEColumnParallelLinear and TERowParallelLinear "
+                "modules "
+                "(megatron/core/extensions/"
+                "transformer_engine_spec_provider.py:101-108), "
+                "and TE marks Linear.forward torch._dynamo.disable "
+                "(transformer_engine/pytorch/module/linear.py:1773, through "
+                "pytorch/jit.py:52-61), which fullgraph=True refuses. Two "
+                "further reasons stand where the block does not: megatron "
+                "compiles no whole transformer layer, and compiling the "
+                "per-expert loop would let Inductor recover the grouping this "
+                "arm exists to remove"
             ),
             correctness=(
                 EXPERT_MLP_MCORE_GATE,
@@ -3108,9 +3182,17 @@ FINAL_NORM = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so every TE "
-                "module it builds runs eager end to end; compiling this one "
-                "would measure a treatment megatron never applies"
+                "eager by choice, not by necessity: TENorm is a factory, not "
+                "a subclass, and it returns te.pytorch.RMSNorm "
+                "(megatron/core/extensions/transformer_engine.py:1018,1062). "
+                "That is TE's ops API -- class RMSNorm(_RMSNormOp) at "
+                "transformer_engine/pytorch/module/rmsnorm.py:16 -- and "
+                "nothing under transformer_engine/pytorch/ops/ carries "
+                "no_torch_dynamo, so this arm could run compiled where the TE "
+                "linear and attention arms cannot. The compile is declined "
+                "for fidelity, and here the two engines agree: megatron "
+                "compiles no whole transformer layer, and titan's own final "
+                "norm sits outside every compiled region"
             ),
             correctness=(
                 CorrectnessCheck(
@@ -3269,9 +3351,15 @@ LM_HEAD_PROJECTION = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer and no output "
-                "layer, so this module runs eager end to end; compiling it "
-                "would measure a treatment megatron never applies"
+                "eager by choice, not by necessity, and this is the "
+                "projection arm that is NOT blocked: gpt_model.py:264-268 "
+                "builds the output layer as megatron's own "
+                "tensor_parallel.ColumnParallelLinear rather than a TE "
+                "linear, so the no_torch_dynamo block that rules out "
+                "qkv_prep/mcore/base and attn_out_proj/mcore/base does not "
+                "reach it. The compile is declined for fidelity: megatron "
+                "compiles no whole transformer layer and no output layer, so "
+                "this module runs eager end to end"
             ),
             correctness=(LM_HEAD_PROJECTION_GATE,),
         ),
@@ -3767,10 +3855,22 @@ ATTENTION_CORE = KernelScenario(
             # same. Backward cost is forward_backward minus forward.
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, and "
-                "TEDotProductAttention carries no jit_fuser, so this module "
-                "runs eager end to end; compiling it would measure a "
-                "treatment megatron never applies"
+                "this arm cannot be compiled at all. TE decorates "
+                "DotProductAttention.forward with "
+                "no_torch_dynamo(recursive=False) "
+                "(transformer_engine/pytorch/attention/dot_product_attention/"
+                "dot_product_attention.py:1008) "
+                "and FusedAttention.forward with no_torch_dynamo() "
+                "(attention/dot_product_attention/backends.py:1958), and "
+                "TEDotProductAttention inherits the outer one "
+                "(megatron/core/extensions/transformer_engine.py:1995). Both "
+                "spell torch._dynamo.disable (pytorch/jit.py:52-61), and "
+                "under fullgraph=True the resulting graph break is an error: "
+                "'Skip inlining torch.compiler.disable()d function'. This is "
+                "the same wall that keeps a TE attention arm out of every e2e "
+                "titan scenario. Eager is the faithful treatment as well as "
+                "the only one: megatron compiles no whole transformer layer, "
+                "and TEDotProductAttention carries no jit_fuser"
             ),
             correctness=(ATTENTION_CORE_GATE,),
         ),
@@ -3792,8 +3892,18 @@ ATTENTION_CORE = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
-                "megatron compiles no whole transformer layer, so its "
-                "attention runs eager whichever backend it selects"
+                "this arm cannot be compiled at all, for the same reason as "
+                "mcore/base and at the same line: TEDotProductAttention "
+                "inherits DotProductAttention.forward, which TE marks "
+                "torch._dynamo.disable "
+                "(transformer_engine/pytorch/attention/dot_product_attention/"
+                "dot_product_attention.py:1008, "
+                "through pytorch/jit.py:52-61), and fullgraph=True refuses "
+                "the graph break. The backend choice does not move that line: "
+                "NVTE_FLASH_ATTN selects FlashAttention inside the disabled "
+                "forward. Eager is the faithful treatment as well: megatron "
+                "compiles no whole transformer layer, so its attention runs "
+                "eager whichever backend it selects"
             ),
             correctness=(ATTENTION_CORE_GATE, ATTENTION_CORE_CROSS_ARM),
         ),
@@ -3825,6 +3935,17 @@ ATTENTION_CORE = KernelScenario(
             ),
             modes=("forward", "forward_backward"),
             eager_reason=(
+                "this arm cannot be compiled at all, for the same reason as "
+                "mcore/base and at the same line: TEDotProductAttention "
+                "inherits DotProductAttention.forward, which TE marks "
+                "torch._dynamo.disable "
+                "(transformer_engine/pytorch/attention/dot_product_attention/"
+                "dot_product_attention.py:1008, "
+                "through pytorch/jit.py:52-61), and fullgraph=True refuses "
+                "the graph break. NVTE_UNFUSED_ATTN selects "
+                "UnfusedDotProductAttention inside that disabled forward, so "
+                "this arm is blocked although its own backend class carries "
+                "no decorator. Eager is the faithful treatment as well: "
                 "megatron compiles no whole transformer layer, so its "
                 "attention runs eager whichever backend it selects"
             ),
