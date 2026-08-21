@@ -60,6 +60,19 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
     help="Kernel scenario subset; repeat per scenario. Default: all.",
 )
 @click.option(
+    "--arm",
+    "arm_names",
+    multiple=True,
+    help=(
+        "Arm subset within the one selected scenario; repeat per arm. "
+        "Default: every arm. The selection must name the anchor arm, "
+        "because every comparison is a ratio against it, and every "
+        "correctness reference the selected arms use. A selection that "
+        "omits either is refused, not repaired: adding an arm the operator "
+        "did not ask for changes what the run measures."
+    ),
+)
+@click.option(
     "--replicates",
     default=5,
     show_default=True,
@@ -170,6 +183,7 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 def kernel_bench_command(
     gpu: str,
     scenario_names: tuple[str, ...],
+    arm_names: tuple[str, ...],
     out_dir: Path | None,
     **options: Any,
 ) -> None:
@@ -180,8 +194,21 @@ def kernel_bench_command(
             "--out requires exactly one --scenario; otherwise scenarios would "
             "overwrite each other"
         )
+    # An arm name belongs to one roster. Two scenarios share neither their
+    # arms nor their anchor, so a selection applied to both would mean a
+    # different thing in each, and a name valid in one would be a typo in the
+    # other. The roster itself is checked in resolve_arm_skips.
+    if arm_names and len(selected) != 1:
+        raise click.UsageError(
+            "--arm requires exactly one --scenario; arm names are per "
+            "scenario and no roster is shared"
+        )
     request = KernelRunRequest(
-        gpu=gpu, scenario_names=selected, out_dir=out_dir, **options
+        gpu=gpu,
+        scenario_names=selected,
+        arm_names=arm_names,
+        out_dir=out_dir,
+        **options,
     )
     try:
         outcomes = execute_kernel_run(request, event_handler=_show_event)

@@ -922,7 +922,12 @@ TEST_CENSUS = {
     # +2 with --replicates-per-process: that a batched worker owns
     # consecutive replicates of one arm and never a second arm, and that a
     # batched worker which dies costs every replicate of its block.
-    "test_kernel_cli": 27,
+    # +4 with --arm: that the selection reaches the request and defaults to
+    # every arm, that it refuses more than one scenario, that an unselected
+    # arm is spawned in neither pass and says which flag dropped it, and
+    # that a selection missing the anchor, a reference or a real arm name is
+    # refused rather than repaired.
+    "test_kernel_cli": 31,
     "test_kernel_gpu_smoke": 4,
     # Added when the merge got a direct caller: every other merge assertion
     # reaches it through execute_kernel_run, which spawns replicate-major and
@@ -1148,7 +1153,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 971
+TEST_CENSUS_TOTAL = 975
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -182,6 +182,15 @@ the compiler fuses the graph around it.
 ./run_bench.sh kernel-bench <gpu> --burst              # add the dispatch-cost diagnostic
 ```
 
+`--arm NAME` measures a subset of one scenario's arms; repeat it per arm, and
+pair it with a single `--scenario`. The selection must name the scenario's
+anchor arm, because every comparison is a ratio against it, and every
+correctness reference the selected arms use. `kernel-bench` refuses a
+selection that omits one of those rather than adding the arm for you. Every
+arm the selection leaves out reaches `results.json` and the manifest as
+`skipped`, with a reason that names the flag, so a reader can tell the
+operator's choice from a host that could not run the arm.
+
 The registry declares 19 scenarios and 73 arms. 15 are cross-engine: they cut
 the model at one component and put megatron-core beside TorchTitan there.
 `./run_bench.sh scenarios` prints every one with its description, and

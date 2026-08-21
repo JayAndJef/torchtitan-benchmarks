@@ -293,6 +293,45 @@ class KernelCliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--out requires exactly one --scenario", result.output)
 
+    def test_arm_selection_reaches_the_request(self) -> None:
+        with mock.patch(
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=()
+        ) as execute:
+            result = self.runner.invoke(
+                cli,
+                [
+                    "kernel-bench",
+                    "7",
+                    "--scenario",
+                    "attention_core",
+                    "--arm",
+                    "mcore/base",
+                    "--arm",
+                    "titan",
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            execute.call_args.args[0].arm_names, ("mcore/base", "titan")
+        )
+
+        # Omitted means every arm, exactly as before the flag existed.
+        with mock.patch(
+            "benchmarks.cli.kernel.execute_kernel_run", return_value=()
+        ) as execute:
+            result = self.runner.invoke(cli, ["kernel-bench", "7"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_args.args[0].arm_names, ())
+
+    def test_arm_requires_a_single_scenario(self) -> None:
+        """An arm name belongs to one roster, so a selection across scenarios
+        would mean a different thing in each of them."""
+        result = self.runner.invoke(
+            cli, ["kernel-bench", "7", "--arm", "mcore/base"]
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--arm requires exactly one --scenario", result.output)
+
     def test_failed_scenario_exits_nonzero_after_rendering(self) -> None:
         outcome = SimpleNamespace(
             scenario="rope",
@@ -480,6 +519,118 @@ class KernelRunnerTests(unittest.TestCase):
             "compiler environment", manifest["skipped_arms"]["titan/te"]
         )
         self.assertIn("titan/te", [arm["name"] for arm in manifest["arms"]])
+
+    def test_an_unselected_arm_is_spawned_in_neither_pass(self) -> None:
+        """``--arm`` rides the same skip machinery a missing requirement
+        does, so one selection reaches both passes: the correctness worker is
+        told which arms it must not gate, and no timing worker is spawned for
+        them in any replicate."""
+        commands = []
+        writer = fragment_writer()
+
+        def fake_process(command, **kwargs):
+            commands.append(command)
+            return writer(command, **kwargs)
+
+        unselected = [
+            "mcore/attn_flash3",
+            "mcore/attn_unfused",
+            "titan/flex_flash",
+            "titan/flash_attention_3",
+        ]
+        metadata_patch, pinning_patch = patched_environment()
+        with tempfile.TemporaryDirectory() as temporary, metadata_patch, pinning_patch:
+            out_dir = Path(temporary) / "kernels"
+            outcomes = execute_kernel_run(
+                KernelRunRequest(
+                    gpu="7",
+                    scenario_names=("attention_core",),
+                    arm_names=("mcore/base", "titan"),
+                    replicates=2,
+                    timestamp="stamp",
+                    out_dir=out_dir,
+                ),
+                process_runner=fake_process,
+                environment={"PATH": "/usr/bin"},
+            )
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+
+        correctness = commands[0]
+        self.assertEqual(
+            correctness[correctness.index("--mode") + 1], "correctness"
+        )
+        self.assertEqual(
+            [
+                correctness[index + 1]
+                for index, token in enumerate(correctness)
+                if token == "--skip-arm"
+            ],
+            unselected,
+        )
+        # Two replicates of the two selected arms, and no other worker.
+        self.assertEqual(
+            [
+                (
+                    command[command.index("--arm") + 1],
+                    command[command.index("--replicate") + 1],
+                )
+                for command in commands[1:]
+            ],
+            [
+                ("mcore/base", "0"),
+                ("titan", "0"),
+                ("mcore/base", "1"),
+                ("titan", "1"),
+            ],
+        )
+
+        # The reason names the flag. An arm nobody asked for and an arm this
+        # host cannot run are different facts, and both land in the same
+        # field.
+        self.assertFalse(outcomes[0].failed)
+        arms = outcomes[0].result.arms
+        for name in unselected:
+            self.assertEqual(arms[name].status, "skipped", name)
+            self.assertIn("--arm did not select it", arms[name].status_reason)
+        for name in ("mcore/base", "titan"):
+            self.assertEqual(arms[name].status, "ok", name)
+        self.assertEqual(list(manifest["skipped_arms"]), unselected)
+
+    def test_a_selection_this_scenario_cannot_honour_is_refused(self) -> None:
+        """Three refusals, each naming what is missing. Repairing any of them
+        would measure a roster the operator did not ask for, and dropping the
+        arm instead would publish a table with no ratios or an ungated
+        number."""
+        cases = (
+            (
+                "attention_core",
+                ("mcore/base", "titn"),
+                ("no such arm: titn", "Available arms: mcore/base"),
+            ),
+            (
+                "attention_core",
+                ("titan",),
+                ("must include the anchor arm 'mcore/base'",),
+            ),
+            (
+                "expert_mlp",
+                ("titan", "titan/piper_optimized_triton"),
+                (
+                    "correctness reference 'titan/fused_grouped_experts'",
+                    "add --arm titan/fused_grouped_experts",
+                ),
+            ),
+        )
+        for scenario_name, selection, expected in cases:
+            with self.subTest(scenario=scenario_name, selection=selection):
+                with self.assertRaises(ValueError) as raised:
+                    resolve_arm_skips(
+                        kernel_scenario_by_name(scenario_name),
+                        compiler_unavailable=None,
+                        selected=selection,
+                    )
+                for phrase in expected:
+                    self.assertIn(phrase, str(raised.exception))
 
     def test_worker_command_carries_pinning_env_and_manifest(self) -> None:
         captured = []

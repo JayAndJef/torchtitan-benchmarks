@@ -141,6 +141,11 @@ class KernelRunRequest:
 
     gpu: str
     scenario_names: tuple[str, ...]
+    # The operator's --arm choice, empty for every arm. It names arms of one
+    # scenario, and it is a request rather than a capability: what it leaves
+    # out is skipped for a reason that says so. resolve_arm_skips refuses a
+    # selection it cannot honour.
+    arm_names: tuple[str, ...] = ()
     replicates: int = 5
     replicates_per_process: int = 1
     samples_per_replicate: int = 40
@@ -278,10 +283,67 @@ def replicate_blocks(
     )
 
 
-def resolve_arm_skips(
-    scenario: KernelScenario, *, compiler_unavailable: str | None
+def _selection_skips(
+    scenario: KernelScenario, selected: Sequence[str]
 ) -> dict[str, str]:
-    """Which arms this host cannot run, and why, keyed by arm name.
+    """The arms ``--arm`` leaves out, keyed by name, with the reason.
+
+    The reason names the flag, so ``results.json`` and the manifest keep the
+    operator's choice apart from the host's capability. "Nobody asked for it"
+    and "this host cannot run it" are different facts about an arm, and a
+    reader who takes one for the other misreads the roster.
+
+    **A selection this scenario cannot honour is refused, never repaired.**
+    Three cases raise, and each names what is missing. An unknown name is a
+    typo, and a typo must not quietly measure a smaller set. A selection
+    without the anchor arm publishes no ratio at all, because every
+    comparison is one against the anchor. A selection that leaves out a
+    selected arm's correctness reference cannot gate that arm, because a
+    check needs both sides in one process. Adding the missing arm silently is
+    the alternative, and it measures something the operator did not ask for.
+    """
+    roster = [arm.name for arm in scenario.arms]
+    unknown = sorted(set(selected) - set(roster))
+    if unknown:
+        raise ValueError(
+            f"{scenario.name}: --arm names no such arm: "
+            f"{', '.join(unknown)}. Available arms: {', '.join(roster)}"
+        )
+    chosen = set(selected)
+    if scenario.baseline_arm not in chosen:
+        raise ValueError(
+            f"{scenario.name}: --arm must include the anchor arm "
+            f"{scenario.baseline_arm!r}; every comparison is a ratio against "
+            f"it, so a selection without it publishes none"
+        )
+    for arm in scenario.arms:
+        if arm.name not in chosen:
+            continue
+        for check in arm.correctness:
+            # "fp64" is the scenario's own reference builder rather than an
+            # arm, so it is present whatever the selection.
+            if check.reference == "fp64" or check.reference in chosen:
+                continue
+            raise ValueError(
+                f"{scenario.name}: --arm selected {arm.name!r} but not its "
+                f"correctness reference {check.reference!r}; a gate needs "
+                f"both sides at once, so add --arm {check.reference}"
+            )
+    measured = ", ".join(name for name in roster if name in chosen)
+    return {
+        name: f"--arm did not select it; this run measures {measured}"
+        for name in roster
+        if name not in chosen
+    }
+
+
+def resolve_arm_skips(
+    scenario: KernelScenario,
+    *,
+    compiler_unavailable: str | None,
+    selected: Sequence[str] = (),
+) -> dict[str, str]:
+    """Which arms this run does not measure, and why, keyed by arm name.
 
     **Requirements belong to the arm, not to the scenario.** Without a C++20
     host compiler, rope loses ``titan/te`` and still measures its other four
@@ -295,12 +357,19 @@ def resolve_arm_skips(
     scenario produces the case today -- ``titan/te`` is a referrer, never a
     reference -- so the closure is a guard against the roster growing into
     it.
+
+    ``selected`` is the operator's ``--arm`` choice, and an empty one means
+    every arm. It is resolved first, so an arm nobody asked for keeps that
+    reason rather than a capability reason it never had to meet.
+    ``_selection_skips`` states what a selection may not do.
     """
-    skipped: dict[str, str] = {}
+    skipped: dict[str, str] = (
+        _selection_skips(scenario, selected) if selected else {}
+    )
     if compiler_unavailable is not None:
         for arm in scenario.arms:
             if arm.requires_gcc_toolset:
-                skipped[arm.name] = compiler_unavailable
+                skipped.setdefault(arm.name, compiler_unavailable)
     while True:
         grew = False
         for arm in scenario.arms:
@@ -528,7 +597,9 @@ def execute_kernel_run(
         _emit(event_handler, "arm", f"=== kernel scenario: {name} ===")
 
         skipped = resolve_arm_skips(
-            scenario, compiler_unavailable=compiler_unavailable
+            scenario,
+            compiler_unavailable=compiler_unavailable,
+            selected=request.arm_names,
         )
         if scenario.baseline_arm in skipped:
             # The anchor carries every ratio, so losing it is the one skip
