@@ -211,9 +211,29 @@ what the number means, and both say so in their own description: `qkv_prep`
 puts the attention-input norm inside the cut, because megatron fuses it into
 the GEMM prologue and runs neither half alone; `expert_mlp` puts each Piper
 arm against TorchTitan's own w13 fusion rather than against unfused experts.
-`lm_head` stays because its `fused_linear_ce` arm has no successor:
+`lm_head` stays because its `fused_linear_ce` arm has no successor *scenario*:
 `FusedLinearCrossEntropyLoss` owns the LM head, so the arm fits neither
-`lm_head_projection` nor `cross_entropy`.
+`lm_head_projection` nor `cross_entropy`. Its successor is the
+`fused_linear_ce` span over both, and `lm_head` stays until that span can be
+measured.
+
+`--span NAME` measures a **span** instead of a scenario: an implementation
+that fuses across a scenario cut, compared against the SUM of the scenarios
+it replaces. A span is never a default, because asking for one adds every
+scenario it encloses to the run. The registry declares five --
+`expert_combine`, `attn_residual_norm`, `ffn_norm_to_moe_residual`,
+`fused_linear_ce` and `chunked_ce` -- and `./run_bench.sh scenarios` prints
+each one with the arms it replaces. Two cautions belong beside every span
+number. The parts side pays one host dispatch chain per enclosed scenario
+and the span pays one, so a ratio below 1.0 holds chains no fusion removed,
+and the effect grows with the length of the range. And the span-against-parts
+interval is **unpaired**, unlike every scenario ratio: it is published as
+`unpaired_ratio_ci_*` and must not be read as a scenario interval.
+
+**No span can be measured yet.** Every span arm names a builder module under
+`benchmarks/kernel/operations/` that nobody has written, so `--span` measures
+the enclosed scenarios and then fails in the span's own worker. The
+declarations are the specification those builders must meet.
 
 Each number is the burst-amortized per-call cost under back-to-back dispatch,
 repeated over replicate sweeps so drift affects every arm equally. It is not
