@@ -560,6 +560,9 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertIsNone(manifest["span_scenarios"])
         self.assertEqual(manifest["skipped_arms"], {})
         self.assertEqual(manifest["scenario"], "swiglu")
+        # And no span name in it. The two names have separate fields, so a
+        # reader of either never has to ask which roster it belongs to.
+        self.assertIsNone(manifest["span"])
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
         self.assertNotIn("spec", manifest)
         self.assertEqual(manifest["model_size"], "normal")

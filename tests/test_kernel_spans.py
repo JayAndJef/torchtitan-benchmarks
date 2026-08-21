@@ -1241,6 +1241,17 @@ class SpanRunTests(unittest.TestCase):
             manifest = json.loads((span_dir / "manifest.json").read_text())
             self.assertEqual(manifest["kind"], "kernel_span")
             self.assertEqual(manifest["unit_kind"], "span")
+            # The name goes under the field that says what kind of name it
+            # is, exactly as the results file does it. A span name in
+            # "scenario" sends a reader to KERNEL_SCENARIOS for a name that
+            # is not there.
+            self.assertEqual(manifest["span"], "test_expert_combine")
+            self.assertIsNone(manifest["scenario"])
+            scenario_manifest = json.loads(
+                (by_name["expert_mlp"].out_dir / "manifest.json").read_text()
+            )
+            self.assertEqual(scenario_manifest["scenario"], "expert_mlp")
+            self.assertIsNone(scenario_manifest["span"])
             self.assertEqual(
                 manifest["span_scenarios"], ["expert_mlp", "moe_combine"]
             )

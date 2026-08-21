@@ -551,11 +551,19 @@ def kernel_manifest_data(
         # and one member of it at once.
         "kind": f"kernel_{unit.kind}",
         "unit_kind": unit.kind,
-        "scenario": scenario.name,
+        # The unit's name, under the field that says what kind of name it
+        # is. A span name is NOT a scenario name: a reader who finds one in
+        # "scenario" goes to KERNEL_SCENARIOS to look it up and finds
+        # nothing. The results file has kept these apart since schema 7 and
+        # this file put a span name in "scenario" one directory over.
+        "scenario": None if span else scenario.name,
+        "span": span.name if span else None,
         "description": scenario.description,
         # The ordered range a span replaces, and what each of its arms
         # replaces in that range. Absent on a scenario, where there is no
-        # range to name.
+        # range to name. Prefixed, unlike the results file's "scenarios",
+        # because both kinds of unit share this one dict and an unprefixed
+        # plural would sit next to "scenario" and read as its list form.
         "span_scenarios": list(span.scenarios) if span else None,
         "parts": (
             {entry.arm: list(entry.parts) for entry in span.parts}
