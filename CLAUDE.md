@@ -173,8 +173,10 @@ and `NGPU=1`, so runs are single-GPU and the index is stable.
 
 - `run` executes and validates only. `run-all` also evaluates and writes
   `results.json`.
-- `run` accepts `--arm NAME` to execute a single arm. `run-all` does not; it
-  always runs every arm in the scenario.
+- `run` accepts `--arm NAME` to execute a single arm; it is **not**
+  repeatable, unlike `kernel-bench --arm` and `evaluate --arm`. `run-all`
+  does not accept it; it always runs every arm in the scenario.
+
 - `run-all` accepts `--resume <out_dir>`; `--resume` and `--out` are mutually
   exclusive.
 - `run-all --all-scenarios` sweeps every scenario in sequence, sharing one
@@ -648,16 +650,20 @@ matching kernel scenario is now **cross-engine**, and its titan arms carry
 | `piper1b_qkv` | `qkv_prep` | `titan`, `titan/unfused_qkv` |
 | `piper1b_attention` | `attention_core` | `titan`, `titan/flex_flash`, `titan/flash_attention_3` |
 
-**Two of those four re-homings changed what the number means, and both say so
-in their own `description`.** `qkv_prep` puts the attention-input norm inside
+**Three of those four rows changed what the number means, so an old number
+and its successor are not comparable.** `rope`'s titan arms now take
+packed-document positions where they took `arange`, and their timed closures
+now run the training graph where they ran an inference graph that saved no
+activations. `qkv_prep` puts the attention-input norm inside
 the cut, on both engines, because megatron fuses the RMSNorm into
 `linear_qkv`'s GEMM prologue and exposes no entry point that runs either half
 alone -- so a `qkv_prep` number is the norm plus the projection, and a `qkv`
 number under `out/` is the projection alone. `expert_mlp` publishes each Piper
 arm against `titan/fused_grouped_experts`, which is TorchTitan's own w13
 fusion, rather than against unfused experts -- so the Piper arms are no longer
-credited with a fusion upstream already ships. Neither is a like-for-like
-successor of the retired number.
+credited with a fusion upstream already ships. `attention_core` is the one row
+whose titan arms measure the same cut the retired scenario measured.
+
 
 Remember also that a kernel-isolation number is **not device time**: for small
 kernels it is dominated by host dispatch, and `--burst` amortization does not
