@@ -1027,8 +1027,8 @@ the varlen path would never share an interpreter. Fixing the environment
 removes it too. Neither is done; the choice is recorded rather than made.
 
 `*` = scenario baseline. `benchmarks/kernel/registry.py` is the registry: add an
-
 arm by appending a `KernelArm` with a builder path, and a scenario by appending
+
 a `KernelScenario` (both declared by `benchmarks/kernel/schema.py`). Builders
 live in that family's module under `benchmarks/kernel/operations/`, one per
 scenario and named after it (spelled `benchmarks.kernel.operations.<scenario>:<fn>`
@@ -1084,7 +1084,59 @@ isolation cannot have. `tests/test_import_boundaries.py` section 3 asserts both
 halves; `tests/test_migration_contract.py` pins each scenario's builders to its
 own family module.
 
+#### The GB/s and x_floor columns are not always read against 1.0
+
+Two derived columns are computed by the parent for every scenario that
+declares a `copy_floor`. `gbps` is `bytes_moved / median`. `x_floor` is
+`median / floor_median` for every non-floor arm that shares a mode with the
+floor, so it reads **no** `bytes_moved` at all.
+
+That last fact is the trap. When two arms of one scenario declare **different**
+`bytes_moved`, an arm running at exactly the floor's bandwidth no longer
+reads `x_floor` 1.0. Two scenarios do that today, and the correction factor
+is `arm_bytes / floor_bytes`:
+
+| scenario | arm | `bytes_moved` at the default workload | reads against |
+|---|---|---|---|
+| `qk_norm` | `copy_floor`, `titan` | 25,165,824 (24 MiB) | 1.00 |
+| `qk_norm` | `mcore/base` | 33,554,432 (32 MiB) | **1.33** |
+| `moe_router` | `copy_floor` | 16,777,216 | 1.00 |
+| `moe_router` | the three `mcore` arms | 8,470,528 | **0.50** |
+| `moe_router` | `titan` | 42,106,880 | **2.51** |
+
+Divide by the factor to recover the usual "near 1 means bandwidth-bound"
+reading. **`qk_norm` states its factor in the scenario `description`, so a
+reader of `results.json` or of the printed table finds it. `moe_router` does
+not** -- its description says only that each arm carries its own
+`bytes_moved` "so the GB/s and x_floor columns show the asymmetry instead of
+absorbing it", which is true and gives a reader no factor. The `moe_router`
+spread is the wider of the two, at 5x between its extremes.
+
+**Why `qk_norm/mcore/base` moves 8 MiB more.** Megatron's `k_layernorm`
+receives the key as a **strided view** into the fused QKV buffer, which is
+what megatron really produces: the query leaves the buffer because the
+reshape that merges the group dimension has to copy, and the key does not.
+TransformerEngine's `RMSNorm` calls `input_.contiguous()` inside the timed
+closure, so the copy is real work -- one 4 MiB read plus one 4 MiB write
+under the read-plus-write convention `qk_bytes` itself uses. That is the half
+of `qkv_prep`'s deferred copy which used to be timed in **no** scenario;
+`attention_core` times the value's half. **The 4 MiB and the 8 MiB are two
+conventions and both are right -- never put them side by side unnamed.**
+
+**One column understates one arm outright, and no factor fixes it.**
+`moe_combine` declares a single `bytes_moved` of 25,165,824 (25.2 MB) for
+every arm. It describes what an **unpermute** moves -- read the routed rows,
+write one row per token. Titan's combine additionally scales every routed row
+by its probability, which megatron applied one cut earlier and does not
+repeat here, so titan makes **at least one more pass** over the `[rows, dim]`
+tensor: at least 41,943,040 B (41.9 MB) against the declared 25.2. By how
+much the titan figure is low is **not measured** -- it depends on whether
+Inductor fuses the cast, the multiply and the cast back into one pass or
+materializes an fp32 copy. **Read no bandwidth achievement off the
+`moe_combine` titan row.**
+
 ### Spans
+
 
 **A span is an implementation that fuses across a scenario cut.** It belongs
 to no single scenario, so it is declared over an **ordered scenario range**,
