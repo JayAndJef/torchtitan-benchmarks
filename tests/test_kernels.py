@@ -416,7 +416,7 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         self.assertEqual(shape.max_seq_len, 4096)
         self.assertEqual(workload.seq_len, 4096)
         # replace() on the registered shape, not a mutation of it.
-        self.assertEqual(shape.name, "normal")
+        self.assertEqual(shape.name, "1b")
         self.assertEqual(resolve_shape_and_workload()[0].max_seq_len, 2048)
         self.assertEqual(
             shape_summary("attention_core", shape, workload)["max_seq_len"],

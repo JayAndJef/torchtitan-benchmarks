@@ -98,7 +98,7 @@ def transfer_weights(titan, megatron, shape) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="TorchTitan vs Megatron parity")
-    parser.add_argument("--model-size", default="normal")
+    parser.add_argument("--model-size", default="1b")
     parser.add_argument(
         "--gate",
         type=float,

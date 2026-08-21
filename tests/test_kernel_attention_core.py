@@ -70,12 +70,12 @@ from benchmarks.kernel.operations.attention_core import (
 )
 from benchmarks.kernel.schema import KernelWorkload, shape_summary
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
-from benchmarks.models.piper_qwen3.shape import NORMAL, PiperShape
+from benchmarks.models.piper_qwen3.shape import PIPER_1B, PiperShape
 
 # head_dim stays 64, the real value and the only geometry the kernels read.
 # 4 query heads over 2 kv groups keeps grouped-query attention exercised while
 # the fp64 reference stays cheap.
-TINY = PiperShape(
+TINY = PiperShape.derived(
     name="tiny", dim=256, n_layers=1, vocab_size=64, max_seq_len=64
 )
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=32)
@@ -1189,8 +1189,8 @@ class BackendVerdictTests(unittest.TestCase):
                 te_record(
                     fused=True,
                     fused_backend="NVTE_F16",
-                    num_heads=NORMAL.n_heads,
-                    num_gqa_groups=NORMAL.n_kv_heads,
+                    num_heads=PIPER_1B.n_heads,
+                    num_gqa_groups=PIPER_1B.n_kv_heads,
                 ),
                 TINY,
             )
@@ -1400,19 +1400,19 @@ class MarkerTests(unittest.TestCase):
 
 class ShapeSummaryTests(unittest.TestCase):
     def test_the_manifest_records_both_engine_layouts(self) -> None:
-        summary = shape_summary("attention_core", NORMAL, KernelWorkload())
+        summary = shape_summary("attention_core", PIPER_1B, KernelWorkload())
         batch, seq = KernelWorkload().batch, KernelWorkload().seq_len
         self.assertEqual(
             summary["q_titan_BLNH"],
-            [batch, seq, NORMAL.n_heads, NORMAL.head_dim],
+            [batch, seq, PIPER_1B.n_heads, PIPER_1B.head_dim],
         )
         self.assertEqual(
             summary["q_mcore_THD"],
-            [batch * seq, NORMAL.n_heads, NORMAL.head_dim],
+            [batch * seq, PIPER_1B.n_heads, PIPER_1B.head_dim],
         )
         self.assertEqual(
             summary["out_mcore_TD"],
-            [batch * seq, NORMAL.n_heads * NORMAL.head_dim],
+            [batch * seq, PIPER_1B.n_heads * PIPER_1B.head_dim],
         )
         self.assertEqual(
             summary["flex_flash_block_size"], list(FLEX_FLASH_BLOCK_SIZE)
@@ -1431,10 +1431,10 @@ class ShapeSummaryTests(unittest.TestCase):
         workload = KernelWorkload()
         batch, seq = workload.batch, workload.seq_len
         tokens = batch * seq
-        heads, groups = NORMAL.n_heads, NORMAL.n_kv_heads
-        head_dim = NORMAL.head_dim
+        heads, groups = PIPER_1B.n_heads, PIPER_1B.n_kv_heads
+        head_dim = PIPER_1B.head_dim
         self.assertEqual(
-            shape_summary("attention_core", NORMAL, workload),
+            shape_summary("attention_core", PIPER_1B, workload),
             {
                 "q_titan_BLNH": [batch, seq, heads, head_dim],
                 "k_titan_BLNH": [batch, seq, groups, head_dim],
@@ -1442,7 +1442,7 @@ class ShapeSummaryTests(unittest.TestCase):
                 "qkv_mcore_fused_TGR": [
                     tokens,
                     groups,
-                    (NORMAL.heads_per_group + 2) * head_dim,
+                    (PIPER_1B.heads_per_group + 2) * head_dim,
                 ],
                 "q_mcore_THD": [tokens, heads, head_dim],
                 "k_mcore_THD": [tokens, groups, head_dim],
@@ -1455,7 +1455,7 @@ class ShapeSummaryTests(unittest.TestCase):
                 "flex_block_size": 128,
                 "flex_flash_block_size": list(FLEX_FLASH_BLOCK_SIZE),
                 "max_seqlen": seq,
-                "max_seq_len": NORMAL.max_seq_len,
+                "max_seq_len": PIPER_1B.max_seq_len,
             },
         )
 

@@ -32,7 +32,22 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # Small enough to build instantly, and still exercising every reshape: 2 kv
 # groups of 2 query heads each, 2 layers, 4 experts. The real shapes differ
 # only in the numbers; vocab is cut because the embedding dominates otherwise.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
+
+# The same map at a head geometry the piper-1B family never produces: 4:1
+# grouped-query attention at head_dim 128, which is piper 48B's shape in
+# miniature. TINY alone is 2:1 at head_dim 64, so without this the interleave
+# -- five reshape literals over n_kv_heads, heads_per_group and head_dim --
+# was pinned only at the ratio it was written for.
+WIDE = PiperShape(
+    name="wide",
+    dim=512,
+    n_layers=1,
+    head_dim=128,
+    n_kv_heads=1,
+    num_experts=8,
+    vocab_size=64,
+)
 
 
 def titan_state(shape: PiperShape) -> dict[str, torch.Tensor]:
@@ -128,6 +143,27 @@ class QkvInterleaveTests(unittest.TestCase):
         # grouped_qkv already asserts this; calling it directly proves the
         # check itself runs rather than that it happens to be called.
         assert_qkv_roundtrip(grouped, wq, wk, wv, TINY)
+
+    def test_the_interleave_is_invertible_at_a_non_family_head_geometry(
+        self,
+    ) -> None:
+        """4:1 grouped-query attention at head_dim 128, as piper 48B runs.
+
+        The reshape reads n_kv_heads, heads_per_group and head_dim. TINY
+        exercises 2 groups of 2 heads at head_dim 64, where several of those
+        numbers coincide with each other and with dim/head_dim. Here they do
+        not: 1 group of 4 heads at head_dim 128 over dim 512.
+        """
+        self.assertEqual((WIDE.n_heads, WIDE.heads_per_group), (4, 4))
+        state = titan_state(WIDE)
+        wq = state["layers.0.attention.qkv_linear.wq.weight"]
+        wk = state["layers.0.attention.qkv_linear.wk.weight"]
+        wv = state["layers.0.attention.qkv_linear.wv.weight"]
+        grouped = grouped_qkv(wq, wk, wv, WIDE)
+        self.assertEqual(
+            tuple(grouped.shape), (WIDE.qkv_out_features, WIDE.dim)
+        )
+        assert_qkv_roundtrip(grouped, wq, wk, wv, WIDE)
 
     def test_a_broken_interleave_is_caught(self) -> None:
         """The guard must fail on a wrong layout, not merely pass on a right

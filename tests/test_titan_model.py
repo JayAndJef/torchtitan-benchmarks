@@ -21,7 +21,7 @@ from benchmarks.models.piper_qwen3.titan_model import (
     build_titan_model,
 )
 
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 
 SWIGLU_OVERRIDE = (
     "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu."

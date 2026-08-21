@@ -59,7 +59,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # turns and the only geometry either engine reads here. Everything else
 # shrinks: 4 query heads over 2 kv groups keeps q and k different sizes, which
 # is why both closures rotate a pair rather than one tensor twice.
-TINY = PiperShape(name="tiny", dim=256, n_layers=1, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=1, vocab_size=64)
 # seq_len 32 gives _packed_positions a low of 2 and a high of 16, so a row
 # holds several documents and the packing is exercised rather than degenerate.
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=32)

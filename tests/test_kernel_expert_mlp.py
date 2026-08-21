@@ -64,7 +64,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 # Small enough to run in milliseconds in fp64, wide enough that every expert
 # gets several rows and the gated width is not degenerate.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=8)
 
 
@@ -244,7 +244,7 @@ class InputsTests(unittest.TestCase):
         self,
     ) -> None:
         """Loudly, and never capped or rounded. See ``_require_even_routing``."""
-        odd = PiperShape(name="odd", dim=256, n_layers=2, num_experts=3)
+        odd = PiperShape.derived(name="odd", dim=256, n_layers=2, num_experts=3)
         with self.assertRaises(ValueError) as caught:
             _require_even_routing(odd, KernelWorkload(batch=1, seq_len=5))
         message = str(caught.exception)
@@ -253,7 +253,7 @@ class InputsTests(unittest.TestCase):
 
     def test_the_inputs_builder_raises_on_the_same_pair(self) -> None:
         """A direct caller must not get a silently capped split either."""
-        odd = PiperShape(name="odd", dim=256, n_layers=2, num_experts=3)
+        odd = PiperShape.derived(name="odd", dim=256, n_layers=2, num_experts=3)
         generator = torch.Generator(device="cpu")
         generator.manual_seed(0)
         with self.assertRaisesRegex(ValueError, "do not divide evenly"):

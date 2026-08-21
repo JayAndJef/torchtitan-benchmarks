@@ -66,7 +66,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 
 # Small enough to run in milliseconds, and still a real GQA geometry: 2 query
 # heads over 1 kv group, so the grouped interleave is not the identity.
-TINY = PiperShape(name="tiny", dim=128, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=128, n_layers=2, vocab_size=64)
 WORKLOAD = KernelWorkload(batch=2, seq_len=4)
 
 

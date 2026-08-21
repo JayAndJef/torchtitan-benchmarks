@@ -1208,14 +1208,23 @@ TEST_CENSUS = {
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
     # and 8 that pin the transfer, its component slices and its refusals.
-    "test_megatron_weights": 11,
+    # +1 with the real piper ladder: the same interleave at 4:1 grouped-query
+    # attention and head_dim 128, which the 1B-family TINY shape cannot reach.
+    "test_megatron_weights": 12,
     # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
     # the symmetric twin of the titan builders' one, added when the megatron
     # side stopped defaulting to the normal shape. +8 for the large and giant
     # shapes: a tensor-by-tensor parameter count that derives what no run has
     # logged, the two geometry tests, the layer-count and parameter-split
     # arguments, the declaration order, and the estimated parity gates.
-    "test_model_shape": 34,
+    # +3 when the head and expert geometry became recorded data: the two
+    # halves of the pinned-shape table (every shape matches it, every shape is
+    # in it) and the one that keeps the piper-1B family constructor out of the
+    # registry. +5 when normal became 1b: the alias resolves, it is not a
+    # registry entry, an unknown size is still refused, a fresh manifest
+    # records the canonical name, and a manifest recording either name
+    # resumes against the other.
+    "test_model_shape": 42,
     "test_profile_regions": 19,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
@@ -1238,7 +1247,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1103
+TEST_CENSUS_TOTAL = 1112
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

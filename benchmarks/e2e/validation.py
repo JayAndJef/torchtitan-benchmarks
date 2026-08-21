@@ -24,7 +24,7 @@ from benchmarks.e2e.registry import (
     Arm,
     Workload,
 )
-from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+from benchmarks.models.piper_qwen3.shape import shape_by_name
 from benchmarks.traces.extraction import pooled_window_metrics
 from benchmarks.traces.schema import Region
 
@@ -97,11 +97,11 @@ def validate_arm(
     regions: tuple[Region, ...] = (),
     compile_mode: str = "default",
     ac_mode: str = "sac",
-    model_size: str = "normal",
+    model_size: str = "1b",
 ) -> None:
     """Reject partial or wrongly configured runs before analysis."""
     profile = VALIDATION_PROFILES[arm.validation]
-    shape = PIPER_SHAPES[model_size]
+    shape = shape_by_name(model_size)
     if not log_path.is_file():
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     log = log_path.read_text(errors="replace")

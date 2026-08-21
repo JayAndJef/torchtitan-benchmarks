@@ -58,7 +58,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # heads over 1 kv group. ``n_heads * head_dim`` is 128, which equals ``dim``
 # at every representable shape, so the tests spell the product out rather
 # than reuse ``dim``.
-TINY = PiperShape(name="tiny", dim=128, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=128, n_layers=2, vocab_size=64)
 WORKLOAD = KernelWorkload(batch=2, seq_len=4)
 
 

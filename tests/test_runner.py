@@ -48,7 +48,7 @@ from torchtitan.components.loss import (
     LossWithLMHead,
 )
 from benchmarks.models.piper_qwen3.parallelize import parallelize_piper1b
-from benchmarks.models.piper_qwen3.shape import HUGE, NORMAL, PIPER_SHAPES
+from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B, PIPER_SHAPES
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
@@ -303,9 +303,11 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(
                     command[command.index("--config-arg") + 1], f"size={size}"
                 )
-                self.assertFalse(
-                    [token for token in command if token.endswith(f"_{size}")]
-                )
+                # The retired scheme spelled the size into the config
+                # name. Checked as the mangled name itself rather than as
+                # "no token ends in the size": the config family is called
+                # qwen3_piper_1b, so at size "1b" the plain name ends in it.
+                self.assertNotIn(f"qwen3_piper_1b_{size}", command)
 
     def test_command_adds_only_the_arm_override_and_dump_folder(self) -> None:
         arm = PIPER_1B_SWIGLU.arm("piper_optimized_triton")
@@ -603,15 +605,15 @@ class ManifestTests(unittest.TestCase):
                 extra_args,
                 "cuda-graph",
                 "none",
-                "normal",
+                "1b",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
         self.assertEqual(manifest["schema_version"], 9)
         self.assertEqual(manifest["compile_mode"], "cuda-graph")
         self.assertEqual(manifest["ac_mode"], "none")
-        self.assertEqual(manifest["model_size"], "normal")
-        self.assertEqual(manifest["model_shape"], NORMAL.describe(seq_len=1024))
+        self.assertEqual(manifest["model_size"], "1b")
+        self.assertEqual(manifest["model_shape"], PIPER_1B.describe(seq_len=1024))
         self.assertEqual(
             manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
         )
@@ -657,7 +659,7 @@ _SAC_LINE = (
 # other rule. Exported so tests/test_run_validation.py builds the same log.
 _SIZE_LINE = (
     "[titan] - root - INFO - Model qwen3 piper_1B "
-    f"size: {PIPER_SHAPES['normal'].param_count:,} total parameters\n"
+    f"size: {PIPER_SHAPES['1b'].param_count:,} total parameters\n"
 )
 
 

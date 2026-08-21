@@ -58,7 +58,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # Small enough to run in milliseconds, and still a real geometry. The
 # vocabulary is deliberately larger than ``dim``, as it is at both registered
 # shapes, so a test that confused the two axes would fail.
-TINY = PiperShape(name="tiny", dim=128, n_layers=2, vocab_size=192)
+TINY = PiperShape.derived(name="tiny", dim=128, n_layers=2, vocab_size=192)
 WORKLOAD = KernelWorkload(batch=2, seq_len=4)
 
 

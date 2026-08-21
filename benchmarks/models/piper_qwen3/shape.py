@@ -10,12 +10,46 @@ Deliberately imports nothing but ``dataclasses``. Modules across
 ``benchmarks/`` and ``tools/`` import this module, several of them in
 processes that must not pull in torch or torchtitan.
 
-Four shapes are registered. The order, smallest to largest by parameter
-count, is ``normal`` < ``large`` < ``huge`` < ``giant``. The names do not
-carry that order on their own, so read it here: ``giant`` is above ``huge``.
+Six shapes are registered. The order, smallest to largest by parameter
+count, is ``1b`` < ``large`` < ``9b`` < ``huge`` < ``giant`` < ``48b``. The
+names do not carry that order on their own, so read it here: ``giant`` is
+above ``huge``, and the real ladder interleaves with the synthetic one.
 ``PIPER_SHAPES`` lists the shapes in that same order, and
 ``tests/test_model_shape.py`` asserts both the order and the ascending
 parameter counts.
+
+``normal`` is the retired name of ``1b`` and still resolves to it. See
+``MODEL_SIZE_ALIASES`` below for why it cannot simply be deleted.
+
+**Three of the six are real piper models, and three are benchmark
+inventions. The name says which.** ``1b``, ``9b`` and ``48b`` are
+transcribed field for field from ``examples/models/qwen3.py`` in the piper
+checkout, cases ``'1B'``, ``'9B'`` and ``'48B'``. The absolute path of that
+checkout moves with the host. It is ``/m-coriander/coriander/jayden/piper/``
+today, and the ``/data/zejiaqi/piper/`` that ``config_registry.py`` cites is
+stale.
+
+``large``, ``huge`` and ``giant`` are ours. Each was built by choosing a dim
+and a layer count for a benchmark reason, and then applying the piper-1B
+rules to everything else.
+
+**A synthetic shape is not piper at scale, and ``huge`` is the clearest
+case.** Piper scales by adding layers and experts and by widening
+``head_dim``, and it holds ``n_heads`` at 32 and ``n_kv_heads`` at 8 from 9B
+up -- 4:1 grouped-query attention. The synthetic shapes pin ``head_dim`` at
+64 and take ``n_heads = dim/head_dim``, so their head count grows with the
+width. ``huge`` carries 192 query heads over 96 kv heads, and ``giant``
+carries 256 over 128. Real piper never approaches those counts. Their 2:1
+ratio is also the ratio real piper stopped using after 1B. That changes the
+fused qkv width, the attention arithmetic and the kv-cache size. Read
+``huge`` as a wide transformer block sized to fill an H200, which is what it
+was built to be, and never as piper at scale.
+
+``large`` and ``48b`` make the same point at one dim. Both are dim 4096
+with a 14336 expert width. They then differ in every remaining geometry
+value: ``head_dim`` 64 against 128, ``n_heads`` 64 against 32,
+``n_kv_heads`` 32 against 8, ``n_layers`` 4 against 32, ``num_experts`` 4
+against 8. ``large`` does not approximate ``48b``.
 
 The one ratio every entry below refers to: embedding + lm_head are ``2*V*D``
 parameters and one transformer layer is ``45*D^2``, so one layer against the
@@ -23,41 +57,54 @@ two tables is ``2*151936/(45*D) = 6753/D``. The whole layer stack against
 them is ``n_layers*dim/6753``, which is why the layer count is part of a
 shape and not a free choice.
 
-``normal``
-    The historical piper-1B model: dim 1024, 16 layers, 1,066,241,024
-    parameters. Every number this repo published before schema 9 is this
-    shape.
+``1b`` (real)
+    Piper 1B, verbatim: dim 1024, 16 layers, 1,066,241,024 parameters.
+    Every number this repo published before schema 9 is this shape, under
+    its old name ``normal``.
 
-``large``
+``large`` (synthetic)
     Four transformer layers at dim 4096, 4,264,661,504 parameters. It is the
-    middle rung between ``normal`` and ``huge`` in dim and in parameter
+    middle rung between ``1b`` and ``huge`` in dim and in parameter
     count. The layer count is what makes it a rung of the same model rather
-    than a different experiment: ``n_layers*dim`` is 16384 here, the product ``normal``
-    carries, so ``large`` splits its parameters exactly as ``normal`` does --
+    than a different experiment: ``n_layers*dim`` is 16384 here, the
+    product ``1b`` carries, so ``large`` splits its parameters as ``1b``
+    does --
     29% embedding tables, 71% layer stack. At one layer the ratio above is
     1.65, so a 1-layer model at dim 4096 would be 62% embedding table and the
     benchmark would measure the lm_head and the cross entropy. Four layers
     also keep ``supports_block_regions`` True, so ``large`` is the only shape
-    above ``normal`` that validation rule 7 still guards.
+    above ``1b`` that validation rule 7 still guards.
 
-``huge``
+``huge`` (synthetic)
     One transformer layer at a much larger width, sized to fill an H200 (see
     ``reports/``'s memory-ceiling ladder). It exists to make the cuda-graph
     comparison be about a transformer block rather than about the embedding
     table. At dim 1024 a 1-layer model would be 87% embedding; at dim 12288
     the single layer is 64% of the parameters and the large majority of the
-    FLOPs. It is the one shape whose ``n_layers*dim`` is not 16384, because
-    the memory ceiling chose its dim rather than the parameter split.
+    FLOPs. Its ``n_layers*dim`` is not 16384, because the memory ceiling
+    chose its dim rather than the parameter split. It was the only such
+    shape until the real ladder arrived; ``9b`` and ``48b`` do not hold that
+    product either, because piper never chose it.
 
-``giant``
+``giant`` (synthetic)
     One transformer layer at dim 16384, 17,058,349,184 parameters. The ratio
     above is 0.41 here, so the ``huge`` argument holds with room to spare,
-    and ``n_layers*dim`` is 16384 again, so ``giant`` carries the ``normal``
+    and ``n_layers*dim`` is 16384 again, so ``giant`` carries the ``1b``
     parameter split.
 
     This shape is declared from estimates. No scenario has run at it, in
     either system, and the first run can run out of memory. The ``GIANT``
     constant records the memory arithmetic and what it does not cover.
+
+``9b`` (real)
+    Piper 9B, verbatim: dim 2048, 24 layers, 9,330,201,600 parameters. The
+    first registered shape with 4:1 grouped-query attention and 8 experts.
+
+``48b`` (real)
+    Piper 48B, verbatim: dim 4096, 32 layers, 47,685,316,608 parameters.
+    The first registered shape with ``head_dim`` 128. Nothing has run at
+    either. 9B may fit one H200 and 48B cannot; see the ``PIPER_48B``
+    constant for that arithmetic.
 
 Everything that varies per shape is a field or a derived property of
 ``PiperShape``, so registering a new shape is one ``PIPER_SHAPES`` entry and
@@ -65,6 +112,12 @@ never an edit somewhere else. That includes the two knobs that used to be
 hardcoded per size elsewhere: ``supports_block_regions`` (derived from
 ``n_layers``) and ``parity_gate`` (a field, read by
 ``tools/megatron_parity_check.py``).
+
+Registering one also means writing its numbers into
+``tests/test_model_shape.py``'s ``PINNED_SHAPES``, which a test requires.
+That is the second statement of the geometry, and it is deliberate: it is
+transcribed from the model config the shape claims to be, so a derivation
+that is wrong for that model cannot pass both.
 
 A shape reaches TorchTitan as ``--config-arg size=<name>``, which
 ``benchmarks/e2e/launch.py`` appends to the training command and the fork's
@@ -80,15 +133,35 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class PiperShape:
-    """One model geometry, shared by the TorchTitan and Megatron builders."""
+    """One model geometry, shared by the TorchTitan and Megatron builders.
+
+    A number is a field when the registered shapes disagree about it. Where
+    they all agree, it is a default here or a derivation below. That rule is
+    what keeps one number from having two sources in this file.
+
+    ``head_dim``, ``n_kv_heads`` and ``num_experts`` are fields for that
+    reason. Each was a constant or a derivation until the real piper ladder
+    arrived, and each is wrong there. Piper 48B carries ``head_dim`` 128
+    against 1B's 64. Piper 9B and 48B carry 8 kv heads, where the old rule
+    ``n_kv_heads = n_heads // 2`` returns 16 and 16. Piper 9B and 48B carry 8
+    experts against 1B's 4. Each wrong value builds a different model and
+    publishes it under the requested name.
+
+    ``PiperShape.derived`` applies the piper-1B family rules for a probe or a
+    test shape. Never register a shape through it.
+    """
 
     name: str
     dim: int
     n_layers: int
-    head_dim: int = 64
-    vocab_size: int = 151936
-    num_experts: int = 4
+    head_dim: int
+    n_kv_heads: int
+    num_experts: int
+    # The registered shapes agree on these four, so each is one default here
+    # rather than a value repeated per shape. Promote one to a per-shape value
+    # the moment a registered shape disagrees, and not before.
     top_k: int = 2
+    vocab_size: int = 151936
     rope_theta: float = 1_000_000.0
     max_seq_len: int = 2048
     # Logit rel_l2 ceiling for tools/megatron_parity_check.py. bf16-scaled:
@@ -98,18 +171,78 @@ class PiperShape:
     parity_gate: float = 2e-2
 
     def __post_init__(self) -> None:
-        if self.dim % (2 * self.head_dim):
+        if self.dim < 1:
+            raise ValueError(f"{self.name}: dim must be >= 1")
+        if self.n_layers < 1:
+            raise ValueError(f"{self.name}: n_layers must be >= 1")
+        if self.head_dim < 1:
+            raise ValueError(f"{self.name}: head_dim must be >= 1")
+        if self.dim % self.head_dim:
             raise ValueError(
-                f"{self.name}: dim {self.dim} must be a multiple of "
-                f"2*head_dim ({2 * self.head_dim}) so n_kv_heads is integral"
+                f"{self.name}: dim {self.dim} must be a multiple of head_dim "
+                f"{self.head_dim}, because n_heads is derived from the two"
             )
         if self.dim % 2:
             raise ValueError(
                 f"{self.name}: dim {self.dim} must be even so the 3.5x MoE "
                 "hidden width is integral"
             )
-        if self.n_layers < 1:
-            raise ValueError(f"{self.name}: n_layers must be >= 1")
+        if self.n_kv_heads < 1:
+            raise ValueError(f"{self.name}: n_kv_heads must be >= 1")
+        if self.n_heads % self.n_kv_heads:
+            raise ValueError(
+                f"{self.name}: n_heads {self.n_heads} must be a multiple of "
+                f"n_kv_heads {self.n_kv_heads}, so each kv head serves a "
+                "whole query group"
+            )
+        if self.num_experts < 1:
+            raise ValueError(f"{self.name}: num_experts must be >= 1")
+
+    @classmethod
+    def derived(
+        cls,
+        *,
+        name: str,
+        dim: int,
+        n_layers: int,
+        head_dim: int = 64,
+        n_kv_heads: int | None = None,
+        num_experts: int = 4,
+        **rest: object,
+    ) -> "PiperShape":
+        """Build a probe shape from the piper-1B family rules.
+
+        The rules are ``head_dim`` 64, ``n_kv_heads = n_heads // 2`` and 4
+        experts. They describe piper 1B and no other real piper model: 9B and
+        48B carry 8 kv heads and 8 experts, and 48B carries ``head_dim`` 128.
+
+        Use this for a test or a probe shape, whose exact geometry is
+        arbitrary and which no run publishes. **Never register a shape through
+        it.** Every ``PIPER_SHAPES`` entry writes its geometry out, so a
+        reader can check the entry against the model config it claims to be.
+        """
+        if dim % head_dim:
+            raise ValueError(
+                f"{name}: dim {dim} must be a multiple of head_dim "
+                f"{head_dim} for the derived n_heads to be integral"
+            )
+        n_heads = dim // head_dim
+        if n_kv_heads is None:
+            if n_heads % 2:
+                raise ValueError(
+                    f"{name}: n_heads {n_heads} is odd, so the family rule "
+                    "n_kv_heads = n_heads // 2 does not apply; pass n_kv_heads"
+                )
+            n_kv_heads = n_heads // 2
+        return cls(
+            name=name,
+            dim=dim,
+            n_layers=n_layers,
+            head_dim=head_dim,
+            n_kv_heads=n_kv_heads,
+            num_experts=num_experts,
+            **rest,  # type: ignore[arg-type]
+        )
 
     # --- derived geometry -------------------------------------------------
 
@@ -128,11 +261,15 @@ class PiperShape:
 
     @property
     def n_heads(self) -> int:
-        return self.dim // self.head_dim
+        """Query heads: ``dim // head_dim``.
 
-    @property
-    def n_kv_heads(self) -> int:
-        return self.n_heads // 2
+        Derived because every registered shape satisfies
+        ``n_heads * head_dim == dim``, and ``__post_init__`` enforces the
+        divisibility that makes it exact. It is not universal -- Qwen3
+        30B-A3B carries 32 heads of 128 at dim 2048 -- so promote it to a
+        field if such a shape is ever registered.
+        """
+        return self.dim // self.head_dim
 
     @property
     def heads_per_group(self) -> int:
@@ -140,7 +277,17 @@ class PiperShape:
 
     @property
     def moe_hidden_dim(self) -> int:
-        """Expert width: 3.5x dim (3584 at dim 1024, piper's inter_dim)."""
+        """Expert width: 3.5x dim (3584 at dim 1024, piper's inter_dim).
+
+        Derived because every registered shape agrees with it: piper 1B 3584,
+        9B 7168 and 48B 14336 are each 3.5x their dim, and the three synthetic
+        shapes were built on the same rule.
+
+        Three real piper configs break it, so registering any of them means
+        promoting this to a field. 9M reads 128 against a derived 896.
+        30B-A3B and 30B-A3B-half read 768 against a derived 7168, which is a
+        9.3x error.
+        """
         return self.dim * 7 // 2
 
     @property
@@ -152,13 +299,25 @@ class PiperShape:
     # Mirrors torchtitan's get_moe_model_nparams_and_flops
     # (third_party/torchtitan/torchtitan/models/utils.py), verified against
     # the "Total parameter count: dense D, sparse S, vision 0, active A" line
-    # a real run logs. tests/test_model_shape.py pins the normal-size values.
+    # a real run logs. tests/test_model_shape.py pins the 1b values.
 
     @property
     def _per_layer_dense(self) -> int:
-        # attention_norm (D) + qkv (2*D*D) + q_norm/k_norm (2*head_dim)
-        # + wo (D*D) + ffn_norm (D)
-        return 3 * self.dim**2 + 2 * self.dim + 2 * self.head_dim
+        """attention_norm + fused qkv + q_norm/k_norm + wo + ffn_norm.
+
+        Written from the tensor widths rather than as ``3*D^2 + 2*D +
+        2*head_dim``. That closed form assumes ``qkv_out_features == 2*dim``
+        and ``n_heads*head_dim == dim``, which hold only at a 2:1 query-to-kv
+        ratio. Piper 9B and 48B run 4:1, where the fused qkv is
+        ``1.5*dim`` wide, so the closed form overcounts them. The two forms
+        agree exactly on every 2:1 shape.
+        """
+        return (
+            self.dim * self.qkv_out_features
+            + self.n_heads * self.head_dim * self.dim
+            + 2 * self.dim
+            + 2 * self.head_dim
+        )
 
     @property
     def _router(self) -> int:
@@ -236,7 +395,16 @@ class PiperShape:
         }
 
 
-NORMAL = PiperShape(name="normal", dim=1024, n_layers=16)
+# Piper 1B, verbatim. Every field matches examples/models/qwen3.py case
+# '1B' in the piper checkout.
+PIPER_1B = PiperShape(
+    name="1b",
+    dim=1024,
+    n_layers=16,
+    head_dim=64,
+    n_kv_heads=8,
+    num_experts=4,
+)
 
 # dim chosen by the memory-ceiling probe: the largest multiple of 128 whose
 # megatron-under-cuda-graph peak stays under ~125 GiB on a 139.81 GiB H200
@@ -246,17 +414,22 @@ HUGE = PiperShape(
     name="huge",
     dim=12288,
     n_layers=1,
-    # 12x the normal dim, so the bf16 accumulation error grows with it: the
-    # normal shape's measured 5.5e-3 becomes 2.03e-2 (sqrt(12) = 3.46). This
+    head_dim=64,
+    # 2:1 query-to-kv, the piper-1B ratio this shape was built on. Real piper
+    # runs 4:1 from 9B up, so 96 kv heads is not a piper geometry.
+    n_kv_heads=96,
+    num_experts=4,
+    # 12x the 1b dim, so the bf16 accumulation error grows with it: the
+    # 1b shape's measured 5.5e-3 becomes 2.03e-2 (sqrt(12) = 3.46). This
     # is evidenced, not slack -- --fp32-reference puts titan's own bf16 output
     # 3.25e-2 from fp32 against megatron's 3.29e-2, so the engines agree with
     # each other better than either agrees with fp32.
     parity_gate=5e-2,
 )
 
-# The middle rung: between normal and huge in dim and in parameter count.
+# The middle rung: between 1b and huge in dim and in parameter count.
 # n_layers*dim is
-# 16384, the product the normal shape carries, so large reproduces the normal
+# 16384, the product the 1b shape carries, so large reproduces the 1b
 # shape's parameter split exactly: 29% embedding tables, 71% layer stack. The
 # layer count is what buys that. At dim 4096 the 6753/D ratio is 1.65, so a
 # 1-layer model here would be 62% embedding table, and the benchmark would
@@ -268,12 +441,15 @@ LARGE = PiperShape(
     name="large",
     dim=4096,
     n_layers=4,
+    head_dim=64,
+    n_kv_heads=32,
+    num_experts=4,
     # UNVERIFIED. Nothing has measured this shape's logit rel_l2. The two
     # measured shapes fit rel_l2 = 5.5e-3 * sqrt(dim/1024) to within 7%
-    # (normal 5.5e-3 at dim 1024; huge 2.03e-2 at dim 12288 against 1.9e-2
+    # (1b 5.5e-3 at dim 1024; huge 2.03e-2 at dim 12288 against 1.9e-2
     # predicted), which puts dim 4096 near 1.2e-2. 3e-2 keeps the 2.46x margin
     # huge keeps over its own measurement. Two anchors cannot separate the
-    # width term from a depth term -- normal is 16 layers at dim 1024 and huge
+    # width term from a depth term -- 1b is 16 layers at dim 1024 and huge
     # is 1 layer at dim 12288 -- and this shape is 4 layers, so the estimate
     # is weaker here than the number alone suggests. Run
     # tools/megatron_parity_check.py --model-size large before any parity
@@ -282,7 +458,7 @@ LARGE = PiperShape(
 )
 
 # Above huge, and declared from arithmetic alone. n_layers*dim is 16384, so
-# giant carries the normal shape's parameter split, and the 6753/D ratio is
+# giant carries the 1b shape's parameter split, and the 6753/D ratio is
 # 0.41, so huge's one-layer argument holds with room to spare.
 #
 # NOTHING HAS MEASURED THIS SHAPE. No e2e scenario and no kernel scenario has
@@ -302,6 +478,9 @@ GIANT = PiperShape(
     name="giant",
     dim=16384,
     n_layers=1,
+    head_dim=64,
+    n_kv_heads=128,
+    num_experts=4,
     # UNVERIFIED, on the same sqrt(dim) law LARGE uses: dim 16384 predicts
     # about 2.4e-2, and 6e-2 keeps huge's 2.46x margin over it. The depth
     # caveat on LARGE does not apply here, because giant is one layer as huge
@@ -311,18 +490,123 @@ GIANT = PiperShape(
     parity_gate=6e-2,
 )
 
+# Piper 9B, verbatim. Every field matches examples/models/qwen3.py case
+# '9B' in the piper checkout.
+#
+# It is the first registered shape whose head geometry is not the 1B family's.
+# 32 query heads over 8 kv heads is 4:1 grouped-query attention, where 1B and
+# every synthetic shape run 2:1, so the fused qkv is 1.5x dim wide here rather
+# than 2x. It is also the first with 8 experts.
+#
+# VALIDATION RULE 7 IS UNTESTED AT 24 LAYERS. The rule identifies a compiled
+# block graph by its invocations per window, n_layers * profiler_active, which
+# is 120 here against the 80 every published regioned run has. Nobody has
+# matched 120 against a real trace. supports_block_regions is True, so a
+# regioned scenario will declare the regions and rule 7 will judge them.
+PIPER_9B = PiperShape(
+    name="9b",
+    dim=2048,
+    n_layers=24,
+    head_dim=64,
+    n_kv_heads=8,
+    num_experts=8,
+    # UNVERIFIED, on the same sqrt(dim) law LARGE and GIANT use: dim 2048
+    # predicts about 7.8e-3, and 2e-2 keeps huge's 2.46x margin over it. The
+    # depth caveat on LARGE applies here and more so -- this is 24 layers,
+    # further from both anchors than any other estimate in this file. Run
+    # tools/megatron_parity_check.py --model-size 9b before any parity claim,
+    # and --fp32-reference before you change this value.
+    parity_gate=2e-2,
+)
+
+# Piper 48B, verbatim. Every field matches examples/models/qwen3.py case
+# '48B' in the piper checkout.
+#
+# The first registered shape whose head_dim is not 64. n_heads stays 32 and
+# n_kv_heads stays 8, exactly as at 9B: piper widens the head and adds layers
+# and experts, and holds the head counts.
+#
+# It shares dim 4096 and moe_hidden_dim 14336 with the synthetic LARGE, and
+# differs in every remaining geometry value -- head_dim 128 against 64,
+# n_heads 32 against 64, n_kv_heads 8 against 32, n_layers 32 against 4,
+# num_experts 8 against 4. LARGE is 48B's width with the wrong head geometry
+# and half the experts. Do not read one as an approximation of the other.
+#
+# VALIDATION RULE 7 IS UNTESTED AT 32 LAYERS, for the reason given on 9B: the
+# window invocation count is 160 here.
+#
+# THIS SHAPE DOES NOT FIT ONE H200, AND IT IS NOT CLOSE. 47,685,316,608
+# parameters at titan's 8 B/param of state (params 2 + grads 2 + fused-AdamW
+# m,v 4) is 355 GiB, and at megatron's 10 B/param under graph mode it is 444
+# GiB, against a 139.81 GiB device -- 2.5x to 3.2x over, before a single
+# activation. GIANT is 2.8x smaller than this and already carries an OOM
+# warning. Do not launch a sweep at 48b on one GPU; it is registered so the
+# geometry is stated once and correctly, not because it is runnable here.
+# 9B is the plausible one: 69.5 GiB titan, 86.9 GiB megatron, both unmeasured.
+PIPER_48B = PiperShape(
+    name="48b",
+    dim=4096,
+    n_layers=32,
+    head_dim=128,
+    n_kv_heads=8,
+    num_experts=8,
+    # UNVERIFIED, on the same law: dim 4096 predicts about 1.1e-2, and 3e-2
+    # keeps huge's 2.46x margin. It is the same gate LARGE carries, which is
+    # the arithmetic agreeing with itself -- the law reads dim alone and the
+    # two shapes share a dim. Run tools/megatron_parity_check.py --model-size
+    # 48b before any parity claim, and --fp32-reference before you change
+    # this value.
+    parity_gate=3e-2,
+)
+
 # Declared smallest to largest by parameter count. The names do not carry the
 # order, so the declaration does.
 PIPER_SHAPES: dict[str, PiperShape] = {
-    shape.name: shape for shape in (NORMAL, LARGE, HUGE, GIANT)
+    shape.name: shape
+    for shape in (PIPER_1B, LARGE, PIPER_9B, HUGE, GIANT, PIPER_48B)
 }
+
+# Retired ``--model-size`` names, each mapped to the key that replaced it.
+#
+# ``normal`` was the 1B shape's name until it took the real model's name. It
+# stays accepted, and it must, because ``--resume`` compares the recorded
+# string against the requested one. Measured under ``out/`` on 2026-08-21:
+# 42 e2e manifests record ``"model_size": "normal"``, and 88 more carry no
+# ``model_size`` at all and are defined to resume as that shape. A bare
+# rename would refuse a resume that should succeed for 130 of the 144 e2e
+# runs on disk. (13 kernel manifests also record ``"normal"``, but
+# ``kernel-bench`` has no resume, so they are not part of this argument.)
+# Re-derive the counts rather than quoting them:
+#   grep -l '"model_size": "normal"' $(find out -name manifest.json)
+#
+# Aliases live here and not in ``PIPER_SHAPES``, so that ``PIPER_SHAPES``
+# enumerates the shapes and nothing else. The CLI's choice lists and the
+# tests both derive from it, and a shape counted twice would appear twice.
+MODEL_SIZE_ALIASES: dict[str, str] = {"normal": "1b"}
+
+# Every ``--model-size`` value a command accepts: the shapes, then the
+# aliases.
+MODEL_SIZE_CHOICES: tuple[str, ...] = tuple(PIPER_SHAPES) + tuple(
+    MODEL_SIZE_ALIASES
+)
+
+
+def canonical_size_name(name: str) -> str:
+    """The registry key a ``--model-size`` value names.
+
+    Total on purpose: an unknown name passes through unchanged. Callers that
+    compare two recorded values -- the resume predicate is the one that
+    matters -- must normalise both sides, and a manifest can record any
+    string at all. Rejecting an unknown size is ``shape_by_name``'s job.
+    """
+    return MODEL_SIZE_ALIASES.get(name, name)
 
 
 def shape_by_name(name: str) -> PiperShape:
     try:
-        return PIPER_SHAPES[name]
+        return PIPER_SHAPES[canonical_size_name(name)]
     except KeyError as error:
         raise ValueError(
             f"Unknown model size {name!r}. Available: "
-            + ", ".join(PIPER_SHAPES)
+            + ", ".join(MODEL_SIZE_CHOICES)
         ) from error

@@ -40,7 +40,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 
 # Small enough to run in a second, and every mechanism under test is the one a
 # GPU arm uses. dim 256 keeps the RMS reduction long enough to be meaningful.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 WORKLOAD = KernelWorkload(batch=2, seq_len=16)
 
 # The rel_l2 the declaration gates on. Measured on CPU at this shape: 1.6e-3.
@@ -177,7 +177,7 @@ class TitanExtractionTests(unittest.TestCase):
 
     def test_the_extraction_does_not_depend_on_the_layer_count(self) -> None:
         """The norm sits at the model level, so one exists at any depth."""
-        one_layer = PiperShape(name="one", dim=256, n_layers=1, vocab_size=64)
+        one_layer = PiperShape.derived(name="one", dim=256, n_layers=1, vocab_size=64)
         self.assertEqual(
             titan_final_norm_module(one_layer).weight.shape,
             titan_final_norm_module(TINY).weight.shape,

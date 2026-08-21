@@ -41,7 +41,11 @@ from benchmarks.execution.environment import (
 from benchmarks.execution.events import EventHandler, ProcessRunner, _emit
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
-from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+from benchmarks.models.piper_qwen3.shape import (
+    canonical_size_name,
+    MODEL_SIZE_CHOICES,
+    PIPER_SHAPES,
+)
 
 
 @dataclass(frozen=True)
@@ -168,7 +172,7 @@ def _resolve_run(
         )
         # Schema <= 8 manifests predate the model-size axis.
         model_size = (
-            str(existing_manifest.get("model_size", "normal"))
+            str(existing_manifest.get("model_size", "1b"))
             if request.model_size is None
             else request.model_size
         )
@@ -183,7 +187,7 @@ def _resolve_run(
         extra_args = request.extra_args or ()
         compile_mode = request.compile_mode or "default"
         ac_mode = request.ac_mode or "sac"
-        model_size = request.model_size or "normal"
+        model_size = request.model_size or "1b"
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
             f"unknown compile mode {compile_mode!r} (schema <= 7 manifests "
@@ -194,10 +198,14 @@ def _resolve_run(
         raise ValueError(
             f"unknown ac mode {ac_mode!r}. Available: {', '.join(AC_MODES)}"
         )
+    # Resolved once, here: everything downstream -- the manifest record, the
+    # --config-arg the training command carries, the resume comparison -- must
+    # see the canonical name rather than a retired alias.
+    model_size = canonical_size_name(model_size)
     if model_size not in PIPER_SHAPES:
         raise ValueError(
             f"unknown model size {model_size!r}. "
-            f"Available: {', '.join(PIPER_SHAPES)}"
+            f"Available: {', '.join(MODEL_SIZE_CHOICES)}"
         )
     shape = PIPER_SHAPES[model_size]
     scenario = replace(scenario, workload=workload)

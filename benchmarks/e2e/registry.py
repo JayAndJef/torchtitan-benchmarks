@@ -16,7 +16,7 @@ command construction (``benchmarks.e2e.launch``), validation
 
 from dataclasses import dataclass, replace
 
-from benchmarks.models.piper_qwen3.shape import NORMAL
+from benchmarks.models.piper_qwen3.shape import PIPER_1B
 from benchmarks.traces.schema import Region
 
 
@@ -181,7 +181,7 @@ def piper_block_regions(
 
 # The normal-size instantiation: 16 layers x 5 active steps = 80.
 PIPER_1B_REGIONS = piper_block_regions(
-    n_layers=NORMAL.n_layers, profiler_active=5
+    n_layers=PIPER_1B.n_layers, profiler_active=5
 )
 
 

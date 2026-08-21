@@ -32,7 +32,7 @@ from benchmarks.models.piper_qwen3.mcore_profiles import (
     profile_by_name,
     transformer_config_kwargs,
 )
-from benchmarks.models.piper_qwen3.shape import HUGE, NORMAL
+from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B
 
 # What benchmarks/models/piper_qwen3/megatron_model.py wrote inline before the
 # profile registry existed, at the normal shape. Every megatron number this
@@ -86,7 +86,7 @@ class BaseProfileExtractionTests(unittest.TestCase):
     def test_the_base_profile_builds_the_config_it_always_built(self) -> None:
         """The extraction is a refactor, so the payload must not move."""
         self.assertEqual(
-            transformer_config_kwargs(shape=NORMAL, profile=BASE),
+            transformer_config_kwargs(shape=PIPER_1B, profile=BASE),
             BASE_KWARGS_AT_NORMAL,
         )
 
@@ -99,7 +99,7 @@ class BaseProfileExtractionTests(unittest.TestCase):
         silent fall back to eager if a future rev only warns.
         """
         kwargs = transformer_config_kwargs(
-            shape=NORMAL,
+            shape=PIPER_1B,
             profile=BASE,
             cuda_graph_impl="local",
             cuda_graph_modules=("moe_router", "moe_preprocess"),
@@ -124,7 +124,7 @@ class BaseProfileExtractionTests(unittest.TestCase):
         a named set of zero modules rather than to use its own default.
         """
         kwargs = transformer_config_kwargs(
-            shape=NORMAL, profile=BASE, cuda_graph_impl="local"
+            shape=PIPER_1B, profile=BASE, cuda_graph_impl="local"
         )
         self.assertNotIn("cuda_graph_modules", kwargs)
         self.assertTrue(kwargs["use_te_rng_tracker"])
@@ -161,10 +161,10 @@ class BaseProfileExtractionTests(unittest.TestCase):
         leave a torch object inside the shared profile and contaminate every
         later build in that process.
         """
-        first = transformer_config_kwargs(shape=NORMAL, profile=BASE)
+        first = transformer_config_kwargs(shape=PIPER_1B, profile=BASE)
         first["activation_func"] = "mutated"
         first["injected"] = True
-        second = transformer_config_kwargs(shape=NORMAL, profile=BASE)
+        second = transformer_config_kwargs(shape=PIPER_1B, profile=BASE)
         self.assertEqual(second, BASE_KWARGS_AT_NORMAL)
         self.assertEqual(BASE.config_overrides["activation_func"], "silu")
 
@@ -179,8 +179,8 @@ class BaseProfileExtractionTests(unittest.TestCase):
         not raise -- the derivation would take its dense branch and build a
         model with no experts at all, under the MoE label.
         """
-        at_normal = transformer_config_kwargs(shape=NORMAL, profile=BASE)
-        self.assertEqual(at_normal["num_moe_experts"], NORMAL.num_experts)
+        at_normal = transformer_config_kwargs(shape=PIPER_1B, profile=BASE)
+        self.assertEqual(at_normal["num_moe_experts"], PIPER_1B.num_experts)
         self.assertTrue(at_normal["moe_grouped_gemm"])
         self.assertTrue(at_normal["qk_layernorm"])
         # moe_layer_freq drives the dense/MoE pattern; 1 means every layer.
@@ -211,7 +211,7 @@ class ProfileValidationTests(unittest.TestCase):
             config_overrides={"moe_grouped_gemm": False},
         )
         self.assertFalse(
-            transformer_config_kwargs(shape=NORMAL, profile=profile)[
+            transformer_config_kwargs(shape=PIPER_1B, profile=profile)[
                 "moe_grouped_gemm"
             ]
         )
@@ -291,7 +291,7 @@ class ProfileValidationTests(unittest.TestCase):
             description="pinned",
             config_overrides={"attention_backend": "fused"},
         )
-        kwargs = transformer_config_kwargs(shape=NORMAL, profile=profile)
+        kwargs = transformer_config_kwargs(shape=PIPER_1B, profile=profile)
         self.assertEqual(kwargs["attention_backend"], "fused")
         self.assertIn("attention_backend", ATTENTION_BACKEND_FIELDS)
         self.assertNotIn("attention_backend", BASE.config_overrides)

@@ -117,7 +117,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--burst-k", type=int, default=16)
     parser.add_argument("--warmup-calls", type=int, default=30)
     parser.add_argument("--burst", action="store_true")
-    parser.add_argument("--model-size", default="normal")
+    parser.add_argument("--model-size", default="1b")
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--max-seq-len", type=int, default=None)

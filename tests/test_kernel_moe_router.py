@@ -76,7 +76,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 
 # Small enough to run in milliseconds, wide enough that the gate GEMM reduces
 # over a real row and the top-2 of 4 selection is a real selection.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=16)
 TOKENS = TINY_WORKLOAD.batch * TINY_WORKLOAD.seq_len
 
