@@ -399,21 +399,33 @@ ATTN_RESIDUAL_NORM = KernelSpan(
 # tie would select a different expert. What the fusion claims is that it
 # changes the backward implementation and not the arithmetic, so the arm it
 # has to match is the unfused one.
+# ``norm_out`` is the fused norm's OWN forward output, and both arms return
+# it as an intermediate. It is here because it is the arbiter: ``out`` is the
+# end of six cuts, so a difference in it can come from the norm, the router's
+# top-k decision, the permutation, the grouped GEMMs or the unpermute, and
+# nothing downstream separates them.
 FUSED_RESIDUAL_RMSNORM_GATE = CorrectnessCheck(
     kind="tolerance",
     reference="mcore/base",
-    outputs=("out", "x_grad", "norm_weight_grad"),
+    outputs=("norm_out", "out", "x_grad", "norm_weight_grad"),
     max_rel_l2=2e-2,
 )
 
 # Informational, and it is evidence either way. The fusion is documented as
-# backward-only, so the forward output should be the unfused one bit for
-# bit; a difference here says the forward changed too, which no part of this
-# declaration expects.
+# backward-only, so the norm's forward output should be the unfused one bit
+# for bit. It is checked on ``norm_out`` and NOT on ``out``: a bitwise
+# difference at the end of six cuts would say only that something in the
+# range changed, which is the inference this check exists to avoid.
+#
+# The fused path is not ``te.pytorch.RMSNorm.forward``. It is a
+# ``te.pytorch.ops.Sequential`` of ``MakeExtraOutput`` and an ops-API
+# ``RMSNorm`` (``extensions/transformer_engine.py:960``), so the two arms may
+# run different kernels for the same arithmetic and a bitwise difference is
+# not by itself a defect. That is why it does not gate.
 FUSED_RESIDUAL_RMSNORM_FORWARD_IS_UNCHANGED = CorrectnessCheck(
     kind="bitwise",
     reference="mcore/base",
-    outputs=("out",),
+    outputs=("norm_out",),
     informational=True,
 )
 
@@ -464,6 +476,18 @@ FFN_NORM_TO_MOE_RESIDUAL = KernelSpan(
             "select a different expert. The fusion's claim is that it changes "
             "the backward implementation and not the arithmetic, so the arm "
             "it must match is the unfused one, and mcore/base is the gate. "
+            "HOW TO READ A LARGE FAILURE OF THAT GATE, because one is "
+            "possible for a reason that is not a defect. The gate covers "
+            "norm_out, which is the fused norm's OWN forward output, and "
+            "norm_out is the arbiter -- read it first, always. If norm_out "
+            "agrees BITWISE, the forward is unchanged and any difference in "
+            "out or x_grad is a real defect in the backward. If norm_out "
+            "differs but stays inside 2e-2, the forward moved a little, and "
+            "a little is enough: this range encloses a top-k router, so a "
+            "changed norm output can flip an expert selection, after which "
+            "out and x_grad differ by a LARGE margin and no fp64 reference "
+            "exists to arbitrate. If norm_out itself fails the tolerance, "
+            "the norm is wrong and nothing downstream needs reading. "
             "THE SPAN-VERSUS-PARTS ROW CARRIES A BIAS AND IT FAVOURS THE "
             "SPAN, AND THIS IS THE LONGEST RANGE DECLARED, SO IT CARRIES THE "
             "MOST OF IT: the parts total pays one host dispatch chain per "

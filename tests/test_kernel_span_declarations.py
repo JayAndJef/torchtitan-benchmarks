@@ -510,18 +510,26 @@ class FfnNormToMoeResidualTests(unittest.TestCase):
     def test_the_forward_output_check_is_informational(self) -> None:
         """Evidence either way, and it gates nothing.
 
-        The fusion is documented as backward-only, so the forward output
-        should be the unfused one bit for bit. A difference says the forward
-        changed too, which no part of this declaration expects -- but a
-        bitwise check between two module classes is not a thing to fail a
-        run on.
+        The fusion is documented as backward-only, so the norm's forward
+        output should be the unfused one bit for bit. The fused path is a
+        ``te.pytorch.ops.Sequential``, not ``te.pytorch.RMSNorm.forward``,
+        so the two arms may run different kernels for the same arithmetic
+        and a bitwise difference is not by itself a defect.
         """
         fused = self.span().arm("mcore/fused_residual_rmsnorm")
         bitwise = next(
             check for check in fused.correctness if check.kind == "bitwise"
         )
         self.assertTrue(bitwise.informational)
-        self.assertEqual(bitwise.outputs, ("out",))
+        # On the norm's own output, not on the end of six cuts. A bitwise
+        # difference in ``out`` could come from the router's top-k, the
+        # permutation, the grouped GEMMs or the unpermute, so it would not
+        # support the inference this check is written to make.
+        self.assertEqual(bitwise.outputs, ("norm_out",))
+        tolerance = next(
+            check for check in fused.correctness if check.kind == "tolerance"
+        )
+        self.assertIn("norm_out", tolerance.outputs)
 
     def test_it_needs_the_balanced_routing_the_moe_cuts_need(self) -> None:
         self.assertTrue(self.span().measurement.requires_balanced_routing)
