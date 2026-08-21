@@ -57,11 +57,22 @@ from benchmarks.artifacts.summaries import SampleSummary
 # of ``kind``. It was ``"kernel"`` on every file, and every file was a
 # scenario -- so the word named the family *and* one member of it. That is
 # one word with two meanings, which is how ``n`` and ``warmup`` went wrong at
-# schema 3. A scenario file now says ``"kernel_scenario"`` and a span file
-# says ``"kernel_span"``. The concrete wrong reading it prevents: a tool that
-# walks out/*/kernels/*/*/results.json and keys on ``kind == "kernel"`` would
-# sum a span and the scenarios it replaces as independent measurements,
-# double-counting the same work.
+# schema 3.
+#
+# The concrete wrong reading it prevents: a **recursive** walk of ``out/``
+# -- ``rglob("results.json")``, ``find out -name results.json``, or any
+# reader handed a path -- meets both shapes and has ``kind`` as its only way
+# to tell them apart. Keyed on ``kind == "kernel"`` it would take a span
+# total for a scenario total and sum it beside the scenarios the span
+# replaces, double-counting the same work.
+#
+# **Not** because a span escapes a glob. A span writes one directory deeper,
+# under ``out/<ts>/kernels/spans/<name>/<hw>/``, so the shallow
+# ``out/*/kernels/*/*/results.json`` pattern cannot reach it -- that
+# separation is what the directory is for
+# (``benchmarks.kernel.runner``), and it is a second guard rather than the
+# reason for this one. The rename is what protects every reader that does
+# not use that pattern.
 #
 # Rejected: keep ``"kernel"`` for scenarios and add ``"kernel_span"``. That
 # lets a reader testing ``kind == "kernel"`` keep working while silently

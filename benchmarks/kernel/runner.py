@@ -698,6 +698,10 @@ def execute_kernel_run(
         # out/*/kernels/*/*/ over the scenarios does not sweep up a span
         # beside them: a span total and a scenario total answer different
         # questions and must not be pooled by a path pattern.
+        #
+        # This guards the shallow-glob reader only. A recursive walk meets
+        # both shapes whatever the directory is, and what separates them
+        # there is the "kind" value the results file carries.
         root = BENCH_DIR / "out" / timestamp / "kernels"
         if unit.span is not None:
             root = root / "spans"

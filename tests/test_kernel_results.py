@@ -268,9 +268,12 @@ class KernelResultsTests(unittest.TestCase):
 
         self.assertEqual(raw["schema_version"], KERNEL_RESULTS_SCHEMA_VERSION)
         # Schema 7 renames the value. "kernel" named the family and one
-        # member of it, so a walk of out/*/kernels/*/*/results.json keying on
-        # it would sum a span and the scenarios it replaces as independent
-        # measurements.
+        # member of it, so a RECURSIVE walk of out/ -- which meets both
+        # shapes and has "kind" as its only way to tell them apart -- would
+        # take a span total for a scenario total and sum it beside the
+        # scenarios that span replaces. A span also writes one directory
+        # deeper, but that separation guards only the readers that use the
+        # shallow glob.
         self.assertEqual(raw["kind"], "kernel_scenario")
         self.assertEqual(loaded.model_size, result.model_size)
         self.assertEqual(loaded.workload, result.workload)
