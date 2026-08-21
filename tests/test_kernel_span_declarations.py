@@ -31,7 +31,7 @@ from benchmarks.kernel.spans import KERNEL_SPANS, _validate_roster
 
 # Every span declared at this rev, in declaration order. The pin is the
 # point: a span added without a line here is a span nobody described.
-DECLARED_SPANS = ("expert_combine",)
+DECLARED_SPANS = ("expert_combine", "attn_residual_norm")
 
 # How many enclosed scenarios each range holds, spelled as the description
 # spells it. The dispatch-chain bias grows with this number, so a reader must
@@ -284,6 +284,94 @@ class ExpertCombineTests(unittest.TestCase):
         )
         self.assertTrue(self.span().arm("titan").compiled)
         self.assertIsNone(self.span().arm("titan").eager_reason)
+
+
+
+class AttnResidualNormTests(unittest.TestCase):
+    """6+7+8: the cut that lands on the side the residual add fuses to."""
+
+    def span(self) -> KernelSpan:
+        return KERNEL_SPANS["attn_residual_norm"]
+
+    def test_it_replaces_the_projection_the_add_and_the_next_norm(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.span().scenarios,
+            ("attn_out_proj", "attn_residual", "ffn_norm"),
+        )
+
+    def test_each_arm_replaces_its_own_engine_at_all_three_cuts(
+        self,
+    ) -> None:
+        for arm in ("mcore/base", "titan"):
+            with self.subTest(arm=arm):
+                self.assertEqual(
+                    [part for _, part in self.span().parts_for(arm)],
+                    [arm] * 3,
+                )
+
+    def test_the_range_ends_at_the_norm_the_add_fuses_into(self) -> None:
+        """A 6+7 span would cut on the wrong side of the residual add.
+
+        TorchTitan's add fuses FORWARD, into the prologue of the next norm,
+        and not backward into the epilogue of the projection GEMM. Ending
+        the range at ``attn_residual`` leaves both engines emitting a GEMM
+        and then a separate add, which is the shape that puts a ratio near
+        1.0 -- and it is exactly why ``attn_residual`` alone publishes no
+        cross-engine row.
+        """
+        self.assertEqual(self.span().scenarios[-1], "ffn_norm")
+        self.assertEqual(
+            [
+                pair
+                for pair in KERNEL_SCENARIOS["attn_residual"].comparison_pairs()
+                if crosses_engines(pair)
+            ],
+            [],
+        )
+
+    def test_it_publishes_the_cross_engine_row_the_middle_cut_declines(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.span().comparison_pairs(), (("titan", "mcore/base"),)
+        )
+
+    def test_the_gate_crosses_the_engines(self) -> None:
+        titan = self.span().arm("titan")
+        references = [check.reference for check in titan.correctness]
+        self.assertIn("mcore/base", references)
+        self.assertIn("fp64", references)
+
+    def test_the_two_weights_carry_distinct_gradient_names(self) -> None:
+        """``weight_grad`` names one tensor, and this cut crosses two.
+
+        ``attn_out_proj`` and ``ffn_norm`` each gate a ``weight_grad``. A
+        span that reused the name would gate whichever of the two the
+        builder returned, and the other would go unchecked.
+        """
+        outputs = self.span().arm("titan").correctness[0].outputs
+        self.assertIn("proj_weight_grad", outputs)
+        self.assertIn("norm_weight_grad", outputs)
+        self.assertNotIn("weight_grad", outputs)
+
+    def test_the_megatron_arm_is_eager_where_it_is_timed_from(self) -> None:
+        """And its middle part is not, which is not a contradiction.
+
+        ``attn_residual/mcore/base`` declares ``compiled=True`` because its
+        timed closure calls ``bias_dropout_add_fused_train`` directly, and
+        that function IS megatron's ``torch.compile`` wrapper. Here the same
+        function is one call inside a plain Python closure, so the arm is
+        eager at its entry point while the region inside it still compiles.
+        The field describes the entry point, and the treatment of the region
+        is the same on both sides of the comparison.
+        """
+        arm = self.span().arm("mcore/base")
+        self.assertFalse(arm.compiled)
+        self.assertTrue(
+            KERNEL_SCENARIOS["attn_residual"].arm("mcore/base").compiled
+        )
 
 
 if __name__ == "__main__":

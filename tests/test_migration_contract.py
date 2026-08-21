@@ -986,7 +986,10 @@ TEST_CENSUS = {
     # part arms and their modes, the builder module rule, and the two
     # captions every span owes its reader) and 6 for expert_combine, whose
     # cross-engine row is the reason the span type exists at all.
-    "test_kernel_span_declarations": 17,
+    # +7 for attn_residual_norm, whose range is 6+7+8 because titan's
+    # residual add fuses FORWARD into the next norm's prologue -- a 6+7
+    # span would cut on the wrong side and land at 1.0.
+    "test_kernel_span_declarations": 24,
     # The per-arm build probe. requires_gcc_toolset answers a question about
     # the HOST; KernelArm.requirement answers one about this shape and this
     # workload, which is what a sequence sweep needs and what an arm that
@@ -1220,7 +1223,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1065
+TEST_CENSUS_TOTAL = 1072
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

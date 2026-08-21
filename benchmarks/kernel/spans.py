@@ -210,9 +210,160 @@ EXPERT_COMBINE = KernelSpan(
 )
 
 
+ATTN_RESIDUAL_NORM_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="fp64",
+    outputs=(
+        "out",
+        "attn_out_grad",
+        "residual_grad",
+        "proj_weight_grad",
+        "norm_weight_grad",
+    ),
+    max_rel_l2=2e-2,
+)
+
+# Two weights cross this cut, so neither may be called ``weight_grad``:
+# ``attn_out_proj`` and ``ffn_norm`` each name one that way, and a span that
+# reused the name would publish a gate over whichever of the two the builder
+# happened to return.
+ATTN_RESIDUAL_NORM_CROSS_ARM = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=ATTN_RESIDUAL_NORM_GATE.outputs,
+    max_rel_l2=2e-2,
+)
+
+
+ATTN_RESIDUAL_NORM = KernelSpan(
+    measurement=KernelScenario(
+        name="attn_residual_norm",
+        description=(
+            "The attention output projection, the residual add after it and "
+            "the norm in front of the MoE block, as ONE cut, cross-engine: "
+            "megatron-core's linear_proj, self_attn_bda and "
+            "pre_mlp_layernorm against TorchTitan's self.wo(...), "
+            "x + attention(...) and self.ffn_norm(x). Megatron needs no "
+            "coarsening to meet it -- those are three separate submodules. "
+            "THE RANGE IS 6+7+8 AND NOT 6+7, AND THAT IS THE WHOLE POINT. "
+            "TorchTitan's residual add fuses FORWARD, into the prologue of "
+            "the next norm, and not backward into the epilogue of the "
+            "projection GEMM: qwen3/model.py:60 writes "
+            "x = x + self.attention(self.attention_norm(x), ...) and :63 "
+            "immediately consumes it as self.ffn_norm(x), and Inductor "
+            "cannot fold an elementwise add of a DIFFERENT tensor into a "
+            "GEMM epilogue in the general case. A 6+7 span therefore cuts "
+            "on the wrong side: both engines emit a GEMM and then a "
+            "separate add, the ratio lands near 1.0, and it lands there for "
+            "the same reason attn_residual alone declares no cross-engine "
+            "row. "
+            "THE LAYOUT OP BEFORE THE PROJECTION IS EXCLUDED ON BOTH SIDES, "
+            "and the two excluded operations are not the same object: "
+            "titan's is a materializing contiguous() copy, because "
+            "FlexAttention returns a transposed view, and megatron's is a "
+            "free reshape. This span inherits attn_out_proj's exclusion, so "
+            "the titan side is short that copy exactly as a cross-engine "
+            "sum over the three scenarios is. "
+            "TE NORMS RUN THROUGH THE cuDNN BACKEND here: "
+            "NVTE_NORM_FWD_USE_CUDNN and NVTE_NORM_BWD_USE_CUDNN are set "
+            "because TE's native RMSNorm kernels fail to launch on this "
+            "box, so the megatron number is not TE's fastest norm and must "
+            "not be published as 'megatron's norm'. "
+            "COMPILE TREATMENT: the megatron arm is eager at the point it "
+            "is timed from and the TorchTitan arm runs under "
+            "torch.compile(fullgraph=True). Note that attn_residual's own "
+            "mcore/base arm declares compiled=True, because ITS timed "
+            "closure calls bias_dropout_add_fused_train directly and that "
+            "function is the torch.compile wrapper; here the same function "
+            "is one call inside a plain Python closure. The treatment of "
+            "the region is identical -- only the field differs, because the "
+            "field describes the entry point. "
+            "THE SPAN-VERSUS-PARTS ROW CARRIES A BIAS AND IT FAVOURS THE "
+            "SPAN: the parts total pays one host dispatch chain per "
+            "enclosed scenario -- three here -- and the span pays one, and "
+            "roughly 85% of a kernel number in this repository is host "
+            "dispatch rather than device time. This range is longer than "
+            "expert_combine's, so more of any gain below 1.0 is the two "
+            "chains the harness stopped paying. "
+            "READ THE TWO ROWS AS TWO DIFFERENT STATISTICS. The titan "
+            "against mcore/base row is a within-span comparison, measured "
+            "in one block-major sweep and PAIRED. The span against the "
+            "parts sum is UNPAIRED -- every worker of all three enclosed "
+            "scenarios separates a span replicate from the part replicate "
+            "that shares its index -- so its interval is published as "
+            "unpaired_ratio_ci_* and may never be set beside a scenario "
+            "interval as the same quantity."
+        ),
+        inputs_builder=(
+            "benchmarks.kernel.operations.attn_residual_norm"
+            ":attn_residual_norm_inputs"
+        ),
+        reference_builder=(
+            "benchmarks.kernel.operations.attn_residual_norm"
+            ":attn_residual_norm_reference"
+        ),
+        arms=(
+            KernelArm(
+                name="mcore/base",
+                description=(
+                    "megatron-core off a real GPTModel: TERowParallelLinear, "
+                    "then self_attn_bda, then pre_mlp_layernorm as a "
+                    "transformer_engine.pytorch.RMSNorm through the cuDNN "
+                    "norm backend. Three submodules called in turn, as "
+                    "TransformerLayer.forward calls them"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.attn_residual_norm"
+                    ":build_attn_residual_norm_mcore_base"
+                ),
+                modes=("forward", "forward_backward"),
+                compiled=False,
+                eager_reason=(
+                    "megatron compiles no whole transformer layer. The "
+                    "@jit_fuser bias_dropout_add_fused_train inside the "
+                    "closure still compiles as its own region, which is "
+                    "megatron's choice and not the harness's"
+                ),
+                correctness=(ATTN_RESIDUAL_NORM_GATE,),
+            ),
+            KernelArm(
+                name="titan",
+                description=(
+                    "TorchTitan under torch.compile(fullgraph=True): wo, "
+                    "the residual add and ffn_norm in one graph, which is "
+                    "the scope apply_compile gives them end to end and the "
+                    "scope in which the add folds into the norm's prologue"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.attn_residual_norm"
+                    ":build_attn_residual_norm_titan"
+                ),
+                modes=("forward", "forward_backward"),
+                compiled=True,
+                correctness=(
+                    ATTN_RESIDUAL_NORM_GATE,
+                    ATTN_RESIDUAL_NORM_CROSS_ARM,
+                ),
+            ),
+        ),
+        baseline_arm="mcore/base",
+        comparisons=(("titan", "mcore/base"),),
+    ),
+    scenarios=("attn_out_proj", "attn_residual", "ffn_norm"),
+    parts=(
+        SpanParts(
+            arm="mcore/base",
+            parts=("mcore/base", "mcore/base", "mcore/base"),
+        ),
+        SpanParts(arm="titan", parts=("titan", "titan", "titan")),
+    ),
+)
+
+
 KERNEL_SPANS: dict[str, KernelSpan] = {
     span.name: span for span in (
         EXPERT_COMBINE,
+        ATTN_RESIDUAL_NORM,
     )
 }
 
