@@ -16,6 +16,16 @@ honest about what happened, and because ``_resume_mismatches`` compares
 ``megatron_git_rev`` verbatim, an "unavailable" value is still a resume
 boundary rather than a hole in one.
 
+``cudnn_torch_build`` and ``cudnn_loader_resolves`` are recorded separately
+and on purpose. TransformerEngine's ``DT_NEEDED`` entries carry no
+``RUNPATH``, and torch loads its own cuDNN lazily, so on a host that ships
+cuDNN in a system directory the loader binds that copy for TE rather than
+the wheel torch is pinned against. Which cuDNN a megatron arm runs is
+therefore decided by the host, not by the pin, and until 2026-08-20 no
+manifest recorded it. The two fields are collected but **not** yet compared
+by ``_resume_mismatches``: recording the boundary and gating on it are
+separate decisions, and older manifests carry neither field.
+
 Separate from ``environment.py`` because it changes for a different reason. A
 new entry here is a manifest-schema decision -- ``megatron_git_rev`` and
 ``te_version`` were both added that way, and every one of these fields is
@@ -51,6 +61,45 @@ def _te_version() -> str:
         return importlib.metadata.version("transformer-engine")
     except importlib.metadata.PackageNotFoundError:
         return "unavailable: transformer-engine not installed"
+
+
+_CUDNN_LOADER_PROBE = """
+import ctypes, ctypes.util, os
+name = ctypes.util.find_library("cudnn") or "libcudnn.so.9"
+try:
+    ctypes.CDLL(name)
+except OSError as error:
+    print(f"unavailable: {error}")
+    raise SystemExit
+for line in open("/proc/self/maps"):
+    if "libcudnn.so" in line:
+        print(os.path.realpath(line.rsplit(" ", 1)[-1].strip()))
+        break
+else:
+    print("unavailable: libcudnn not mapped after load")
+"""
+
+
+def _cudnn_torch_build() -> str:
+    """The cuDNN version torch was compiled against.
+
+    Read through ``getCompileVersion`` rather than ``backends.cudnn.version``,
+    because the latter raises whenever the resolved runtime is older, which is
+    the very case this field exists to record.
+    """
+    return run_text(
+        [
+            sys.executable,
+            "-c",
+            "import torch; print('.'.join(str(part) for part in "
+            "torch._C._cudnn.getCompileVersion()))",
+        ]
+    ).strip()
+
+
+def _cudnn_loader_resolves() -> str:
+    """The cuDNN the dynamic loader binds, which is the one TE gets."""
+    return run_text([sys.executable, "-c", _CUDNN_LOADER_PROBE]).strip()
 
 
 def run_text(command: list[str], *, cwd: Path | None = None) -> str:
@@ -93,6 +142,8 @@ def hardware_metadata(
         # even for pure-titan scenarios.
         "megatron_git_rev": _megatron_git_rev(),
         "te_version": _te_version(),
+        "cudnn_torch_build": _cudnn_torch_build(),
+        "cudnn_loader_resolves": _cudnn_loader_resolves(),
     }
     if hardware_label != "auto":
         return hardware_label, metadata

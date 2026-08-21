@@ -1127,6 +1127,13 @@ TEST_CENSUS = {
     # side stopped defaulting to the normal shape.
     "test_model_shape": 26,
     "test_profile_regions": 19,
+    # New with the cuDNN identity fields. TransformerEngine binds the
+    # loader's cuDNN while torch expects the wheel's, so which cuDNN a
+    # megatron arm ran is a property of the host and was recorded
+    # nowhere until 2026-08-20. 4 pin that both fields reach the
+    # manifest separately, and 2 pin that collecting them reports a
+    # diagnostic instead of failing the run.
+    "test_provenance": 6,
     "test_runner": 41,
     "test_run_validation": 1,
     "test_swiglu": 4,
@@ -1141,7 +1148,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 965
+TEST_CENSUS_TOTAL = 971
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
