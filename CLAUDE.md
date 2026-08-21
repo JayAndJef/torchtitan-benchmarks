@@ -22,7 +22,6 @@ that wins in isolation can be irrelevant once Inductor fuses the graph around
 it. Never present a span total as a scenario total either: the two answer
 different questions, and the span statistic is not the scenario statistic.
 
-
 ## Environment
 
 One environment, owned by this repo. There is no `TITAN_DIR` and no
@@ -393,7 +392,6 @@ directories under `out/` and every published number. Every arm in both
 registries carries a one-line `description`; `./run_bench.sh scenarios` prints
 them and manifests record them.
 
-
 The five titan scenarios share `PIPER_1B_REGIONS`: `forward_block` and
 `backward_block`, each 80 invocations per window (16 layers x 5 active
 steps). `piper1b_megatron` declares no regions (region pooling rides on
@@ -488,7 +486,6 @@ component label in "Total kernel time cannot rank arms that differ in one
 component". The label there is the removed trace classifier's, and it names
 no scenario.)
 
-
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios
 do not. The megatron scenario's `_pretokenized` configs swap the dataloader
@@ -542,7 +539,6 @@ neither field. So `--resume` will still continue a run across a cuDNN change.
 Cite the fields; do not assume a comparison is safe because resume allowed
 it. Every megatron number this repo has published was taken on the host's
 cuDNN, whatever that was, and no manifest before 2026-08-20 says which.
-
 
 ### CPU pinning
 
@@ -664,7 +660,6 @@ fusion, rather than against unfused experts -- so the Piper arms are no longer
 credited with a fusion upstream already ships. `attention_core` is the one row
 whose titan arms measure the same cut the retired scenario measured.
 
-
 Remember also that a kernel-isolation number is **not device time**: for small
 kernels it is dominated by host dispatch, and `--burst` amortization does not
 remove that (see "Method" under Kernel-isolation benchmarks). A kernel-speed
@@ -677,7 +672,6 @@ declarations at this rev and nothing more: **no `results.json` under `out/`
 contains the string `mcore/`**, so there is no cross-engine component number
 to cite yet. Only one of the 16, `attention_core`, has ever been built at all;
 see "No cross-engine arm has produced a number" below.
-
 
 Measured three times on 2026-08-09, twice producing a published claim that
 had to be retracted:
@@ -832,7 +826,6 @@ the residency change: `run_correctness_pass` now builds one arm at a time and
 drops it before the next, so the pass is bounded by the largest single arm
 rather than by their sum. **`expert_mlp` at `huge` is untested.** Measure it
 before reporting anything about it.
-
 
 ### Scenarios and arms
 
@@ -989,52 +982,8 @@ worth measuring. Gate the arms with `max_rel_l2` only: attention is a
 reduction, and this file's rule against max/ULP metrics on reductions
 applies.
 
-#### The correctness pass needs a per-arm split on some hosts
-
-`run_correctness_pass` gates every arm of a scenario in **one** interpreter,
-because a gate needs both sides at once. On this box that is what
-`attention_core` cannot do without a workaround.
-
-TransformerEngine's `libtransformer_engine.so` needs `libcudnn.so.9` and
-carries no `RUNPATH`, and torch loads its own cuDNN **lazily**. So after
-`import transformer_engine.pytorch` the loader has bound the host's cuDNN,
-not the wheel's. `torch.backends.cudnn.version()` then raises, because torch
-requires `runtime_minor >= compile_minor`. `torch.nn.attention.varlen` asks
-for that version, and the answer is `lru_cache`d, so one raise is enough:
-torchtitan's `VarlenAttention` cannot build in a process that has imported
-TE. On this host torch expects **9.24.0** and the loader binds `/usr/lib64`
-**9.23.2**, which `rpm -qf` names as `libcudnn9-cuda-12` -- **a CUDA 12 build
-inside a cu13 process**.
-
-cuDNN is the only library that splits this way: `libcublas`, `libcublasLt`,
-`libcudart` and `libnccl` all resolve to the venv wheels in the same process,
-because torch loads those eagerly. **The blocker is the correctness pass
-alone.** A timing worker holds one arm, so TE never sits beside the varlen
-path there.
-
-Two workarounds exist and they are **not** equivalent, so say which one a
-number came from:
-
-- `PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1` leaves TE on 9.23.2 -- the same
-  cuDNN every published megatron number used -- and only stops torch refusing
-  to answer. This is what the first `attention_core` gate pass used. Note
-  the flag reaches **every** worker, because the child environment is built
-  from `os.environ`, so a shell that exports it publishes every number under
-  it.
-- Prepending the venv's `nvidia/cudnn/lib` to `LD_LIBRARY_PATH` gives the
-  whole process the pinned 9.24.0 and matches the pin -- but it **moves TE
-  off 9.23.2 and therefore moves every megatron measurement in the repo**.
-
-Do **not** initialize torch's cuDNN before TE imports as a third option: TE
-then runs a 9.24.0 graph engine against 9.23.2 ops, which nobody tests.
-
-A per-arm correctness split would remove the need for either, because TE and
-the varlen path would never share an interpreter. Fixing the environment
-removes it too. Neither is done; the choice is recorded rather than made.
-
 `*` = scenario baseline. `benchmarks/kernel/registry.py` is the registry: add an
 arm by appending a `KernelArm` with a builder path, and a scenario by appending
-
 a `KernelScenario` (both declared by `benchmarks/kernel/schema.py`). Builders
 live in that family's module under `benchmarks/kernel/operations/`, one per
 scenario and named after it (spelled `benchmarks.kernel.operations.<scenario>:<fn>`
@@ -1078,7 +1027,6 @@ builder's exception instead was rejected: a `try` around the build turns a
 bug into a skipped arm, shortens the roster for a reason nobody declared, and
 still exits zero.
 
-
 **A builder path is a string, and must stay one.** `benchmarks/kernel/engine/`
 imports `schema.py`, never `registry.py`, and never an `operations/` module:
 arms reach it only as already-resolved `BuiltArm` values via `resolve_symbol`.
@@ -1089,6 +1037,49 @@ dependencies into the engine's import graph, which is what per-arm process
 isolation cannot have. `tests/test_import_boundaries.py` section 3 asserts both
 halves; `tests/test_migration_contract.py` pins each scenario's builders to its
 own family module.
+
+#### The correctness pass needs a per-arm split on some hosts
+
+`run_correctness_pass` gates every arm of a scenario in **one** interpreter,
+because a gate needs both sides at once. On this box that is what
+`attention_core` cannot do without a workaround.
+
+TransformerEngine's `libtransformer_engine.so` needs `libcudnn.so.9` and
+carries no `RUNPATH`, and torch loads its own cuDNN **lazily**. So after
+`import transformer_engine.pytorch` the loader has bound the host's cuDNN,
+not the wheel's. `torch.backends.cudnn.version()` then raises, because torch
+requires `runtime_minor >= compile_minor`. `torch.nn.attention.varlen` asks
+for that version, and the answer is `lru_cache`d, so one raise is enough:
+torchtitan's `VarlenAttention` cannot build in a process that has imported
+TE. On this host torch expects **9.24.0** and the loader binds `/usr/lib64`
+**9.23.2**, which `rpm -qf` names as `libcudnn9-cuda-12` -- **a CUDA 12 build
+inside a cu13 process**.
+
+cuDNN is the only library that splits this way: `libcublas`, `libcublasLt`,
+`libcudart` and `libnccl` all resolve to the venv wheels in the same process,
+because torch loads those eagerly. **The blocker is the correctness pass
+alone.** A timing worker holds one arm, so TE never sits beside the varlen
+path there.
+
+Two workarounds exist and they are **not** equivalent, so say which one a
+number came from:
+
+- `PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1` leaves TE on 9.23.2 -- the same
+  cuDNN every published megatron number used -- and only stops torch refusing
+  to answer. This is what the first `attention_core` gate pass used. Note
+  the flag reaches **every** worker, because the child environment is built
+  from `os.environ`, so a shell that exports it publishes every number under
+  it.
+- Prepending the venv's `nvidia/cudnn/lib` to `LD_LIBRARY_PATH` gives the
+  whole process the pinned 9.24.0 and matches the pin -- but it **moves TE
+  off 9.23.2 and therefore moves every megatron measurement in the repo**.
+
+Do **not** initialize torch's cuDNN before TE imports as a third option: TE
+then runs a 9.24.0 graph engine against 9.23.2 ops, which nobody tests.
+
+A per-arm correctness split would remove the need for either, because TE and
+the varlen path would never share an interpreter. Fixing the environment
+removes it too. Neither is done; the choice is recorded rather than made.
 
 #### The GB/s and x_floor columns are not always read against 1.0
 
@@ -1142,7 +1133,6 @@ materializes an fp32 copy. **Read no bandwidth achievement off the
 `moe_combine` titan row.**
 
 ### Spans
-
 
 **A span is an implementation that fuses across a scenario cut.** It belongs
 to no single scenario, so it is declared over an **ordered scenario range**,
@@ -1217,9 +1207,7 @@ Three things about a span number that must be said next to it:
    span arm carries a parts total: that file would state the span's own
    number and no claim about it, which is a scenario wearing a span's name.
 
-
 ### Method
-
 
 - Module-scope arms (the three titan rope modules, `expert_mlp`'s four titan
   arms, `qkv_prep`'s two) run under `torch.compile(fullgraph=True)`, because
@@ -1447,7 +1435,6 @@ Three things about a span number that must be said next to it:
   different facts, and the reason string is what separates them. The skip of
   an *anchor* is the exception that costs the scenario.
 
-
 ### Startup cost
 
 **Every timing number in this section was measured on a contended box**
@@ -1510,7 +1497,6 @@ condition: more than a 2x end-to-end speedup on an idle box. Nobody has run
 that measurement. If the verified speedup is under 2x, remove the flag. The
 measurement it rests on was taken on the retired `qkv` scenario, on a
 contended box, and may not be cited.
-
 
 **Two architectural claims are contested, and the contest is unsettled.** One
 agent measured that a fresh process does not reduce the spread of a
@@ -1597,7 +1583,6 @@ destroying it.
   `benchmarks/kernel/operations/dispatch_permute.py` both carry that form and
   that conclusion today; the earlier `sqrt(2/N)` spelling is gone from both.
 
-
 ### Silent-fallback guard
 
 `HelionCosSinRoPE` and `TECosSinRoPE` fall back to the *numerically correct*
@@ -1625,7 +1610,6 @@ therefore reads TE's own recorded decision about the arm's own call. That is
 stronger than a trace marker, and there is deliberately **no cuDNN
 kernel-name marker** anywhere.
 
-
 ### Output layout
 
 ```
@@ -1652,7 +1636,6 @@ questions and must never be pooled by a path pattern. A **recursive** walk
 field is the only thing that separates them. `--out` refuses a span for the
 same reason: a span run is several units and they would all land in one
 directory.
-
 
 Every fragment also carries a `phases` table: the named wall-clock spans of
 the process that wrote it. A worker that measures several replicates writes
@@ -1723,7 +1706,6 @@ The results loader enforces exact schema equality,
 so older files are rejected rather than half-read, and each `from_dict` also
 refuses the other kind's file; the manifest is
 write-only provenance and has no loader.
-
 
 ### Trace diagnostics
 
@@ -1839,7 +1821,6 @@ is `expert_mlp/titan`; the `swiglu/baseline` this sentence used to name is
 deleted.) Manifests
 record `execution_model`; runs from schema <= 6 used FSDP2 mixed precision
 and are not comparable.
-
 
 An arm changes behavior one of two ways:
 
@@ -1995,7 +1976,6 @@ above. `megatron_bootstrap.py` also sets
 mismatch, arrived at independently. A host with a native CUDA 13 driver must
 repeat the measurement.
 
-
 Under `--compile-mode cuda-graph` the arm uses Megatron's per-layer partial
 capture (`MoETransformerLayer`, `cuda_graph_modules=("moe_router",
 "moe_preprocess")`): `n_layers x 2 modules x fwd+bwd` graph replays/step (64
@@ -2140,7 +2120,6 @@ The kernel scenarios additionally depend on:
   `torchtitan.models.common.token_dispatcher` / `config_utils`, and
   `CosSinRoPE` and `_qwen3_norm` for the rope and norm cuts
 - `CrossEntropyLoss` from `torchtitan.components.loss`
-
 
 Also recheck the documented deltas vs Piper: the builder hardcodes
 `route_norm=True` (Piper wants `False`), experts are `GroupedExperts` rather

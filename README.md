@@ -159,7 +159,6 @@ than the pinned wheel's, because torch loads its own lazily, so which cuDNN a
 Megatron arm ran is a property of the host. Cite both fields with any
 Megatron number.
 
-
 Run directories written before the package restructure record the module names
 this repository used at the time. They still load and evaluate, but they cannot
 be resumed across it: `--resume` requires a matching `benchmarks_git_rev`, and
@@ -209,7 +208,6 @@ published as `unpaired_ratio_ci_*`, because nothing pairs a span's replicate
 with a part's. And the parts side pays one host dispatch chain per enclosed
 scenario against the span's one, so a span ratio is biased in the span's own
 favour, by more as the range grows.
-
 
 `--arm NAME` measures a subset of one scenario's arms; repeat it per arm, and
 pair it with a single `--scenario`. The selection must name the scenario's
@@ -266,7 +264,6 @@ says which one it dropped. Each scenario writes a manifest and results JSON
 `results.json` under `out/` predates the cross-engine partition, and only one
 of the sixteen cross-engine scenarios has ever had an arm built. Read a
 cross-engine scenario as a declaration until a run says otherwise.
-
 
 ## Tests
 
