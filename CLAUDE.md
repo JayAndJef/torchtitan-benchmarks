@@ -99,7 +99,8 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/kernel/operations/` | Arm builders, one module per scenario and named after it, plus `common.py` |
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments, for a scenario and for a span), `span_statistics.py` (the span-versus-parts estimator, parent-side because one of its two sides is a sum over units the engine never sees) and `reporting.py` |
 
-| `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
+| `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the four-entry `PIPER_SHAPES` registry (`normal`, `large`, `huge`, `giant`, in ascending parameter count); both engines' single source of geometry |
+
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
 | `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
 | `benchmarks/models/piper_qwen3/mcore_profiles.py` | Megatron behaviour as data: one `McoreProfile` per variant, torch-free and parent-side |
@@ -278,26 +279,63 @@ dataclasses and are the single source of truth for *both* engines --
 so a size cannot drift between them. That module imports nothing but
 `dataclasses`.
 
-| | `normal` | `huge` |
-|---|---|---|
-| dim | 1024 | 12288 |
-| n_layers | 16 | 1 |
-| n_heads / n_kv_heads | 16 / 8 | 192 / 96 |
-| head_dim | 64 | 64 |
-| MoE inter_dim (3.5x dim) | 3584 | 43008 |
-| experts / top_k | 4 / 2 | 4 / 2 |
-| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 |
-| param_count | 1,066,241,024 | 10,528,837,760 |
-| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 |
-| num_flops_per_token @1024 | 3,551,348,736 | 33,096,721,152 |
-| per-block regions | yes (80/80) | **no** |
+**Four shapes are registered**, in ascending order of the parameter count:
+
+| | `normal` | `large` | `huge` | `giant` |
+|---|---|---|---|---|
+| dim | 1024 | 4096 | 12288 | 16384 |
+| n_layers | 16 | 4 | 1 | 1 |
+| n_heads / n_kv_heads | 16 / 8 | 64 / 32 | 192 / 96 | 256 / 128 |
+| head_dim | 64 | 64 | 64 | 64 |
+| MoE inter_dim (3.5x dim) | 3584 | 14336 | 43008 | 57344 |
+| experts / top_k | 4 / 2 | 4 / 2 | 4 / 2 | 4 / 2 |
+| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 |
+| param_count | 1,066,241,024 | 4,264,661,504 | 10,528,837,760 | 17,058,349,184 |
+| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 1,446,023,680 / 2,818,637,824 / 2,855,375,360 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 | 5,783,994,496 / 11,274,354,688 / 11,421,204,608 |
+| num_flops_per_token @1024 | 3,551,348,736 | 13,599,599,616 | 33,096,721,152 | 53,792,637,696 |
+| per-block regions | yes (80/80) | yes (20/20) | **no** | **no** |
+| `parity_gate` | 2e-2 | 3e-2 | 5e-2 | 6e-2 |
+| measured? | yes | **no** | yes | **no** |
+
+**`large` and `giant` have never run.** No scenario, no parity check, and no
+`results.json` at either shape. Two consequences follow, and both are open
+questions rather than settings:
+
+- **Both new parity gates are unverified.** They are fitted, not measured:
+  the two measured shapes fit `rel_l2 = 5.5e-3 * sqrt(dim/1024)` to within
+  7%, and each new gate sits above that prediction by the margin `huge` keeps
+  over its own measurement. Run `tools/megatron_parity_check.py --model-size
+  <name>` before any parity claim at either shape.
+- **Validation rule 7 at `large` is untested and could collide.** Regions are
+  derived per shape, so `large` asks for 4 layers x 5 active steps = **20**
+  invocations per window. The uniqueness argument behind rule 7 was measured
+  on a 16-layer trace, where the forward graphs ran {5, 80, 5} times and the
+  backward graphs {5, 80}; 80 is unique there. Nobody has looked at a
+  4-layer trace, so nobody knows whether 20 is unique in it. If another
+  same-phase partition also runs 20 times, `pooled_window_metrics` raises and
+  the arm fails rule 7. Treat a `large` run as unproven on that rule until a
+  trace says otherwise.
+
+`giant` is declared from a memory estimate only, so its first run can still
+run out of memory. `large` is 4 layers rather than 1 for the reason `huge` is
+1 rather than 16, applied in the other direction: at dim 4096 the
+layer-to-table ratio is 1.65, so a 1-layer model would be 62% embedding table
+and the benchmark would measure the lm_head and the cross entropy. Four
+layers put `n_layers * dim` at 16384, which is the product `normal` carries,
+so `large` reproduces the `normal` parameter split and keeps
+`supports_block_regions` True.
+
 
 Everything except `dim` and `n_layers` is derived
 (`n_heads = dim/head_dim`, `n_kv_heads = n_heads/2`,
 `moe_hidden_dim = dim*7/2`), and the parameter/flops formulas mirror
 torchtitan's `get_moe_model_nparams_and_flops`. `tests/test_model_shape.py`
-pins the five normal-size numbers against what a real run logs; they were
-previously duplicated by hand in the Megatron builder.
+pins the five normal-size numbers against what a real run logs, and derives
+every other shape's counts rather than transcribing them: a helper counts the
+parameters tensor by tensor, the test proves the helper against the `normal`
+numbers, and every registered shape must then agree with the helper. The
+counts were previously duplicated by hand in the Megatron builder.
+
 `supports_block_regions` is derived too (`n_layers > 1`, see below), and
 `parity_gate` -- the tolerance `tools/megatron_parity_check.py` enforces --
 is per-shape data on the same dataclass rather than a lookup table beside
@@ -327,7 +365,7 @@ peaks at 92.8 GiB, 12288 at 120.1, 13312 at 136.6 (2.3% headroom -- rejected),
 14336 OOMs. The acceptance rule is <= 125 GiB. Full ladder including the OOM
 rungs: `reports/20260809/`.
 
-**The huge shape declares no regions, deliberately.** `PIPER_1B_REGIONS`
+**The 1-layer shapes declare no regions, deliberately.** `piper_block_regions`
 identifies a block graph by its invocations per window
 (`n_layers * profiler_active`), and that count is the *identity*: measured
 on a real 16-layer trace the forward graphs run {5, 80, 5} times and the
@@ -336,11 +374,18 @@ the block graph also runs 5 times, colliding with two forward and one
 backward partition, and `pooled_window_metrics` would raise "found 3". There
 is no invocation count that identifies a 1-layer block graph and adding a
 tiebreak would be relaxing validation rule 7 -- so `supports_block_regions`
-is `n_layers > 1`, False at huge, and `_resolve_run` writes `regions: []`,
-exactly as `piper1b_megatron` already does and for the same honest reason.
-Rule 7 therefore does not guard huge runs; rules 8, 9 and 11 do. Cross-mode
+is `n_layers > 1`, False at `huge` and at `giant`, and `_resolve_run` writes
+`regions: []`, exactly as `piper1b_megatron` already does and for the same
+honest reason. Rule 7 therefore does not guard a run at either of those two
+shapes; rules 8, 9 and 11 do. Cross-mode
 metrics (total GPU kernel time, tokens/s, launch latency, peak memory) are
 unaffected.
+
+**`large` passes that test arithmetically and has not been checked against a
+trace.** It asks for 20 invocations per window, which is not 5, so it does not
+hit the collision above. Whether 20 is *unique* in a 4-layer trace is the part
+nobody has measured. See "Four shapes are registered" above.
+
 
 Rejected alternatives, for the record: a copy-pasted `_huge` scenario
 (duplicates arm definitions, cannot apply to other scenarios, and the size
@@ -578,7 +623,8 @@ are not comparable; `--resume` refuses to mix them.
 1. Missing `<arm>.log`, or log lacking the profile's completion marker
    (`Training completed` for both engines).
 2. `[Override]` line count != `arm.overrides_per_block * shape.n_layers`
-   (16 at the normal size, 1 at huge: one per transformer block).
+   (one per transformer block, so 16 / 4 / 1 / 1 across the four shapes).
+
 3. A declared `override_imports` entry with no matching `[Override] <path>:` line.
 4. A profile `failure_marker` phrase in the log (`falling back to the
    PyTorch` for titan arms -- an optimized kernel silently degraded). This
@@ -1935,9 +1981,12 @@ Faithfulness guarantees, all verified:
   it builds both engines through the same helpers a cross-engine kernel arm
   uses, which is what makes it their numerics check rather than a parallel
   implementation. The gate is per-shape and lives on the shape itself
-  (`PiperShape.parity_gate`): 2e-2 at normal
-  (measured 5.5e-3), 5e-2 at huge (measured 2.03e-2). The wider huge gate is
+  (`PiperShape.parity_gate`): 2e-2 at `normal`
+  (measured 5.5e-3), 5e-2 at `huge` (measured 2.03e-2), and 3e-2 at `large`
+  and 6e-2 at `giant`, **both of which are fitted predictions that no parity
+  check has tested**. The wider huge gate is
   bf16 accumulation, not slack, and it is evidenced rather than assumed --
+
   `--fp32-reference` runs the same weights in fp32 and shows titan's own
   bf16 output sits 3.25e-2 from it against megatron's 3.29e-2 (ratio 1.011),
   i.e. the engines agree with each other better than either agrees with
