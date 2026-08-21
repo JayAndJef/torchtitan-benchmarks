@@ -102,6 +102,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.kernel.results.schema",
     "benchmarks.kernel.results.merge",
     "benchmarks.kernel.results.reporting",
+    # The span-versus-parts statistic. Parent-side work about a parent-side
+    # object: a worker is handed span.measurement and never learns that the
+    # span exists, so nothing about a span belongs under engine/.
+    "benchmarks.kernel.results.span_statistics",
     "benchmarks.models.piper_qwen3.shape",
     # Behavioural configuration is data, and data the parent must be able to
     # name, record in a manifest and diff without importing the ML stack --
@@ -743,6 +747,34 @@ class KernelEngineImportBoundaryTest(unittest.TestCase):
             "registry -- and every arm's dependencies behind it -- into "
             "every worker:\n  "
             + "\n  ".join(violations),
+        )
+
+    def test_the_engine_holds_no_span_declaration_type(self):
+        """A worker is handed ``span.measurement``, so spans are invisible.
+
+        The engine measures one arm in one worker and never sees a second
+        unit. Everything that makes a span a span -- the range, the parts,
+        the second total, the statistic that compares them -- is assembled
+        by the parent. ``span_comparison`` sat under ``engine/`` for a
+        while, which made "the engine gained no branch for spans" true of
+        the import graph and false of the directory.
+
+        The wall-clock phase table uses the word ``span`` for a different
+        thing entirely, so this matches the declaration types rather than
+        the word.
+        """
+        violations = []
+        for path in engine_source_files():
+            source = Path(path).read_text()
+            for name in ("KernelSpan", "SpanParts", "span_comparison"):
+                if name in source:
+                    violations.append(f"{path}: {name}")
+        self.assertEqual(
+            violations,
+            [],
+            "the kernel engine names a span declaration type; a worker "
+            "measures span.measurement, which is a KernelScenario, and the "
+            "parent assembles everything else:\n  " + "\n  ".join(violations),
         )
 
     def test_the_engine_allowlist_would_catch_a_registry_import(self):

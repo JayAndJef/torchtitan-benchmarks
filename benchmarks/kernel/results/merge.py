@@ -75,8 +75,8 @@ from benchmarks.artifacts.summaries import summarize
 from benchmarks.kernel.engine.statistics import (
     KERNEL_SIGNIFICANCE_METHODOLOGY,
     kernel_comparison,
-    span_comparison,
 )
+from benchmarks.kernel.results.span_statistics import span_comparison
 from benchmarks.kernel.results.schema import (
     ArmResult,
     CorrectnessResult,
