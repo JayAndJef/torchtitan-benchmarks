@@ -1,18 +1,26 @@
 # torchtitan-benchmarks: Agent Guide
 
 Out-of-tree benchmarks for the Piper Qwen3-1B TorchTitan port. One CLI,
-two kinds of measurement:
+three kinds of measurement:
 
 1. **Declarative end-to-end scenarios** -- `./run_bench.sh run` / `run-all`,
    driven by `benchmarks/e2e/registry.py`. Runs real TorchTitan training,
    validates, and evaluates.
-2. **Declarative kernel-isolation benchmarks** -- `./run_bench.sh
+2. **Declarative kernel-isolation scenarios** -- `./run_bench.sh
    kernel-bench`, driven by `benchmarks/kernel/registry.py`. Times competing
    kernel implementations head-to-head on synthetic tensors at Piper-1B shapes.
+   A scenario cuts the model at one boundary and ranks the implementations
+   there.
+3. **Declarative kernel spans** -- `./run_bench.sh kernel-bench --span`,
+   driven by `benchmarks/kernel/spans.py`. A span is an implementation that
+   fuses **across** a scenario cut, so it belongs to no single scenario. Its
+   claim is the span against the **sum of the scenarios it replaces**. The
+   roster is empty at this rev; read the module.
 
 Never present kernel numbers as end-to-end results, or vice versa: a kernel
 that wins in isolation can be irrelevant once Inductor fuses the graph around
-it.
+it. Never present a span total as a scenario total either: the two answer
+different questions, and the span statistic is not the scenario statistic.
 
 ## Environment
 
@@ -74,7 +82,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 
 | path | contents |
 |---|---|
-| `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group |
+| `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans -- the span heading prints even when the roster is empty, so a reader learns `--span` exists |
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |
@@ -82,13 +90,14 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/e2e/results.py` | Evaluation, region comparison, `results.json`, and its renderer |
 | `benchmarks/e2e/data/piper_qwen3.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
 | `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
-| `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, plus `resolve_shape_and_workload` and `shape_summary` |
-| `benchmarks/kernel/registry.py` | The kernel scenarios themselves (19 at this rev, 73 arms), declared with those types |
-| `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness |
-| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py` |
+| `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, the span types `KernelSpan`/`SpanParts`/`validate_span_parts`, plus `resolve_symbol`, `resolve_shape_and_workload` and `shape_summary` |
+| `benchmarks/kernel/registry.py` | The kernel scenarios themselves (17 at this rev, 71 arms), declared with those types. Re-derive the counts; do not quote them |
+| `benchmarks/kernel/spans.py` | The kernel spans. Parent-side and torch-free, exactly as the scenario registry is. `KERNEL_SPANS` is **empty** at this rev: the mechanism landed before any declaration. It imports the scenario registry to check that each named part arm exists, which is why it is a separate module |
+| `benchmarks/kernel/runner.py`, `worker.py` | Kernel-bench supervisor and the per-pass subprocess it launches, one per (arm, replicate) plus one for correctness. The runner also owns `measurement_plan`, which orders a run's units: every enclosed scenario ahead of its span |
+| `benchmarks/kernel/engine/` | `arm.py` (the `BuiltArm` contract), `measurement.py` (burst timing, memory and the burst ladder), `correctness.py` (the gates), `run.py` (orchestration, and the timing pass: `build_timing_arm`/`time_replicate`/`arm_extras`, composed once in `time_replicate_block`), `phases.py` (the stdlib-only wall-clock attribution every fragment carries) and `statistics.py`. **The engine does not know that spans exist**: both passes take a `KernelScenario`, and a span hands them its own `measurement`, which is one |
 | `benchmarks/kernel/operations/` | Arm builders, one module per scenario and named after it, plus `common.py` |
-| `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments) and `reporting.py` |
-| `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the `normal`/`huge` registry; both engines' single source of geometry |
+| `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments, for a scenario and for a span), `span_statistics.py` (the span-versus-parts estimator, parent-side because one of its two sides is a sum over units the engine never sees) and `reporting.py` |
+| `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the four-entry `PIPER_SHAPES` registry (`normal`, `large`, `huge`, `giant`, in ascending parameter count); both engines' single source of geometry |
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
 | `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
 | `benchmarks/models/piper_qwen3/mcore_profiles.py` | Megatron behaviour as data: one `McoreProfile` per variant, torch-free and parent-side |
@@ -101,7 +110,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/models/piper_qwen3/components/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
 | `benchmarks/traces/` | `schema.py` (the `Region` declaration) and `extraction.py` (trace parsing, window and region pooling) |
 | `benchmarks/artifacts/` | On-disk artifacts: `layout.py` (output layout, `trace_files`, `atomic_write_json` -- the only JSON writer), `manifests.py` (the manifest schema and the resume predicate; the one module here coupled to `e2e/`), `run_state.py` (the per-arm ledger) and `summaries.py` (`SampleSummary`, shared by both systems) |
-| `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning), `provenance.py` (`hardware_metadata`), `events.py` (`RunEvent`, `ProcessRunner`) |
+| `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning), `provenance.py` (`hardware_metadata`, including the two cuDNN fields -- see "Which cuDNN a megatron arm runs"), `events.py` (`RunEvent`, `ProcessRunner`) |
 | `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), and the two argv-driven trace diagnostics `analyze.py` and `per_block.py` |
 | `tests/` | CPU + GPU unit tests. Deliberately **flat** -- every module does `sys.path.insert(0, <repo root>)` at a fixed depth, and `unittest discover -s tests` needs no `__init__.py` |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
@@ -120,10 +129,14 @@ appears**, and here they appear as history, not as instructions; the
 retired-path audit allowlists it for that reason.
 
 Every manifest, `results.json` and report written **before** the flag day
-records the old module names, and they are still on disk: 197 `manifest.json`
-files under `out/`, of which 142 record `"module": "piper1b"`, 55 record
+records the old module names, and they are still on disk: 142 `manifest.json`
+files under `out/` record `"module": "piper1b"`, 55 record
 `benchmarks.kernel_arms:<builder>` kernel-arm paths, and 21 record
-`python -m megatron_baseline.train` in `commands`.
+`python -m megatron_baseline.train` in `commands`. Those three counts are
+fixed, because no new run writes a retired name. The **total** number of
+manifests under `out/` is not fixed, grows with every run, and is
+deliberately not stated here.
+
 
 **Those strings are inert history.** No module of any of those names exists any
 more, and nothing imports one: manifest `commands` is a write-only provenance
@@ -160,8 +173,10 @@ and `NGPU=1`, so runs are single-GPU and the index is stable.
 
 - `run` executes and validates only. `run-all` also evaluates and writes
   `results.json`.
-- `run` accepts `--arm NAME` to execute a single arm. `run-all` does not; it
-  always runs every arm in the scenario.
+- `run` accepts `--arm NAME` to execute a single arm; it is **not**
+  repeatable, unlike `kernel-bench --arm` and `evaluate --arm`. `run-all`
+  does not accept it; it always runs every arm in the scenario.
+
 - `run-all` accepts `--resume <out_dir>`; `--resume` and `--out` are mutually
   exclusive.
 - `run-all --all-scenarios` sweeps every scenario in sequence, sharing one
@@ -264,26 +279,63 @@ dataclasses and are the single source of truth for *both* engines --
 so a size cannot drift between them. That module imports nothing but
 `dataclasses`.
 
-| | `normal` | `huge` |
-|---|---|---|
-| dim | 1024 | 12288 |
-| n_layers | 16 | 1 |
-| n_heads / n_kv_heads | 16 / 8 | 192 / 96 |
-| head_dim | 64 | 64 |
-| MoE inter_dim (3.5x dim) | 3584 | 43008 |
-| experts / top_k | 4 / 2 | 4 / 2 |
-| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 |
-| param_count | 1,066,241,024 | 10,528,837,760 |
-| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 |
-| num_flops_per_token @1024 | 3,551,348,736 | 33,096,721,152 |
-| per-block regions | yes (80/80) | **no** |
+**Four shapes are registered**, in ascending order of the parameter count:
+
+| | `normal` | `large` | `huge` | `giant` |
+|---|---|---|---|---|
+| dim | 1024 | 4096 | 12288 | 16384 |
+| n_layers | 16 | 4 | 1 | 1 |
+| n_heads / n_kv_heads | 16 / 8 | 64 / 32 | 192 / 96 | 256 / 128 |
+| head_dim | 64 | 64 | 64 | 64 |
+| MoE inter_dim (3.5x dim) | 3584 | 14336 | 43008 | 57344 |
+| experts / top_k | 4 / 2 | 4 / 2 | 4 / 2 | 4 / 2 |
+| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 |
+| param_count | 1,066,241,024 | 4,264,661,504 | 10,528,837,760 | 17,058,349,184 |
+| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 1,446,023,680 / 2,818,637,824 / 2,855,375,360 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 | 5,783,994,496 / 11,274,354,688 / 11,421,204,608 |
+| num_flops_per_token @1024 | 3,551,348,736 | 13,599,599,616 | 33,096,721,152 | 53,792,637,696 |
+| per-block regions | yes (80/80) | yes (20/20) | **no** | **no** |
+| `parity_gate` | 2e-2 | 3e-2 | 5e-2 | 6e-2 |
+| measured? | yes | **no** | yes | **no** |
+
+**`large` and `giant` have never run.** No scenario, no parity check, and no
+`results.json` at either shape. Two consequences follow, and both are open
+questions rather than settings:
+
+- **Both new parity gates are unverified.** They are fitted, not measured:
+  the two measured shapes fit `rel_l2 = 5.5e-3 * sqrt(dim/1024)` to within
+  7%, and each new gate sits above that prediction by the margin `huge` keeps
+  over its own measurement. Run `tools/megatron_parity_check.py --model-size
+  <name>` before any parity claim at either shape.
+- **Validation rule 7 at `large` is untested and could collide.** Regions are
+  derived per shape, so `large` asks for 4 layers x 5 active steps = **20**
+  invocations per window. The uniqueness argument behind rule 7 was measured
+  on a 16-layer trace, where the forward graphs ran {5, 80, 5} times and the
+  backward graphs {5, 80}; 80 is unique there. Nobody has looked at a
+  4-layer trace, so nobody knows whether 20 is unique in it. If another
+  same-phase partition also runs 20 times, `pooled_window_metrics` raises and
+  the arm fails rule 7. Treat a `large` run as unproven on that rule until a
+  trace says otherwise.
+
+`giant` is declared from a memory estimate only, so its first run can still
+run out of memory. `large` is 4 layers rather than 1 for the reason `huge` is
+1 rather than 16, applied in the other direction: at dim 4096 the
+layer-to-table ratio is 1.65, so a 1-layer model would be 62% embedding table
+and the benchmark would measure the lm_head and the cross entropy. Four
+layers put `n_layers * dim` at 16384, which is the product `normal` carries,
+so `large` reproduces the `normal` parameter split and keeps
+`supports_block_regions` True.
+
 
 Everything except `dim` and `n_layers` is derived
 (`n_heads = dim/head_dim`, `n_kv_heads = n_heads/2`,
 `moe_hidden_dim = dim*7/2`), and the parameter/flops formulas mirror
 torchtitan's `get_moe_model_nparams_and_flops`. `tests/test_model_shape.py`
-pins the five normal-size numbers against what a real run logs; they were
-previously duplicated by hand in the Megatron builder.
+pins the five normal-size numbers against what a real run logs, and derives
+every other shape's counts rather than transcribing them: a helper counts the
+parameters tensor by tensor, the test proves the helper against the `normal`
+numbers, and every registered shape must then agree with the helper. The
+counts were previously duplicated by hand in the Megatron builder.
+
 `supports_block_regions` is derived too (`n_layers > 1`, see below), and
 `parity_gate` -- the tolerance `tools/megatron_parity_check.py` enforces --
 is per-shape data on the same dataclass rather than a lookup table beside
@@ -313,7 +365,7 @@ peaks at 92.8 GiB, 12288 at 120.1, 13312 at 136.6 (2.3% headroom -- rejected),
 14336 OOMs. The acceptance rule is <= 125 GiB. Full ladder including the OOM
 rungs: `reports/20260809/`.
 
-**The huge shape declares no regions, deliberately.** `PIPER_1B_REGIONS`
+**The 1-layer shapes declare no regions, deliberately.** `piper_block_regions`
 identifies a block graph by its invocations per window
 (`n_layers * profiler_active`), and that count is the *identity*: measured
 on a real 16-layer trace the forward graphs run {5, 80, 5} times and the
@@ -322,11 +374,18 @@ the block graph also runs 5 times, colliding with two forward and one
 backward partition, and `pooled_window_metrics` would raise "found 3". There
 is no invocation count that identifies a 1-layer block graph and adding a
 tiebreak would be relaxing validation rule 7 -- so `supports_block_regions`
-is `n_layers > 1`, False at huge, and `_resolve_run` writes `regions: []`,
-exactly as `piper1b_megatron` already does and for the same honest reason.
-Rule 7 therefore does not guard huge runs; rules 8, 9 and 11 do. Cross-mode
+is `n_layers > 1`, False at `huge` and at `giant`, and `_resolve_run` writes
+`regions: []`, exactly as `piper1b_megatron` already does and for the same
+honest reason. Rule 7 therefore does not guard a run at either of those two
+shapes; rules 8, 9 and 11 do. Cross-mode
 metrics (total GPU kernel time, tokens/s, launch latency, peak memory) are
 unaffected.
+
+**`large` passes that test arithmetically and has not been checked against a
+trace.** It asks for 20 invocations per window, which is not 5, so it does not
+hit the collision above. Whether 20 is *unique* in a 4-layer trace is the part
+nobody has measured. See "Four shapes are registered" above.
+
 
 Rejected alternatives, for the record: a copy-pasted `_huge` scenario
 (duplicates arm definitions, cannot apply to other scenarios, and the size
@@ -356,18 +415,27 @@ trace validation and region pooling. Do not lower `--steps` to save time.
 
 ### Scenarios and arms
 
-Arm names match the kernel scenarios at four scenarios only, and the pairing
-is declared data rather than a naming habit:
-`tests/test_migration_contract.py`'s `KERNEL_TO_E2E_SCENARIO` maps `swiglu`,
-`qkv`, `lm_head` and `attention` onto their `piper1b_*` twins, so
-`piper1b_swiglu/piper_optimized_triton` and `swiglu/piper_optimized_triton`
-are the same code at two scopes. **`rope` left that map when it became
-cross-engine**: its kernel arms are `mcore/base`, `mcore/no_rope_fusion`,
-`titan`, `titan/helion` and `titan/te`, against an e2e `piper1b_rope` that
-still runs `baseline`, `helion` and `te`. The e2e ids are deliberately not
-renamed to match -- they name directories under `out/` and every published
-rope number. Every arm in both registries carries a one-line `description`;
-`./run_bench.sh scenarios` prints them and manifests record them.
+**Arm names match the kernel scenarios at one scenario only.** The pairing is
+declared data rather than a naming habit: `tests/test_migration_contract.py`'s
+`KERNEL_TO_E2E_SCENARIO` maps `lm_head` onto `piper1b_lm_head`, so
+`piper1b_lm_head/piper_optimized_te_ce` and `lm_head/piper_optimized_te_ce`
+are the same code at two scopes. The map held four entries until 2026-08-20.
+Three left it in two different ways, and the difference matters:
+
+- **`rope` left by becoming cross-engine.** Its kernel arms are now
+  `mcore/base`, `mcore/no_rope_fusion`, `titan`, `titan/helion` and
+  `titan/te`, against an e2e `piper1b_rope` that still runs `baseline`,
+  `helion` and `te`.
+- **`swiglu`, `qkv` and `attention` left by being deleted.** Each was
+  superseded by a cross-engine scenario that re-homed every one of its arms:
+  `swiglu` into `expert_mlp`, `qkv` into `qkv_prep`, `attention` into
+  `attention_core`. The e2e scenarios `piper1b_swiglu`, `piper1b_qkv` and
+  `piper1b_attention` are untouched and still run.
+
+The e2e ids are deliberately not renamed to match a kernel roster -- they name
+directories under `out/` and every published number. Every arm in both
+registries carries a one-line `description`; `./run_bench.sh scenarios` prints
+them and manifests record them.
 
 The five titan scenarios share `PIPER_1B_REGIONS`: `forward_block` and
 `backward_block`, each 80 invocations per window (16 layers x 5 active
@@ -441,8 +509,8 @@ packed-document mask_mod emits a per-KV-lane gather the interval analyzer
 refuses anyway. Report an FA4 number here as "FA4 running the generic per-lane
 mask path on sm90", never as "FA4 is slower than the Triton template".
 
-**There is deliberately no TE attention arm here, and there cannot be one.**
-TransformerEngine wraps `DotProductAttention.forward` in
+**There is deliberately no TE attention arm in this e2e scenario, and there
+cannot be one.** TransformerEngine wraps `DotProductAttention.forward` in
 `torch.compiler.disable` itself (`transformer_engine/pytorch/jit.py`), so
 Dynamo refuses to inline it: any titan arm calling TE attention dies with
 "Skip inlining `torch.compiler.disable()`d function" the moment
@@ -450,13 +518,17 @@ Dynamo refuses to inline it: any titan arm calling TE attention dies with
 choice, not a gap in our integration, and it is why megatron runs TE eagerly.
 Getting a titan+TE arm would mean excluding that block from compilation,
 which changes the treatment and makes the arm incomparable to the others.
-No kernel scenario measures TE attention either: `attention` declares
-`baseline`, `flex_flash` and `flash_attention_3` and no TE arm. A
-cross-engine `attention_core` scenario is in flight in another worktree;
-read the registry for what it ends up declaring. (That scenario name
-collides with the `attention_core` component label in "Total kernel time
-cannot rank arms that differ in one component". The label there is the
-removed trace classifier's, and it names no scenario.)
+
+**The kernel side is different, and the old text here stated the opposite.** `kernel-bench` runs no compile treatment it did not choose, so TE
+attention is measurable in isolation, and the `attention_core` scenario
+measures three TE backends: `mcore/base` (cuDNN FusedAttention),
+`mcore/attn_flash3` (FlashAttention 3) and `mcore/attn_unfused` (TE's own
+torch implementation). The sentence "no kernel scenario measures TE
+attention" was true of the deleted single-engine `attention` scenario and is
+false now. (`attention_core` also collides by name with the `attention_core`
+component label in "Total kernel time cannot rank arms that differ in one
+component". The label there is the removed trace classifier's, and it names
+no scenario.)
 
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios
@@ -482,11 +554,59 @@ out/<timestamp>/<scenario>/<hardware>/
 
 `manifest.json` `hardware_metadata` records `requested_gpu`, `nvidia_smi`,
 `cpu_pinning`, `torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev`,
-`megatron_git_rev`, `te_version`. Always cite `torchtitan_git_rev`,
+`megatron_git_rev`, `te_version`, `cudnn_torch_build` and
+`cudnn_loader_resolves`. Always cite `torchtitan_git_rev`,
 `torch_version`, `compile_mode`, and `ac_mode` when reporting numbers --
-plus `megatron_git_rev` and `te_version` for the megatron scenario.
+plus `megatron_git_rev`, `te_version` and the two cuDNN fields for the
+megatron scenario.
+
+### Which cuDNN a megatron arm runs is a host property
+
+TransformerEngine binds cuDNN **in Python**, before the dynamic loader
+resolves any `DT_NEEDED` entry. `transformer_engine/common/__init__.py:345`
+tries the system copy first, and its last resort at `:330` is
+`ctypes.CDLL("libcudnn.so", RTLD_GLOBAL)` -- the **unversioned** name. Torch
+also loads its own cuDNN lazily. So on a host that ships cuDNN in a system
+directory, TE gets **that** copy rather than the wheel torch is pinned
+against. Which cuDNN a megatron arm ran is therefore decided by the host,
+not by the pin, and until 2026-08-20 no manifest recorded it.
+
+`hardware_metadata` now records both halves: `cudnn_torch_build` is the
+version torch was compiled against, read through `getCompileVersion` because
+`backends.cudnn.version()` **raises** in exactly the case the field exists to
+record; `cudnn_loader_resolves` is the real path the dynamic loader binds,
+probed in a subprocess. On this box the two disagree -- torch expects
+**9.24.0** and the loader binds `/usr/lib64` **9.23.2**, which `rpm -qf`
+names as `libcudnn9-cuda-12`, a **CUDA 12 build inside a cu13 process**.
+
+**The version changes no value, and that was measured rather than assumed.**
+A direct comparison on 2026-08-21 ran the `attention_core` gates under 9.23.2
+and under 9.24.0 (`reports/20260821-cudnn-version-comparison.md`). Every gate
+row matches to the float64 bit pattern, the raw bytes of all eight output
+tensors hash identically, and TE selects the same backend either way. So the
+cuDNN version is **not a numerical comparability boundary**, and no published
+megatron figure is numerically wrong because of it.
+
+**What stays open is speed.** Nobody has timed the two versions against each
+other. So cite `cudnn_loader_resolves` beside any timing number that goes
+through TransformerEngine, and read a cuDNN difference as an unmeasured
+effect on speed rather than as a difference in the values.
+
+The two fields are collected but **not** resume-gated, which is consistent
+with the above: recording a fact and refusing to cross it are separate
+decisions, and there is no numerical boundary here to refuse.
+
+**Two variables are necessary to move the whole process to the pinned
+cuDNN.**
+`LD_LIBRARY_PATH` alone does **not** work: the wheel directory ships only
+`libcudnn.so.9`, so the unversioned `CDLL` above skips it and takes
+`/usr/lib64` anyway, leaving torch reporting 9.24.0 while TE still runs
+9.23.2 -- a split in the opposite direction, which is worse than doing
+nothing. `CUDNN_PATH` **and** `LD_LIBRARY_PATH` together were measured to
+leave zero `/usr/lib64/libcudnn` mappings.
 
 ### CPU pinning
+
 
 The training step is host-bound at benchmark sizes, so unpinned runs measure
 scheduler placement, not kernels. The runner therefore binds each training
@@ -503,7 +623,8 @@ are not comparable; `--resume` refuses to mix them.
 1. Missing `<arm>.log`, or log lacking the profile's completion marker
    (`Training completed` for both engines).
 2. `[Override]` line count != `arm.overrides_per_block * shape.n_layers`
-   (16 at the normal size, 1 at huge: one per transformer block).
+   (one per transformer block, so 16 / 4 / 1 / 1 across the four shapes).
+
 3. A declared `override_imports` entry with no matching `[Override] <path>:` line.
 4. A profile `failure_marker` phrase in the log (`falling back to the
    PyTorch` for titan arms -- an optimized kernel silently degraded). This
@@ -575,22 +696,51 @@ test. Quote the total only as the arm's step cost.
 
 **No in-tree tool currently attributes per-component GPU time.** A
 `components.py` trace classifier did, and it was removed (before the package
-restructure; it never moved into `tools/`). For the **same-engine**
-case, rank the implementations in the matching `kernel-bench` scenario
-instead, where one exists: `KERNEL_TO_E2E_SCENARIO` declares the four
-scenarios whose rosters pair (see "Scenarios and arms"), so
-`piper1b_attention/flex_flash` and `attention/flex_flash` are the same code
-at two scopes -- while remembering
-that a kernel-isolation number is **not device time**: for small kernels it
-is dominated by host dispatch, and `--burst` amortization does not remove
-that (see "Method" under Kernel-isolation benchmarks). A kernel-speed claim
-needs profiler-summed device time, which nothing in this repo currently
-measures. Do not apply the replacement more loosely than the tool it
-replaces. The **cross-engine** case -- attributing a megatron-vs-titan gap to
-particular components -- is what the 15 cross-engine kernel scenarios are
-for. They are declarations at this rev and nothing more: no `results.json`
-under `out/` names a single one of their arms, so there is no cross-engine
-component number to cite yet.
+restructure; it never moved into `tools/`).
+
+For the **same-engine** case, rank the implementations in the matching
+`kernel-bench` scenario instead. **Only `lm_head` still pairs by name**:
+`KERNEL_TO_E2E_SCENARIO` holds that one entry, so
+`piper1b_lm_head/piper_optimized_te_ce` and `lm_head/piper_optimized_te_ce`
+are the same code at two scopes. For the other four titan e2e scenarios the
+matching kernel scenario is now **cross-engine**, and its titan arms carry
+`engine/profile` names:
+
+| e2e scenario | kernel scenario | the titan arms to read |
+|---|---|---|
+| `piper1b_rope` | `rope` | `titan`, `titan/helion`, `titan/te` |
+| `piper1b_swiglu` | `expert_mlp` | `titan`, `titan/fused_grouped_experts`, `titan/piper_optimized_triton`, `titan/piper_optimized_inductor` |
+| `piper1b_qkv` | `qkv_prep` | `titan`, `titan/unfused_qkv` |
+| `piper1b_attention` | `attention_core` | `titan`, `titan/flex_flash`, `titan/flash_attention_3` |
+
+**Three of those four rows changed what the number means, so an old number
+and its successor are not comparable.** `rope`'s titan arms now take
+packed-document positions where they took `arange`, and their timed closures
+now run the training graph where they ran an inference graph that saved no
+activations. `qkv_prep` puts the attention-input norm inside
+the cut, on both engines, because megatron fuses the RMSNorm into
+`linear_qkv`'s GEMM prologue and exposes no entry point that runs either half
+alone -- so a `qkv_prep` number is the norm plus the projection, and a `qkv`
+number under `out/` is the projection alone. `expert_mlp` publishes each Piper
+arm against `titan/fused_grouped_experts`, which is TorchTitan's own w13
+fusion, rather than against unfused experts -- so the Piper arms are no longer
+credited with a fusion upstream already ships. `attention_core` is the one row
+whose titan arms measure the same cut the retired scenario measured.
+
+Remember also that a kernel-isolation number is **not device time**: for small
+kernels it is dominated by host dispatch, and `--burst` amortization does not
+remove that (see "Method" under Kernel-isolation benchmarks). A kernel-speed
+claim needs profiler-summed device time, which nothing in this repo currently
+measures. Do not apply the replacement more loosely than the tool it replaces.
+
+The **cross-engine** case -- attributing a megatron-vs-titan gap to particular
+components -- is what the 16 cross-engine kernel scenarios are for. Fifteen of
+them are declarations at this rev and nothing more. The sixteenth,
+`attention_core`, has produced **one** cell: two of its six arms, at one long
+sequence length. So there is one cross-engine component number to cite, it
+covers inner attention alone, and it is not a component breakdown of anything
+else. See "Exactly one cross-engine number exists" below.
+
 
 Measured three times on 2026-08-09, twice producing a published claim that
 had to be retracted:
@@ -663,6 +813,8 @@ even absent, once Inductor fuses the surrounding graph).
 | flag | default | meaning |
 |---|---|---|
 | `--scenario` (repeatable) | every scenario | subset of kernel scenarios |
+| `--arm` (repeatable) | every arm | subset of **one** scenario's arms; needs exactly one `--scenario` and refuses `--span` |
+| `--span` (repeatable) | **none** | a kernel span, plus every scenario it replaces; refuses `--out` and `--arm` |
 | `--replicates` | 5 | sweeps of every arm; the unit the CI is taken over |
 | `--replicates-per-process` | 1 | consecutive replicates of one arm per worker; above 1 the CI is renamed (see "Startup cost") |
 | `--samples-per-replicate` | 40 | timed bursts per arm per mode, per replicate |
@@ -671,21 +823,51 @@ even absent, once Inductor fuses the surrounding graph).
 | `--burst` | off | adds the 1/4/16/64 dispatch-cost diagnostic |
 | `--model-size` | `normal` | shape from `PIPER_SHAPES`; single-valued, no sweep |
 | `--batch` / `--seq-len` | 4 / 1024 | `KernelWorkload` overrides (seq <= `max_seq_len`) |
-| `--max-seq-len` | 2048 | raises the shape's seq ceiling; needed to sweep `attention` past 2048 |
+| `--max-seq-len` | 2048 | raises the shape's seq ceiling; needed to sweep `attention_core` past 2048 |
 | `--seed` | 0 | input generator seed |
 | `--hardware` | `auto` | provenance label |
-| `--out` | `out/<ts>/kernels/<scenario>/<hardware>` | single `--scenario` only |
+| `--out` | `out/<ts>/kernels/<scenario>/<hardware>` | single `--scenario`, and no `--span` |
 | `--cache-root` / `--compiler-env` | as e2e | `rope` needs the compiler env |
+
+`--replicates`, `--replicates-per-process`, `--samples-per-replicate` and
+`--burst-k` all take `IntRange(min=1)`. Each of the four used to accept a
+zero, and each broke differently and late.
 
 Unlike `run-all --all-scenarios`, a failing scenario does not abort the rest;
 every scenario is reported and the command exits nonzero if any failed.
 Deliberately ignores the `OUT`/`SEQ`/`BATCH` env vars -- flags only, so an
 e2e shell cannot leak settings into a kernel run.
 
-Four scenarios need their synthetic rows to route evenly
+**`--scenario` and `--span` default differently, and the asymmetry is
+deliberate.** `--scenario` defaults to every scenario; `--span` defaults to
+none. A span drags every scenario it encloses into the run, so a default of
+"every span" would silently change what a bare invocation costs. An explicit
+`--span` with no `--scenario` measures that span and its range, and nothing
+else.
+
+**`--arm` measures a subset of one scenario's arms.** Repeat it per arm, and
+pair it with exactly one `--scenario`; an arm name belongs to one roster, so
+a selection across two scenarios would mean a different thing in each. The
+selection **must** name the anchor arm, because every comparison is a ratio
+against it, and every correctness reference the selected arms use, because a
+gate needs both sides in one process. A selection that omits either is
+**refused, not repaired**: adding an arm the operator did not ask for changes
+what the run measures. An unknown arm name raises rather than quietly
+measuring a smaller set.
+
+Every arm the selection leaves out still reaches `results.json` and the
+manifest as `skipped`, with a reason that **names the flag**. The skip map
+therefore carries two kinds of reason now, and a reader must not take one for
+the other: the operator's choice (`--arm did not select it; this run measures
+...`) and the host's capability (no C++20 compiler, or a declared
+`KernelArm.requirement` this shape or workload fails). The selection is
+resolved first, so an arm nobody asked for keeps that reason rather than a
+capability reason it never had to meet.
+
+Three scenarios need their synthetic rows to route evenly
 (`batch * seq_len * top_k` divisible by `num_experts`), and each declares it
-with `requires_balanced_routing`: `swiglu`, `dispatch_permute`, `expert_mlp`
-and `moe_combine`. A shape/workload pair that breaks that skips those four
+with `requires_balanced_routing`: `dispatch_permute`, `expert_mlp` and
+`moe_combine`. A shape/workload pair that breaks that skips those three
 **loudly** -- named numbers, a recorded error, a nonzero exit -- rather than
 capping or rounding anything. The check is per scenario, so every other
 scenario is unaffected and still runs. The same invariant is re-asserted
@@ -693,119 +875,201 @@ inside `run_kernel_scenario`, so `python -m benchmarks.kernel.worker` and any
 other direct caller raise instead of measuring an expert split that does not
 cover the rows they built.
 
-**`--model-size huge` is probed on four scenarios only.** On an H200 on
-2026-08-19, `qkv`, `attention` and `lm_head` completed at `huge` with every
-arm `ok`, and `swiglu` ran out of memory and wrote no `results.json`
-(`out/20260819T010252Z/kernels/`). No cross-engine arm has run at either
-size. Treat every other scenario at `huge` as untested rather than as
-working.
+**`--model-size huge` has been probed on four scenarios, and three of them no
+longer exist.** On an H200 on 2026-08-19, `qkv`, `attention` and `lm_head`
+completed at `huge` with every arm `ok`, and `swiglu` ran out of memory and
+wrote no `results.json` (`out/20260819T010252Z/kernels/`). Of those four only
+`lm_head` is still a scenario. **No cross-engine arm has run at `huge`**, and
+no successor scenario has been probed there; the one cross-engine run so far
+is at `normal`. Treat every scenario except `lm_head` at `huge` as untested
+rather than as working.
+
 
 The `swiglu` run died inside `run_correctness_pass`, in the gate's fp32
-upcast, with 134 GiB of the device's 139.81 GiB already in use. The
-arithmetic behind that: `swiglu_inputs` allocates three fp32
-`(4, 43008, 12288)` expert tensors (7.9 GiB each, 23.6 GiB of state dict,
-held for the whole run), and each of the three arms then loads its own bf16
-copy (11.8 GiB) and grows a bf16 weight gradient of the same size in
-backward. That run predates the residency change: `run_correctness_pass`
-now builds one arm at a time and drops it before the next, so the pass is
-bounded by the largest single arm rather than by their sum. Nobody has
-re-run `swiglu` at `huge` since. Measure it before reporting anything about
-it.
+upcast, with 134 GiB of the device's 139.81 GiB already in use. **Keep that
+as history and do not carry its arithmetic forward.** `swiglu_inputs` is a
+deleted symbol, its successor `expert_mlp` has 8 arms rather than 3, and four
+of those build a whole megatron `GPTModel` -- so re-pointing the name without
+re-doing the sum would publish a memory figure for a roster that does not
+exist. `benchmarks/kernel/operations/expert_mlp.py` carries its own `huge`
+arithmetic, computed for its own eight arms; cite that. The run also predates
+the residency change: `run_correctness_pass` now builds one arm at a time and
+drops it before the next, so the pass is bounded by the largest single arm
+rather than by their sum. **`expert_mlp` at `huge` is untested.** Measure it
+before reporting anything about it.
 
 ### Scenarios and arms
 
-**The registry declares 19 scenarios and 73 arms.** 15 of the 19 are
+**The registry declares 17 scenarios and 71 arms.** 16 of the 17 are
 cross-engine: they put megatron-core beside TorchTitan at one cut of the
-model. The other 4 -- `swiglu`, `qkv`, `lm_head` and `attention` -- are
-single-engine, and they do **not** share one fate. `swiglu` is recorded as
-superseded by `expert_mlp` and deliberately not deleted
-(`reports/20260819-partc/MERGE-half2-result.md`). Nothing supersedes
-`attention`: no declared scenario cuts inner attention cross-engine, and the
-`attention_core` scenario that would is in flight in another worktree and is
-not in this registry. Do not write that a later commit removes the four
-together; no in-tree document says so.
+model. **`lm_head` is the one single-engine scenario left.** It stays because
+its `fused_linear_ce` arm has no successor: `FusedLinearCrossEntropyLoss` owns
+the LM head, so the arm fits neither `lm_head_projection` nor
+`cross_entropy`, and the `fused_linear_ce` **span** that would hold it is not
+declared yet.
 
-**Every count in this section is the count at this HEAD**, and
-`attention_core` moves all of them at once -- scenarios, arms, the
+**Three single-engine holdovers were deleted on 2026-08-20**, each once a
+cross-engine scenario had re-homed every one of its arms: `swiglu` into
+`expert_mlp`, `qkv` into `qkv_prep`, `attention` into `attention_core`. A
+re-homed titan arm is the same code under an `engine/profile` name, so
+`swiglu/piper_optimized_triton` is now
+`expert_mlp/titan/piper_optimized_triton`. Two of the successors changed what
+the number means -- see the table under "Total kernel time cannot rank arms
+that differ in one component" -- so an old number and its successor are not
+comparable.
+
+**Every count in this section is the count at this HEAD.** Any scenario that
+arrives or leaves moves all of them at once -- scenarios, arms, the
 cross-engine total, the comparison and correctness tallies below. Re-derive
 rather than quote:
 
 ```bash
-.venv/bin/python -c "from benchmarks.kernel.registry import KERNEL_SCENARIOS as K; print(len(K), sum(len(s.arms) for s in K.values()))"
+.venv/bin/python -c "
+from benchmarks.kernel.registry import KERNEL_SCENARIOS as K
+from benchmarks.kernel.spans import KERNEL_SPANS
+print(len(K), sum(len(s.arms) for s in K.values()), len(KERNEL_SPANS))"
 ```
 
-The table below details the 4 holdovers plus `rope`. **It is 5 of the 19, and
-the registry is the authority.** The paragraph after the table names the other
-14.
+The table below details `rope` and `lm_head`. **It is 2 of the 17, and the
+registry is the authority.** The paragraph after the table names the other 15.
 
 | scenario | arms | modes | notes |
 |---|---|---|---|
 | `rope` | `mcore/base`*, `mcore/no_rope_fusion`, `titan`, `titan/helion`, `titan/te` | fwd, bwd | **cross-engine**: megatron's THD path eager against three compiled titan modules. `titan/te` alone needs gcc-13, and is skipped by name without it. GB/s is reported; **x-floor is not**, because the scenario declares no floor |
-| `swiglu` | `baseline`*, `piper_optimized_triton`, `piper_optimized_inductor` | fwd, bwd, fwd+bwd | whole expert layer only; both Piper arms fuse the w13 GEMM and differ in the activation (custom Triton op vs plain ops left to Inductor) |
-| `qkv` | `baseline`*, `fused_qkv` | fwd, bwd, fwd+bwd | weights transferred via the fused state-dict merge hook |
-| `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric |
-| `attention` | `baseline`*, `flex_flash`, `flash_attention_3` | fwd, fwd+bwd | inner attention only, packed-document causal masking; FA3 needs the `flash3` group, `flex_flash` the `fa4` group |
+| `lm_head` | `baseline`*, `fused_linear_ce`, `te_fused_ce`, `piper_optimized_te_ce` | fwd+bwd | losses compiled; peak memory is the secondary metric. The last single-engine scenario |
 
-**The table above is the four single-engine holdovers, plus `rope`. It is not
-the whole registry.** `benchmarks/kernel/registry.py` declares 14 further
-cross-engine scenarios, in partition order: `embedding_stage`, `qkv_prep`,
-`qk_norm`, `attn_out_proj`, `attn_residual`, `ffn_norm`, `moe_router`,
-`dispatch_permute`, `expert_mlp`, `moe_combine`, `moe_residual`, `final_norm`,
-`lm_head_projection` and `cross_entropy`. Their arms are named `engine` or
+**The table above is not the whole registry.**
+`benchmarks/kernel/registry.py` declares 15 further cross-engine scenarios, in
+partition order: `embedding_stage`, `qkv_prep`, `qk_norm`, `attn_out_proj`,
+`attn_residual`, `ffn_norm`, `moe_router`, `dispatch_permute`, `expert_mlp`,
+`moe_combine`, `moe_residual`, `final_norm`, `lm_head_projection`,
+`cross_entropy` and `attention_core`. Their arms are named `engine` or
 `engine/profile`, except the `copy_floor` bandwidth arms. The anchor is
 `mcore/base` in every one except `expert_mlp`, which anchors on `titan`
 because it publishes no cross-engine row. `./run_bench.sh scenarios` prints
 every scenario with its description. Read the registry rather than this table
 for that half.
 
-**No cross-engine arm has produced a number on this box yet.** Every
-`results.json` under `out/` names one of the five scenarios in the table
-above, and none of them contains the string `mcore/base`. Treat the 15
-cross-engine scenarios as declarations until a run says otherwise.
+**Exactly one cross-engine number exists**, and it is two arms of one
+scenario. 53 kernel `results.json` files exist under `out/` and **one**
+contains the string `mcore/`:
+`out/20260821T042516Z/kernels/attention_core/nvidia-h200/`. Re-derive both
+counts rather than trusting this line:
 
-The `attention` scenario measures **inner attention only** -- the level at
-which the implementations are substitutable, and the level that keeps it from
-re-measuring the projection work `qkv` already covers. All three arms consume
-the same q/k/v and the same synthetic packed-document boundaries, delivered in
-the three mask forms the backends need -- a flex `BlockMask` at the default 128
-block size, the same mask at the `(256, 128)` blocks the FLASH backend wants,
-and THD `cu_seqlens` -- all built once in the inputs builder, because
-`create_varlen_metadata_for_document` contains a device-to-host sync and
-`create_block_mask` is itself a compiled call, so none may run inside a timed
-closure. Nothing validates the FLASH block size on the torch side: it is
-forwarded verbatim into FA4's block-sparse tensors, so a mismatch surfaces
-inside FA4 rather than as a torch-level error.
+```bash
+find out -path '*kernels*' -name results.json | wc -l
+find out -path '*kernels*' -name results.json -exec grep -l "mcore/" {} +
+```
 
-One asymmetry is deliberate and recorded rather than hidden: **`baseline` is
-not wrapped in `torch.compile`.** `FlexAttention` already holds a class-level
-compile of `flex_attention`, so wrapping it again risks a double compile or a
-graph break around its spmd context. `flex_flash` is the same module and gets
-the same treatment; only `flash_attention_3` is wrapped explicitly. All three
-arms are therefore compiled, just by different mechanisms, and
-`KernelArm.compiled` records it.
+That run is a **two-arm selection**: `--arm mcore/base --arm titan` at
+`--seq-len 16384`, batch 4, `normal` shape, 5 replicates. The other four arms
+carry `status: skipped` with the selection as the reason, so the file holds 2
+comparison rows and no ratio against FA3, FA4 or the unfused arm. `titan`
+against `mcore/base`:
 
-**There is no TE arm in either attention scenario, and one of the two reasons
-given for that has been refuted.** The file used to claim TE and the FA3
-varlen path cannot share a process, citing a cuDNN soname collision. That was
-measured on 2026-08-20 and **it does not hold**: both libraries import and run
-real attention kernels in one process, in both import orders, dense and THD
-varlen alike, under the conditions `run_bench.sh` creates. Evidence:
-`reports/20260820-te-fa3-coexist.md`. So process sharing blocks nothing, and
-a kernel-bench TE attention arm is not ruled out by it.
+| mode | titan / mcore/base | 95% CI | medians (us/call) |
+|---|---|---|---|
+| forward | **1.1226** | [1.1196, 1.1241] | 2071.7 against 1847.0 |
+| forward_backward | **1.1421** | [1.1357, 1.1494] | 7936.9 against 6951.5 |
 
-The other blocker stands, and it is an e2e blocker only: TE wraps
-`DotProductAttention.forward` in `torch.compiler.disable`
-(`transformer_engine/pytorch/jit.py`), which the fork's
-`fullgraph=True` per-block compile (`distributed/compile.py:58`) refuses,
-ruling it out of e2e. The second is not absolute -- with graph breaks allowed
-TE would run, splitting each block into ~3 graphs -- but that is a different
-compile treatment from the baseline and so not a like-for-like arm.
+Titan is slower on both. **The number is quotable because the sequence
+length made both arms device-dominated**: the `--burst` ladder puts every
+residual inside +/-0.7%, far below the 2% flag, where the same two arms at
+seq 1024 are dispatch-bound and their ratio would move with `k`. Read it as
+one cell of one scenario at one long sequence, not as an engine verdict.
+
+**15 of the 16 cross-engine scenarios have still never been built.** No arm
+was constructed, no `_assert_mcore_*` guard ran, and no gate compared a real
+tensor. Only `attention_core` has been built and gated, on 2026-08-20
+(`reports/20260820-attention_core-firstrun.md`): all six arms built and all
+24 enforcing gates passed. So the correct reading of any other cross-engine
+scenario at this rev is "a declaration whose builders have never executed",
+which is weaker than "untested" and much weaker than "measured".
+
+
+The `attention_core` scenario measures **inner attention only** -- the level
+at which the implementations are substitutable, and the level that keeps it
+from re-measuring the projection work `qkv_prep` and `attn_out_proj` already
+cover. Its six arms are `mcore/base` (TransformerEngine's cuDNN
+FusedAttention), `mcore/attn_flash3` (TE resolving to FlashAttention 3 on
+sm90), `mcore/attn_unfused` (TE's own torch implementation), `titan`
+(FlexAttention's Triton template), `titan/flex_flash` (the same FlexAttention
+module lowered to FA4 CuTe kernels) and `titan/flash_attention_3` (FA3 varlen
+through `torch.nn.attention.varlen`).
+
+Every arm consumes the same q/k/v **values** and the same synthetic
+packed-document boundaries. Those boundaries reach the arms in the three mask
+forms the backends need: a flex `BlockMask` at the default 128 block size, the
+same mask at the `(256, 128)` blocks the FLASH backend wants, and THD
+`cu_seqlens`. The inputs builder builds all three once. No timed closure may
+build one, because `create_varlen_metadata_for_document` contains a
+device-to-host sync and `create_block_mask` is itself a compiled call. Nothing validates the FLASH
+block size on the torch side: it is forwarded verbatim into FA4's
+block-sparse tensors, so a mismatch surfaces inside FA4 rather than as a
+torch-level error.
+
+**The two engines get the same values in different memory layouts, on
+purpose.** Titan gets three contiguous tensors, which is what its projection
+materializes. Megatron gets a contiguous query, a contiguous key, and one
+non-contiguous strided view -- the **value**, which is neither normed nor
+rotated and therefore never leaves the fused QKV buffer. TE does not
+recognize that layout and copies the value inside every timed megatron call.
+So a megatron number here is attention plus megatron's own layout adaptation
+for the value. The key's equal half belongs to `qk_norm`, which hands its own
+megatron arm the matching strided key, so neither scenario double-books it.
+
+**The compile treatment differs by arm, and every ratio is a comparison of
+treatments.** All three megatron arms are eager, because megatron compiles no
+whole transformer layer. `titan` and `titan/flex_flash` are compiled by
+FlexAttention's own class-level `torch.compile`, which carries
+`max_autotune` **and** `coordinate_descent_tuning`;
+`titan/flash_attention_3` gets a plain `torch.compile(fullgraph=True)` with no
+autotune. The Triton template is therefore the **only autotuned arm in the
+scenario**, and a row against it is not a kernel-quality claim on its own.
+`KernelArm.compiled` and `eager_reason` record the treatment per arm.
+
+**Which kernel each megatron arm runs is pinned by its profile and enforced
+by a guard**, because every backend computes the same function and no
+correctness gate can tell them apart. `_assert_te_selected_backend` reads
+TE's own recorded decision. On 2026-08-20 the three arms selected
+`FusedAttention`, `FlashAttention 3.0.0` and `UnfusedDotProductAttention`
+respectively. **`mcore/base` is the cuDNN arm**, because cuDNN is what
+TransformerEngine resolves to on Hopper -- so the anchor of this scenario is
+a cuDNN kernel, and every cuDNN caveat below applies to it.
+
+**There is no megatron FlashAttention-4 arm**, and there cannot be one here:
+TE prefers FA3 on sm90 whenever both are installed and no megatron setting
+reaches past that. `titan/flex_flash` therefore has no megatron opponent and
+is published against `titan`, which isolates the lowering. Expect it to lose
+on Hopper for a reason that is not about FA4: FlexAttention's packed-interval
+mask optimization is gated on compute capability 10/11, so partial blocks
+evaluate the mask per lane here.
+
+**`mcore/attn_unfused` can exhaust the device, and its OOM would take the
+whole scenario.** It materializes the score matrix over the **segment** count,
+which is `cu_seqlens.numel() - 1` and not the real document count -- 127 at
+every workload, because `cu_seqlens` is padded to 128 entries. One bf16 score
+tensor is 4.0 GiB at seq 1024, 15.9 GiB at 2048 and 63.5 GiB at 4096 on the
+normal shape, and 47.6 GiB at seq 1024 on `huge`; the arm holds three of
+those. A sweep past seq 2048 will OOM, and the correctness pass has no
+per-arm exception handling, so the whole scenario goes with it. At the
+default workload it does not: measured peak 13.47 GiB against 139.81.
+
+**The TE/FA3 coexistence question is settled, and its answer is not the one
+the file used to give.** The old text claimed TE and the FA3 varlen path
+cannot share a process, citing a cuDNN soname collision. Measured on
+2026-08-20, **that is refuted**: both libraries import and run real attention
+kernels in one interpreter, in both import orders
+(`reports/20260820-te-fa3-coexist.md`). What does block them on this host is
+narrower and real -- torch's cuDNN **version bookkeeping**. See "The
+correctness pass needs a per-arm split on some hosts" below.
 
 The fp64 reference is computed **per (row, kv group)**. A one-shot
 `[B, n_heads, L, L]` fp64 score tensor is 8.6 GiB at batch 4 / seq 4096 and
 69 GiB at batch 32, so the obvious implementation OOMs exactly at the shapes
 worth measuring. Gate the arms with `max_rel_l2` only: attention is a
-reduction, and CLAUDE.md's rule against max/ULP metrics on reductions applies.
+reduction, and this file's rule against max/ULP metrics on reductions
+applies.
 
 `*` = scenario baseline. `benchmarks/kernel/registry.py` is the registry: add an
 arm by appending a `KernelArm` with a builder path, and a scenario by appending
@@ -827,31 +1091,216 @@ nothing describes, and a floor known only to its builder could not produce
 the x-floor column, which the parent computes.
 
 **Which comparisons exist is declared too.** `KernelScenario.comparisons` is
-a tuple of `(arm, opponent)` pairs. Left `None` -- as 7 of the 19 scenarios
+a tuple of `(arm, opponent)` pairs. Left `None` -- as 4 of the 17 scenarios
 leave it -- it derives the usual set: every non-floor arm against the anchor.
 An explicit tuple is exhaustive, and the empty tuple declares a scenario that
 publishes no ratio at all, which a scenario whose two sides are not a
 like-for-like cut must be able to say. It replaces the per-arm `compare_to`,
-which could redirect a row but could not decline one.
+which could redirect a row but could not decline one. The 17 scenarios
+publish 41 comparison rows between them; no scenario declares the empty tuple
+today.
+
+**A second kind of per-arm requirement exists.** `KernelArm.requirement` is a
+dotted `module:function` path, resolved **in the parent** and called as
+`predicate(shape, workload)`. It returns `None` when the arm can run here, or
+the reason it cannot -- and that reason reaches `results.json` as
+`status_reason`, so a reader learns why an arm is absent without holding the
+registry. It differs from `requires_gcc_toolset` in what decides it:
+`requires_gcc_toolset` is a property of the **host**, answerable before the
+shape is known, and `requirement` is a property of this **shape and
+workload**. The module it names must be parent-side and torch-free, like the
+schema; a test asserts that. **No arm declares one at this rev.** The case
+that forced the field is an unfused attention arm whose score tensor grows
+with the square of the sequence length, and it is undeclared. Catching the
+builder's exception instead was rejected: a `try` around the build turns a
+bug into a skipped arm, shortens the roster for a reason nobody declared, and
+still exits zero.
 
 **A builder path is a string, and must stay one.** `benchmarks/kernel/engine/`
 imports `schema.py`, never `registry.py`, and never an `operations/` module:
 arms reach it only as already-resolved `BuiltArm` values via `resolve_symbol`.
 So do not move a scenario constant next to its family's builders -- that
 "colocate the family" move recreates `engine -> registry ->
-operations.<family> -> torchtitan` and drags every kernel family and its model
-dependencies into the engine's import graph, which is what per-arm process
-isolation cannot have. `tests/test_import_boundaries.py` section 3 asserts both
+operations.<family> -> torchtitan`. That chain puts every kernel family and
+its model dependencies into the engine's import graph. Per-arm process
+isolation cannot have that. `tests/test_import_boundaries.py` section 3 asserts both
 halves; `tests/test_migration_contract.py` pins each scenario's builders to its
 own family module.
 
+#### The correctness pass needs a per-arm split on some hosts
+
+`run_correctness_pass` gates every arm of a scenario in **one** interpreter,
+because a gate needs both sides at once. On this box that is what
+`attention_core` cannot do without a workaround.
+
+The mechanism is the one "Which cuDNN a megatron arm runs is a host property"
+describes: TE binds the host's cuDNN, so `torch.backends.cudnn.version()`
+raises, because torch requires `runtime_minor >= compile_minor`.
+`torch.nn.attention.varlen` asks for that version and the answer is
+`lru_cache`d, so one raise is enough -- torchtitan's `VarlenAttention` cannot
+build in a process that has imported TE.
+
+**The blocker is the correctness pass alone.** A timing worker holds one arm,
+so TE never sits beside the varlen path there. cuDNN is also the only library
+that splits this way: `libcublas`, `libcublasLt`, `libcudart` and `libnccl`
+all resolve to the venv wheels in the same process, because torch loads those
+eagerly.
+
+Two ways past it, and they are **not** equivalent, so say which one a number
+came from:
+
+- `PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1` leaves TE on 9.23.2 and only
+  stops torch refusing to answer. This is what the first `attention_core`
+  gate pass used. The flag reaches **every** worker, because the child
+  environment is built from `os.environ`, so a shell that exports it
+  publishes every number under it.
+- `CUDNN_PATH` **and** `LD_LIBRARY_PATH` together move the whole process to
+  the pinned 9.24.0. `LD_LIBRARY_PATH` on its own does not, and leaves a
+  split in the opposite direction; the section above gives the reason.
+
+A third option -- initializing torch's cuDNN before TE imports -- is
+**untested and predicted to be bad**: it should leave TE running a 9.24.0
+graph engine against 9.23.2 ops. The cuDNN comparison measured four
+configurations and this is not one of them, and the binding order above works
+against it. Treat it as a prediction, and do not use it.
+
+A per-arm correctness split would remove the need for either workaround,
+because TE and the varlen path would never share an interpreter. A repair to
+the environment removes it too. Neither is done; the choice is recorded rather
+than made.
+
+
+#### The GB/s and x_floor columns are not always read against 1.0
+
+Two derived columns are computed by the parent for every scenario that
+declares a `copy_floor`. `gbps` is `bytes_moved / median`. `x_floor` is
+`median / floor_median` for every non-floor arm that shares a mode with the
+floor, so it reads **no** `bytes_moved` at all.
+
+That last fact is what a reader misses. When two arms of one scenario declare **different**
+`bytes_moved`, an arm running at exactly the floor's bandwidth no longer
+reads `x_floor` 1.0. Two scenarios do that today, and the correction factor
+is `arm_bytes / floor_bytes`:
+
+| scenario | arm | `bytes_moved` at the default workload | reads against |
+|---|---|---|---|
+| `qk_norm` | `copy_floor`, `titan` | 25,165,824 (24 MiB) | 1.00 |
+| `qk_norm` | `mcore/base` | 33,554,432 (32 MiB) | **1.33** |
+| `moe_router` | `copy_floor` | 16,777,216 | 1.00 |
+| `moe_router` | the three `mcore` arms | 8,470,528 | **0.50** |
+| `moe_router` | `titan` | 42,106,880 | **2.51** |
+
+Divide by the factor to recover the usual "near 1 means bandwidth-bound"
+reading. **`qk_norm` states its factor in the scenario `description`, so a
+reader of `results.json` or of the printed table finds it. `moe_router` does
+not** -- its description says only that each arm carries its own
+`bytes_moved` "so the GB/s and x_floor columns show the asymmetry instead of
+absorbing it", which is true and gives a reader no factor. The `moe_router`
+spread is the wider of the two, at 5x between its extremes.
+
+**Why `qk_norm/mcore/base` moves 8 MiB more.** Megatron's `k_layernorm`
+receives the key as a **strided view** into the fused QKV buffer, which is
+what megatron really produces: the query leaves the buffer because the
+reshape that merges the group dimension has to copy, and the key does not.
+TransformerEngine's `RMSNorm` calls `input_.contiguous()` inside the timed
+closure, so the copy is real work -- one 4 MiB read plus one 4 MiB write
+under the read-plus-write convention `qk_bytes` itself uses. That is the half
+of `qkv_prep`'s deferred copy which used to be timed in **no** scenario;
+`attention_core` times the value's half. **The 4 MiB and the 8 MiB are two
+conventions and both are right -- never put them side by side unnamed.**
+
+**One column understates one arm outright, and no factor fixes it.**
+`moe_combine` declares a single `bytes_moved` of 25,165,824 (25.2 MB) for
+every arm. It describes what an **unpermute** moves -- read the routed rows,
+write one row per token. Titan's combine additionally scales every routed row
+by its probability, which megatron applied one cut earlier and does not
+repeat here, so titan makes **at least one more pass** over the `[rows, dim]`
+tensor: at least 41,943,040 B (41.9 MB) against the declared 25.2. By how
+much the titan figure is low is **not measured** -- it depends on whether
+Inductor fuses the cast, the multiply and the cast back into one pass or
+materializes an fp32 copy. **Read no bandwidth achievement off the
+`moe_combine` titan row.**
+
+### Spans
+
+**A span is an implementation that fuses across a scenario cut.** It belongs
+to no single scenario, so it is declared over an **ordered scenario range**,
+and its claim is the span against the **sum of the scenarios it replaces**. A
+span result therefore holds two totals.
+
+**`KERNEL_SPANS` is empty at this rev.** The mechanism landed before any
+declaration, deliberately: a span needs a runner that can launch one and a
+merge that can hold two totals, and neither existed. **Re-derive the count before this file states one.** Another branch declares
+spans now:
+
+```bash
+.venv/bin/python -c "
+from benchmarks.kernel.spans import KERNEL_SPANS
+print(len(KERNEL_SPANS), sorted(KERNEL_SPANS))"
+```
+
+**No span has ever been measured.** The engine has never run on a GPU, and
+every number in its tests is synthetic.
+
+How a span is declared. `benchmarks/kernel/spans.py` holds the roster;
+`KernelSpan` and `SpanParts` live in `benchmarks/kernel/schema.py` beside the
+scenario types.
+
+- `measurement` is the span's own head-to-head, and it is a `KernelScenario`.
+  A span **composes** one rather than subclassing it, so
+  `isinstance(span, KernelScenario)` is False and a span added to
+  `KERNEL_SCENARIOS` by mistake cannot run as a bare scenario. It is also
+  what keeps `benchmarks/kernel/engine/` free of any knowledge that spans
+  exist: both passes take a `KernelScenario`, and a span hands them
+  `measurement`.
+- `scenarios` is the range, in the model's own order, and it must hold at
+  least two entries with no repeat.
+- `parts` says what each span arm replaces, **positionally**: one arm name per
+  entry of `scenarios`, in that order. The correspondence is declared and
+  never inferred, because a span arm named `titan` does not necessarily
+  replace an arm named `titan` at each cut, and a span arm may name an
+  implementation no enclosed scenario has.
+- Every span arm must declare a `parts` entry. A span exists to state one
+  claim. An arm with no parts row cannot state it.
+- `validate_span_parts` runs at **import**, so a part arm that does not exist
+  fails when the module loads rather than as an absent row after a GPU has
+  measured every arm of the span and of every scenario it encloses.
+
+How a span runs. `--span NAME` is repeatable and defaults to none. Asking for
+one span can add several scenarios to the run: `measurement_plan` puts every
+enclosed scenario **ahead of** its span, and each scenario once however many
+spans enclose it. That ordering is what makes the two sides share a run.
+`--out` refuses a span outright, because a span run is always several units
+and they would all resolve to one directory; `--arm` refuses it too, because
+an arm name belongs to one roster.
+
+What a span publishes. A span writes a `kernel_span` results file whose
+`arms` holds the span's **own** measurement, whose `parts` holds the other
+side keyed by span arm, whose `comparisons` keeps its scenario meaning (arm
+against arm, both measured inside the span), and whose `parts_comparisons`
+holds the span-versus-parts claim under its own name. A reader who opens one
+and finds the other has opened the wrong field.
+
+Three things about a span number that must be said next to it:
+
+1. **The statistic is unpaired.** See "Method" -- the interval is
+   `unpaired_ratio_ci_low`/`_high` and it cancels no drift.
+2. **The ratio is biased in the span's favour**, by one host dispatch chain
+   per enclosed scenario beyond the first. See "Method".
+3. **An incomplete parts side costs one row, not the whole file.** A part
+   that lost its measurement costs that span arm its parts total; a part that
+   measured fewer modes than it declared costs that mode's row, and both are
+   recorded as warnings. The loud failure is kept for the case where **no**
+   span arm carries a parts total: that file would state the span's own
+   number and no claim about it. That is a scenario under a span's name.
+
 ### Method
 
-- Module-scope arms (the three titan rope modules, the swiglu layer arms,
-  both qkv arms) run under `torch.compile(fullgraph=True)`, because that is
-  what they face end-to-end: eager isolation races custom ops against
+- Module-scope arms (the three titan rope modules, `expert_mlp`'s four titan
+  arms, `qkv_prep`'s two) run under `torch.compile(fullgraph=True)`, because
+  that is what they face end-to-end: eager isolation races custom ops against
   materialization costs Inductor deletes, which inverts verdicts (the
-  swiglu combined layout wins eager, loses compiled). **The treatment is per
+  combined SwiGLU layout wins eager, loses compiled). **The treatment is per
   arm, and the engine does not imply it.** An arm is eager only where
   `KernelArm.eager_reason` says why: every `copy_floor`, because a bandwidth
   floor is not an implementation; most megatron-core arms, because megatron
@@ -893,8 +1342,24 @@ own family module.
   device work these shapes carry, so the method works where an arm is
   device-bound; the three module arms sit 6-19x above that floor and are
   still falling at 64, so **roughly 85% of every published rope number is
-  host dispatch**. `qkv` is dispatch-heavy in absolute terms too, but both
-  its arms are, so the effect largely cancels in the ratio.
+  host dispatch**. The retired `qkv` scenario was dispatch-heavy in absolute
+  terms too, but both its arms were, so the effect largely cancelled in the
+  ratio. That reading transfers to `qkv_prep`'s titan pair in principle, and
+  **it is not a repeat**: `qkv_prep` puts the attention-input norm inside the
+  cut, so the arms are not the ones the figure was taken on.
+- **A span ratio carries the same 85% as a bias in its own favour.** The
+  parts side pays **one host dispatch chain per enclosed scenario**, and the
+  span pays one. So a parts total over N scenarios holds N-1 extra chains
+  that no fusion removed -- the harness stopped paying them because it timed
+  one closure instead of N. The published span/parts ratio is therefore
+  **smaller** than fusion alone would make it, which is the direction that
+  supports the claim a span exists to make, and the effect grows with the
+  length of the range. It is a property of the range length rather than of
+  what a span fuses, so the engine states it on every span -- printed under
+  the table and recorded in every span `results.json` -- and nothing corrects
+  for it. Separating the two would need profiler-summed device time, which
+  nothing here measures.
+
 - **A dispatch-bound arm carries a k-dependent ratio, so its ranking is not
   a kernel result.** On the same retired rope roster, `helion` against
   `baseline` is 2.40x at k=1, 3.05x at k=16 and 3.09x at k=64. Run `--burst`; the merge derives a `residual`
@@ -921,9 +1386,11 @@ own family module.
   the shorter arms reach their timed region, and this workload is
   host-dispatch bound, so host jitter lands inside the measured interval.
   Setting `compile_threads=1` removes the pool. Measured at n=3, median
-  us/call with the per-run standard deviation: `qkv/fused_qkv/forward`
-  248.68 +/- **9.42** against 233.37 +/- **0.82**; `rope/helion/forward`
-  261.27 +/- **29.07** against 244.64 +/- **6.47**. The standard deviation
+  us/call with the per-run standard deviation, **on two arms that no longer
+  exist under those names**: `qkv/fused_qkv/forward` (the retired `qkv`
+  scenario) 248.68 +/- **9.42** against 233.37 +/- **0.82**, and
+  `rope/helion/forward` (the retired single-engine rope roster) 261.27 +/-
+  **29.07** against 244.64 +/- **6.47**. The standard deviation
   falls 3x to 11x on the dispatch-bound arms and the device-bound arm is
   unmoved -- which is what 32 concurrent `import torch` processes would do.
   The medians move in both directions at n=3, so **only the variance change
@@ -951,10 +1418,25 @@ own family module.
   assumption is not met. **Wilcoxon was removed**: it needed the per-cycle
   pairing the old round-robin provided, and at 5 replicates its exact
   two-sided minimum p is 0.0625, so it can never reject.
+- **That whole bullet is a *scenario* statement. The span statistic is
+  unpaired.** `measurement_plan` runs each unit to completion before the next
+  one starts, so a span's replicate `r` and an enclosed scenario's replicate
+  `r` are separated by every worker in between and share nothing but the
+  number. Any permutation of the parts' indices would be as justified as the
+  identity. So a span's point estimate is a ratio of two medians, each taken
+  over its own side, and the interval is an **unpaired** bootstrap that
+  resamples each side independently. It is published as
+  `unpaired_ratio_ci_low`/`_high` and never under the scenario name: it
+  cancels no drift, and the two must not be read as the same statistic.
+  **Rejected: an interleave of the units, which would make the pairing real.**
+  It would make a scenario's own numbers depend on whether a span asked for
+  it.
 - Python's garbage collector is paused during the timed region. A collection
   starves the launch queue and lands as idle time inside whichever arm's
-  interval is open; pausing it cut the swiglu module sd from ~63 us to
-  ~1.4 us and removed every 2x outlier, medians unchanged.
+  interval is open; pausing it cut the sd of the retired `swiglu` scenario's
+  module arm from ~63 us to ~1.4 us and removed every 2x outlier, medians
+  unchanged.
+
 - The first burst after the warmup synchronize is discarded (empty queue,
   systematically high).
 - No L2 flush, and **no equalization is claimed**. The old text claimed
@@ -978,19 +1460,24 @@ own family module.
   arm's dependencies out of another arm's interpreter during measurement, and
   it is why the parent computes the ratios: no timing worker sees a second
   arm. **`run_correctness_pass` is the exception**: it gates *every* arm of
-  the scenario in one interpreter, because 35 of the 73 arms name another
+  the scenario in one interpreter, because 36 of the 71 arms name another
   arm as their correctness reference and a check needs both sides at once.
   One arm is resident at a time -- each is built, asked for its outputs, and
   dropped before the next is built -- so the pass is bounded by the largest
   single arm rather than by their sum
-  (`benchmarks/kernel/engine/run.py`). The scenario that was expected to
-  force a per-arm split -- one holding both a TransformerEngine arm and an
-  FA3 arm -- does not: the two were measured to coexist in one process
-  (`reports/20260820-te-fa3-coexist.md`). The split may still be wanted, but
-  nothing is waiting on it.
+  (`benchmarks/kernel/engine/run.py`).
+- **One declared scenario now needs a per-arm correctness split, and the
+  reason is not the one anybody predicted.** TransformerEngine and the FA3
+  varlen path were expected to collide over kernels or sonames; measured,
+  they do not (`reports/20260820-te-fa3-coexist.md`). What collides is
+  torch's cuDNN **version bookkeeping**, and it stops `attention_core`'s
+  titan FA3 arm from building after a megatron arm in the same interpreter.
+  See "The correctness pass needs a per-arm split on some hosts" above. The
+  split is not built; the workaround is an environment flag.
   `benchmarks/kernel/engine/run.py`'s `run_kernel_scenario` composes the same
   two passes in a single process for the GPU smoke test; the runner never
   calls it.
+
 - **Re-seeding is per arm build, not per process.** Inputs rebuild
   bit-identically in every worker (the inputs builder owns its generator),
   but builders consume the global RNG, so an arm built second in one process
@@ -1009,22 +1496,30 @@ own family module.
   results at all -- every comparison is a ratio against it, so the
   alternative is a table whose missing ratios look like a scenario that
   declared none.
-- **Requirements belong to the arm, not to the scenario.** Without a C++20
-  host compiler, rope loses `titan/te` and still measures its other four
-  arms; the former scenario-level `requires_gcc_toolset` check threw away
-  the whole scenario. `resolve_arm_skips` decides the set in the parent, closes it
-  over correctness references (an arm whose reference is skipped is skipped
-  too -- timing an arm nothing checked is the wrongness the gates exist for),
-  and delivers it to the correctness worker as `--skip-arm NAME`. A skipped
-  arm is spawned in neither pass. The scenario-level property survives for
-  its one honest use: asking whether anything here needs the compiler at all,
-  which is what decides whether `add_compiler_environment` runs. That call
-  shells out to bash and is now resolved **once per run**.
+- **Requirements belong to the arm, not to the scenario, and there are now
+  two kinds.** `requires_gcc_toolset` is a property of the host:
+  without a C++20 host compiler, rope loses `titan/te` and still measures its
+  other four arms, where the former scenario-level check threw away the whole
+  scenario. `KernelArm.requirement` is the other kind -- a parent-side
+  predicate called with `(shape, workload)` -- and no arm declares one yet.
+  `resolve_arm_skips` decides the set in the parent, before a GPU is claimed;
+  it resolves the operator's `--arm` choice first, then the capability
+  probes, then closes the set over correctness references (an arm whose
+  reference is skipped is skipped too -- timing an arm nothing checked is the
+  wrongness the gates exist for). It delivers the result to the correctness
+  worker as `--skip-arm NAME`, and a skipped arm is spawned in neither pass.
+  The scenario-level property survives for its one honest use: asking whether
+  anything here needs the compiler at all, which is what decides whether
+  `add_compiler_environment` runs. That call shells out to bash and is now
+  resolved **once per run**.
 - **Every declared arm reaches `results.json`, measured or not**, carrying
   `status` `ok`, `skipped` or `failed` and the reason. At schema 3 an arm
   this host could not run and an arm the registry never declared were both
   simply absent, so a reader could not tell a short roster from a complete
-  one. The skip of an *anchor* is the exception that costs the scenario.
+  one. **Read the reason, not only the status**: a `skipped` arm the operator
+  left out with `--arm` and a `skipped` arm this host cannot build are
+  different facts, and the reason string is what separates them. The skip of
+  an *anchor* is the exception that costs the scenario.
 
 ### Startup cost
 
@@ -1079,10 +1574,15 @@ without the ratio becoming better known. Above 1, therefore:
   and `methodology.replicates_per_process` records the value.
 - The printed table states the isolation on every run, marks the interval
   with `~`, and prints a warning that names the renamed fields.
+- A **span**'s parts row is published under `unpaired_ratio_ci_*` either way
+  and does not also take the `within_process_` rename;
+  `methodology.replicates_per_process` records the value in both files.
 
-**Its acceptance gate is outstanding.** The flag lives on one condition: more
-than a 2x end-to-end speedup on an idle box. If the verified speedup is under
-2x, remove the flag.
+**Its acceptance gate is still outstanding.** The flag lives on one
+condition: more than a 2x end-to-end speedup on an idle box. Nobody has run
+that measurement. If the verified speedup is under 2x, remove the flag. The
+measurement it rests on was taken on the retired `qkv` scenario, on a
+contended box, and may not be cited.
 
 **Two architectural claims are contested, and the contest is unsettled.** One
 agent measured that a fresh process does not reduce the spread of a
@@ -1111,10 +1611,13 @@ destroying it.
 - **A fork pool of pre-warmed interpreters.** Its author could not
   demonstrate timing neutrality: `rope/te/backward` read 12% high pooled in
   one experiment and 2% low in another, and two dispatch-bound measurements
-  that disagree about the sign are not a result. It was never run on
-  `attention` (the scenario whose isolation matters most, holding both FA3
-  and FA4) or on `lm_head`. It targets the same wall clock
+  that disagree about the sign are not a result. It was never run on the
+  scenario whose isolation matters most, or on `lm_head`. That scenario is
+  now `attention_core`, which holds FA3, FA4 **and** a TransformerEngine arm
+  in one correctness pass -- so the isolation argument is stronger than it
+  was, not weaker. The pool targets the same wall clock
   `--replicates-per-process` removes, and it costs a second launch path.
+
 - **A fork server**, for the same reasons and a fortiori: it never landed,
   and its own author called it not ready.
 - **`compile_threads=1`.** It removes the 32-worker pool and most of the
@@ -1141,28 +1644,30 @@ destroying it.
   drives individual dot-product outputs toward zero, and dividing their
   negligible error by that tiny magnitude reports thousands of ULPs for a
   numerically perfect kernel -- including the stock one.
-- **`bitwise`** where implementations must agree exactly. Seven scenarios
-  declare it (`qkv`, `embedding_stage`, `qkv_prep`, `attn_residual`,
-  `moe_router`, `dispatch_permute`, `moe_residual`), and whether a given
-  check *gates* depends on what it compares. It stays informational
+- **`bitwise`** where implementations must agree exactly. Six scenarios
+  declare it (`embedding_stage`, `qkv_prep`, `attn_residual`, `moe_router`,
+  `dispatch_permute`, `moe_residual`), and whether a given check *gates*
+  depends on what it compares. It stays informational
   wherever a compiled region may legitimately round differently from an
-  eager one -- the fused-vs-unfused QKV outputs are the original case -- and
-  the rel_l2 gates enforce closeness there. It **enforces** on a permutation
-  or a routing decision, in `dispatch_permute` and on `moe_router`'s
-  `selected_count`. A permutation is a gather, so a wrong one moves right
-  values to wrong places, and both engines build the permuted rows by a pure
-  copy: exact equality is achievable, and it is the metric that sees a
-  misplacement whatever the shape.
+  eager one -- the fused-vs-unfused QKV outputs are the original case, and
+  `qkv_prep/titan/unfused_qkv` still carries that informational check against
+  `qkv_prep/titan` -- and the rel_l2 gates enforce closeness there. It
+  **enforces** on a permutation or a routing decision, in `dispatch_permute`
+  and on `moe_router`'s `selected_count`. A permutation is a gather, so a
+  wrong one moves right values to wrong places, and both engines build the
+  permuted rows by a pure copy: exact equality is achievable, and it is the
+  metric that sees a misplacement whatever the shape.
 
-  **Do not justify that with the `sqrt(2/N)` figure two other files carry.**
-  Swapping one pair of `N` rows gives `max_rel_l2 ~ 2/sqrt(N)`, not
-  `sqrt(2/N)`. At the default `dispatch_permute` workload (`N = 8192`) that
-  is 2.21e-2 measured, **above** the 2e-2 gate, not below it. So a tolerance
-  gate would catch a single swap here by a 10% margin, and would stop
-  catching it as `N` grows. `benchmarks/kernel/registry.py` and
-  `benchmarks/kernel/operations/dispatch_permute.py` state the wrong form and
-  the wrong conclusion; neither is editable from here. The bitwise gate is
-  right for the reason above, not for that one.
+  **The arithmetic behind that is now stated correctly in the source, and
+  this file's warning about it is withdrawn.** Swapping one pair of `N` rows
+  gives `max_rel_l2 ~ 2/sqrt(N)`, which is 2.2e-2 at the default
+  `dispatch_permute` workload (`N = 8192`) -- **above** the 2e-2 gate rather
+  than below it, and **falling** as the workload grows, to 1.6e-2 at batch 8.
+  So a tolerance gate would catch a misplaced row at one batch size and miss
+  it at the next, while the flags that set batch and sequence length are the
+  operator's to change. `benchmarks/kernel/registry.py` and
+  `benchmarks/kernel/operations/dispatch_permute.py` both carry that form and
+  that conclusion today; the earlier `sqrt(2/N)` spelling is gone from both.
 
 ### Silent-fallback guard
 
@@ -1172,25 +1677,51 @@ catch a mis-timed arm. Their builders profile one call and refuse to continue
 unless the arm's marker kernel (`_helion__rope_cos_sin_fwd`,
 `fused_rope_forward_positions_kernel`) actually appears.
 
-`flex_flash` is the one arm with the *opposite* failure mode, and it still
-carries a guard. `BACKEND="FLASH"` hard-raises when `flash_attn.cute` is
-missing rather than degrading to a Triton template, so an arm that runs at all
-ran FA4 -- there is no silent fallback anywhere in that lowering. The
-`FlashAttentionForwardSm90` guard therefore protects against the *reverse*
-mistake: a future refactor quietly dropping `kernel_options` and leaving the
-arm measuring the baseline under an FA4 label.
+`attention_core/titan/flex_flash` is the one arm with the *opposite* failure
+mode, and it still carries a guard. `BACKEND="FLASH"` hard-raises when
+`flash_attn.cute` is missing rather than degrading to a Triton template, so an
+arm that runs at all ran FA4 -- there is no silent fallback anywhere in that
+lowering. The `FlashAttentionForwardSm90` marker guard therefore protects
+against the *reverse* mistake: a future refactor quietly dropping
+`kernel_options` and leaving the arm measuring the baseline under an FA4
+label. The sibling `titan/flash_attention_3` pins `FlashAttnFwdSm90` for the
+usual reason: FA3 degrades to FA2 rather than failing.
+
+**The megatron arms of `attention_core` are guarded by a different mechanism,
+and it must not be described as a marker guard.** Every attention backend
+computes the same function, so no correctness gate separates them, and
+megatron's own `flash_attention_version` field writes environment variables
+TransformerEngine 2.17.1 reads nowhere. `_assert_te_selected_backend`
+therefore reads TE's own recorded decision about the arm's own call. That is
+stronger than a trace marker, and there is deliberately **no cuDNN
+kernel-name marker** anywhere.
 
 ### Output layout
 
 ```
 out/<timestamp>/kernels/<scenario>/<hardware>/
-  manifest.json      # schema 6: model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/replicates_per_process/burst_k/warmup_calls/seed, commands, provenance
-  results.json       # schema 6: every declared arm with a status and its declared compile treatment, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
+  manifest.json      # schema 7: kind, unit_kind, scenario, span, model_size, model_shape, workload, shapes, arms, skipped_arms, replicates/replicates_per_process/burst_k/warmup_calls/seed, commands, provenance
+  results.json       # schema 7: kind, every declared arm with a status and its declared compile treatment, per-mode summaries + per-replicate samples, comparisons, correctness, warnings
   kernel_bench.log   # every worker's stdout+stderr, in spawn order
   fragments/
     correctness.json         # the gate pass
     timing__<arm>__r<N>.json # one per (arm, replicate)
+
+out/<timestamp>/kernels/spans/<span>/<hardware>/
+  manifest.json      # the same schema 7, plus span_scenarios and parts
+  results.json       # kind "kernel_span": arms, parts, comparisons, parts_comparisons
+  ...                # the same log and fragments
 ```
+
+**A span writes one directory deeper, and that is load-bearing.** Every
+statement in this file that globs `out/*/kernels/*/*/` is a **scenarios-only**
+statement: the shallow pattern cannot reach a span, which is what the extra
+directory is for. A span total and a scenario total answer different
+questions and must never be pooled by a path pattern. A **recursive** walk
+(`rglob`, `find -name results.json`) meets both shapes, and there the `kind`
+field is the only thing that separates them. `--out` refuses a span for the
+same reason: a span run is several units and they would all land in one
+directory.
 
 Every fragment also carries a `phases` table: the named wall-clock spans of
 the process that wrote it. A worker that measures several replicates writes
@@ -1238,9 +1769,28 @@ and two do not, most titan arms run compiled and three do not. A reader of
 `results.json` holds no registry, so a row that does not name both sides
 cannot be read. The fields were added to the dataclasses one
 commit before they reached `to_dict`, so a schema-6 file briefly had the
-shape of a schema-5 file; a round-trip test now pins both directions. The
-results loader enforces exact schema equality,
-so older files are rejected rather than half-read; the manifest is
+shape of a schema-5 file; a round-trip test now pins both directions.
+
+**Both files went 6 -> 7 together, when a second kind of unit arrived.** The
+rename that makes it a bump rather than an addition is the value of `kind`.
+It was `"kernel"` on every file, and every file was a scenario -- so the word
+named the family **and** one member of it, which is exactly how `n` and
+`warmup` went wrong at schema 3. It is now `"kernel_scenario"` or
+`"kernel_span"`. The wrong reading this prevents is concrete: a recursive
+walk of `out/` meets both shapes and has `kind` as its only way to tell them
+apart, so a reader keyed on `kind == "kernel"` would take a span total for a
+scenario total and sum it beside the scenarios the span replaces,
+double-counting the same work. Keeping `"kernel"` for scenarios and adding
+`"kernel_span"` was **rejected**: it lets such a reader keep working while
+silently skipping every span, which is the half-read the exact-equality
+loader exists to prevent. The manifest carries the same rename plus
+`unit_kind`, `span`, `span_scenarios` and `parts`; a span manifest writes its
+name in `span` and leaves `scenario` null, because a span name looked up in
+`KERNEL_SCENARIOS` finds nothing.
+
+The results loader enforces exact schema equality,
+so older files are rejected rather than half-read, and each `from_dict` also
+refuses the other kind's file; the manifest is
 write-only provenance and has no loader.
 
 ### Trace diagnostics
@@ -1350,8 +1900,11 @@ load-balancing stability), so the gate runs fp32 on every layer of this
 model, and autocast casts *both* operands up, which materializes an fp32
 copy of the hidden state. That copy is real work in every e2e run this repo
 has ever done, and nothing isolated it until the `moe_router` kernel
-scenario. Read the wrapper's enforcement narrowly, as what it is: the TE RoPE arm requires bf16 activations, and an fp32 swiglu baseline
-would pass every validation rule while measuring the wrong thing. Manifests
+scenario. Read the wrapper's enforcement narrowly, as what it is: the TE RoPE
+arm requires bf16 activations, and an fp32 expert layer would pass every
+validation rule while measuring the wrong thing. (The arm that would show it
+is `expert_mlp/titan`; the `swiglu/baseline` this sentence used to name is
+deleted.) Manifests
 record `execution_model`; runs from schema <= 6 used FSDP2 mixed precision
 and are not comparable.
 
@@ -1425,8 +1978,10 @@ Faithfulness guarantees, all verified:
   it builds both engines through the same helpers a cross-engine kernel arm
   uses, which is what makes it their numerics check rather than a parallel
   implementation. The gate is per-shape and lives on the shape itself
-  (`PiperShape.parity_gate`): 2e-2 at normal
-  (measured 5.5e-3), 5e-2 at huge (measured 2.03e-2). The wider huge gate is
+  (`PiperShape.parity_gate`): 2e-2 at `normal`
+  (measured 5.5e-3), 5e-2 at `huge` (measured 2.03e-2), and 3e-2 at `large`
+  and 6e-2 at `giant`, **both of which are fitted predictions that no parity
+  check has tested**. The wider huge gate is
   bf16 accumulation, not slack, and it is evidenced rather than assumed --
   `--fp32-reference` runs the same weights in fp32 and shows titan's own
   bf16 output sits 3.25e-2 from it against megatron's 3.29e-2 (ratio 1.011),
@@ -1500,6 +2055,18 @@ that imports TE here. Without apex, megatron's standalone norms are torch
 RMSNorm (its own spec fallback); the qkv-input norm fuses into the TE
 linear.
 
+**That routing makes the cuDNN identity a caption obligation, and the
+obligation is about speed.** Every norm number from this arm, and from every
+cross-engine kernel scenario that norms, is "TE norms via cuDNN backend" and
+not TE's fastest norm. Which cuDNN serves that backend is a host property --
+see "Which cuDNN a megatron arm runs is a host property" above -- and the
+version changes no value, so the caption qualifies the timing and not the
+numbers. `megatron_bootstrap.py` also sets
+`CUDNN_FRONTEND_CUDART_LIB_NAME=libcudart.so.13` for the same class of
+mismatch, arrived at independently. A host with a native CUDA 13 driver must
+repeat the measurement.
+
+
 Under `--compile-mode cuda-graph` the arm uses Megatron's per-layer partial
 capture (`MoETransformerLayer`, `cuda_graph_modules=("moe_router",
 "moe_preprocess")`): `n_layers x 2 modules x fwd+bwd` graph replays/step (64
@@ -1518,8 +2085,17 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
+The suite is CPU-only and runs 1124 tests in about 40 seconds at this rev.
+Re-derive that count rather than quoting it; `tests/test_migration_contract.py`
+carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
+the dict**, recomputed at every commit that changes a count. Never add
+deltas. The census does not cover every module -- `test_import_boundaries`,
+`test_legacy_artifacts` and `test_migration_contract` are outside it -- so
+`TEST_CENSUS_TOTAL` is smaller than the suite's own count, by design.
+
 GPU tests skip themselves when CUDA is unavailable. `test_te_rope.py`
 additionally requires g++ >= 13 and JIT-builds the CUDA extension on import.
+
 `test_lm_head_losses.py` includes a SHA-256 check that the vendored TE sources
 are unmodified except for import rewrites -- if you touch
 `benchmarks/models/piper_qwen3/components/lm_head/te_*.py`, that test is
@@ -1620,7 +2196,20 @@ The kernel scenarios additionally depend on:
 - `QKVLinear` / `FusedQKVLinear` / `Linear` from `torchtitan.models.common`,
   and the fused module's state-dict merge hook (arms rely on
   `fused.load_state_dict(unfused.state_dict())` producing bit-identical
-  weights)
+  weights). These are `qkv_prep`'s two titan arms since the single-engine
+  `qkv` scenario was deleted
+- `FlexAttention`, `VarlenAttention`, `VarlenMetadata`,
+  `create_attention_mask`, `create_varlen_metadata_for_document`,
+  `get_causal_mask_mod` and
+  `get_efficient_causal_mask_mod_for_packed_document` from
+  `torchtitan.models.common.attention` -- the whole `attention_core` titan
+  side, plus the mask forms every arm of that scenario shares. The FA3 and
+  FA4 marker strings `FlashAttnFwdSm90` and `FlashAttentionForwardSm90` are
+  pinned by the arms' guards and are generated by CUTLASS and the CuTe DSL,
+  so they appear nowhere in the torch source
+- `AllToAllTokenDispatcher` and `make_token_dispatcher_config` from
+  `torchtitan.models.common.token_dispatcher` / `config_utils`, and
+  `CosSinRoPE` and `_qwen3_norm` for the rope and norm cuts
 - `CrossEntropyLoss` from `torchtitan.components.loss`
 
 Also recheck the documented deltas vs Piper: the builder hardcodes
@@ -1640,7 +2229,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
   `ac_mode`, and one `model_size` (plus one `megatron_git_rev`/`te_version`
-  for the megatron scenario). All are in
+  for the megatron scenario). `cudnn_loader_resolves` is a **speed** axis
+  only: the version changes no value, measured, so cite it beside a timing
+  number and never call two runs numerically incomparable for it. All are in
   every manifest -- check them before comparing against an older run in
   `out/` (manifests written before schema 6 predate the compile-mode flag
   and are `default`; before schema 8 they record the old torch-level mode
@@ -1654,7 +2245,14 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about two seconds.
+  and takes about 40 seconds at 1124 tests.
+- **Do not let "declared" become "measured".** Most of the kernel registry has
+  never executed: 15 of the 16 cross-engine scenarios have never had an arm
+  built, one cross-engine scenario has produced two arms at one sequence
+  length, and no span has been measured at all. Report what such a scenario
+  declares, never what it measures.
+
+
 - **Commit in single, self-contained steps, as the work happens.** One commit
   is one logical change that leaves the tree green on its own. Do not
   accumulate a whole task in the working tree and land it as one commit --

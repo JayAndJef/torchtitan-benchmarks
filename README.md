@@ -19,7 +19,7 @@ the argv-driven operator scripts.
 |---|---|
 | `benchmarks/cli/` | Click CLI and the `python -m benchmarks.cli` entry point. |
 | `benchmarks/e2e/` | End-to-end system: scenario registry, runner, subprocess launch, validation, results. Includes the Megatron-LM training driver under `e2e/megatron/`. |
-| `benchmarks/kernel/` | Kernel-isolation system: registry, runner/worker, timing engine, arm builders, results. |
+| `benchmarks/kernel/` | Kernel-isolation system: scenario registry, span registry, runner/worker, timing engine, arm builders, results. |
 | `benchmarks/models/piper_qwen3/` | Piper Qwen3-1B config port, model shape, and benchmark-local kernel overrides under `components/`. Also the Megatron model builder and submodule bootstrap. |
 | `benchmarks/traces/` | Chrome-trace parsing and per-region pooling. |
 | `benchmarks/artifacts/` | Manifest and run-state IO, output layout, shared sample summaries. |
@@ -140,7 +140,7 @@ Each run writes:
 
 ```text
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json          # workload, commands, source revisions, and hardware metadata
+  manifest.json          # workload, commands, source revisions, and hardware metadata (including the two cuDNN fields)
   run_state.json         # resumable arm and evaluation status
   results.json           # throughput, memory, gpu kernel time, region timings
   <arm>.log              # training output
@@ -150,6 +150,15 @@ out/<timestamp>/<scenario>/<hardware>/
 Training runs are bound to the GPU's NUMA node with `numactl` when available,
 so host scheduling does not decide throughput; the manifest records the
 binding as `cpu_pinning`.
+
+The manifest also records which cuDNN the run used, as `cudnn_torch_build`
+and `cudnn_loader_resolves`. TransformerEngine binds the host's cuDNN rather
+than the pinned wheel's, so which cuDNN a Megatron arm ran is a property of
+the host. The version changes no value -- measured on 2026-08-21, bitwise
+identical outputs under 9.23.2 and 9.24.0 -- so cite both fields beside a
+timing number, where the effect is unmeasured, and not as a reason two runs
+disagree numerically.
+
 
 Run directories written before the package restructure record the module names
 this repository used at the time. They still load and evaluate, but they cannot
@@ -181,6 +190,25 @@ the compiler fuses the graph around it.
 ./run_bench.sh kernel-bench <gpu> --scenario expert_mlp # one scenario
 ./run_bench.sh kernel-bench <gpu> --burst              # add the dispatch-cost diagnostic
 ```
+
+A **span** is a third kind of unit. A scenario cuts the model at one boundary
+and ranks the implementations there; a span is an implementation that fuses
+*across* a cut, so it belongs to no scenario and is declared over an ordered
+scenario range. Its claim is the span against the sum of the scenarios it
+replaces, and a span result holds both totals. `--span NAME` measures one,
+plus every scenario it replaces, in the same run; it defaults to none and it
+does not combine with `--out` or `--arm`. A span writes to
+`out/<timestamp>/kernels/spans/<span>/<hardware>/`, one directory deeper than
+a scenario, so a shallow glob of the scenarios cannot sweep one up. The
+roster lives in `benchmarks/kernel/spans.py`, `./run_bench.sh scenarios`
+prints it, and no span has been measured yet.
+
+Two properties of a span number are not properties of a scenario number, and
+both must be said next to it. The interval is an **unpaired** bootstrap
+published as `unpaired_ratio_ci_*`, because nothing pairs a span's replicate
+with a part's. And the parts side pays one host dispatch chain per enclosed
+scenario against the span's one, so a span ratio is biased in the span's own
+favour, by more as the range grows.
 
 `--arm NAME` measures a subset of one scenario's arms; repeat it per arm, and
 pair it with a single `--scenario`. The selection must name the scenario's
@@ -252,6 +280,13 @@ declared arm reaches the results file with a status of `ok`, `skipped` or
 says which one it dropped. Each scenario writes a manifest and results JSON
 (with the raw per-replicate samples) under `out/<timestamp>/kernels/`.
 `./run_bench.sh scenarios` lists every scenario and arm.
+
+**One cross-engine number exists so far**, and it covers two arms of one
+scenario: `attention_core`'s `titan` against `mcore/base` at sequence length
+16384, where titan is about 1.12x slower forward and 1.14x slower forward
+plus backward. Fifteen of the sixteen cross-engine scenarios have never had
+an arm built. Read those as declarations until a run says otherwise.
+
 
 ## Tests
 
