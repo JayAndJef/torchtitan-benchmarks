@@ -2153,8 +2153,11 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
   `ac_mode`, and one `model_size` (plus one `megatron_git_rev`/`te_version`
-  for the megatron scenario). All are in
+  for the megatron scenario, and one `cudnn_loader_resolves` for any number
+  that goes through TransformerEngine -- that one is recorded but **not**
+  resume-gated, so `--resume` will not stop you). All are in
   every manifest -- check them before comparing against an older run in
+
   `out/` (manifests written before schema 6 predate the compile-mode flag
   and are `default`; before schema 8 they record the old torch-level mode
   names -- `reduce-overhead` data is comparable to `cuda-graph` for titan
@@ -2167,7 +2170,12 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about two seconds.
+  and takes about 40 seconds at 1124 tests.
+- **Do not let "declared" become "measured".** Most of the kernel registry has
+  never executed: 15 of the 16 cross-engine scenarios have never had an arm
+  built, no cross-engine arm has produced a number, and no span has been
+  measured at all. When you write about one of those, say what it declares.
+
 - **Commit in single, self-contained steps, as the work happens.** One commit
   is one logical change that leaves the tree green on its own. Do not
   accumulate a whole task in the working tree and land it as one commit --
