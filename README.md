@@ -155,9 +155,12 @@ binding as `cpu_pinning`.
 
 The manifest also records which cuDNN the run used, as `cudnn_torch_build`
 and `cudnn_loader_resolves`. TransformerEngine binds the host's cuDNN rather
-than the pinned wheel's, because torch loads its own lazily, so which cuDNN a
-Megatron arm ran is a property of the host. Cite both fields with any
-Megatron number.
+than the pinned wheel's, so which cuDNN a Megatron arm ran is a property of
+the host. The version changes no value -- measured on 2026-08-21, bitwise
+identical outputs under 9.23.2 and 9.24.0 -- so cite both fields beside a
+timing number, where the effect is unmeasured, and not as a reason two runs
+disagree numerically.
+
 
 Run directories written before the package restructure record the module names
 this repository used at the time. They still load and evaluate, but they cannot

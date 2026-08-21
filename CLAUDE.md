@@ -516,14 +516,16 @@ out/<timestamp>/<scenario>/<hardware>/
 plus `megatron_git_rev`, `te_version` and the two cuDNN fields for the
 megatron scenario.
 
-#### Which cuDNN a megatron arm runs is a host property
+### Which cuDNN a megatron arm runs is a host property
 
-TransformerEngine's `libtransformer_engine.so` needs `libcudnn.so.9` and
-carries no `RUNPATH`, and torch loads its own cuDNN **lazily**. So on a host
-that ships cuDNN in a system directory, the loader binds **that** copy for TE
-rather than the wheel torch is pinned against. Which cuDNN a megatron arm
-ran is therefore decided by the host, not by the pin, and until 2026-08-20 no
-manifest recorded it.
+TransformerEngine binds cuDNN **in Python**, before the dynamic loader
+resolves any `DT_NEEDED` entry. `transformer_engine/common/__init__.py:345`
+tries the system copy first, and its last resort at `:330` is
+`ctypes.CDLL("libcudnn.so", RTLD_GLOBAL)` -- the **unversioned** name. Torch
+also loads its own cuDNN lazily. So on a host that ships cuDNN in a system
+directory, TE gets **that** copy rather than the wheel torch is pinned
+against. Which cuDNN a megatron arm ran is therefore decided by the host,
+not by the pin, and until 2026-08-20 no manifest recorded it.
 
 `hardware_metadata` now records both halves: `cudnn_torch_build` is the
 version torch was compiled against, read through `getCompileVersion` because
@@ -533,14 +535,33 @@ probed in a subprocess. On this box the two disagree -- torch expects
 **9.24.0** and the loader binds `/usr/lib64` **9.23.2**, which `rpm -qf`
 names as `libcudnn9-cuda-12`, a **CUDA 12 build inside a cu13 process**.
 
-**The two fields are collected but not resume-gated.** Recording a boundary
-and refusing to cross it are separate decisions, and older manifests carry
-neither field. So `--resume` will still continue a run across a cuDNN change.
-Cite the fields; do not assume a comparison is safe because resume allowed
-it. Every megatron number this repo has published was taken on the host's
-cuDNN, whatever that was, and no manifest before 2026-08-20 says which.
+**The version changes no value, and that was measured rather than assumed.**
+A direct comparison on 2026-08-21 ran the `attention_core` gates under 9.23.2
+and under 9.24.0 (`reports/20260821-cudnn-version-comparison.md`). Every gate
+row matches to the float64 bit pattern, the raw bytes of all eight output
+tensors hash identically, and TE selects the same backend either way. So the
+cuDNN version is **not a numerical comparability boundary**, and no published
+megatron figure is numerically wrong because of it.
+
+**What stays open is speed.** Nobody has timed the two versions against each
+other. So cite `cudnn_loader_resolves` beside any timing number that goes
+through TransformerEngine, and read a cuDNN difference as an unmeasured
+effect on speed rather than as a difference in the values.
+
+The two fields are collected but **not** resume-gated, which is consistent
+with the above: recording a fact and refusing to cross it are separate
+decisions, and there is no numerical boundary here to refuse.
+
+**Moving the whole process to the pinned cuDNN needs two variables.**
+`LD_LIBRARY_PATH` alone does **not** work: the wheel directory ships only
+`libcudnn.so.9`, so the unversioned `CDLL` above skips it and takes
+`/usr/lib64` anyway, leaving torch reporting 9.24.0 while TE still runs
+9.23.2 -- a split in the opposite direction, which is worse than doing
+nothing. `CUDNN_PATH` **and** `LD_LIBRARY_PATH` together were measured to
+leave zero `/usr/lib64/libcudnn` mappings.
 
 ### CPU pinning
+
 
 The training step is host-bound at benchmark sizes, so unpinned runs measure
 scheduler placement, not kernels. The runner therefore binds each training
@@ -1044,42 +1065,42 @@ own family module.
 because a gate needs both sides at once. On this box that is what
 `attention_core` cannot do without a workaround.
 
-TransformerEngine's `libtransformer_engine.so` needs `libcudnn.so.9` and
-carries no `RUNPATH`, and torch loads its own cuDNN **lazily**. So after
-`import transformer_engine.pytorch` the loader has bound the host's cuDNN,
-not the wheel's. `torch.backends.cudnn.version()` then raises, because torch
-requires `runtime_minor >= compile_minor`. `torch.nn.attention.varlen` asks
-for that version, and the answer is `lru_cache`d, so one raise is enough:
-torchtitan's `VarlenAttention` cannot build in a process that has imported
-TE. On this host torch expects **9.24.0** and the loader binds `/usr/lib64`
-**9.23.2**, which `rpm -qf` names as `libcudnn9-cuda-12` -- **a CUDA 12 build
-inside a cu13 process**.
+The mechanism is the one "Which cuDNN a megatron arm runs is a host property"
+describes: TE binds the host's cuDNN, so `torch.backends.cudnn.version()`
+raises, because torch requires `runtime_minor >= compile_minor`.
+`torch.nn.attention.varlen` asks for that version and the answer is
+`lru_cache`d, so one raise is enough -- torchtitan's `VarlenAttention` cannot
+build in a process that has imported TE.
 
-cuDNN is the only library that splits this way: `libcublas`, `libcublasLt`,
-`libcudart` and `libnccl` all resolve to the venv wheels in the same process,
-because torch loads those eagerly. **The blocker is the correctness pass
-alone.** A timing worker holds one arm, so TE never sits beside the varlen
-path there.
+**The blocker is the correctness pass alone.** A timing worker holds one arm,
+so TE never sits beside the varlen path there. cuDNN is also the only library
+that splits this way: `libcublas`, `libcublasLt`, `libcudart` and `libnccl`
+all resolve to the venv wheels in the same process, because torch loads those
+eagerly.
 
-Two workarounds exist and they are **not** equivalent, so say which one a
-number came from:
+Two ways past it, and they are **not** equivalent, so say which one a number
+came from:
 
-- `PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1` leaves TE on 9.23.2 -- the same
-  cuDNN every published megatron number used -- and only stops torch refusing
-  to answer. This is what the first `attention_core` gate pass used. Note
-  the flag reaches **every** worker, because the child environment is built
-  from `os.environ`, so a shell that exports it publishes every number under
-  it.
-- Prepending the venv's `nvidia/cudnn/lib` to `LD_LIBRARY_PATH` gives the
-  whole process the pinned 9.24.0 and matches the pin -- but it **moves TE
-  off 9.23.2 and therefore moves every megatron measurement in the repo**.
+- `PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1` leaves TE on 9.23.2 and only
+  stops torch refusing to answer. This is what the first `attention_core`
+  gate pass used. The flag reaches **every** worker, because the child
+  environment is built from `os.environ`, so a shell that exports it
+  publishes every number under it.
+- `CUDNN_PATH` **and** `LD_LIBRARY_PATH` together move the whole process to
+  the pinned 9.24.0. `LD_LIBRARY_PATH` on its own does not, and leaves a
+  split in the opposite direction; the section above gives the reason.
 
-Do **not** initialize torch's cuDNN before TE imports as a third option: TE
-then runs a 9.24.0 graph engine against 9.23.2 ops, which nobody tests.
+A third option -- initializing torch's cuDNN before TE imports -- is
+**untested and predicted to be bad**: it should leave TE running a 9.24.0
+graph engine against 9.23.2 ops. The cuDNN comparison measured four
+configurations and this is not one of them, and the binding order above works
+against it. Treat it as a prediction, and do not use it.
 
-A per-arm correctness split would remove the need for either, because TE and
-the varlen path would never share an interpreter. Fixing the environment
-removes it too. Neither is done; the choice is recorded rather than made.
+A per-arm correctness split would remove the need for either workaround,
+because TE and the varlen path would never share an interpreter. Fixing the
+environment removes it too. Neither is done; the choice is recorded rather
+than made.
+
 
 #### The GB/s and x_floor columns are not always read against 1.0
 
@@ -1967,14 +1988,17 @@ that imports TE here. Without apex, megatron's standalone norms are torch
 RMSNorm (its own spec fallback); the qkv-input norm fuses into the TE
 linear.
 
-**That routing makes the cuDNN identity a caption obligation.** Every norm
-number from this arm, and from every cross-engine kernel scenario that norms,
-is "TE norms via cuDNN backend" and not TE's fastest norm. Which cuDNN is a
-host property -- see "Which cuDNN a megatron arm runs is a host property"
-above. `megatron_bootstrap.py` also sets
+**That routing makes the cuDNN identity a caption obligation, and the
+obligation is about speed.** Every norm number from this arm, and from every
+cross-engine kernel scenario that norms, is "TE norms via cuDNN backend" and
+not TE's fastest norm. Which cuDNN serves that backend is a host property --
+see "Which cuDNN a megatron arm runs is a host property" above -- and the
+version changes no value, so the caption qualifies the timing and not the
+numbers. `megatron_bootstrap.py` also sets
 `CUDNN_FRONTEND_CUDART_LIB_NAME=libcudart.so.13` for the same class of
 mismatch, arrived at independently. A host with a native CUDA 13 driver must
 repeat the measurement.
+
 
 Under `--compile-mode cuda-graph` the arm uses Megatron's per-layer partial
 capture (`MoETransformerLayer`, `cuda_graph_modules=("moe_router",
@@ -2138,9 +2162,10 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
   `ac_mode`, and one `model_size` (plus one `megatron_git_rev`/`te_version`
-  for the megatron scenario, and one `cudnn_loader_resolves` for any number
-  that goes through TransformerEngine -- that one is recorded but **not**
-  resume-gated, so `--resume` will not stop you). All are in
+  for the megatron scenario). `cudnn_loader_resolves` is a **speed** axis
+  only: the version changes no value, measured, so cite it beside a timing
+  number and never call two runs numerically incomparable for it. All are in
+
   every manifest -- check them before comparing against an older run in
 
   `out/` (manifests written before schema 6 predate the compile-mode flag
