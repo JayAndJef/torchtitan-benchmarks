@@ -17,7 +17,7 @@ module would make ``rope`` a dependency of ``attention_core``, or
 * ``_compile_module`` -- the production compile treatment, ``fullgraph=True``.
   Applying it is a measurement decision, not a convenience: eager isolation
   races custom ops against materialization costs Inductor deletes, which
-  inverted the swiglu verdict outright.
+  inverted the combined-SwiGLU verdict outright.
 * ``_assert_kernel_marker`` -- the silent-fallback guard the rope overrides
   and all three titan attention_core arms depend on.
 * ``_navigate`` -- walks a dotted attribute path down a built model
@@ -147,7 +147,7 @@ def _compile_module(module: nn.Module) -> nn.Module:
     """Compile a module-scope arm the way production runs it.
 
     Eager isolation races custom ops against materialization costs Inductor
-    deletes, which inverts verdicts (the swiglu combined layout wins eager
+    deletes, which inverts verdicts (the combined SwiGLU layout wins eager
     and loses compiled). fullgraph turns a graph break into a build failure
     instead of silently timing partially-eager code.
     """

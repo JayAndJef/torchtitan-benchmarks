@@ -125,8 +125,8 @@ class KernelRunRequest:
     process-to-process variation, so the CI narrows without the underlying
     quantity having become better known -- measured at 26-48% narrower while
     the point estimate's round-to-round spread did not improve, **on a box at
-    load average 28 to 81, on ``qkv`` alone, two arms, one of them the
-    anchor**. That figure is the record of what was tried and may not be
+    load average 28 to 81, on the retired ``qkv`` scenario alone, two arms,
+    one of them the anchor**. That figure is the record of what was tried and may not be
     cited. And the arms move apart in time -- at the extreme, arm A's whole
     block runs, then arm B's -- so drift between the blocks lands in the point
     estimate instead of cancelling. The same measurement could only have

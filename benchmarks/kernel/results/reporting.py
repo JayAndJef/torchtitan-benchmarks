@@ -76,8 +76,8 @@ def _isolation_lines(result: KernelScenarioResult) -> list[str]:
     ]
     if per_process > 1:
         # No figure. The one that stood here -- 26-48% narrower -- was taken
-        # on a box carrying load average 28 to 81, on qkv alone, two arms, one
-        # of them the anchor. CLAUDE.md says none of that work's numbers may
+        # on a box carrying load average 28 to 81, on the retired qkv
+        # scenario alone, two arms, one of them the anchor. CLAUDE.md says none of that work's numbers may
         # be cited, and this line printed one as an operational fact on every
         # degraded run. The qualitative statement carries the whole message,
         # and the last line already says what to do about it.

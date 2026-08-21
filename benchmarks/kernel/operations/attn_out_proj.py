@@ -53,7 +53,8 @@ Megatron runs ``core_attn_out.reshape(t, 1, -1)`` before ``linear_proj``
 (``attention.py:1598-1603``), which is free. Three reasons put both outside
 this scenario. First, neither op is inside the module under test. Second, the
 titan cost belongs to the *attention arm* that produced the tensor -- the
-attention scenario declares three titan arms with three output layouts, and
+attention_core scenario declares three titan arms with three output layouts,
+and
 this scenario declares one -- so it cannot be attributed here. Third, it
 cannot be made symmetric by construction: adding a copy to megatron would
 invent work megatron does not do, and dropping titan's would hide work titan

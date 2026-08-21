@@ -496,8 +496,9 @@ def _qk_norm_arm(
     (``transformer_engine/pytorch/ops/fuser.py:225,258``), and TE's RMSNorm
     calls ``clear_tensor_data`` on both saved tensors at the end of
     ``op_backward`` (``ops/basic/rmsnorm.py``). A second backward over the
-    same graph therefore raises. The retained-graph trick rope and qkv use is
-    not available here, so both arms drop the mode and stay comparable;
+    same graph therefore raises. The retained-graph trick rope and expert_mlp
+    use is not available here, so both arms drop the mode and stay
+    comparable;
     backward cost is still forward_backward minus forward.
 
     ``make_leaves`` is the engine's own, because the layout is part of the
