@@ -144,6 +144,20 @@ KERNEL_SPAN_METHODOLOGY = {
     # The bias every span row carries, stated where the numbers are. It is
     # systematic, it runs in one direction, and that direction is the
     # direction of the conclusion a span is written to support.
+    "span_pairing": "none",
+    "span_pairing_note": (
+        "the replicate index does NOT pair a span with its parts. The runner "
+        "runs each unit to completion before the next starts, so a span's "
+        "replicate r and an enclosed scenario's replicate r are separated by "
+        "every worker in between and share nothing but the number. Any "
+        "permutation of the parts' indices would be as justified as the "
+        "identity. So the point estimate is a ratio of two medians, each "
+        "taken over its own side, and the interval is an UNPAIRED bootstrap "
+        "that resamples each side independently. It is published as "
+        "unpaired_ratio_ci_* and never under the honest name: it cancels no "
+        "drift, unlike a scenario's per-replicate interval, and the two must "
+        "not be read as the same statistic."
+    ),
     "span_dispatch_bias": "parts_total_pays_one_dispatch_chain_per_scenario",
     "span_dispatch_bias_note": (
         "the parts total pays ONE HOST DISPATCH CHAIN PER ENCLOSED "
@@ -160,20 +174,19 @@ KERNEL_SPAN_METHODOLOGY = {
         "below 1.0 as fusion PLUS the dispatch chains the harness stopped "
         "paying, never as fusion alone."
     ),
+    "span_parts_estimator": "sum_of_each_part_arms_median",
     "span_parts_note": (
-        "the parts total is summed at the REPLICATE level: per replicate it "
-        "is the sum of each part arm's median in that replicate. Samples are "
-        "not paired across scenarios -- sample i of one and sample i of the "
-        "next are unrelated bursts from different sweeps -- so an "
-        "element-wise sum would invent a pairing that does not exist. The "
-        "span and its parts were measured in separate sweeps of ONE run, so "
-        "replicate r of each shares an index but not a moment: drift between "
-        "the sweeps lands in the ratio instead of cancelling. Every interval "
-        "on a parts_comparisons row is therefore published as cross_sweep_ "
-        "and never under the honest name. Welch, Mann-Whitney and Cohen's d "
-        "are absent from those rows on purpose: the parts side is one summed "
-        "value per replicate, and a two-sample test between it and the "
-        "span's pooled bursts is a diagnostic of nothing."
+        "the parts total is the SUM OF EACH PART ARM'S MEDIAN, and each of "
+        "those medians is taken over that arm's own per-replicate medians. "
+        "part_medians_us on every parts_comparisons row carries the terms, "
+        "in the order the row's parts field names them, so a reader "
+        "recomputes the total from the file. Samples are NEVER summed: "
+        "sample i of one scenario and sample i of the next are unrelated "
+        "bursts, taken in different units of the run, so an element-wise sum "
+        "would invent a pairing that does not exist. Welch, Mann-Whitney and "
+        "Cohen's d are absent from those rows on purpose: the parts side is "
+        "a handful of per-replicate medians, and a two-sample test between "
+        "it and the span's pooled bursts is a diagnostic of nothing."
     ),
 }
 
@@ -809,13 +822,6 @@ def merge_kernel_span_fragments(
                     "holds and no row is written"
                 )
                 continue
-            totals = [
-                sum(
-                    part.replicate_medians_us[mode][index]
-                    for part in collected
-                )
-                for index in range(replicates)
-            ]
             row: dict[str, Any] = {
                 "arm": arm_name,
                 "mode": mode,
@@ -825,7 +831,20 @@ def merge_kernel_span_fragments(
                     f"{part.scenario}/{part.arm}" for part in collected
                 ],
             }
-            row.update(span_comparison(totals, replicate_samples))
+            # Each part's own per-replicate medians, kept apart rather than
+            # summed here. Nothing pairs replicate r of one part with
+            # replicate r of another -- the runner runs each unit to
+            # completion -- so the sum is of each part's median, and the
+            # interval resamples each side independently.
+            row.update(
+                span_comparison(
+                    [
+                        list(part.replicate_medians_us[mode])
+                        for part in collected
+                    ],
+                    replicate_samples,
+                )
+            )
             parts_comparisons.append(row)
 
     if not span_parts:

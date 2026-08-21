@@ -339,20 +339,20 @@ def render_kernel_results(result: KernelScenarioResult) -> str:
 
 
 def _parts_ci(row: dict) -> str:
-    """The span-versus-parts interval, always marked.
+    """The span-versus-parts interval. Unpaired, and the heading says so.
 
-    ``~`` says the same thing it says on a within-process interval: the
-    number under it was not taken under the conditions the honest name
-    promises. Here the span and its parts were measured in separate sweeps of
-    one run, so replicate ``r`` of each shares an index but not a moment.
-    There is no unmarked spelling of this column, because there is no
-    condition under which a span and its parts are measured adjacently.
+    Deliberately **not** marked with ``~``. That mark already means
+    "within-process, and therefore a lower bound" in the scenario table, and
+    one mark with two meanings is how a reader learns the wrong thing. This
+    column's heading carries the word instead: nothing pairs a span with its
+    parts, so each side is resampled on its own and the interval cancels no
+    drift.
     """
-    low = row.get("cross_sweep_ratio_ci_low")
-    high = row.get("cross_sweep_ratio_ci_high")
+    low = row.get("unpaired_ratio_ci_low")
+    high = row.get("unpaired_ratio_ci_high")
     if low is None or high is None:
         return "-"
-    return f"~[{low:.4f},{high:.4f}]"
+    return f"[{low:.4f},{high:.4f}]"
 
 
 def render_kernel_span_results(result: KernelSpanResult) -> str:
@@ -382,7 +382,8 @@ def render_kernel_span_results(result: KernelSpanResult) -> str:
             "against the sum of the scenarios it replaces:",
             "  "
             + f"{'arm':{ARM_FIELD}s} {'mode':>17s} {'span us':>10s} "
-            + f"{'parts us':>10s} {'ratio':>7s} {'95% CI':>18s}  parts",
+            + f"{'parts us':>10s} {'ratio':>7s} "
+            + f"{'unpaired 95% CI':>18s}  parts",
         ]
     )
     for row in result.parts_comparisons:
@@ -393,7 +394,15 @@ def render_kernel_span_results(result: KernelSpanResult) -> str:
             f"{_value(row.get('parts_median_us'), 10, 2)} "
             f"{_value(row.get('median_ratio'), 7, 4)} "
             f"{_parts_ci(row):>18s}  "
-            + " + ".join(row.get("parts", ()))
+            # The terms, not only their names. The total is a sum this file
+            # asserts, and a reader must be able to add it up without
+            # opening results.json.
+            + " + ".join(
+                f"{name} {value:.2f}"
+                for name, value in zip(
+                    row.get("parts", ()), row.get("part_medians_us", ())
+                )
+            )
         )
     if not result.parts_comparisons:
         lines.append("  (no arm carries a parts total)")
@@ -402,8 +411,8 @@ def render_kernel_span_results(result: KernelSpanResult) -> str:
         [
             "",
             "The 'span us' column is measured. The 'parts us' column is a",
-            "SUM: per replicate it adds each part arm's median in that",
-            "replicate, and the column is the median of those sums.",
+            "SUM of each part arm's median, and the 'parts' column carries",
+            "the terms so the total adds up in front of the reader.",
             "",
             f"BIAS, and it favours the span. The parts total pays one host",
             f"dispatch chain per enclosed scenario -- "
@@ -418,12 +427,15 @@ def render_kernel_span_results(result: KernelSpanResult) -> str:
             "the two. Read a ratio below 1.0 as fusion PLUS the dispatch",
             "chains the harness stopped paying, never as fusion alone.",
             "",
-            "The two sides were measured in separate sweeps of one run, so",
-            "replicate r of each shares an index but not a moment: drift",
-            "between the sweeps lands in the ratio instead of cancelling.",
-            "The interval is marked '~' for that reason and is published as",
-            "cross_sweep_ratio_ci_* in results.json, never under the honest",
-            "name. No Welch, MWU or d is computed against a sum.",
+            "NOTHING PAIRS the two sides. The runner runs each unit to",
+            "completion, so the span's replicate r and a part's replicate r",
+            "are separated by every worker in between and share nothing but",
+            "the number. The ratio is therefore a ratio of two medians and",
+            "the interval resamples each side on its own: it cancels no",
+            "drift, unlike a scenario's per-replicate interval, and it is",
+            "published as unpaired_ratio_ci_* in results.json. Do not read",
+            "the two intervals as the same statistic. No Welch, MWU or d is",
+            "computed against a sum.",
             "",
             "Each number is the per-call cost under back-to-back dispatch.",
             "It is not device time: where the host cannot keep the stream",

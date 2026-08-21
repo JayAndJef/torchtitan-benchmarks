@@ -318,15 +318,20 @@ class SpanPartResult:
     """One enclosed scenario's contribution to one span arm's parts total.
 
     ``replicate_medians_us`` maps a mode to that part arm's **per-replicate
-    median**, one value per replicate, in replicate order. The parts total of
-    a replicate is the sum of these across the range, so the sum is auditable
-    from the file rather than asserted by it.
+    median**, one value per replicate, in replicate order. The part's own
+    contribution to the total is the median of those, and the total is the
+    sum of the contributions -- which ``part_medians_us`` on the matching
+    ``parts_comparisons`` row also carries, so the sum is auditable from the
+    file rather than asserted by it.
 
-    Summed at the replicate level and never at the sample level. Sample ``i``
-    of one scenario and sample ``i`` of the next are unrelated bursts taken in
-    different sweeps, so adding them element-wise would invent a pairing that
-    does not exist. Replicate ``r`` of both really is replicate ``r`` of one
-    run, which is the pairing there is.
+    **Nothing is summed across replicate indices, and nothing is summed
+    across samples.** Replicate ``r`` of this part and replicate ``r`` of the
+    next share nothing but the number: the runner runs each unit to
+    completion, so they are separated by every worker in between and any
+    permutation of the indices would be as justified. Samples are further
+    apart still. Both sums would invent a pairing that does not exist; the
+    per-replicate values are kept here so a reader sees each part's own
+    spread instead.
 
     ``results_path`` is where the part was measured. It is provenance a reader
     needs and cannot derive: the parts total is a number this file did not

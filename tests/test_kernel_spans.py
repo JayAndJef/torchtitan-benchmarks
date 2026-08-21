@@ -460,8 +460,9 @@ def sample_span_result() -> KernelSpanResult:
                 "span_median_us": 30.0,
                 "parts_median_us": 30.0,
                 "median_ratio": 1.0,
-                "cross_sweep_ratio_ci_low": 0.95,
-                "cross_sweep_ratio_ci_high": 1.05,
+                "part_medians_us": [20.0, 10.0],
+                "unpaired_ratio_ci_low": 0.95,
+                "unpaired_ratio_ci_high": 1.05,
             }
         ],
         correctness=[
@@ -540,10 +541,9 @@ class SpanResultsSchemaTests(unittest.TestCase):
         ``comparisons`` keeps the meaning it has in a scenario file: arm
         against arm, both measured inside the span, so it carries the honest
         ``ratio_ci_*`` names. ``parts_comparisons`` is span against parts,
-        and its interval is renamed because the two sides were measured in
-        separate sweeps: replicate r of each is the same index but not
-        adjacent in time, so drift between the sweeps lands in the ratio
-        instead of cancelling.
+        and its interval is renamed because nothing pairs the two sides at
+        all: the runner runs each unit to completion, so a span's replicate
+        r and a part's replicate r share nothing but the number.
         """
         payload = sample_span_result().to_dict()
         within = payload["comparisons"][0]
@@ -553,7 +553,7 @@ class SpanResultsSchemaTests(unittest.TestCase):
         claim = payload["parts_comparisons"][0]
         self.assertNotIn("opponent", claim)
         self.assertNotIn("ratio_ci_low", claim)
-        self.assertIn("cross_sweep_ratio_ci_low", claim)
+        self.assertIn("unpaired_ratio_ci_low", claim)
         self.assertEqual(claim["span_median_us"], 30.0)
         self.assertEqual(claim["parts_median_us"], 30.0)
 
@@ -777,26 +777,23 @@ class SpanMergeTests(unittest.TestCase):
     """The parent assembles the second total, from the same run's scenarios."""
 
     def test_the_parts_total_is_the_sum_of_per_replicate_medians(self) -> None:
-        """The central claim, against the three ways of getting it wrong.
+        """The central claim, against the ways of getting it wrong.
 
         The fixture's parts are ``expert_mlp/mcore/base`` at per-replicate
-        medians 6, 12, 24 and ``moe_combine/mcore/base`` at 4, 8, 16. The
-        span itself reads 10, 40, 40. So:
+        medians 6, 12, 24 and ``moe_combine/mcore/base`` at 4, 8, 16, so
+        their own medians are 12 and 8 and the parts total is 20.0. The span
+        itself reads 10, 40, 40, so its median is 40.0.
 
-        =============================  ============  ============  =========
-        estimator                      parts median  span median   ratio
-        =============================  ============  ============  =========
-        per replicate, sum of medians          20.0          40.0        1.0
-        pooled medians                         20.0          11.0     (0.55)
-        parts paired in reverse                20.0          40.0        2.0
-        element-wise sum of samples            44.0          40.0      0.625
-        =============================  ============  ============  =========
+        ==============================  ============  ============
+        estimator                       parts median  span median
+        ==============================  ============  ============
+        median per side, then summed            20.0          40.0
+        pooled medians                          31.0          11.0
+        element-wise sum of samples             44.0          40.0
+        ==============================  ============  ============
 
-        Every cell in the first row is asserted below, and no two rows agree
-        in every cell -- which is what makes each mutation visible in at
-        least one assertion. ``ratio`` is the only column that moves under a
-        reversed pairing, so a test that asserted the medians alone would
-        miss it.
+        No two rows agree in either cell, so each mutation is visible in at
+        least one assertion below.
         """
         result = merge_span()
         row = next(
@@ -804,37 +801,58 @@ class SpanMergeTests(unittest.TestCase):
             for row in result.parts_comparisons
             if row["arm"] == "mcore/base" and row["mode"] == "forward"
         )
-        # 10 + 20 + 40 per replicate, so the median of the sums is 20.0. A
-        # pooled median or an element-wise sample sum is not 20.0.
         self.assertAlmostEqual(row["parts_median_us"], 20.0)
+        self.assertEqual(row["part_medians_us"], [12.0, 8.0])
         # The median of the span's per-replicate medians. Its pooled median
         # is 11.0.
         self.assertAlmostEqual(row["span_median_us"], 40.0)
         self.assertAlmostEqual(row["median_ratio"], 2.0)
-        # The paired estimate: per-replicate ratios 1.0, 2.0, 1.0. Reversing
-        # the pairing gives 0.25, 2.0, 4.0 and a point estimate of 2.0.
-        self.assertAlmostEqual(row["ratio"], 1.0)
         self.assertEqual(row["n_replicates"], SPAN_REPLICATES)
         self.assertEqual(
             row["parts"], ["expert_mlp/mcore/base", "moe_combine/mcore/base"]
         )
-        self.assertLessEqual(row["cross_sweep_ratio_ci_low"], row["ratio"])
-        self.assertGreaterEqual(row["cross_sweep_ratio_ci_high"], row["ratio"])
-
-    def test_the_paired_estimate_is_not_the_unpaired_one(self) -> None:
-        """Two columns, two estimators, and the fixture separates them.
-
-        ``median_ratio`` divides the two medians and knows nothing about
-        which replicate produced which. ``ratio`` is the median of the
-        per-replicate ratios. A fixture on which they agree cannot show that
-        the file publishes both, nor which of them a reader is being handed.
-        """
-        row = next(
-            row
-            for row in merge_span().parts_comparisons
-            if row["arm"] == "mcore/base" and row["mode"] == "forward"
+        self.assertLessEqual(row["unpaired_ratio_ci_low"], row["median_ratio"])
+        self.assertGreaterEqual(
+            row["unpaired_ratio_ci_high"], row["median_ratio"]
         )
-        self.assertNotAlmostEqual(row["median_ratio"], row["ratio"])
+
+    def test_the_estimate_does_not_move_when_a_part_is_reordered(
+        self,
+    ) -> None:
+        """Because nothing pairs replicate r of one side with r of another.
+
+        The runner runs each unit to completion, so a span's replicate 0 and
+        an enclosed scenario's replicate 0 are separated by every worker in
+        between. Any permutation of a part's replicate order is as justified
+        as the identity, so the published number must not depend on which
+        one it was handed. An estimator that moved here would report a
+        choice among equals as a measurement.
+        """
+        shuffled = {
+            "expert_mlp": MeasuredScenario(
+                result=measured_part(
+                    "expert_mlp",
+                    "mcore/base",
+                    tuple(reversed(unit_samples("expert_mlp", "mcore/base"))),
+                ),
+                results_path="a",
+            ),
+            "moe_combine": MeasuredScenario(
+                result=measured_part("moe_combine", "mcore/base"),
+                results_path="b",
+            ),
+        }
+        straight = merge_span().parts_comparisons[0]
+        reordered = merge_span(parts=shuffled).parts_comparisons[0]
+        for field in (
+            "parts_median_us",
+            "span_median_us",
+            "median_ratio",
+            "unpaired_ratio_ci_low",
+            "unpaired_ratio_ci_high",
+        ):
+            with self.subTest(field=field):
+                self.assertAlmostEqual(straight[field], reordered[field])
 
     def test_the_published_total_is_auditable_from_the_same_file(self) -> None:
         """"Auditable" is a property here, not a word.
@@ -849,18 +867,14 @@ class SpanMergeTests(unittest.TestCase):
         for row in result.parts_comparisons:
             with self.subTest(arm=row["arm"], mode=row["mode"]):
                 parts = result.parts[row["arm"]]
-                per_replicate = [
-                    sum(
-                        part.replicate_medians_us[row["mode"]][index]
-                        for part in parts
-                    )
-                    for index in range(SPAN_REPLICATES)
+                per_part = [
+                    median(part.replicate_medians_us[row["mode"]])
+                    for part in parts
                 ]
-                self.assertAlmostEqual(
-                    row["parts_median_us"], median(per_replicate)
-                )
+                self.assertEqual(row["part_medians_us"], per_part)
+                self.assertAlmostEqual(row["parts_median_us"], sum(per_part))
                 # And the names in the row are the names in the breakdown,
-                # in the same order, so a reader knows which terms to add.
+                # in the same order, so a reader knows which term is which.
                 self.assertEqual(
                     row["parts"],
                     [f"{part.scenario}/{part.arm}" for part in parts],
@@ -894,29 +908,39 @@ class SpanMergeTests(unittest.TestCase):
         )
         self.assertTrue(parts[1].results_path.endswith("results.json"))
 
-    def test_the_claim_carries_a_cross_sweep_interval_and_no_honest_one(
+    def test_the_claim_carries_an_unpaired_interval_and_no_honest_one(
         self,
     ) -> None:
-        """The span and its parts were measured in separate sweeps.
+        """Nothing pairs a span with its parts, so nothing here is paired.
 
-        Replicate r of each shares an index but not a moment, so drift
-        between the sweeps lands in the ratio instead of cancelling. A reader
-        of ``ratio_ci_low`` must find nothing.
+        ``ratio_ci_low`` names the per-replicate interval a scenario
+        publishes, which cancels drift because the sweep puts the two arms
+        within seconds of each other. This one cancels none, so a reader of
+        that name must find nothing. ``ratio`` and
+        ``replicate_ratio_spread`` are gone with the pairing that produced
+        them, and so is the ``cross_sweep_`` name, which said the pairing
+        was loose when it does not exist.
         """
         row = merge_span().parts_comparisons[0]
-        self.assertNotIn("ratio_ci_low", row)
-        self.assertNotIn("ratio_ci_high", row)
-        self.assertNotIn("replicate_ratio_spread", row)
-        self.assertIn("cross_sweep_ratio_ci_low", row)
-        self.assertIn("cross_sweep_ratio_ci_high", row)
-        self.assertIn("cross_sweep_replicate_ratio_spread", row)
+        for absent in (
+            "ratio",
+            "ratio_ci_low",
+            "ratio_ci_high",
+            "replicate_ratio_spread",
+            "cross_sweep_ratio_ci_low",
+            "cross_sweep_replicate_ratio_spread",
+        ):
+            with self.subTest(field=absent):
+                self.assertNotIn(absent, row)
+        self.assertIn("unpaired_ratio_ci_low", row)
+        self.assertIn("unpaired_ratio_ci_high", row)
 
     def test_the_claim_carries_no_two_sample_test(self) -> None:
-        """The parts side is one summed value per replicate.
+        """The parts side is a handful of per-replicate medians.
 
-        A Welch or Mann-Whitney between three synthetic sums and the span's
-        pooled bursts is a diagnostic of nothing, so the row does not carry
-        one at all.
+        A Welch or Mann-Whitney between three of them and the span's pooled
+        bursts is a diagnostic of nothing, so the row does not carry one at
+        all.
         """
         row = merge_span().parts_comparisons[0]
         for absent in ("welch_p", "mwu_p", "cohens_d", "n_base", "n_arm"):
@@ -1204,19 +1228,18 @@ class SpanRunTests(unittest.TestCase):
                 (row["arm"], row["mode"]): row
                 for row in result.parts_comparisons
             }
-            # 6 + 4, 12 + 8, 24 + 16 per replicate, so the median is 20.0.
+            # Part medians 12 and 8, summed: 20.0.
             anchor = rows[("mcore/base", "forward")]
             self.assertAlmostEqual(anchor["parts_median_us"], 20.0)
+            self.assertEqual(anchor["part_medians_us"], [12.0, 8.0])
             self.assertAlmostEqual(anchor["span_median_us"], 40.0)
             self.assertAlmostEqual(anchor["median_ratio"], 2.0)
-            self.assertAlmostEqual(anchor["ratio"], 1.0)
 
-            # 14 + 7 per replicate against a span of 14.
+            # 14 + 7 against a span of 14.
             win = rows[("titan", "forward")]
             self.assertAlmostEqual(win["parts_median_us"], 21.0)
             self.assertAlmostEqual(win["span_median_us"], 14.0)
             self.assertAlmostEqual(win["median_ratio"], 14.0 / 21.0)
-            self.assertAlmostEqual(win["ratio"], 14.0 / 21.0)
 
     def test_the_span_file_sits_apart_from_the_scenario_files(self) -> None:
         """A glob over the scenarios must not sweep up a span beside them.
@@ -1281,21 +1304,28 @@ class SpanRunTests(unittest.TestCase):
         self.assertIn("against the sum of the scenarios it replaces:", rendered)
         self.assertIn("span us", rendered)
         self.assertIn("parts us", rendered)
-        self.assertIn("expert_mlp/mcore/base + moe_combine/mcore/base", rendered)
-        # Every interval on this table is marked: there is no condition under
-        # which a span and its parts are measured adjacently.
+        # The terms and their values, so the total adds up on the terminal.
+        self.assertIn(
+            "expert_mlp/mcore/base 12.00 + moe_combine/mcore/base 8.00",
+            rendered,
+        )
         row = next(
             line
             for line in rendered.splitlines()
-            if "expert_mlp/titan + moe_combine/titan" in line
+            if "expert_mlp/titan 14.00 + moe_combine/titan 7.00" in line
         )
-        self.assertIn("~[", row)
         self.assertIn("14.00", row)
         self.assertIn("21.00", row)
         self.assertIn("0.6667", row)
         self.assertIn("The 'parts us' column is a", rendered)
         self.assertIn("SUM", rendered)
-        self.assertIn("cross_sweep_ratio_ci_*", rendered)
+        # The heading carries the word, so the column needs no mark. "~"
+        # already means "within-process" in the scenario table, and one mark
+        # with two meanings teaches a reader the wrong thing.
+        self.assertIn("unpaired 95% CI", rendered)
+        self.assertNotIn("~[", rendered)
+        self.assertIn("NOTHING PAIRS the two sides", rendered)
+        self.assertIn("unpaired_ratio_ci_*", rendered)
 
 
 class SpanCliTests(unittest.TestCase):
