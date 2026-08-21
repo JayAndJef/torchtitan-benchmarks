@@ -491,7 +491,7 @@ class FfnNormToMoeResidualTests(unittest.TestCase):
         )
 
     def test_the_fusion_is_gated_against_the_arm_it_must_match(self) -> None:
-        """And against no fp64 truth, which this range cannot have.
+        """And against an unchecked anchor, over a range with no fp64 truth.
 
         An fp64 reference would have to reproduce the top-k routing decision
         from an fp64 norm output, and a near tie would select a different
@@ -506,6 +506,16 @@ class FfnNormToMoeResidualTests(unittest.TestCase):
         )
         self.assertEqual(gate.reference, "mcore/base")
         self.assertFalse(gate.informational)
+        # And the arm it must match is itself unchecked, which the
+        # description states. The parts are not: each of the six enclosed
+        # mcore/base arms carries its own fp64 gate.
+        self.assertEqual(self.span().arm("mcore/base").correctness, ())
+        for name in self.span().scenarios:
+            part = KERNEL_SCENARIOS[name].arm("mcore/base")
+            with self.subTest(scenario=name):
+                self.assertIn(
+                    "fp64", [check.reference for check in part.correctness]
+                )
 
     def test_the_forward_output_check_is_informational(self) -> None:
         """Evidence either way, and it gates nothing.
