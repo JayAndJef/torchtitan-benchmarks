@@ -178,7 +178,7 @@ the compiler fuses the graph around it.
 
 ```bash
 ./run_bench.sh kernel-bench <gpu>                      # all scenarios
-./run_bench.sh kernel-bench <gpu> --scenario swiglu    # one scenario
+./run_bench.sh kernel-bench <gpu> --scenario expert_mlp # one scenario
 ./run_bench.sh kernel-bench <gpu> --burst              # add the dispatch-cost diagnostic
 ```
 
@@ -191,23 +191,29 @@ arm the selection leaves out reaches `results.json` and the manifest as
 `skipped`, with a reason that names the flag, so a reader can tell the
 operator's choice from a host that could not run the arm.
 
-The registry declares 19 scenarios and 73 arms. 15 are cross-engine: they cut
+The registry declares 17 scenarios and 71 arms. 16 are cross-engine: they cut
 the model at one component and put megatron-core beside TorchTitan there.
 `./run_bench.sh scenarios` prints every one with its description, and
-`benchmarks/kernel/registry.py` is the authority. Five of the 19:
+`benchmarks/kernel/registry.py` is the authority. Two of the 17:
 
 | scenario | compares |
 |---|---|
 | `rope` | cross-engine: megatron's THD rotary path against three titan modules, stock vs Helion vs TransformerEngine |
-| `swiglu` | stock grouped experts vs the two Piper fused-w13 variants, whole expert layer only |
-| `qkv` | separate Q/K/V projections vs one fused QKV GEMM |
 | `lm_head` | full logits vs fused linear-CE vs TE and Piper-optimized cross entropy |
-| `attention` | inner attention only: FlexAttention vs FlashAttention-3 varlen vs FlexAttention lowered to FlashAttention-4 |
 
-The last four are single-engine. `swiglu` is recorded as superseded by the
-cross-engine `expert_mlp` and deliberately not deleted; `attention` is
-superseded by nothing, because no declared scenario cuts inner attention
-cross-engine.
+`lm_head` is the only single-engine scenario left. Three others were deleted
+once a cross-engine scenario re-homed every one of their arms: `swiglu` into
+`expert_mlp`, `qkv` into `qkv_prep`, and `attention` into `attention_core`.
+A re-homed titan arm is the same code under an `engine/profile` name, so
+`swiglu/piper_optimized_triton` is now
+`expert_mlp/titan/piper_optimized_triton`. Two of the successors changed
+what the number means, and both say so in their own description: `qkv_prep`
+puts the attention-input norm inside the cut, because megatron fuses it into
+the GEMM prologue and runs neither half alone; `expert_mlp` puts each Piper
+arm against TorchTitan's own w13 fusion rather than against unfused experts.
+`lm_head` stays because its `fused_linear_ce` arm has no successor:
+`FusedLinearCrossEntropyLoss` owns the LM head, so the arm fits neither
+`lm_head_projection` nor `cross_entropy`.
 
 Each number is the burst-amortized per-call cost under back-to-back dispatch,
 repeated over replicate sweeps so drift affects every arm equally. It is not
@@ -217,7 +223,7 @@ Run `--burst` to see which arms those are. Every arm is *timed* in its own
 process, so one arm's dependencies never reach another's during measurement;
 the parent merges the per-worker fragments into the results file. The
 correctness pass is the exception: it gates the whole roster in one process,
-because 35 of the 73 arms name another arm as their reference and a check
+because 36 of the 71 arms name another arm as their reference and a check
 needs both sides at once. It holds one arm resident at a time, building each
 and dropping it before the next. Correctness gates run first and fail the run
 loudly, and no arm is timed after a failed gate. Every
