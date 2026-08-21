@@ -253,13 +253,13 @@ class KernelCliTests(unittest.TestCase):
         self.assertEqual(request.model_size, "huge")
         self.assertEqual((request.batch, request.seq_len), (1, 512))
 
-    def test_model_size_defaults_to_normal_and_rejects_unknown(self) -> None:
+    def test_model_size_defaults_to_1b_and_rejects_unknown(self) -> None:
         with mock.patch(
             "benchmarks.cli.kernel.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].model_size, "normal")
+        self.assertEqual(execute.call_args.args[0].model_size, "1b")
 
         result = self.runner.invoke(
             cli, ["kernel-bench", "7", "--model-size", "enormous"]
@@ -687,7 +687,7 @@ class KernelRunnerTests(unittest.TestCase):
         # The correctness pass covers every arm at once, so it names none.
         self.assertNotIn("--arm", command)
         # Forwarded unconditionally, unlike the optional overrides.
-        self.assertEqual(command[command.index("--model-size") + 1], "normal")
+        self.assertEqual(command[command.index("--model-size") + 1], "1b")
         self.assertNotIn("--batch", command)
         self.assertEqual(environment["CUDA_VISIBLE_DEVICES"], "7")
         self.assertEqual(environment["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
@@ -719,7 +719,7 @@ class KernelRunnerTests(unittest.TestCase):
         self.assertIsNone(manifest["span"])
         self.assertEqual(manifest["hardware_metadata"]["cpu_pinning"], "numactl test")
         self.assertNotIn("spec", manifest)
-        self.assertEqual(manifest["model_size"], "normal")
+        self.assertEqual(manifest["model_size"], "1b")
         self.assertEqual(manifest["model_shape"]["dim"], 1024)
         self.assertEqual(manifest["model_shape"]["n_layers"], 16)
         self.assertEqual(manifest["workload"], {"batch": 4, "seq_len": 1024})

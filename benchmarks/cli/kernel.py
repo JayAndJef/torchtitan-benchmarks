@@ -57,7 +57,7 @@ from benchmarks.kernel.results.reporting import (
 from benchmarks.kernel.results.schema import KernelSpanResult
 from benchmarks.kernel.runner import KernelRunRequest, execute_kernel_run
 from benchmarks.kernel.spans import KERNEL_SPANS
-from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
 
 @click.command("kernel-bench")
@@ -150,9 +150,9 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
 )
 @click.option(
     "--model-size",
-    default="normal",
+    default="1b",
     show_default=True,
-    type=click.Choice(tuple(PIPER_SHAPES)),
+    type=click.Choice(MODEL_SIZE_CHOICES),
     help=(
         "Model shape from benchmarks/models/piper_qwen3/shape.py; sizes the "
         "geometry only."

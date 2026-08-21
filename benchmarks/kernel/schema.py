@@ -178,7 +178,7 @@ def routing_divides_evenly(
 
 def resolve_shape_and_workload(
     *,
-    model_size: str = "normal",
+    model_size: str = "1b",
     batch: int | None = None,
     seq_len: int | None = None,
     max_seq_len: int | None = None,

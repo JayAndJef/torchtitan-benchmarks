@@ -22,7 +22,7 @@ def command_for_arm(
     compile_mode: str = "default",
     ac_mode: str = "sac",
     *,
-    model_size: str = "normal",
+    model_size: str = "1b",
 ) -> list[str]:
     """Build the training command for one arm, dispatching on its launcher.
 
@@ -88,7 +88,7 @@ def _megatron_command(
     extra_args: list[str] | tuple[str, ...],
     compile_mode: str,
     ac_mode: str,
-    model_size: str = "normal",
+    model_size: str = "1b",
 ) -> list[str]:
     """Launch command for the Megatron baseline driver.
 

@@ -70,7 +70,10 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.e2e.registry import EXECUTION_MODEL, PIPER_1B_REGIONS, Workload
-from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+from benchmarks.models.piper_qwen3.shape import (
+    canonical_size_name,
+    shape_by_name,
+)
 from benchmarks.traces.schema import Region
 
 if TYPE_CHECKING:
@@ -93,10 +96,12 @@ def manifest_data(
     # No default. This value is what the manifest *claims* the run was, and
     # _resume_mismatches below already requires it explicitly; a writer that
     # defaults what the checker demands is the asymmetry that lets a huge run
-    # be recorded, resumed and published as "normal".
+    # be recorded, resumed and published as "1b".
     model_size: str,
 ) -> dict[str, Any]:
-    shape = PIPER_SHAPES[model_size]
+    # Recorded canonically, so a fresh manifest never carries a retired name.
+    model_size = canonical_size_name(model_size)
+    shape = shape_by_name(model_size)
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "scenario": scenario.name,
@@ -179,8 +184,12 @@ def _resume_mismatches(
         key for key, value in expected.items() if manifest.get(key) != value
     ]
     # Defaulted lookup rather than a generic entry: schema <= 8 output
-    # directories predate the axis and are still resumable as "normal".
-    if str(manifest.get("model_size", "normal")) != model_size:
+    # directories predate the axis and are still resumable as the 1B shape.
+    # Both sides go through canonical_size_name, because 13 manifests on disk
+    # record the retired name "normal" and it names the same shape as "1b".
+    # Without that, a resume of a real run would be refused over a rename.
+    recorded = canonical_size_name(str(manifest.get("model_size", "1b")))
+    if recorded != canonical_size_name(model_size):
         mismatches.append("model_size")
     existing_metadata = manifest.get("hardware_metadata", {})
     for key in (

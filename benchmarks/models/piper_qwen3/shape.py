@@ -11,11 +11,14 @@ Deliberately imports nothing but ``dataclasses``. Modules across
 processes that must not pull in torch or torchtitan.
 
 Four shapes are registered. The order, smallest to largest by parameter
-count, is ``normal`` < ``large`` < ``huge`` < ``giant``. The names do not
+count, is ``1b`` < ``large`` < ``huge`` < ``giant``. The names do not
 carry that order on their own, so read it here: ``giant`` is above ``huge``.
 ``PIPER_SHAPES`` lists the shapes in that same order, and
 ``tests/test_model_shape.py`` asserts both the order and the ascending
 parameter counts.
+
+``normal`` is the retired name of ``1b`` and still resolves to it. See
+``MODEL_SIZE_ALIASES`` below for why it cannot simply be deleted.
 
 The one ratio every entry below refers to: embedding + lm_head are ``2*V*D``
 parameters and one transformer layer is ``45*D^2``, so one layer against the
@@ -23,22 +26,22 @@ two tables is ``2*151936/(45*D) = 6753/D``. The whole layer stack against
 them is ``n_layers*dim/6753``, which is why the layer count is part of a
 shape and not a free choice.
 
-``normal``
-    The historical piper-1B model: dim 1024, 16 layers, 1,066,241,024
-    parameters. Every number this repo published before schema 9 is this
-    shape.
+``1b``
+    Piper 1B: dim 1024, 16 layers, 1,066,241,024 parameters. Every number
+    this repo published before schema 9 is this shape, under its old name
+    ``normal``.
 
 ``large``
     Four transformer layers at dim 4096, 4,264,661,504 parameters. It is the
-    middle rung between ``normal`` and ``huge`` in dim and in parameter
+    middle rung between ``1b`` and ``huge`` in dim and in parameter
     count. The layer count is what makes it a rung of the same model rather
-    than a different experiment: ``n_layers*dim`` is 16384 here, the product ``normal``
-    carries, so ``large`` splits its parameters exactly as ``normal`` does --
+    than a different experiment: ``n_layers*dim`` is 16384 here, the product ``1b``
+    carries, so ``large`` splits its parameters exactly as ``1b`` does --
     29% embedding tables, 71% layer stack. At one layer the ratio above is
     1.65, so a 1-layer model at dim 4096 would be 62% embedding table and the
     benchmark would measure the lm_head and the cross entropy. Four layers
     also keep ``supports_block_regions`` True, so ``large`` is the only shape
-    above ``normal`` that validation rule 7 still guards.
+    above ``1b`` that validation rule 7 still guards.
 
 ``huge``
     One transformer layer at a much larger width, sized to fill an H200 (see
@@ -52,7 +55,7 @@ shape and not a free choice.
 ``giant``
     One transformer layer at dim 16384, 17,058,349,184 parameters. The ratio
     above is 0.41 here, so the ``huge`` argument holds with room to spare,
-    and ``n_layers*dim`` is 16384 again, so ``giant`` carries the ``normal``
+    and ``n_layers*dim`` is 16384 again, so ``giant`` carries the ``1b``
     parameter split.
 
     This shape is declared from estimates. No scenario has run at it, in
@@ -243,7 +246,7 @@ class PiperShape:
     # Mirrors torchtitan's get_moe_model_nparams_and_flops
     # (third_party/torchtitan/torchtitan/models/utils.py), verified against
     # the "Total parameter count: dense D, sparse S, vision 0, active A" line
-    # a real run logs. tests/test_model_shape.py pins the normal-size values.
+    # a real run logs. tests/test_model_shape.py pins the 1b values.
 
     @property
     def _per_layer_dense(self) -> int:
@@ -339,8 +342,10 @@ class PiperShape:
         }
 
 
-NORMAL = PiperShape(
-    name="normal",
+# Piper 1B, verbatim. Every field matches
+# /data/zejiaqi/piper/examples/models/qwen3.py case '1B'.
+PIPER_1B = PiperShape(
+    name="1b",
     dim=1024,
     n_layers=16,
     head_dim=64,
@@ -361,17 +366,17 @@ HUGE = PiperShape(
     # runs 4:1 from 9B up, so 96 kv heads is not a piper geometry.
     n_kv_heads=96,
     num_experts=4,
-    # 12x the normal dim, so the bf16 accumulation error grows with it: the
-    # normal shape's measured 5.5e-3 becomes 2.03e-2 (sqrt(12) = 3.46). This
+    # 12x the 1b dim, so the bf16 accumulation error grows with it: the
+    # 1b shape's measured 5.5e-3 becomes 2.03e-2 (sqrt(12) = 3.46). This
     # is evidenced, not slack -- --fp32-reference puts titan's own bf16 output
     # 3.25e-2 from fp32 against megatron's 3.29e-2, so the engines agree with
     # each other better than either agrees with fp32.
     parity_gate=5e-2,
 )
 
-# The middle rung: between normal and huge in dim and in parameter count.
+# The middle rung: between 1b and huge in dim and in parameter count.
 # n_layers*dim is
-# 16384, the product the normal shape carries, so large reproduces the normal
+# 16384, the product the 1b shape carries, so large reproduces the 1b
 # shape's parameter split exactly: 29% embedding tables, 71% layer stack. The
 # layer count is what buys that. At dim 4096 the 6753/D ratio is 1.65, so a
 # 1-layer model here would be 62% embedding table, and the benchmark would
@@ -388,10 +393,10 @@ LARGE = PiperShape(
     num_experts=4,
     # UNVERIFIED. Nothing has measured this shape's logit rel_l2. The two
     # measured shapes fit rel_l2 = 5.5e-3 * sqrt(dim/1024) to within 7%
-    # (normal 5.5e-3 at dim 1024; huge 2.03e-2 at dim 12288 against 1.9e-2
+    # (1b 5.5e-3 at dim 1024; huge 2.03e-2 at dim 12288 against 1.9e-2
     # predicted), which puts dim 4096 near 1.2e-2. 3e-2 keeps the 2.46x margin
     # huge keeps over its own measurement. Two anchors cannot separate the
-    # width term from a depth term -- normal is 16 layers at dim 1024 and huge
+    # width term from a depth term -- 1b is 16 layers at dim 1024 and huge
     # is 1 layer at dim 12288 -- and this shape is 4 layers, so the estimate
     # is weaker here than the number alone suggests. Run
     # tools/megatron_parity_check.py --model-size large before any parity
@@ -400,7 +405,7 @@ LARGE = PiperShape(
 )
 
 # Above huge, and declared from arithmetic alone. n_layers*dim is 16384, so
-# giant carries the normal shape's parameter split, and the 6753/D ratio is
+# giant carries the 1b shape's parameter split, and the 6753/D ratio is
 # 0.41, so huge's one-layer argument holds with room to spare.
 #
 # NOTHING HAS MEASURED THIS SHAPE. No e2e scenario and no kernel scenario has
@@ -435,15 +440,46 @@ GIANT = PiperShape(
 # Declared smallest to largest by parameter count. The names do not carry the
 # order, so the declaration does.
 PIPER_SHAPES: dict[str, PiperShape] = {
-    shape.name: shape for shape in (NORMAL, LARGE, HUGE, GIANT)
+    shape.name: shape for shape in (PIPER_1B, LARGE, HUGE, GIANT)
 }
+
+# Retired ``--model-size`` names, each mapped to the key that replaced it.
+#
+# ``normal`` was the 1B shape's name until it took the real model's name. It
+# stays accepted, and it must: 13 manifests under ``out/`` record
+# ``"model_size": "normal"``, every manifest at schema <= 8 carries no
+# ``model_size`` at all and is defined to resume as that shape, and
+# ``--resume`` compares the recorded string against the requested one. A bare
+# rename would refuse a resume that should succeed.
+#
+# Aliases live here and not in ``PIPER_SHAPES``, so that ``PIPER_SHAPES``
+# enumerates the shapes and nothing else. The CLI's choice lists and the
+# tests both derive from it, and a shape counted twice would appear twice.
+MODEL_SIZE_ALIASES: dict[str, str] = {"normal": "1b"}
+
+# Every ``--model-size`` value a command accepts: the shapes, then the
+# aliases.
+MODEL_SIZE_CHOICES: tuple[str, ...] = tuple(PIPER_SHAPES) + tuple(
+    MODEL_SIZE_ALIASES
+)
+
+
+def canonical_size_name(name: str) -> str:
+    """The registry key a ``--model-size`` value names.
+
+    Total on purpose: an unknown name passes through unchanged. Callers that
+    compare two recorded values -- the resume predicate is the one that
+    matters -- must normalise both sides, and a manifest can record any
+    string at all. Rejecting an unknown size is ``shape_by_name``'s job.
+    """
+    return MODEL_SIZE_ALIASES.get(name, name)
 
 
 def shape_by_name(name: str) -> PiperShape:
     try:
-        return PIPER_SHAPES[name]
+        return PIPER_SHAPES[canonical_size_name(name)]
     except KeyError as error:
         raise ValueError(
             f"Unknown model size {name!r}. Available: "
-            + ", ".join(PIPER_SHAPES)
+            + ", ".join(MODEL_SIZE_CHOICES)
         ) from error

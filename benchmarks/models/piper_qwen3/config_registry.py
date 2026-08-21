@@ -129,7 +129,13 @@ def _piper_1b_model(
     )
 
 
-def qwen3_piper_1b(*, size: str = "normal") -> Trainer.Config:
+# **The ``1b`` in every public name below is the config family, not the
+# geometry.** ``--config qwen3_piper_1b --config-arg size=48b`` builds a 48B
+# model, and that is correct: the size is one argument and the config is
+# another. The names are not renamed to match, because they are a contract --
+# the fork's ``ConfigManager`` resolves ``--config`` by ``getattr`` on this
+# module, and every manifest on disk records the name it used in ``commands``.
+def qwen3_piper_1b(*, size: str = "1b") -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=True,
         loss_kind="full_logits",
@@ -137,7 +143,7 @@ def qwen3_piper_1b(*, size: str = "normal") -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_varlen(*, size: str = "normal") -> Trainer.Config:
+def qwen3_piper_1b_varlen(*, size: str = "1b") -> Trainer.Config:
     """Piper-1B with FlashAttention-3 varlen instead of FlexAttention.
 
     ``attn_backend="varlen"`` selects VarlenAttention, whose constructor
@@ -155,7 +161,7 @@ def qwen3_piper_1b_varlen(*, size: str = "normal") -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_flex_flash(*, size: str = "normal") -> Trainer.Config:
+def qwen3_piper_1b_flex_flash(*, size: str = "1b") -> Trainer.Config:
     """Piper-1B with FlexAttention lowered to FlashAttention-4 kernels.
 
     ``attn_backend="flex_flash"`` keeps FlexAttention and its BlockMask -- only
@@ -175,7 +181,7 @@ def qwen3_piper_1b_flex_flash(*, size: str = "normal") -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_unfused_qkv(*, size: str = "normal") -> Trainer.Config:
+def qwen3_piper_1b_unfused_qkv(*, size: str = "1b") -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=False,
         loss_kind="full_logits",
@@ -183,7 +189,7 @@ def qwen3_piper_1b_unfused_qkv(*, size: str = "normal") -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_full_logits(*, size: str = "normal") -> Trainer.Config:
+def qwen3_piper_1b_full_logits(*, size: str = "1b") -> Trainer.Config:
     """Piper's vanilla full lm_head followed by cross entropy."""
     return _piper_1b_trainer(
         fuse_qkv=True,
@@ -192,7 +198,7 @@ def qwen3_piper_1b_full_logits(*, size: str = "normal") -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_fused_linear_ce(*, size: str = "normal") -> Trainer.Config:
+def qwen3_piper_1b_fused_linear_ce(*, size: str = "1b") -> Trainer.Config:
     """Full-token PyTorch-native fused linear plus cross entropy."""
     return _piper_1b_trainer(
         fuse_qkv=True,
@@ -201,7 +207,7 @@ def qwen3_piper_1b_fused_linear_ce(*, size: str = "normal") -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_te_fused_ce(*, size: str = "normal") -> Trainer.Config:
+def qwen3_piper_1b_te_fused_ce(*, size: str = "1b") -> Trainer.Config:
     """Full-token lm_head followed by TransformerEngine fused CE."""
     return _piper_1b_trainer(
         fuse_qkv=True,
@@ -211,7 +217,7 @@ def qwen3_piper_1b_te_fused_ce(*, size: str = "normal") -> Trainer.Config:
 
 
 def qwen3_piper_1b_piper_optimized_te_ce(
-    *, attn_backend: str = "flex", size: str = "normal"
+    *, attn_backend: str = "flex", size: str = "1b"
 ) -> Trainer.Config:
     """Full-token lm_head followed by Piper-optimized TE-derived CE."""
     return _piper_1b_trainer(
@@ -222,7 +228,7 @@ def qwen3_piper_1b_piper_optimized_te_ce(
     )
 
 
-def qwen3_piper_1b_pretokenized(*, size: str = "normal") -> Trainer.Config:
+def qwen3_piper_1b_pretokenized(*, size: str = "1b") -> Trainer.Config:
     """Stock model on the pre-tokenized replay stream (piper1b_megatron)."""
     # Pass the size on rather than a resolved shape: the delegate resolves it
     # itself, and resolving here as well would be two places to keep in step.
@@ -230,7 +236,7 @@ def qwen3_piper_1b_pretokenized(*, size: str = "normal") -> Trainer.Config:
 
 
 def qwen3_piper_1b_piper_optimized_te_ce_pretokenized(
-    *, size: str = "normal"
+    *, size: str = "1b"
 ) -> Trainer.Config:
     """Piper-optimized TE CE loss on the pre-tokenized replay stream."""
     return _with_pretokenized_replay(

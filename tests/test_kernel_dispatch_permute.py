@@ -430,7 +430,7 @@ class PermutationOrderTests(unittest.TestCase):
         assertions below hold for every one of 60 seeds measured: batch 4
         spans 0.0211 to 0.0232, and batch 8 spans 0.0150 to 0.0164.
         """
-        shape = PIPER_SHAPES["normal"]
+        shape = PIPER_SHAPES["1b"]
         generator = torch.Generator(device="cpu")
         generator.manual_seed(0)
         measured = {}

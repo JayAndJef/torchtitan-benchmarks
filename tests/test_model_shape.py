@@ -18,7 +18,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts.manifests import write_manifest
+from benchmarks.artifacts.manifests import (
+    _resume_mismatches,
+    manifest_data,
+    write_manifest,
+)
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import (
     SCENARIOS,
@@ -29,12 +33,16 @@ from benchmarks.e2e.runner import RunRequest, execute_run
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import (
+    canonical_size_name,
     GIANT,
     HUGE,
     LARGE,
-    NORMAL,
+    MODEL_SIZE_ALIASES,
+    MODEL_SIZE_CHOICES,
+    PIPER_1B,
     PIPER_SHAPES,
     PiperShape,
+    shape_by_name,
 )
 from tests.test_runner import _SAC_LINE, _compiled_line
 
@@ -79,32 +87,32 @@ class ShapeArithmeticTests(unittest.TestCase):
         # ("Total parameter count: dense D, sparse S, vision 0, active A")
         # and the constant tools/megatron_parity_check.py asserts. They were
         # duplicated by hand in the megatron baseline before schema 9.
-        self.assertEqual(NORMAL.param_count, 1_066_241_024)
-        self.assertEqual(NORMAL.nparams_dense, 361_532_416)
-        self.assertEqual(NORMAL.nparams_sparse, 704_708_608)
-        self.assertEqual(NORMAL.nparams_active, 713_919_488)
-        self.assertEqual(NORMAL.num_flops_per_token(1024), 3_551_348_736)
+        self.assertEqual(PIPER_1B.param_count, 1_066_241_024)
+        self.assertEqual(PIPER_1B.nparams_dense, 361_532_416)
+        self.assertEqual(PIPER_1B.nparams_sparse, 704_708_608)
+        self.assertEqual(PIPER_1B.nparams_active, 713_919_488)
+        self.assertEqual(PIPER_1B.num_flops_per_token(1024), 3_551_348_736)
 
     def test_normal_geometry(self) -> None:
         self.assertEqual(
-            (NORMAL.dim, NORMAL.n_layers, NORMAL.n_heads, NORMAL.n_kv_heads),
+            (PIPER_1B.dim, PIPER_1B.n_layers, PIPER_1B.n_heads, PIPER_1B.n_kv_heads),
             (1024, 16, 16, 8),
         )
-        self.assertEqual(NORMAL.moe_hidden_dim, 3584)
-        self.assertEqual(NORMAL.qkv_out_features, 2048)
-        self.assertEqual(NORMAL.heads_per_group, 2)
-        self.assertTrue(NORMAL.supports_block_regions)
+        self.assertEqual(PIPER_1B.moe_hidden_dim, 3584)
+        self.assertEqual(PIPER_1B.qkv_out_features, 2048)
+        self.assertEqual(PIPER_1B.heads_per_group, 2)
+        self.assertTrue(PIPER_1B.supports_block_regions)
 
     def test_the_tensor_by_tensor_count_reproduces_a_real_run(self) -> None:
         # The helper earns its authority here, against the same logged
         # numbers the test above pins, and then derives the shapes no run has
         # produced.
         self.assertEqual(
-            _counts_from_the_tensor_list(NORMAL),
+            _counts_from_the_tensor_list(PIPER_1B),
             (361_532_416, 704_708_608, 713_919_488),
         )
         self.assertEqual(
-            _flops_from_the_tensor_list(NORMAL, 1024), 3_551_348_736
+            _flops_from_the_tensor_list(PIPER_1B, 1024), 3_551_348_736
         )
 
     def test_every_registered_shape_agrees_with_the_tensor_list(self) -> None:
@@ -139,8 +147,8 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(LARGE.n_kv_heads, LARGE.n_heads // 2)
         self.assertEqual(LARGE.moe_hidden_dim, LARGE.dim * 7 // 2)
         self.assertEqual(LARGE.qkv_out_features, 2 * LARGE.dim)
-        self.assertEqual(LARGE.head_dim, NORMAL.head_dim)
-        self.assertEqual(LARGE.vocab_size, NORMAL.vocab_size)
+        self.assertEqual(LARGE.head_dim, PIPER_1B.head_dim)
+        self.assertEqual(LARGE.vocab_size, PIPER_1B.vocab_size)
         # Four layers, so this is the only shape above normal whose block
         # graphs stay identifiable and whose runs validation rule 7 guards.
         self.assertTrue(LARGE.supports_block_regions)
@@ -158,8 +166,8 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(GIANT.n_kv_heads, GIANT.n_heads // 2)
         self.assertEqual(GIANT.moe_hidden_dim, GIANT.dim * 7 // 2)
         self.assertEqual(GIANT.qkv_out_features, 2 * GIANT.dim)
-        self.assertEqual(GIANT.head_dim, NORMAL.head_dim)
-        self.assertEqual(GIANT.vocab_size, NORMAL.vocab_size)
+        self.assertEqual(GIANT.head_dim, PIPER_1B.head_dim)
+        self.assertEqual(GIANT.vocab_size, PIPER_1B.vocab_size)
         # One layer, so the same region argument the huge shape makes.
         self.assertFalse(GIANT.supports_block_regions)
         # 6753/dim is 0.41 here, further below 1.0 than huge's 0.55.
@@ -185,7 +193,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         # three carry the same split between the two tables and the layer
         # stack. huge is the exception, because the memory ceiling chose its
         # dim rather than the split.
-        for shape in (NORMAL, LARGE, GIANT):
+        for shape in (PIPER_1B, LARGE, GIANT):
             with self.subTest(size=shape.name):
                 self.assertEqual(shape.n_layers * shape.dim, 16384)
                 self.assertAlmostEqual(
@@ -201,7 +209,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         a later insertion from breaking it.
         """
         self.assertEqual(
-            tuple(PIPER_SHAPES), ("normal", "large", "huge", "giant")
+            tuple(PIPER_SHAPES), ("1b", "large", "huge", "giant")
         )
         counts = [shape.param_count for shape in PIPER_SHAPES.values()]
         self.assertEqual(counts, sorted(counts))
@@ -225,8 +233,8 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(HUGE.n_kv_heads, HUGE.n_heads // 2)
         self.assertEqual(HUGE.moe_hidden_dim, HUGE.dim * 7 // 2)
         self.assertEqual(HUGE.qkv_out_features, 2 * HUGE.dim)
-        self.assertEqual(HUGE.head_dim, NORMAL.head_dim)
-        self.assertEqual(HUGE.vocab_size, NORMAL.vocab_size)
+        self.assertEqual(HUGE.head_dim, PIPER_1B.head_dim)
+        self.assertEqual(HUGE.vocab_size, PIPER_1B.vocab_size)
         # The reason the huge shape exists: at one layer the embedding tables
         # must not dominate. embedding+lm_head / one layer = 6753/dim.
         self.assertLess(2 * HUGE.vocab_size / (45 * HUGE.dim), 1.0)
@@ -293,7 +301,7 @@ class ShapeArithmeticTests(unittest.TestCase):
     def test_block_region_support_is_derived_from_the_layer_count(self) -> None:
         # Not a per-shape flag anyone can set wrong: a 1-layer block graph is
         # not structurally identifiable, at any dim.
-        self.assertTrue(NORMAL.supports_block_regions)
+        self.assertTrue(PIPER_1B.supports_block_regions)
         self.assertFalse(HUGE.supports_block_regions)
         self.assertFalse(
             PiperShape.derived(name="probe", dim=1024, n_layers=1).supports_block_regions
@@ -305,7 +313,7 @@ class ShapeArithmeticTests(unittest.TestCase):
     def test_parity_gate_is_shape_data(self) -> None:
         # tools/megatron_parity_check.py reads these; the huge gate is wider
         # only because bf16 accumulation scales with the reduction length.
-        self.assertEqual(NORMAL.parity_gate, 2e-2)
+        self.assertEqual(PIPER_1B.parity_gate, 2e-2)
         self.assertEqual(HUGE.parity_gate, 5e-2)
         self.assertEqual(LARGE.parity_gate, 3e-2)
         self.assertEqual(GIANT.parity_gate, 6e-2)
@@ -329,7 +337,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         """
         for shape in (LARGE, GIANT):
             with self.subTest(size=shape.name):
-                predicted = 5.5e-3 * (shape.dim / NORMAL.dim) ** 0.5
+                predicted = 5.5e-3 * (shape.dim / PIPER_1B.dim) ** 0.5
                 self.assertGreater(shape.parity_gate, 2.4 * predicted)
                 self.assertLess(shape.parity_gate, 4.0 * predicted)
         # A wider shape never gets a tighter gate.
@@ -343,7 +351,7 @@ class ShapeArithmeticTests(unittest.TestCase):
 # table is deliberately a literal: it must be read against the model config
 # the shape claims to be, never regenerated from the code it guards.
 PINNED_SHAPES: dict[str, dict[str, object]] = {
-    "normal": {
+    "1b": {
         "dim": 1024,
         "n_layers": 16,
         "n_heads": 16,
@@ -454,6 +462,134 @@ class PinnedShapeTests(unittest.TestCase):
         self.assertEqual(set(PINNED_SHAPES), set(PIPER_SHAPES))
 
 
+class ModelSizeAliasTests(unittest.TestCase):
+    """``normal`` is the retired name of ``1b``, and it must keep working.
+
+    13 manifests under ``out/`` record ``"model_size": "normal"``, and every
+    manifest at schema <= 8 records no size at all and is defined to resume as
+    that shape. ``--resume`` compares the recorded string against the
+    requested one, so a rename without an alias would refuse a resume that
+    should succeed.
+    """
+
+    def test_the_retired_name_resolves_to_the_same_shape(self) -> None:
+        self.assertIs(shape_by_name("normal"), PIPER_1B)
+        self.assertIs(shape_by_name("1b"), PIPER_1B)
+        self.assertEqual(canonical_size_name("normal"), "1b")
+        self.assertEqual(canonical_size_name("1b"), "1b")
+
+    def test_the_alias_is_not_a_registry_entry(self) -> None:
+        """``PIPER_SHAPES`` enumerates shapes; the CLI and the tests count it.
+
+        An alias held there would make one shape appear twice -- in
+        ``click.Choice``, in the declaration-order test, and in every sweep
+        that iterates the registry.
+        """
+        self.assertNotIn("normal", PIPER_SHAPES)
+        self.assertEqual(set(MODEL_SIZE_ALIASES), {"normal"})
+        self.assertIn("normal", MODEL_SIZE_CHOICES)
+        self.assertEqual(
+            len(MODEL_SIZE_CHOICES), len(PIPER_SHAPES) + len(MODEL_SIZE_ALIASES)
+        )
+
+    def test_an_unknown_size_is_still_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown model size"):
+            shape_by_name("enormous")
+        # A total function: an unknown name passes through rather than
+        # raising, so the resume comparison can normalise any recorded string.
+        self.assertEqual(canonical_size_name("enormous"), "enormous")
+
+    def test_a_fresh_manifest_records_the_canonical_name(self) -> None:
+        scenario = scenario_by_name("piper1b_rope")
+        selected = (scenario.arm("baseline"),)
+        recorded = manifest_data(
+            scenario,
+            selected,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "normal",
+        )
+        self.assertEqual(recorded["model_size"], "1b")
+        self.assertEqual(recorded["model_shape"]["name"], "1b")
+
+    def test_a_manifest_recording_either_name_resumes_against_the_other(
+        self,
+    ) -> None:
+        """The site the rename could most easily have broken.
+
+        ``_resume_mismatches`` compares the recorded size against the
+        requested one. Both sides must normalise, or a run recorded before the
+        rename would be refused for naming its own shape.
+        """
+        scenario = scenario_by_name("piper1b_rope")
+        selected = (scenario.arm("baseline"),)
+        for recorded_name, requested in (
+            ("normal", "1b"),
+            ("1b", "normal"),
+            ("normal", "normal"),
+            ("1b", "1b"),
+        ):
+            with self.subTest(recorded=recorded_name, requested=requested):
+                manifest = manifest_data(
+                    scenario,
+                    selected,
+                    {"baseline": ["cmd"]},
+                    "test-gpu",
+                    _METADATA,
+                    (),
+                    "default",
+                    "sac",
+                    "1b",
+                )
+                # Written by hand, because manifest_data canonicalises: an
+                # on-disk manifest from before the rename says "normal".
+                manifest["model_size"] = recorded_name
+                self.assertEqual(
+                    _resume_mismatches(
+                        manifest,
+                        scenario,
+                        selected,
+                        "test-gpu",
+                        _METADATA,
+                        (),
+                        "default",
+                        "sac",
+                        requested,
+                    ),
+                    [],
+                )
+        # A genuinely different size is still refused.
+        manifest = manifest_data(
+            scenario,
+            selected,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "normal",
+        )
+        self.assertEqual(
+            _resume_mismatches(
+                manifest,
+                scenario,
+                selected,
+                "test-gpu",
+                _METADATA,
+                (),
+                "default",
+                "sac",
+                "huge",
+            ),
+            ["model_size"],
+        )
+
+
 class ConfigSizeClosureTests(unittest.TestCase):
     def test_every_scenario_arm_builds_at_every_size(self) -> None:
         """Every arm's config resolves and accepts every registered size.
@@ -480,7 +616,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
                     parameter = inspect.signature(factory).parameters.get("size")
                     self.assertIsNotNone(parameter, f"{name} takes no size")
                     self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
-                    self.assertEqual(parameter.default, "normal")
+                    self.assertEqual(parameter.default, "1b")
                     self._assert_every_size_lands(factory, name)
 
     def _assert_every_size_lands(self, factory, name: str) -> None:
@@ -552,7 +688,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
         self.assertEqual(qwen3_piper_1b(size="normal").model_spec.model.dim, 1024)
         # The default is the normal shape, so an unparameterized call is the
         # historical config.
-        self.assertEqual(qwen3_piper_1b().model_spec.model.dim, NORMAL.dim)
+        self.assertEqual(qwen3_piper_1b().model_spec.model.dim, PIPER_1B.dim)
         with self.assertRaisesRegex(ValueError, "Unknown model size"):
             qwen3_piper_1b(size="enormous")
 
@@ -560,8 +696,8 @@ class ConfigSizeClosureTests(unittest.TestCase):
         from benchmarks.models.piper_qwen3.config_registry import qwen3_piper_1b
 
         normal = qwen3_piper_1b().model_spec.model
-        self.assertEqual(normal.dim, NORMAL.dim)
-        self.assertEqual(len(normal.layers), NORMAL.n_layers)
+        self.assertEqual(normal.dim, PIPER_1B.dim)
+        self.assertEqual(len(normal.layers), PIPER_1B.n_layers)
 
         huge = qwen3_piper_1b(size="huge").model_spec.model
         self.assertEqual(huge.dim, HUGE.dim)
@@ -621,7 +757,7 @@ class CommandTests(unittest.TestCase):
             command[command.index("--config") + 1], "qwen3_piper_1b"
         )
         self.assertEqual(
-            command[command.index("--config-arg") + 1], "size=normal"
+            command[command.index("--config-arg") + 1], "size=1b"
         )
 
     def test_non_replay_scenarios_do_not_get_the_replay_flag(self) -> None:
@@ -663,7 +799,7 @@ class CommandTests(unittest.TestCase):
                 "--profiler-warmup", "5", "--profiler-active", "5",
                 "--mode", "default", "/tmp/arm",
             ]
-        ).model_size, "normal")
+        ).model_size, "1b")
 
 
 class RegionDerivationTests(unittest.TestCase):
@@ -716,7 +852,7 @@ class ValidationRuleElevenTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, scenario.workload)
 
-            log.write_text(head + _size_line(NORMAL) + "Training completed\n")
+            log.write_text(head + _size_line(PIPER_1B) + "Training completed\n")
             validate_arm(arm, root, log, scenario.workload)
 
             # The normal-size marker must not satisfy a huge-size run.
@@ -762,7 +898,7 @@ class ValidationRuleElevenTests(unittest.TestCase):
                 )
 
             log.write_text(
-                head + _size_line(NORMAL) + "Training completed\n" + applied * 16
+                head + _size_line(PIPER_1B) + "Training completed\n" + applied * 16
             )
             validate_arm(arm, root, log, scenario.workload)
 
@@ -851,7 +987,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                         arm_name="baseline",
                         out_dir=out_dir,
                     ),
-                    process_runner=_fake_process(_size_line(NORMAL)),
+                    process_runner=_fake_process(_size_line(PIPER_1B)),
                     environment={"PATH": os.environ["PATH"]},
                 )
             manifest = json.loads((out_dir / "manifest.json").read_text())
@@ -891,7 +1027,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                 ac_mode="none",
             )
 
-    def test_schema_eight_directories_still_resume_as_normal(self) -> None:
+    def test_schema_eight_directories_still_resume_as_the_1b_shape(self) -> None:
         scenario = scenario_by_name("piper1b_rope")
         selected = (scenario.arm("baseline"),)
         with tempfile.TemporaryDirectory() as temporary:

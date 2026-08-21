@@ -11,8 +11,8 @@ was not readable which surface a given ``click.option`` belonged to.
 This module declares it with ``envvar="MODEL_SIZE"`` and no default, so an
 unrequested size reaches ``RunRequest`` as ``None`` -- which is what lets
 ``run-all --resume`` tell "inherit the size recorded in the manifest" from
-"the caller asked for ``normal``". ``benchmarks/cli/kernel.py`` declares its
-own with ``default="normal"`` and no envvar, because ``kernel-bench`` takes
+"the caller asked for ``1b``". ``benchmarks/cli/kernel.py`` declares its
+own with ``default="1b"`` and no envvar, because ``kernel-bench`` takes
 flags only, so that an ``OUT``/``SEQ``/``BATCH`` environment exported for an
 end-to-end shell cannot leak into a kernel measurement (CLAUDE.md,
 "Kernel-isolation benchmarks"). They are two different options that share a
@@ -50,7 +50,7 @@ from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.registry import AC_MODES, COMPILE_MODES, SCENARIOS
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
 from benchmarks.e2e.runner import RunRequest, RunResult, execute_run
-from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
 
 PASSTHROUGH_CONTEXT = {
@@ -117,13 +117,13 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
         click.option(
             "--model-size",
             "model_size",
-            type=click.Choice(tuple(PIPER_SHAPES)),
+            type=click.Choice(MODEL_SIZE_CHOICES),
             envvar="MODEL_SIZE",
             show_envvar=True,
             help=(
-                "Model shape applied to every arm in the run [default: "
-                "normal]. See benchmarks/models/piper_qwen3/shape.py. Results "
-                "are only comparable within one size."
+                "Model shape applied to every arm in the run [default: 1b]. "
+                "See benchmarks/models/piper_qwen3/shape.py. Results are only "
+                "comparable within one size."
             ),
         ),
     ]

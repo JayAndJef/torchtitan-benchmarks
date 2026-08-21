@@ -58,7 +58,7 @@ H100_CLASS_BF16_PEAK_FLOPS = 989e12
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+    from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seq-len", type=int, required=True)
@@ -70,7 +70,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--profiler-active", type=int, required=True)
     parser.add_argument("--mode", choices=("default", "cuda-graph"), required=True)
     parser.add_argument(
-        "--model-size", choices=tuple(PIPER_SHAPES), default="normal"
+        "--model-size", choices=MODEL_SIZE_CHOICES, default="1b"
     )
     parser.add_argument("arm_dir", type=Path)
     return parser.parse_args(argv)
@@ -106,10 +106,10 @@ def main(argv: list[str] | None = None) -> None:
         FUSION_FIELDS,
         declared_mismatches,
     )
-    from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+    from benchmarks.models.piper_qwen3.shape import shape_by_name
 
     args = parse_args(argv)
-    shape = PIPER_SHAPES[args.model_size]
+    shape = shape_by_name(args.model_size)
     # The e2e megatron arm measures megatron at its own best, which is the
     # base profile. A profile axis belongs to kernel-bench, where one arm per
     # profile is the unit; an e2e run has one megatron arm and no such axis.

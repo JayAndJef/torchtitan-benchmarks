@@ -86,7 +86,10 @@ from benchmarks.kernel.schema import (
     timing_fragment_path,
 )
 from benchmarks.kernel.spans import kernel_span_by_name
-from benchmarks.models.piper_qwen3.shape import PiperShape
+from benchmarks.models.piper_qwen3.shape import (
+    canonical_size_name,
+    PiperShape,
+)
 
 
 # 2: the single flat shape record was replaced by model_size + model_shape
@@ -184,7 +187,7 @@ class KernelRunRequest:
     burst_k: int = 16
     warmup_calls: int = 30
     burst: bool = False
-    model_size: str = "normal"
+    model_size: str = "1b"
     batch: int | None = None
     seq_len: int | None = None
     max_seq_len: int | None = None
@@ -353,8 +356,9 @@ def worker_command(
         str(request.seed),
         # Unconditional, unlike the overrides below: the run always has a
         # model size, and the worker must not fall back to its own default.
+        # Canonical, so a recorded command never carries a retired alias.
         "--model-size",
-        request.model_size,
+        canonical_size_name(request.model_size),
     ]
     if arm is not None:
         command.extend(("--arm", arm))
@@ -640,7 +644,9 @@ def kernel_manifest_data(
             if span
             else None
         ),
-        "model_size": request.model_size,
+        # The shape's own name, which is canonical by construction: an
+        # alias reaching the record would name a size no reader can look up.
+        "model_size": shape.name,
         # The same record the e2e manifest writes, so both systems state
         # model identity identically.
         "model_shape": shape.describe(seq_len=workload.seq_len),
