@@ -566,9 +566,34 @@ class ClassificationCompletenessTest(unittest.TestCase):
 # and refuted on 2026-08-20 (reports/20260820-te-fa3-coexist.md, and see
 # CLAUDE.md).
 ENGINE_DIRECTORY = "benchmarks/kernel/engine/"
-ENGINE_FORBIDDEN_IMPORTS = (
-    "benchmarks.kernel.operations",
-    "benchmarks.kernel.registry",
+
+# **An allowlist, because the denylist it replaced had a hole in it.** The
+# rule was two banned names, ``operations`` and ``registry``, and it held only
+# while nobody added a third module that reaches the registry. Somebody did:
+# ``benchmarks.kernel.spans`` imports ``benchmarks.kernel.registry`` to check
+# that every part arm exists, so an engine -> spans import is an engine ->
+# registry import with one hop, and the banned-name check did not see it.
+#
+# So the rule is inverted. The engine may reach exactly these under
+# ``benchmarks.kernel``, and everything else -- including a module that does
+# not exist yet -- is forbidden until somebody argues it onto this list:
+#
+# * ``benchmarks.kernel.schema``: the declaration TYPES. Torch-free, and it
+#   knows that no scenario or span exists as an object.
+# * ``benchmarks.kernel.results.schema``: the result types the engine's
+#   in-process composition returns.
+# * ``benchmarks.kernel.results.merge``: allowed here because this rule is
+#   about *coupling to the arms*, and the merge couples to neither. It is
+#   still forbidden at **module scope** by its own test below, because it
+#   reaches numpy and scipy through ``engine.statistics`` and no timing
+#   worker should pay for them.
+#
+# A denylist forgets; an allowlist has to be edited on purpose.
+ENGINE_ALLOWED_KERNEL_IMPORTS = (
+    "benchmarks.kernel.engine",
+    "benchmarks.kernel.schema",
+    "benchmarks.kernel.results.schema",
+    "benchmarks.kernel.results.merge",
 )
 
 # The declaration side of the same edge: neither the types nor the scenarios
@@ -689,20 +714,61 @@ class KernelEngineImportBoundaryTest(unittest.TestCase):
         )
 
     def test_the_engine_imports_neither_the_arms_nor_the_scenario_data(self):
-        """At any scope -- a deferred import couples the packages just as much."""
+        """At any scope -- a deferred import couples the packages just as much.
+
+        Allowlisted rather than banned by name. A banned-name rule only sees
+        the names it was given, and ``benchmarks.kernel.spans`` walked
+        straight past one: it imports the registry, so an engine -> spans
+        edge is an engine -> registry edge one hop along, and adding that
+        import to ``engine/run.py`` produced no failure at all.
+        """
         violations = []
         for path in engine_source_files():
             for imported, lineno in all_imports(path):
-                for forbidden in ENGINE_FORBIDDEN_IMPORTS:
-                    if targets(imported, forbidden):
-                        violations.append(f"{path}:{lineno}: {imported}")
+                if not targets(imported, "benchmarks.kernel"):
+                    continue
+                if any(
+                    targets(imported, allowed)
+                    for allowed in ENGINE_ALLOWED_KERNEL_IMPORTS
+                ):
+                    continue
+                violations.append(f"{path}:{lineno}: {imported}")
         self.assertEqual(
             violations,
             [],
-            "the kernel engine must reach arms only as resolved BuiltArm "
-            "values and scenarios only as benchmarks.kernel.schema types:\n  "
+            "the kernel engine may import only "
+            f"{', '.join(ENGINE_ALLOWED_KERNEL_IMPORTS)} from "
+            "benchmarks.kernel: arms reach it as resolved BuiltArm values "
+            "and declarations as schema types, and anything else drags the "
+            "registry -- and every arm's dependencies behind it -- into "
+            "every worker:\n  "
             + "\n  ".join(violations),
         )
+
+    def test_the_engine_allowlist_would_catch_a_registry_import(self):
+        """Negative control, on the exact hole this replaced.
+
+        The rule is only worth its lines if it fails on the imports it
+        forbids. Each of these reaches the registry -- ``spans`` by one hop
+        -- and each must be rejected by the same predicate the test above
+        applies.
+        """
+        for forbidden in (
+            "benchmarks.kernel.registry",
+            "benchmarks.kernel.spans",
+            "benchmarks.kernel.operations.rope",
+            "benchmarks.kernel.runner",
+            "benchmarks.kernel.worker",
+        ):
+            with self.subTest(module=forbidden):
+                self.assertTrue(targets(forbidden, "benchmarks.kernel"))
+                self.assertFalse(
+                    any(
+                        targets(forbidden, allowed)
+                        for allowed in ENGINE_ALLOWED_KERNEL_IMPORTS
+                    ),
+                    f"{forbidden} would pass the engine allowlist",
+                )
 
     def test_the_engine_takes_its_declaration_types_from_the_schema(self):
         """The positive half: the types it does not import from the registry
