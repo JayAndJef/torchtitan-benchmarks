@@ -1208,7 +1208,9 @@ TEST_CENSUS = {
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
     # and 8 that pin the transfer, its component slices and its refusals.
-    "test_megatron_weights": 11,
+    # +1 with the real piper ladder: the same interleave at 4:1 grouped-query
+    # attention and head_dim 128, which the 1B-family TINY shape cannot reach.
+    "test_megatron_weights": 12,
     # 25 pre-migration, +1 for the megatron builder's explicit-shape test --
     # the symmetric twin of the titan builders' one, added when the megatron
     # side stopped defaulting to the normal shape. +8 for the large and giant
@@ -1245,7 +1247,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1111
+TEST_CENSUS_TOTAL = 1112
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

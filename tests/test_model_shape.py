@@ -7,6 +7,7 @@ manifest/resume plumbing.
 """
 
 import gzip
+import inspect
 import json
 import os
 import sys
@@ -275,25 +276,20 @@ class ShapeArithmeticTests(unittest.TestCase):
             (probe.head_dim, probe.n_heads, probe.n_kv_heads, probe.num_experts),
             (64, 32, 16, 4),
         )
-        # Every registered shape writes its own geometry out instead.
-        for name, shape in PIPER_SHAPES.items():
-            with self.subTest(size=name):
-                self.assertEqual(
-                    shape,
-                    PiperShape(
-                        name=shape.name,
-                        dim=shape.dim,
-                        n_layers=shape.n_layers,
-                        head_dim=shape.head_dim,
-                        n_kv_heads=shape.n_kv_heads,
-                        num_experts=shape.num_experts,
-                        top_k=shape.top_k,
-                        vocab_size=shape.vocab_size,
-                        rope_theta=shape.rope_theta,
-                        max_seq_len=shape.max_seq_len,
-                        parity_gate=shape.parity_gate,
-                    ),
-                )
+        # Piper 9B is dim 2048 too, and agrees with none of those but n_heads.
+        self.assertEqual(PIPER_9B.dim, probe.dim)
+        self.assertEqual(PIPER_9B.n_kv_heads, 8)
+        self.assertEqual(PIPER_9B.num_experts, 8)
+
+        # A structural guard, not a value comparison. Comparing a registered
+        # shape to a PiperShape rebuilt from its own fields is a tautology for
+        # a frozen dataclass, so this reads the source instead: the registry
+        # must construct every entry through the plain constructor.
+        source = Path(
+            inspect.getsourcefile(PiperShape) or ""
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("PiperShape.derived(", source)
+        self.assertIn("PIPER_9B = PiperShape(", source)
 
     def test_describe_is_json_safe(self) -> None:
         for shape in PIPER_SHAPES.values():
@@ -686,6 +682,25 @@ class ConfigSizeClosureTests(unittest.TestCase):
                 model = factory(size=size).model_spec.model
             self.assertEqual(model.dim, shape.dim, f"{name} at {size}")
             self.assertEqual(len(model.layers), shape.n_layers, f"{name} at {size}")
+            # Every field the shape records, checked where it lands. dim and
+            # the layer count alone would pass a config that ignored the head
+            # geometry or the expert roster -- which is the whole class of
+            # error that made head_dim, n_kv_heads and num_experts recorded
+            # fields, and the class no run at 9b or 48b has yet exercised.
+            attention = model.layers[0].attention
+            moe = model.layers[0].moe
+            self.assertEqual(
+                (attention.n_heads, attention.n_kv_heads, attention.head_dim),
+                (shape.n_heads, shape.n_kv_heads, shape.head_dim),
+                f"{name} at {size}",
+            )
+            experts = moe.routed_experts.inner_experts
+            self.assertEqual(
+                (moe.num_experts, moe.router.top_k, experts.hidden_dim),
+                (shape.num_experts, shape.top_k, shape.moe_hidden_dim),
+                f"{name} at {size}",
+            )
+            self.assertEqual(model.vocab_size, shape.vocab_size, f"{name} at {size}")
 
     def test_the_private_builders_require_an_explicit_shape(self) -> None:
         """No default shape on the builders every public config calls.
