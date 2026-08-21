@@ -31,7 +31,11 @@ from benchmarks.kernel.spans import KERNEL_SPANS, _validate_roster
 
 # Every span declared at this rev, in declaration order. The pin is the
 # point: a span added without a line here is a span nobody described.
-DECLARED_SPANS = ("expert_combine", "attn_residual_norm")
+DECLARED_SPANS = (
+    "expert_combine",
+    "attn_residual_norm",
+    "ffn_norm_to_moe_residual",
+)
 
 # How many enclosed scenarios each range holds, spelled as the description
 # spells it. The dispatch-chain bias grows with this number, so a reader must
@@ -372,6 +376,129 @@ class AttnResidualNormTests(unittest.TestCase):
         self.assertTrue(
             KERNEL_SCENARIOS["attn_residual"].arm("mcore/base").compiled
         )
+
+
+
+class FfnNormToMoeResidualTests(unittest.TestCase):
+    """8..13: megatron's own residual-plus-RMSNorm backward fusion."""
+
+    def span(self) -> KernelSpan:
+        return KERNEL_SPANS["ffn_norm_to_moe_residual"]
+
+    def test_it_replaces_the_norm_through_the_residual_in_model_order(
+        self,
+    ) -> None:
+        """The range is set by which residual the fusion joins.
+
+        ``pre_mlp_layernorm`` is the only ``has_residual`` norm in this
+        build's layer spec, and ``transformer_layer`` hands its residual to
+        ``mlp_bda``. So the fusion joins the ffn norm to the MoE residual,
+        and the range is every cut between them.
+        """
+        self.assertEqual(
+            self.span().scenarios,
+            (
+                "ffn_norm",
+                "moe_router",
+                "dispatch_permute",
+                "expert_mlp",
+                "moe_combine",
+                "moe_residual",
+            ),
+        )
+
+    def test_both_arms_are_backward_mode_only(self) -> None:
+        """The flag fuses the RMSNorm BACKWARD pass and nothing else.
+
+        A forward-mode arm would be the base arm under another name, and
+        the span would publish a row in which two arms cannot differ.
+        """
+        for arm in self.span().arms:
+            with self.subTest(arm=arm.name):
+                self.assertEqual(arm.modes, ("forward_backward",))
+
+    def test_the_fusion_replaces_the_unfused_megatron_at_every_cut(
+        self,
+    ) -> None:
+        """It has no arm in any enclosed scenario, and it does not need one.
+
+        The fusion exists only across the cut between the first scenario and
+        the last, so what it replaces is ``mcore/base`` six times. A
+        name-based correspondence could not express that at all.
+        """
+        for arm in ("mcore/base", "mcore/fused_residual_rmsnorm"):
+            with self.subTest(arm=arm):
+                self.assertEqual(
+                    [part for _, part in self.span().parts_for(arm)],
+                    ["mcore/base"] * 6,
+                )
+
+    def test_it_sums_only_the_arms_its_parts_name(self) -> None:
+        """All six enclosed scenarios also declare a titan arm.
+
+        None of them is named by any ``SpanParts``, so none of them reaches
+        a parts total. A single-engine span over cross-engine scenarios is
+        the case the declared correspondence exists for.
+        """
+        summed = {
+            part
+            for arm in self.span().arms
+            for _, part in self.span().parts_for(arm.name)
+        }
+        self.assertEqual(summed, {"mcore/base"})
+        with_titan = [
+            name
+            for name in self.span().scenarios
+            if any(arm.name == "titan" for arm in KERNEL_SCENARIOS[name].arms)
+        ]
+        self.assertEqual(with_titan, list(self.span().scenarios))
+
+    def test_it_declares_no_titan_arm(self) -> None:
+        """Every cut here that can publish a cross-engine row already does.
+
+        The two that cannot, ``expert_mlp`` and ``moe_combine``, are covered
+        by ``expert_combine``. A titan arm would add one coarser ratio over
+        the whole MoE block and answer no question the finer cuts leave open.
+        """
+        self.assertEqual(
+            {engine_of(arm.name) for arm in self.span().arms}, {"mcore"}
+        )
+
+    def test_the_fusion_is_gated_against_the_arm_it_must_match(self) -> None:
+        """And against no fp64 truth, which this range cannot have.
+
+        An fp64 reference would have to reproduce the top-k routing decision
+        from an fp64 norm output, and a near tie would select a different
+        expert. The fusion's claim is that it changes the backward
+        implementation and not the arithmetic, so the unfused arm is the
+        reference the claim names.
+        """
+        self.assertIsNone(self.span().measurement.reference_builder)
+        fused = self.span().arm("mcore/fused_residual_rmsnorm")
+        gate = next(
+            check for check in fused.correctness if check.kind == "tolerance"
+        )
+        self.assertEqual(gate.reference, "mcore/base")
+        self.assertFalse(gate.informational)
+
+    def test_the_forward_output_check_is_informational(self) -> None:
+        """Evidence either way, and it gates nothing.
+
+        The fusion is documented as backward-only, so the forward output
+        should be the unfused one bit for bit. A difference says the forward
+        changed too, which no part of this declaration expects -- but a
+        bitwise check between two module classes is not a thing to fail a
+        run on.
+        """
+        fused = self.span().arm("mcore/fused_residual_rmsnorm")
+        bitwise = next(
+            check for check in fused.correctness if check.kind == "bitwise"
+        )
+        self.assertTrue(bitwise.informational)
+        self.assertEqual(bitwise.outputs, ("out",))
+
+    def test_it_needs_the_balanced_routing_the_moe_cuts_need(self) -> None:
+        self.assertTrue(self.span().measurement.requires_balanced_routing)
 
 
 if __name__ == "__main__":

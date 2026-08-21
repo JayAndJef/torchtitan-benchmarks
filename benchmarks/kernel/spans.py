@@ -360,10 +360,179 @@ ATTN_RESIDUAL_NORM = KernelSpan(
 )
 
 
+# The base arm IS the reference here, and there is no fp64 truth. See the
+# span's description: an fp64 reference over this range would have to
+# reproduce the top-k routing decision from an fp64 norm output, and a near
+# tie would select a different expert. What the fusion claims is that it
+# changes the backward implementation and not the arithmetic, so the arm it
+# has to match is the unfused one.
+FUSED_RESIDUAL_RMSNORM_GATE = CorrectnessCheck(
+    kind="tolerance",
+    reference="mcore/base",
+    outputs=("out", "x_grad", "norm_weight_grad"),
+    max_rel_l2=2e-2,
+)
+
+# Informational, and it is evidence either way. The fusion is documented as
+# backward-only, so the forward output should be the unfused one bit for
+# bit; a difference here says the forward changed too, which no part of this
+# declaration expects.
+FUSED_RESIDUAL_RMSNORM_FORWARD_IS_UNCHANGED = CorrectnessCheck(
+    kind="bitwise",
+    reference="mcore/base",
+    outputs=("out",),
+    informational=True,
+)
+
+
+FFN_NORM_TO_MOE_RESIDUAL = KernelSpan(
+    measurement=KernelScenario(
+        name="ffn_norm_to_moe_residual",
+        description=(
+            "megatron's own residual-plus-RMSNorm backward fusion, over the "
+            "six cuts its residual crosses: pre_mlp_layernorm, the router, "
+            "the dispatch, the experts, the combine and mlp_bda. "
+            "WITHIN MEGATRON ONLY, AND BACKWARD ONLY. "
+            "config.fused_residual_rmsnorm (transformer_config.py:508, "
+            "default False) is documented as fusing the residual connection "
+            "and the RMSNorm BACKWARD pass when TE is used, so a "
+            "forward-mode arm would be the base arm under another name. "
+            "Both arms therefore declare forward_backward and nothing else. "
+            "ITS PARTNER IS mlp_bda AND NOT self_attn_bda, which is what "
+            "sets the range. In this build's layer spec "
+            "pre_mlp_layernorm=backend.layer_norm(has_residual=True) "
+            "(gpt_layer_specs.py:336) is the ONLY has_residual norm -- the "
+            "attention-input norm is fused inside "
+            "TELayerNormColumnParallelLinear and has no separate module -- "
+            "and transformer_layer.py unpacks that norm's (output, residual) "
+            "tuple and hands the residual to mlp_bda. The gate is two-level: "
+            "use_fused_residual = config.fused_residual_rmsnorm and "
+            "has_residual (extensions/transformer_engine.py:1046), so with "
+            "the flag off the same site builds a plain te.pytorch.RMSNorm. "
+            "EXPECT DILUTION, AND SAY SO BESIDE ANY NUMBER. The range "
+            "encloses the whole MoE block, so the expert GEMMs may swamp a "
+            "norm-plus-add backward fusion and the ratio may land inside the "
+            "noise. Report the ffn_norm and moe_residual forward_backward "
+            "numbers from the same run next to the span total -- and record "
+            "that those two per-scenario numbers no longer line up between "
+            "the arms, because the fusion is what moves work across the cut "
+            "between them. "
+            "NO TITAN ARM, AND THE OMISSION IS A DECLARATION. Every cut in "
+            "this range that can publish a cross-engine row already does, "
+            "and the two that cannot -- expert_mlp and moe_combine -- are "
+            "covered by the expert_combine span. A titan arm here would add "
+            "one coarser cross-engine ratio over the whole MoE block, one "
+            "compiled graph against six eager modules, which is the "
+            "engine-design difference this partition exists to decompose "
+            "rather than to restate. "
+            "THERE IS NO fp64 REFERENCE, deliberately: this range encloses a "
+            "top-k router, so an fp64 truth would have to reproduce the "
+            "routing decision from an fp64 norm output, and a near tie would "
+            "select a different expert. The fusion's claim is that it changes "
+            "the backward implementation and not the arithmetic, so the arm "
+            "it must match is the unfused one, and mcore/base is the gate. "
+            "THE SPAN-VERSUS-PARTS ROW CARRIES A BIAS AND IT FAVOURS THE "
+            "SPAN, AND THIS IS THE LONGEST RANGE DECLARED, SO IT CARRIES THE "
+            "MOST OF IT: the parts total pays one host dispatch chain per "
+            "enclosed scenario -- six here -- and the span pays one, and "
+            "roughly 85% of a kernel number in this repository is host "
+            "dispatch rather than device time. Five chains the harness "
+            "stopped paying sit inside any ratio below 1.0, and no fusion "
+            "removed them. "
+            "READ THE TWO ROWS AS TWO DIFFERENT STATISTICS. The "
+            "fused-against-base row is a within-span comparison, measured in "
+            "one block-major sweep and PAIRED. The span against the parts "
+            "sum is UNPAIRED -- roughly 150 workers separate a span "
+            "replicate from the part replicate that shares its index -- so "
+            "its interval is published as unpaired_ratio_ci_* and may never "
+            "be set beside a scenario interval as the same quantity."
+        ),
+        inputs_builder=(
+            "benchmarks.kernel.operations.ffn_norm_to_moe_residual"
+            ":ffn_norm_to_moe_residual_inputs"
+        ),
+        reference_builder=None,
+        arms=(
+            KernelArm(
+                name="mcore/base",
+                description=(
+                    "megatron-core off a real GPTModel with "
+                    "fused_residual_rmsnorm off: pre_mlp_layernorm is a "
+                    "plain transformer_engine.pytorch.RMSNorm, and the "
+                    "residual reaches mlp_bda as the layer's own "
+                    "hidden_states. The unfused side of the flag"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.ffn_norm_to_moe_residual"
+                    ":build_ffn_norm_to_moe_residual_mcore_base"
+                ),
+                modes=("forward_backward",),
+                compiled=False,
+                eager_reason=(
+                    "megatron compiles no whole transformer layer. The "
+                    "@jit_fuser regions inside the range -- the router and "
+                    "bias_dropout_add_fused_train -- still compile as their "
+                    "own regions, which is megatron's choice and not the "
+                    "harness's"
+                ),
+            ),
+            KernelArm(
+                name="mcore/fused_residual_rmsnorm",
+                description=(
+                    "the same six cuts with fused_residual_rmsnorm=True: "
+                    "pre_mlp_layernorm becomes TEFusedResidualRMSNorm, "
+                    "returns (output, residual), and fuses the residual add "
+                    "into the norm's BACKWARD pass. The fusion under test, "
+                    "and it exists in backward alone"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.ffn_norm_to_moe_residual"
+                    ":build_ffn_norm_to_moe_residual_mcore_fused"
+                ),
+                modes=("forward_backward",),
+                compiled=False,
+                eager_reason=(
+                    "the same treatment as the arm it is measured against; "
+                    "the flag changes a norm module, not a compile scope"
+                ),
+                correctness=(
+                    FUSED_RESIDUAL_RMSNORM_GATE,
+                    FUSED_RESIDUAL_RMSNORM_FORWARD_IS_UNCHANGED,
+                ),
+            ),
+        ),
+        baseline_arm="mcore/base",
+        # The range holds the dispatch, the experts and the combine, so the
+        # span builds routed rows and needs the same even split they need.
+        requires_balanced_routing=True,
+        comparisons=(("mcore/fused_residual_rmsnorm", "mcore/base"),),
+    ),
+    scenarios=(
+        "ffn_norm",
+        "moe_router",
+        "dispatch_permute",
+        "expert_mlp",
+        "moe_combine",
+        "moe_residual",
+    ),
+    parts=(
+        SpanParts(arm="mcore/base", parts=("mcore/base",) * 6),
+        # The fusion has no arm in any enclosed scenario, because it exists
+        # only across the cut between the first and the last. What it
+        # replaces is the unfused megatron at every cut it crosses, and a
+        # name-based correspondence could not say that.
+        SpanParts(
+            arm="mcore/fused_residual_rmsnorm", parts=("mcore/base",) * 6
+        ),
+    ),
+)
+
+
 KERNEL_SPANS: dict[str, KernelSpan] = {
     span.name: span for span in (
         EXPERT_COMBINE,
         ATTN_RESIDUAL_NORM,
+        FFN_NORM_TO_MOE_RESIDUAL,
     )
 }
 
