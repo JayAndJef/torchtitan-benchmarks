@@ -72,7 +72,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 # Small enough to run in milliseconds, and wide enough that a lost row or a
 # transposed view shows up rather than cancelling. ``dim`` must be a multiple
 # of ``2 * head_dim``; 256 is the smallest that is.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=8)
 
 MEGATRON = megatron_dir()
@@ -334,7 +334,7 @@ class InputsTests(unittest.TestCase):
 
     def test_a_top_k_above_the_expert_count_is_refused(self) -> None:
         """A token would reach one expert twice and the order would collide."""
-        wide = PiperShape(
+        wide = PiperShape.derived(
             name="wide", dim=256, n_layers=2, vocab_size=64, num_experts=2, top_k=4
         )
         with self.assertRaisesRegex(ValueError, "exceeds num_experts"):

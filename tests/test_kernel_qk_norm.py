@@ -67,7 +67,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 # over and the only geometry this scenario reads. Everything else shrinks:
 # 4 query heads over 2 kv groups keeps q and k different sizes, which is the
 # reason the scenario times a pair.
-TINY = PiperShape(name="tiny", dim=256, n_layers=1, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=1, vocab_size=64)
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=8)
 
 # The gate the scenario declaration carries, applied to all six outputs. One

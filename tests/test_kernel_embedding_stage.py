@@ -55,7 +55,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # Small enough to run in a second, and every mechanism under test is the one a
 # GPU arm uses. A 64-row vocabulary against 32 tokens guarantees repeated ids,
 # which is what makes the backward a real scatter-add rather than a permutation.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 WORKLOAD = KernelWorkload(batch=2, seq_len=16)
 
 BATCH, SEQ, DIM = WORKLOAD.batch, WORKLOAD.seq_len, TINY.dim
@@ -681,7 +681,7 @@ class TitanGuardTests(unittest.TestCase):
             _assert_titan_embedding(module, TINY)
 
     def test_a_table_of_the_wrong_shape_is_refused(self) -> None:
-        other = PiperShape(name="other", dim=256, n_layers=2, vocab_size=128)
+        other = PiperShape.derived(name="other", dim=256, n_layers=2, vocab_size=128)
         with self.assertRaisesRegex(RuntimeError, "expected"):
             _assert_titan_embedding(
                 titan_embedding_module(TINY, torch.device("cpu")), other

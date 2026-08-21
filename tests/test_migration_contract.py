@@ -1215,7 +1215,11 @@ TEST_CENSUS = {
     # shapes: a tensor-by-tensor parameter count that derives what no run has
     # logged, the two geometry tests, the layer-count and parameter-split
     # arguments, the declaration order, and the estimated parity gates.
-    "test_model_shape": 34,
+    # +3 when the head and expert geometry became recorded data: the two
+    # halves of the pinned-shape table (every shape matches it, every shape is
+    # in it) and the one that keeps the piper-1B family constructor out of the
+    # registry.
+    "test_model_shape": 37,
     "test_profile_regions": 19,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
@@ -1238,7 +1242,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1103
+TEST_CENSUS_TOTAL = 1106
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

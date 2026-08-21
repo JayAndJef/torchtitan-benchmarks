@@ -40,7 +40,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # Small enough to run in well under a second, and every mechanism under test
 # is the one a GPU arm uses. The vocabulary stays long enough that a softmax
 # over it is a real reduction rather than a pair of terms.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 WORKLOAD = KernelWorkload(batch=2, seq_len=8)
 
 # A row count the reference's chunk loop cannot cover in whole blocks, used to

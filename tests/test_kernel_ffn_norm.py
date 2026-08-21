@@ -44,7 +44,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
 # Small enough to run in milliseconds, wide enough that the norm reduces over
 # a real row rather than a handful of elements.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=16)
 
 

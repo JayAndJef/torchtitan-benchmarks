@@ -32,7 +32,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # Small enough to build instantly, and still exercising every reshape: 2 kv
 # groups of 2 query heads each, 2 layers, 4 experts. The real shapes differ
 # only in the numbers; vocab is cut because the embedding dominates otherwise.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 
 
 def titan_state(shape: PiperShape) -> dict[str, torch.Tensor]:

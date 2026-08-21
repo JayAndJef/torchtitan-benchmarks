@@ -75,7 +75,7 @@ from benchmarks.models.piper_qwen3.shape import NORMAL, PiperShape
 # head_dim stays 64, the real value and the only geometry the kernels read.
 # 4 query heads over 2 kv groups keeps grouped-query attention exercised while
 # the fp64 reference stays cheap.
-TINY = PiperShape(
+TINY = PiperShape.derived(
     name="tiny", dim=256, n_layers=1, vocab_size=64, max_seq_len=64
 )
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=32)

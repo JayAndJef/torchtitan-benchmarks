@@ -74,7 +74,7 @@ from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES, PiperShape
 # Small enough to build in milliseconds, and wide enough that a lost row or a
 # transposed view shows up rather than cancelling. 32 tokens and 4 experts keep
 # the split exact, which is the scenario's own precondition.
-TINY = PiperShape(name="tiny", dim=256, n_layers=2, vocab_size=64)
+TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 TINY_WORKLOAD = KernelWorkload(batch=2, seq_len=16)
 
 MEGATRON = megatron_dir()
@@ -321,7 +321,7 @@ class InputsTests(unittest.TestCase):
         )
 
     def test_unbalanced_slots_fail_loudly_with_named_numbers(self) -> None:
-        shape = PiperShape(name="odd", dim=256, n_layers=2, vocab_size=64)
+        shape = PiperShape.derived(name="odd", dim=256, n_layers=2, vocab_size=64)
         workload = KernelWorkload(batch=1, seq_len=3)
         with self.assertRaises(ValueError) as raised:
             _inputs(shape=shape, workload=workload)
@@ -337,7 +337,7 @@ class InputsTests(unittest.TestCase):
         ``routing_divides_evenly`` accepts it. The token count does not divide,
         and this construction needs it to.
         """
-        shape = PiperShape(name="odd", dim=256, n_layers=2, vocab_size=64)
+        shape = PiperShape.derived(name="odd", dim=256, n_layers=2, vocab_size=64)
         workload = KernelWorkload(batch=1, seq_len=6)
         with self.assertRaises(ValueError) as raised:
             _inputs(shape=shape, workload=workload)
@@ -346,7 +346,7 @@ class InputsTests(unittest.TestCase):
         self.assertIn("remainder is 2", message)
 
     def test_top_k_above_the_expert_count_fails(self) -> None:
-        shape = PiperShape(
+        shape = PiperShape.derived(
             name="narrow", dim=256, n_layers=2, vocab_size=64, num_experts=2, top_k=4
         )
         with self.assertRaises(ValueError) as raised:
@@ -688,7 +688,7 @@ class GuardTests(unittest.TestCase):
 
     def test_a_permutation_that_returns_its_own_buffer_is_refused(self) -> None:
         """Covers ``top_k == 1``, where the row count alone cannot see it."""
-        one_slot = PiperShape(
+        one_slot = PiperShape.derived(
             name="single", dim=256, n_layers=2, vocab_size=64, top_k=1
         )
         inputs = _inputs(shape=one_slot)

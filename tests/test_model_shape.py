@@ -43,19 +43,19 @@ def _counts_from_the_tensor_list(shape) -> tuple[int, int, int]:
     """Count the parameters tensor by tensor, as a state dict enumerates them.
 
     A second route to the numbers ``PiperShape``'s closed form returns, and
-    the route that lets a new shape be derived rather than transcribed. The
-    closed form writes the fused QKV as ``2*D*D``; this counts
-    ``qkv_out_features*D``, so the head geometry reaches the total here and a
-    head-count error cannot cancel. The test below checks this helper against
-    the four numbers a real ``normal`` run logs, which is what gives it the
-    authority to derive the counts of the shapes no run has produced.
+    the route that lets a new shape be derived rather than transcribed. Every
+    width here is written from the tensor it belongs to, so a head-count or an
+    expert-count error reaches the total instead of cancelling. The test below
+    checks this helper against the four numbers a real ``normal`` run logs,
+    which is what gives it the authority to derive the counts of the shapes no
+    run has produced.
     """
     tables = 2 * shape.vocab_size * shape.dim  # tok_embeddings + lm_head
     per_layer_dense = (
         shape.dim  # attention_norm
         + shape.qkv_out_features * shape.dim  # fused qkv
         + 2 * shape.head_dim  # q_norm + k_norm
-        + shape.dim * shape.dim  # wo
+        + shape.n_heads * shape.head_dim * shape.dim  # wo
         + shape.dim  # ffn_norm
     )
     router = shape.num_experts * shape.dim
@@ -126,7 +126,14 @@ class ShapeArithmeticTests(unittest.TestCase):
                     _flops_from_the_tensor_list(shape, 1024),
                 )
 
-    def test_large_geometry_is_derived_not_hardcoded(self) -> None:
+    def test_large_geometry_follows_the_piper_1b_family_rules(self) -> None:
+        """Recorded values now, and this is what they must record.
+
+        This shape is synthetic. It was built by applying the
+        piper-1B rules at a larger width, so its head geometry is 2:1
+        grouped-query attention at ``head_dim`` 64. Real piper runs
+        4:1 from 9B up. Do not read this shape as piper at scale.
+        """
         self.assertEqual((LARGE.dim, LARGE.n_layers), (4096, 4))
         self.assertEqual(LARGE.n_heads, LARGE.dim // 64)
         self.assertEqual(LARGE.n_kv_heads, LARGE.n_heads // 2)
@@ -138,7 +145,14 @@ class ShapeArithmeticTests(unittest.TestCase):
         # graphs stay identifiable and whose runs validation rule 7 guards.
         self.assertTrue(LARGE.supports_block_regions)
 
-    def test_giant_geometry_is_derived_not_hardcoded(self) -> None:
+    def test_giant_geometry_follows_the_piper_1b_family_rules(self) -> None:
+        """Recorded values now, and this is what they must record.
+
+        This shape is synthetic. It was built by applying the
+        piper-1B rules at a larger width, so its head geometry is 2:1
+        grouped-query attention at ``head_dim`` 64. Real piper runs
+        4:1 from 9B up. Do not read this shape as piper at scale.
+        """
         self.assertEqual((GIANT.dim, GIANT.n_layers), (16384, 1))
         self.assertEqual(GIANT.n_heads, GIANT.dim // 64)
         self.assertEqual(GIANT.n_kv_heads, GIANT.n_heads // 2)
@@ -162,7 +176,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         benchmark measures the lm_head and the cross entropy. Four layers
         move 71% of the parameters into the layer stack.
         """
-        one_layer = PiperShape(name="probe", dim=LARGE.dim, n_layers=1)
+        one_layer = PiperShape.derived(name="probe", dim=LARGE.dim, n_layers=1)
         self.assertGreater(self._table_fraction(one_layer), 0.6)
         self.assertLess(self._table_fraction(LARGE), 0.3)
 
@@ -198,7 +212,14 @@ class ShapeArithmeticTests(unittest.TestCase):
         """Embedding plus lm_head, as a fraction of every parameter."""
         return 2 * shape.vocab_size * shape.dim / shape.param_count
 
-    def test_huge_geometry_is_derived_not_hardcoded(self) -> None:
+    def test_huge_geometry_follows_the_piper_1b_family_rules(self) -> None:
+        """Recorded values now, and this is what they must record.
+
+        This shape is synthetic. It was built by applying the
+        piper-1B rules at a larger width, so its head geometry is 2:1
+        grouped-query attention at ``head_dim`` 64. Real piper runs
+        4:1 from 9B up. Do not read this shape as piper at scale.
+        """
         self.assertEqual(HUGE.n_layers, 1)
         self.assertEqual(HUGE.n_heads, HUGE.dim // 64)
         self.assertEqual(HUGE.n_kv_heads, HUGE.n_heads // 2)
@@ -211,11 +232,57 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertLess(2 * HUGE.vocab_size / (45 * HUGE.dim), 1.0)
         self.assertFalse(HUGE.supports_block_regions)
 
-    def test_dim_must_admit_integral_kv_heads(self) -> None:
-        with self.assertRaisesRegex(ValueError, "2\\*head_dim"):
-            PiperShape(name="bad", dim=1000, n_layers=1)
+    def test_the_geometry_guards_refuse_an_impossible_shape(self) -> None:
+        with self.assertRaisesRegex(ValueError, "multiple of head_dim"):
+            PiperShape.derived(name="bad", dim=1000, n_layers=1)
         with self.assertRaisesRegex(ValueError, "n_layers"):
-            PiperShape(name="bad", dim=1024, n_layers=0)
+            PiperShape.derived(name="bad", dim=1024, n_layers=0)
+        # n_kv_heads is recorded now, so a ratio that leaves a partial query
+        # group is a shape error rather than an unreachable one.
+        with self.assertRaisesRegex(ValueError, "multiple of n_kv_heads"):
+            PiperShape(
+                name="bad",
+                dim=1024,
+                n_layers=1,
+                head_dim=64,
+                n_kv_heads=5,
+                num_experts=4,
+            )
+        with self.assertRaisesRegex(ValueError, "num_experts"):
+            PiperShape.derived(name="bad", dim=1024, n_layers=1, num_experts=0)
+
+    def test_the_family_constructor_is_not_how_a_shape_is_registered(self) -> None:
+        """``derived`` carries the piper-1B rules, which 9B and 48B break.
+
+        The rules give ``head_dim`` 64, half as many kv heads as query heads,
+        and 4 experts. Real piper runs 4:1 grouped-query attention and 8
+        experts above 1B, so a registered shape that took these would build
+        the wrong attention and the wrong expert count under the right name.
+        """
+        probe = PiperShape.derived(name="probe", dim=2048, n_layers=1)
+        self.assertEqual(
+            (probe.head_dim, probe.n_heads, probe.n_kv_heads, probe.num_experts),
+            (64, 32, 16, 4),
+        )
+        # Every registered shape writes its own geometry out instead.
+        for name, shape in PIPER_SHAPES.items():
+            with self.subTest(size=name):
+                self.assertEqual(
+                    shape,
+                    PiperShape(
+                        name=shape.name,
+                        dim=shape.dim,
+                        n_layers=shape.n_layers,
+                        head_dim=shape.head_dim,
+                        n_kv_heads=shape.n_kv_heads,
+                        num_experts=shape.num_experts,
+                        top_k=shape.top_k,
+                        vocab_size=shape.vocab_size,
+                        rope_theta=shape.rope_theta,
+                        max_seq_len=shape.max_seq_len,
+                        parity_gate=shape.parity_gate,
+                    ),
+                )
 
     def test_describe_is_json_safe(self) -> None:
         for shape in PIPER_SHAPES.values():
@@ -229,10 +296,10 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertTrue(NORMAL.supports_block_regions)
         self.assertFalse(HUGE.supports_block_regions)
         self.assertFalse(
-            PiperShape(name="probe", dim=1024, n_layers=1).supports_block_regions
+            PiperShape.derived(name="probe", dim=1024, n_layers=1).supports_block_regions
         )
         self.assertTrue(
-            PiperShape(name="probe", dim=1024, n_layers=2).supports_block_regions
+            PiperShape.derived(name="probe", dim=1024, n_layers=2).supports_block_regions
         )
 
     def test_parity_gate_is_shape_data(self) -> None:
@@ -243,7 +310,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(LARGE.parity_gate, 3e-2)
         self.assertEqual(GIANT.parity_gate, 6e-2)
         self.assertEqual(
-            PiperShape(name="probe", dim=1024, n_layers=2).parity_gate, 2e-2
+            PiperShape.derived(name="probe", dim=1024, n_layers=2).parity_gate, 2e-2
         )
         for shape in PIPER_SHAPES.values():
             self.assertEqual(
@@ -268,6 +335,123 @@ class ShapeArithmeticTests(unittest.TestCase):
         # A wider shape never gets a tighter gate.
         gates = [shape.parity_gate for shape in PIPER_SHAPES.values()]
         self.assertEqual(gates, sorted(gates))
+
+
+# Every registered shape, transcribed. ``describe`` is what the manifest
+# records and what a reader compares two runs by, so a change to any number
+# here changes the meaning of every run already on disk under that name. The
+# table is deliberately a literal: it must be read against the model config
+# the shape claims to be, never regenerated from the code it guards.
+PINNED_SHAPES: dict[str, dict[str, object]] = {
+    "normal": {
+        "dim": 1024,
+        "n_layers": 16,
+        "n_heads": 16,
+        "n_kv_heads": 8,
+        "head_dim": 64,
+        "moe_hidden_dim": 3584,
+        "num_experts": 4,
+        "top_k": 2,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 2048,
+        "supports_block_regions": True,
+        "parity_gate": 2e-2,
+        "param_count": 1_066_241_024,
+        "nparams_dense": 361_532_416,
+        "nparams_sparse": 704_708_608,
+        "nparams_active": 713_919_488,
+        "num_flops_per_token": 3_551_348_736,
+    },
+    "large": {
+        "dim": 4096,
+        "n_layers": 4,
+        "n_heads": 64,
+        "n_kv_heads": 32,
+        "head_dim": 64,
+        "moe_hidden_dim": 14_336,
+        "num_experts": 4,
+        "top_k": 2,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 2048,
+        "supports_block_regions": True,
+        "parity_gate": 3e-2,
+        "param_count": 4_264_661_504,
+        "nparams_dense": 1_446_023_680,
+        "nparams_sparse": 2_818_637_824,
+        "nparams_active": 2_855_375_360,
+        "num_flops_per_token": 13_599_599_616,
+    },
+    "huge": {
+        "dim": 12_288,
+        "n_layers": 1,
+        "n_heads": 192,
+        "n_kv_heads": 96,
+        "head_dim": 64,
+        "moe_hidden_dim": 43_008,
+        "num_experts": 4,
+        "top_k": 2,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 2048,
+        "supports_block_regions": False,
+        "parity_gate": 5e-2,
+        "param_count": 10_528_837_760,
+        "nparams_dense": 4_187_000_960,
+        "nparams_sparse": 6_341_836_800,
+        "nparams_active": 7_357_943_936,
+        "num_flops_per_token": 33_096_721_152,
+    },
+    "giant": {
+        "dim": 16_384,
+        "n_layers": 1,
+        "n_heads": 256,
+        "n_kv_heads": 128,
+        "head_dim": 64,
+        "moe_hidden_dim": 57_344,
+        "num_experts": 4,
+        "top_k": 2,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 2048,
+        "supports_block_regions": False,
+        "parity_gate": 6e-2,
+        "param_count": 17_058_349_184,
+        "nparams_dense": 5_783_994_496,
+        "nparams_sparse": 11_274_354_688,
+        "nparams_active": 11_421_204_608,
+        "num_flops_per_token": 53_792_637_696,
+    },
+}
+
+
+class PinnedShapeTests(unittest.TestCase):
+    """The whole registry, number by number.
+
+    Runs exist on disk against these shapes, and a run is comparable to
+    another only within one ``model_size``. A silent change to any value here
+    would therefore publish two different models under one name, which no
+    other test in this file can see: the arithmetic tests check that the
+    closed form agrees with the tensor list, and both would move together.
+    """
+
+    def test_every_registered_shape_matches_its_pinned_geometry(self) -> None:
+        for name, expected in PINNED_SHAPES.items():
+            with self.subTest(size=name):
+                described = PIPER_SHAPES[name].describe(seq_len=1024)
+                for key, value in expected.items():
+                    self.assertEqual(described[key], value, f"{name}.{key}")
+
+    def test_every_registered_shape_is_pinned(self) -> None:
+        """A new shape must write its numbers down before it can ship.
+
+        The table above is the only place a shape's geometry is stated twice,
+        and stating it twice is the point: the second statement is transcribed
+        from the model config the shape claims to be, so a derivation that is
+        wrong for that model cannot pass both.
+        """
+        self.assertEqual(set(PINNED_SHAPES), set(PIPER_SHAPES))
 
 
 class ConfigSizeClosureTests(unittest.TestCase):
