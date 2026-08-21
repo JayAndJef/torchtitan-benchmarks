@@ -902,21 +902,37 @@ KERNEL_SPANS: dict[str, KernelSpan] = {
 }
 
 
-def _validate_roster(
+def validate_roster(
     spans: dict[str, KernelSpan], scenarios: dict[str, KernelScenario]
 ) -> None:
     """Refuse a roster this repository cannot measure, at import.
 
-    Both halves fail here rather than after a GPU has measured every arm of
+    Every half fails here rather than after a GPU has measured every arm of
     a span and of every scenario it encloses.
 
-    The disjointness half is the one a test cannot own. A name in both
-    rosters would be measured **twice** in one run -- once as a scenario,
-    without its parts, and once as the span, with them -- and ``--scenario``
-    and ``--span`` would each accept it. The rule belongs to the registry
-    that could break it.
+    **The key must be the span's own name.** The two are read by different
+    halves of one run: ``--span`` offers the dictionary keys and
+    ``measurement_plan`` looks a span up by key, while ``worker_command``
+    hands the worker ``unit.name``, which is ``span.measurement.name``. A
+    hand-written key that disagreed would plan correctly, measure every
+    enclosed scenario, and then fail inside the span's own worker at
+    ``kernel_span_by_name``. The comprehension below cannot produce that
+    today; the check is what keeps a later hand-written literal from doing
+    so.
+
+    **The two rosters are disjoint.** A name in both would be measured
+    **twice** in one run -- once as a scenario, without its parts, and once
+    as the span, with them -- and ``--scenario`` and ``--span`` would each
+    accept it. The rule belongs to the registry that could break it.
     """
     for name, span in spans.items():
+        if name != span.name:
+            raise ValueError(
+                f"kernel span {span.name!r} is registered under the key "
+                f"{name!r}. The parent plans by key and the worker is handed "
+                "the span's own name, so the run would measure every "
+                "enclosed scenario and then fail in the span's worker"
+            )
         if name in scenarios:
             raise ValueError(
                 f"{name!r} names both a kernel span and a kernel scenario. "
@@ -926,7 +942,7 @@ def _validate_roster(
         validate_span_parts(span, scenarios)
 
 
-_validate_roster(KERNEL_SPANS, KERNEL_SCENARIOS)
+validate_roster(KERNEL_SPANS, KERNEL_SCENARIOS)
 
 
 def kernel_span_by_name(name: str) -> KernelSpan:

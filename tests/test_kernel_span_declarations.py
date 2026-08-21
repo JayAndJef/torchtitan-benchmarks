@@ -18,9 +18,12 @@ the worker; these tests read the declaration, which is the whole of what a
 span is until somebody writes the arms.
 """
 
+import dataclasses
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -32,7 +35,7 @@ from benchmarks.kernel.schema import (
     resolve_shape_and_workload,
     resolve_symbol,
 )
-from benchmarks.kernel.spans import KERNEL_SPANS, _validate_roster
+from benchmarks.kernel.spans import KERNEL_SPANS, validate_roster
 
 
 # Every span declared at this rev, in declaration order. The pin is the
@@ -75,9 +78,33 @@ class SpanRosterTests(unittest.TestCase):
     def test_the_roster_is_exactly_the_declared_spans(self) -> None:
         self.assertEqual(tuple(KERNEL_SPANS), DECLARED_SPANS)
 
-    def test_the_declared_roster_passes_its_own_validation(self) -> None:
-        """Already run at import; asserted here so the failure is named."""
-        _validate_roster(KERNEL_SPANS, KERNEL_SCENARIOS)
+    def test_the_roster_is_validated_when_the_module_loads(self) -> None:
+        """The call at import is the whole value of the guard.
+
+        Deleting that one line leaves every refusal below passing, because
+        each of them calls ``validate_roster`` itself. So this test executes
+        a fresh copy of ``spans.py`` against a registry that holds a
+        colliding scenario name, and asserts the module refuses to load.
+        ``sys.modules`` is untouched: the copy is loaded under its own name,
+        so nothing that already imported the real module sees a new object.
+        """
+        spans_file = (
+            Path(__file__).resolve().parent.parent
+            / "benchmarks"
+            / "kernel"
+            / "spans.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "spans_import_probe", spans_file
+        )
+        probe = importlib.util.module_from_spec(spec)
+        collision = {"expert_combine": KERNEL_SCENARIOS["expert_mlp"]}
+        with mock.patch.dict(
+            "benchmarks.kernel.registry.KERNEL_SCENARIOS", collision
+        ), self.assertRaises(ValueError) as caught:
+            spec.loader.exec_module(probe)
+        self.assertIn("disjoint", str(caught.exception))
+        self.assertNotIn("spans_import_probe", sys.modules)
 
     def test_a_span_named_after_a_scenario_is_refused(self) -> None:
         """Otherwise one run measures that name twice.
@@ -86,11 +113,33 @@ class SpanRosterTests(unittest.TestCase):
         them. ``--scenario`` and ``--span`` would each accept it, and the two
         results files would disagree about what the name means.
         """
-        span = KERNEL_SPANS["expert_combine"]
+        span = dataclasses.replace(
+            KERNEL_SPANS["expert_combine"],
+            measurement=dataclasses.replace(
+                KERNEL_SPANS["expert_combine"].measurement,
+                name="expert_mlp",
+            ),
+        )
         with self.assertRaises(ValueError) as caught:
-            _validate_roster({"expert_mlp": span}, KERNEL_SCENARIOS)
+            validate_roster({"expert_mlp": span}, KERNEL_SCENARIOS)
         self.assertIn("expert_mlp", str(caught.exception))
         self.assertIn("disjoint", str(caught.exception))
+
+    def test_a_key_that_is_not_the_spans_own_name_is_refused(self) -> None:
+        """The parent plans by key; the worker is handed the span's name.
+
+        ``--span`` offers the dictionary keys and ``measurement_plan`` looks
+        a span up by key, while ``worker_command`` passes ``unit.name``,
+        which is the span's own name. A key that disagreed would plan
+        correctly, measure every enclosed scenario, and only then fail
+        inside the span's worker at ``kernel_span_by_name``.
+        """
+        span = KERNEL_SPANS["expert_combine"]
+        with self.assertRaises(ValueError) as caught:
+            validate_roster({"expert_combined": span}, KERNEL_SCENARIOS)
+        message = str(caught.exception)
+        self.assertIn("expert_combined", message)
+        self.assertIn("expert_combine", message)
 
     def test_every_span_names_only_live_scenarios(self) -> None:
         for span in KERNEL_SPANS.values():
