@@ -519,8 +519,7 @@ choice, not a gap in our integration, and it is why megatron runs TE eagerly.
 Getting a titan+TE arm would mean excluding that block from compilation,
 which changes the treatment and makes the arm incomparable to the others.
 
-**The kernel side is the other way round, and the old text here said the
-opposite.** `kernel-bench` runs no compile treatment it did not choose, so TE
+**The kernel side is different, and the old text here stated the opposite.** `kernel-bench` runs no compile treatment it did not choose, so TE
 attention is measurable in isolation, and the `attention_core` scenario
 measures three TE backends: `mcore/base` (cuDNN FusedAttention),
 `mcore/attn_flash3` (FlashAttention 3) and `mcore/attn_unfused` (TE's own
@@ -597,7 +596,8 @@ The two fields are collected but **not** resume-gated, which is consistent
 with the above: recording a fact and refusing to cross it are separate
 decisions, and there is no numerical boundary here to refuse.
 
-**Moving the whole process to the pinned cuDNN needs two variables.**
+**Two variables are necessary to move the whole process to the pinned
+cuDNN.**
 `LD_LIBRARY_PATH` alone does **not** work: the wheel directory ships only
 `libcudnn.so.9`, so the unversioned `CDLL` above skips it and takes
 `/usr/lib64` anyway, leaving torch reporting 9.24.0 while TE still runs
@@ -918,8 +918,8 @@ the number means -- see the table under "Total kernel time cannot rank arms
 that differ in one component" -- so an old number and its successor are not
 comparable.
 
-**Every count in this section is the count at this HEAD**, and any scenario
-landing or leaving moves all of them at once -- scenarios, arms, the
+**Every count in this section is the count at this HEAD.** Any scenario that
+arrives or leaves moves all of them at once -- scenarios, arms, the
 cross-engine total, the comparison and correctness tallies below. Re-derive
 rather than quote:
 
@@ -998,12 +998,12 @@ module lowered to FA4 CuTe kernels) and `titan/flash_attention_3` (FA3 varlen
 through `torch.nn.attention.varlen`).
 
 Every arm consumes the same q/k/v **values** and the same synthetic
-packed-document boundaries, delivered in the three mask forms the backends
-need -- a flex `BlockMask` at the default 128 block size, the same mask at the
-`(256, 128)` blocks the FLASH backend wants, and THD `cu_seqlens` -- all built
-once in the inputs builder, because `create_varlen_metadata_for_document`
-contains a device-to-host sync and `create_block_mask` is itself a compiled
-call, so none may run inside a timed closure. Nothing validates the FLASH
+packed-document boundaries. Those boundaries reach the arms in the three mask
+forms the backends need: a flex `BlockMask` at the default 128 block size, the
+same mask at the `(256, 128)` blocks the FLASH backend wants, and THD
+`cu_seqlens`. The inputs builder builds all three once. No timed closure may
+build one, because `create_varlen_metadata_for_document` contains a
+device-to-host sync and `create_block_mask` is itself a compiled call. Nothing validates the FLASH
 block size on the torch side: it is forwarded verbatim into FA4's
 block-sparse tensors, so a mismatch surfaces inside FA4 rather than as a
 torch-level error.
@@ -1121,9 +1121,9 @@ imports `schema.py`, never `registry.py`, and never an `operations/` module:
 arms reach it only as already-resolved `BuiltArm` values via `resolve_symbol`.
 So do not move a scenario constant next to its family's builders -- that
 "colocate the family" move recreates `engine -> registry ->
-operations.<family> -> torchtitan` and drags every kernel family and its model
-dependencies into the engine's import graph, which is what per-arm process
-isolation cannot have. `tests/test_import_boundaries.py` section 3 asserts both
+operations.<family> -> torchtitan`. That chain puts every kernel family and
+its model dependencies into the engine's import graph. Per-arm process
+isolation cannot have that. `tests/test_import_boundaries.py` section 3 asserts both
 halves; `tests/test_migration_contract.py` pins each scenario's builders to its
 own family module.
 
@@ -1165,8 +1165,8 @@ configurations and this is not one of them, and the binding order above works
 against it. Treat it as a prediction, and do not use it.
 
 A per-arm correctness split would remove the need for either workaround,
-because TE and the varlen path would never share an interpreter. Fixing the
-environment removes it too. Neither is done; the choice is recorded rather
+because TE and the varlen path would never share an interpreter. A repair to
+the environment removes it too. Neither is done; the choice is recorded rather
 than made.
 
 
@@ -1177,7 +1177,7 @@ declares a `copy_floor`. `gbps` is `bytes_moved / median`. `x_floor` is
 `median / floor_median` for every non-floor arm that shares a mode with the
 floor, so it reads **no** `bytes_moved` at all.
 
-That last fact is the trap. When two arms of one scenario declare **different**
+That last fact is what a reader misses. When two arms of one scenario declare **different**
 `bytes_moved`, an arm running at exactly the floor's bandwidth no longer
 reads `x_floor` 1.0. Two scenarios do that today, and the correction factor
 is `arm_bytes / floor_bytes`:
@@ -1230,9 +1230,8 @@ span result therefore holds two totals.
 
 **`KERNEL_SPANS` is empty at this rev.** The mechanism landed before any
 declaration, deliberately: a span needs a runner that can launch one and a
-merge that can hold two totals, and neither existed. **Re-derive the count
-before you write one down** -- spans are being declared while this file is
-being written:
+merge that can hold two totals, and neither existed. **Re-derive the count before this file states one.** Another branch declares
+spans now:
 
 ```bash
 .venv/bin/python -c "
@@ -1261,9 +1260,8 @@ scenario types.
   never inferred, because a span arm named `titan` does not necessarily
   replace an arm named `titan` at each cut, and a span arm may name an
   implementation no enclosed scenario has.
-- Every span arm must declare a `parts` entry. An arm with no parts row is an
-  arm whose claim cannot be stated, and stating that claim is the whole of
-  what a span is for.
+- Every span arm must declare a `parts` entry. A span exists to state one
+  claim. An arm with no parts row cannot state it.
 - `validate_span_parts` runs at **import**, so a part arm that does not exist
   fails when the module loads rather than as an absent row after a GPU has
   measured every arm of the span and of every scenario it encloses.
@@ -1294,7 +1292,7 @@ Three things about a span number that must be said next to it:
    measured fewer modes than it declared costs that mode's row, and both are
    recorded as warnings. The loud failure is kept for the case where **no**
    span arm carries a parts total: that file would state the span's own
-   number and no claim about it, which is a scenario wearing a span's name.
+   number and no claim about it. That is a scenario under a span's name.
 
 ### Method
 
@@ -1430,8 +1428,9 @@ Three things about a span number that must be said next to it:
   resamples each side independently. It is published as
   `unpaired_ratio_ci_low`/`_high` and never under the scenario name: it
   cancels no drift, and the two must not be read as the same statistic.
-  Interleaving the units so the pairing would be real was **rejected** -- it
-  would make a scenario's own numbers depend on whether a span asked for it.
+  **Rejected: an interleave of the units, which would make the pairing real.**
+  It would make a scenario's own numbers depend on whether a span asked for
+  it.
 - Python's garbage collector is paused during the timed region. A collection
   starves the launch queue and lands as idle time inside whichever arm's
   interval is open; pausing it cut the sd of the retired `swiglu` scenario's
@@ -2250,8 +2249,8 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - **Do not let "declared" become "measured".** Most of the kernel registry has
   never executed: 15 of the 16 cross-engine scenarios have never had an arm
   built, one cross-engine scenario has produced two arms at one sequence
-  length, and no span has been measured at all. When you write about one of
-  those, say what it declares.
+  length, and no span has been measured at all. Report what such a scenario
+  declares, never what it measures.
 
 
 - **Commit in single, self-contained steps, as the work happens.** One commit
