@@ -997,7 +997,11 @@ TEST_CENSUS = {
     # head: its parts share neither name with its arm, it publishes no
     # within-span row, and the compile treatment of the projection moves
     # across the cut and reaches the ratio.
-    "test_kernel_span_declarations": 39,
+    # +7 for chunked_ce, upstream's actual default over that same range:
+    # that the two spans share a range without colliding, that their arm
+    # names stay distinct, that this one is eager where it is timed from,
+    # and that its sequence requirement is declared and costs the span.
+    "test_kernel_span_declarations": 46,
     # The per-arm build probe. requires_gcc_toolset answers a question about
     # the HOST; KernelArm.requirement answers one about this shape and this
     # workload, which is what a sequence sweep needs and what an arm that
@@ -1231,7 +1235,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1087
+TEST_CENSUS_TOTAL = 1094
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

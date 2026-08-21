@@ -25,7 +25,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
-from benchmarks.kernel.schema import KernelSpan
+from benchmarks.kernel.runner import resolve_arm_skips
+from benchmarks.kernel.schema import (
+    KernelSpan,
+    KernelWorkload,
+    resolve_shape_and_workload,
+    resolve_symbol,
+)
 from benchmarks.kernel.spans import KERNEL_SPANS, _validate_roster
 
 
@@ -36,6 +42,7 @@ DECLARED_SPANS = (
     "attn_residual_norm",
     "ffn_norm_to_moe_residual",
     "fused_linear_ce",
+    "chunked_ce",
 )
 
 # How many enclosed scenarios each range holds, spelled as the description
@@ -330,7 +337,9 @@ class AttnResidualNormTests(unittest.TestCase):
         self.assertEqual(
             [
                 pair
-                for pair in KERNEL_SCENARIOS["attn_residual"].comparison_pairs()
+                for pair in KERNEL_SCENARIOS[
+                    "attn_residual"
+                ].comparison_pairs()
                 if crosses_engines(pair)
             ],
             [],
@@ -589,6 +598,115 @@ class FusedLinearCeTests(unittest.TestCase):
             [check.reference for check in arm.correctness], ["fp64"]
         )
         self.assertIsNotNone(self.span().measurement.reference_builder)
+
+
+
+class ChunkedCeTests(unittest.TestCase):
+    """15+16 again: upstream's actual default, over the same range."""
+
+    def span(self) -> KernelSpan:
+        return KERNEL_SPANS["chunked_ce"]
+
+    def test_it_replaces_the_same_range_as_fused_linear_ce(self) -> None:
+        """Two spans over one range, and neither collides with the other.
+
+        ``KERNEL_SPANS`` keys on the span's name, the two output
+        directories differ, and the runner measures the shared range once.
+        The parts total is the same number in both files, and each records
+        it with its own provenance.
+        """
+        other = KERNEL_SPANS["fused_linear_ce"]
+        self.assertEqual(self.span().scenarios, other.scenarios)
+        self.assertNotEqual(self.span().name, other.name)
+        self.assertEqual(
+            [part for _, part in self.span().parts_for("titan/chunked_ce")],
+            [
+                part
+                for _, part in other.parts_for("titan/fused_linear_ce")
+            ],
+        )
+
+    def test_the_two_spans_over_one_range_carry_distinct_arm_names(
+        self,
+    ) -> None:
+        """A fragment file is named after the arm that wrote it.
+
+        Both spans would otherwise hold an arm called ``titan``, and the
+        only thing separating their two rows in a merged reading would be
+        the directory they came from.
+        """
+        names = {arm.name for arm in self.span().arms} | {
+            arm.name for arm in KERNEL_SPANS["fused_linear_ce"].arms
+        }
+        self.assertEqual(
+            names, {"titan/chunked_ce", "titan/fused_linear_ce"}
+        )
+
+    def test_it_is_forward_backward_only(self) -> None:
+        """The wrapper calls backward on every chunk inside ``__call__``."""
+        self.assertEqual(
+            self.span().arm("titan/chunked_ce").modes, ("forward_backward",)
+        )
+
+    def test_it_is_eager_where_it_is_timed_from(self) -> None:
+        """And that is the difference from its twin over the same range.
+
+        ``ChunkedLossWrapper`` compiles nothing of its own: it builds the
+        inner loss with the compile config and calls ``lm_head`` eagerly,
+        which its own docstring records. ``fused_linear_ce`` compiles the
+        projection together with the loss. So the two spans differ in
+        compile treatment as well as in algorithm.
+        """
+        arm = self.span().arm("titan/chunked_ce")
+        self.assertFalse(arm.compiled)
+        self.assertTrue(arm.eager_reason.strip())
+        self.assertTrue(
+            KERNEL_SPANS["fused_linear_ce"]
+            .arm("titan/fused_linear_ce")
+            .compiled
+        )
+
+    def test_it_publishes_no_within_span_row(self) -> None:
+        self.assertEqual(len(self.span().arms), 1)
+        self.assertEqual(self.span().measurement.comparisons, ())
+
+    def test_the_sequence_requirement_is_declared_and_parent_side(
+        self,
+    ) -> None:
+        """The wrapper asserts the division inside its own ``__call__``.
+
+        A builder that raised would take the unit down with a cause nobody
+        could read off ``results.json``. The predicate answers before a GPU
+        is claimed, and its reason is what reaches the file.
+        """
+        arm = self.span().arm("titan/chunked_ce")
+        self.assertIsNotNone(arm.requirement)
+        predicate = resolve_symbol(arm.requirement)
+        shape, _ = resolve_shape_and_workload()
+        self.assertIsNone(
+            predicate(shape, KernelWorkload(batch=4, seq_len=1024))
+        )
+        reason = predicate(shape, KernelWorkload(batch=4, seq_len=1020))
+        self.assertIsNotNone(reason)
+        self.assertIn("1020", reason)
+
+    def test_the_requirement_costs_the_span_because_the_arm_is_the_anchor(
+        self,
+    ) -> None:
+        """One arm, and it is the baseline, so a skip is not a short roster.
+
+        ``resolve_arm_skips`` names it, and an anchor the parent skipped
+        costs the unit rather than publishing a table of missing ratios.
+        """
+        shape, _ = resolve_shape_and_workload()
+        skips = resolve_arm_skips(
+            self.span(),
+            compiler_unavailable=None,
+            shape=shape,
+            workload=KernelWorkload(batch=4, seq_len=1020),
+        )
+        self.assertIn("titan/chunked_ce", skips)
+        self.assertEqual(self.span().baseline_arm, "titan/chunked_ce")
 
 
 if __name__ == "__main__":

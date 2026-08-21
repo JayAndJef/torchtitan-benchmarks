@@ -66,9 +66,11 @@ from benchmarks.kernel.schema import (
     KernelArm,
     KernelScenario,
     KernelSpan,
+    KernelWorkload,
     SpanParts,
     validate_span_parts,
 )
+from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
 # Both engines produce the same tensors at this cut, under the same names,
@@ -643,12 +645,150 @@ FUSED_LINEAR_CE = KernelSpan(
 )
 
 
+# Upstream's own default, and the arm is a measurement of that value rather
+# than of chunking in general: peak memory falls as it rises and per-call
+# host cost rises with it.
+CHUNKED_CE_NUM_CHUNKS = 8
+
+
+def chunked_ce_sequence_divides(
+    shape: PiperShape, workload: KernelWorkload
+) -> str | None:
+    """Whether ``chunked_ce`` can run at this workload.
+
+    ``ChunkedLossWrapper`` splits the sequence into ``num_chunks`` equal
+    parts and asserts the division inside its own ``__call__``
+    (``torch._check(seq_len % num_chunks == 0)``), because
+    ``GradAccumulator`` writes one chunk length at each slice offset. The
+    default workload divides; ``--seq-len`` can be given a value that does
+    not.
+
+    Declared here rather than discovered in the builder. The condition is a
+    property of the workload, the parent knows the workload before it claims
+    a GPU, and a builder that raised would take the whole unit down with a
+    cause nobody could read off ``results.json``. This arm is the span's
+    only one, so a workload that breaks the division costs the span -- which
+    is the right answer, and a loud one.
+    """
+    if workload.seq_len % CHUNKED_CE_NUM_CHUNKS:
+        return (
+            f"ChunkedLossWrapper splits the sequence into "
+            f"{CHUNKED_CE_NUM_CHUNKS} equal chunks, and seq_len "
+            f"{workload.seq_len} does not divide by {CHUNKED_CE_NUM_CHUNKS}"
+        )
+    return None
+
+
+CHUNKED_CE = KernelSpan(
+    measurement=KernelScenario(
+        name="chunked_ce",
+        description=(
+            "UPSTREAM TORCHTITAN'S ACTUAL DEFAULT LOSS, AND IT MUST NEVER BE "
+            "LABELLED A BENCHMARK VARIANT. Every upstream qwen3 config wraps "
+            "CrossEntropyLoss in ChunkedLossWrapper "
+            "(torchtitan/components/loss.py:570), which OWNS THE LM HEAD "
+            "through set_lm_head, splits the sequence into num_chunks equal "
+            "parts, and runs lm_head, then the loss, then backward on each "
+            "part in turn. Owning the head is what puts it on neither cut: "
+            "the projection is lm_head_projection's and the loss is "
+            "cross_entropy's, so this implementation spans them exactly as "
+            "fused_linear_ce does, and cross_entropy's titan anchor is named "
+            "titan/full_logits precisely so that nothing in a published "
+            "table reads as upstream's default when it is our benchmark "
+            "baseline. "
+            "forward_backward IS THE ONLY MODE: the wrapper calls backward "
+            "on every chunk inside __call__. "
+            "num_chunks IS 8, WHICH IS UPSTREAM'S DEFAULT, and the number "
+            "measured is a property of that value rather than of chunking in "
+            "general -- peak memory falls as the chunk count rises and "
+            "per-call host cost rises with it. The wrapper also requires the "
+            "sequence to divide by it, so the arm declares that requirement "
+            "and reports skipped with the reason instead of failing a run. "
+            "THE COMPILE TREATMENT DIFFERS FROM fused_linear_ce's OVER THE "
+            "SAME RANGE, AND THE TWO RATIOS MAY NOT BE SET SIDE BY SIDE AS "
+            "TWO ALGORITHMS UNDER ONE TREATMENT: ChunkedLossWrapper compiles "
+            "nothing of its own. It builds its inner loss_fn with the "
+            "compile config and calls lm_head eagerly -- its own docstring "
+            "records 'lm_head is not compiled' -- so this arm is eager where "
+            "it is timed from and only the inner CrossEntropyLoss is "
+            "compiled, which is how upstream runs it. fused_linear_ce "
+            "compiles the projection together with the loss. "
+            "IT REPLACES THE SAME TWO ARMS fused_linear_ce REPLACES, so the "
+            "parts total is the same number in both files. Each records it "
+            "with its own results_path, and a reader who compares the two "
+            "spans is comparing two numerators over one denominator. "
+            "THE SPAN-VERSUS-PARTS ROW CARRIES A BIAS AND IT FAVOURS THE "
+            "SPAN: the parts total pays one host dispatch chain per enclosed "
+            "scenario -- two here -- and the span pays one, and roughly 85% "
+            "of a kernel number in this repository is host dispatch rather "
+            "than device time. The chunk loop is the other way round and is "
+            "not a harness artifact: it is num_chunks host iterations inside "
+            "the span's one chain, and upstream pays every one of them. "
+            "THERE IS NO WITHIN-SPAN ROW, by declaration: one arm has no "
+            "opponent, and the whole claim is the span against the parts. "
+            "That claim is UNPAIRED -- every worker of both enclosed "
+            "scenarios separates a span replicate from the part replicate "
+            "that shares its index -- so its interval is published as "
+            "unpaired_ratio_ci_* and may never be set beside a scenario "
+            "interval as the same quantity."
+        ),
+        inputs_builder=(
+            "benchmarks.kernel.operations.chunked_ce:chunked_ce_inputs"
+        ),
+        reference_builder=(
+            "benchmarks.kernel.operations.chunked_ce:chunked_ce_reference"
+        ),
+        arms=(
+            KernelArm(
+                name="titan/chunked_ce",
+                description=(
+                    "torchtitan.components.loss.ChunkedLossWrapper around "
+                    "CrossEntropyLoss at num_chunks=8, given the head "
+                    "through set_lm_head: eight sequence chunks, each "
+                    "projected, scored and backpropagated in turn, with the "
+                    "chunk gradients assembled by GradAccumulator. UPSTREAM'S "
+                    "DEFAULT, not a variant"
+                ),
+                builder=(
+                    "benchmarks.kernel.operations.chunked_ce"
+                    ":build_chunked_ce_titan"
+                ),
+                modes=("forward_backward",),
+                requirement=(
+                    "benchmarks.kernel.spans:chunked_ce_sequence_divides"
+                ),
+                compiled=False,
+                eager_reason=(
+                    "ChunkedLossWrapper compiles nothing of its own: it "
+                    "builds its inner loss_fn with the compile config and "
+                    "calls lm_head eagerly, which its own docstring records. "
+                    "The arm is eager where it is timed from, and that is "
+                    "how upstream runs it"
+                ),
+                correctness=(LM_HEAD_LOSS_SPAN_GATE,),
+            ),
+        ),
+        baseline_arm="titan/chunked_ce",
+        comparisons=(),
+    ),
+    scenarios=("lm_head_projection", "cross_entropy"),
+    # The same range and the same parts as fused_linear_ce. The two spans
+    # differ in their arm, and the runner measures the shared range once.
+    parts=(
+        SpanParts(
+            arm="titan/chunked_ce", parts=("titan", "titan/full_logits")
+        ),
+    ),
+)
+
+
 KERNEL_SPANS: dict[str, KernelSpan] = {
     span.name: span for span in (
         EXPERT_COMBINE,
         ATTN_RESIDUAL_NORM,
         FFN_NORM_TO_MOE_RESIDUAL,
         FUSED_LINEAR_CE,
+        CHUNKED_CE,
     )
 }
 
