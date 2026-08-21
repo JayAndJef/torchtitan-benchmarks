@@ -369,18 +369,28 @@ trace validation and region pooling. Do not lower `--steps` to save time.
 
 ### Scenarios and arms
 
-Arm names match the kernel scenarios at four scenarios only, and the pairing
-is declared data rather than a naming habit:
-`tests/test_migration_contract.py`'s `KERNEL_TO_E2E_SCENARIO` maps `swiglu`,
-`qkv`, `lm_head` and `attention` onto their `piper1b_*` twins, so
-`piper1b_swiglu/piper_optimized_triton` and `swiglu/piper_optimized_triton`
-are the same code at two scopes. **`rope` left that map when it became
-cross-engine**: its kernel arms are `mcore/base`, `mcore/no_rope_fusion`,
-`titan`, `titan/helion` and `titan/te`, against an e2e `piper1b_rope` that
-still runs `baseline`, `helion` and `te`. The e2e ids are deliberately not
-renamed to match -- they name directories under `out/` and every published
-rope number. Every arm in both registries carries a one-line `description`;
-`./run_bench.sh scenarios` prints them and manifests record them.
+**Arm names match the kernel scenarios at one scenario only.** The pairing is
+declared data rather than a naming habit: `tests/test_migration_contract.py`'s
+`KERNEL_TO_E2E_SCENARIO` maps `lm_head` onto `piper1b_lm_head`, so
+`piper1b_lm_head/piper_optimized_te_ce` and `lm_head/piper_optimized_te_ce`
+are the same code at two scopes. The map held four entries until 2026-08-20.
+Three left it in two different ways, and the difference matters:
+
+- **`rope` left by becoming cross-engine.** Its kernel arms are now
+  `mcore/base`, `mcore/no_rope_fusion`, `titan`, `titan/helion` and
+  `titan/te`, against an e2e `piper1b_rope` that still runs `baseline`,
+  `helion` and `te`.
+- **`swiglu`, `qkv` and `attention` left by being deleted.** Each was
+  superseded by a cross-engine scenario that re-homed every one of its arms:
+  `swiglu` into `expert_mlp`, `qkv` into `qkv_prep`, `attention` into
+  `attention_core`. The e2e scenarios `piper1b_swiglu`, `piper1b_qkv` and
+  `piper1b_attention` are untouched and still run.
+
+The e2e ids are deliberately not renamed to match a kernel roster -- they name
+directories under `out/` and every published number. Every arm in both
+registries carries a one-line `description`; `./run_bench.sh scenarios` prints
+them and manifests record them.
+
 
 The five titan scenarios share `PIPER_1B_REGIONS`: `forward_block` and
 `backward_block`, each 80 invocations per window (16 layers x 5 active
@@ -454,8 +464,8 @@ packed-document mask_mod emits a per-KV-lane gather the interval analyzer
 refuses anyway. Report an FA4 number here as "FA4 running the generic per-lane
 mask path on sm90", never as "FA4 is slower than the Triton template".
 
-**There is deliberately no TE attention arm here, and there cannot be one.**
-TransformerEngine wraps `DotProductAttention.forward` in
+**There is deliberately no TE attention arm in this e2e scenario, and there
+cannot be one.** TransformerEngine wraps `DotProductAttention.forward` in
 `torch.compiler.disable` itself (`transformer_engine/pytorch/jit.py`), so
 Dynamo refuses to inline it: any titan arm calling TE attention dies with
 "Skip inlining `torch.compiler.disable()`d function" the moment
@@ -463,13 +473,19 @@ Dynamo refuses to inline it: any titan arm calling TE attention dies with
 choice, not a gap in our integration, and it is why megatron runs TE eagerly.
 Getting a titan+TE arm would mean excluding that block from compilation,
 which changes the treatment and makes the arm incomparable to the others.
-No kernel scenario measures TE attention either: `attention` declares
-`baseline`, `flex_flash` and `flash_attention_3` and no TE arm. A
-cross-engine `attention_core` scenario is in flight in another worktree;
-read the registry for what it ends up declaring. (That scenario name
-collides with the `attention_core` component label in "Total kernel time
-cannot rank arms that differ in one component". The label there is the
-removed trace classifier's, and it names no scenario.)
+
+**The kernel side is the other way round, and the old text here said the
+opposite.** `kernel-bench` runs no compile treatment it did not choose, so TE
+attention is measurable in isolation, and the `attention_core` scenario
+measures three TE backends: `mcore/base` (cuDNN FusedAttention),
+`mcore/attn_flash3` (FlashAttention 3) and `mcore/attn_unfused` (TE's own
+torch implementation). The sentence "no kernel scenario measures TE
+attention" was true of the deleted single-engine `attention` scenario and is
+false now. (`attention_core` also collides by name with the `attention_core`
+component label in "Total kernel time cannot rank arms that differ in one
+component". The label there is the removed trace classifier's, and it names
+no scenario.)
+
 
 `piper1b_qkv`, `piper1b_lm_head`, and `piper1b_megatron` set `seed=42`
 because their arms differ in model structure; the RoPE and SwiGLU scenarios
@@ -588,22 +604,47 @@ test. Quote the total only as the arm's step cost.
 
 **No in-tree tool currently attributes per-component GPU time.** A
 `components.py` trace classifier did, and it was removed (before the package
-restructure; it never moved into `tools/`). For the **same-engine**
-case, rank the implementations in the matching `kernel-bench` scenario
-instead, where one exists: `KERNEL_TO_E2E_SCENARIO` declares the four
-scenarios whose rosters pair (see "Scenarios and arms"), so
-`piper1b_attention/flex_flash` and `attention/flex_flash` are the same code
-at two scopes -- while remembering
-that a kernel-isolation number is **not device time**: for small kernels it
-is dominated by host dispatch, and `--burst` amortization does not remove
-that (see "Method" under Kernel-isolation benchmarks). A kernel-speed claim
-needs profiler-summed device time, which nothing in this repo currently
-measures. Do not apply the replacement more loosely than the tool it
-replaces. The **cross-engine** case -- attributing a megatron-vs-titan gap to
-particular components -- is what the 15 cross-engine kernel scenarios are
-for. They are declarations at this rev and nothing more: no `results.json`
-under `out/` names a single one of their arms, so there is no cross-engine
-component number to cite yet.
+restructure; it never moved into `tools/`).
+
+For the **same-engine** case, rank the implementations in the matching
+`kernel-bench` scenario instead. **Only `lm_head` still pairs by name**:
+`KERNEL_TO_E2E_SCENARIO` holds that one entry, so
+`piper1b_lm_head/piper_optimized_te_ce` and `lm_head/piper_optimized_te_ce`
+are the same code at two scopes. For the other four titan e2e scenarios the
+matching kernel scenario is now **cross-engine**, and its titan arms carry
+`engine/profile` names:
+
+| e2e scenario | kernel scenario | the titan arms to read |
+|---|---|---|
+| `piper1b_rope` | `rope` | `titan`, `titan/helion`, `titan/te` |
+| `piper1b_swiglu` | `expert_mlp` | `titan`, `titan/fused_grouped_experts`, `titan/piper_optimized_triton`, `titan/piper_optimized_inductor` |
+| `piper1b_qkv` | `qkv_prep` | `titan`, `titan/unfused_qkv` |
+| `piper1b_attention` | `attention_core` | `titan`, `titan/flex_flash`, `titan/flash_attention_3` |
+
+**Two of those four re-homings changed what the number means, and both say so
+in their own `description`.** `qkv_prep` puts the attention-input norm inside
+the cut, on both engines, because megatron fuses the RMSNorm into
+`linear_qkv`'s GEMM prologue and exposes no entry point that runs either half
+alone -- so a `qkv_prep` number is the norm plus the projection, and a `qkv`
+number under `out/` is the projection alone. `expert_mlp` publishes each Piper
+arm against `titan/fused_grouped_experts`, which is TorchTitan's own w13
+fusion, rather than against unfused experts -- so the Piper arms are no longer
+credited with a fusion upstream already ships. Neither is a like-for-like
+successor of the retired number.
+
+Remember also that a kernel-isolation number is **not device time**: for small
+kernels it is dominated by host dispatch, and `--burst` amortization does not
+remove that (see "Method" under Kernel-isolation benchmarks). A kernel-speed
+claim needs profiler-summed device time, which nothing in this repo currently
+measures. Do not apply the replacement more loosely than the tool it replaces.
+
+The **cross-engine** case -- attributing a megatron-vs-titan gap to particular
+components -- is what the 16 cross-engine kernel scenarios are for. They are
+declarations at this rev and nothing more: **no `results.json` under `out/`
+contains the string `mcore/`**, so there is no cross-engine component number
+to cite yet. Only one of the 16, `attention_core`, has ever been built at all;
+see "No cross-engine arm has produced a number" below.
+
 
 Measured three times on 2026-08-09, twice producing a published claim that
 had to be retracted:
