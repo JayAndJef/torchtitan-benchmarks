@@ -21,6 +21,7 @@ from benchmarks.artifacts.layout import trace_files
 from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
     TORCH_COMPILE_MODE,
+    UNCOMPILED_COMPILE_MODES,
     Arm,
     Workload,
 )
@@ -42,10 +43,19 @@ class ValidationProfile:
     log line that proves the requested mode actually applied, the phrases
     that mean a silent fallback, and whether the SelectiveAC line and the
     compiled-region structure are expected at all.
+
+    ``compiled_marker`` is the other half of rule 8, and it is read the
+    other way round: ``mode_line`` must be *present* under a compiled mode,
+    and ``compiled_marker`` must be *absent* under an uncompiled one. A
+    profile leaves it ``None`` when the engine compiles regions it exposes no
+    switch for, which is a statement that the engine cannot run uncompiled at
+    all; ``validate_arm`` then refuses such a run rather than publishing a
+    treatment nothing checked.
     """
 
     completion_marker: str
     mode_line: Callable[[str], str]
+    compiled_marker: str | None
     failure_markers: tuple[str, ...]
     check_ac_line: bool
     check_regions: bool
@@ -58,6 +68,10 @@ VALIDATION_PROFILES = {
         mode_line=lambda mode: (
             f"with torch.compile (mode={TORCH_COMPILE_MODE[mode]})"
         ),
+        # Carried by both of TorchTitan's compile log lines -- apply_compile's
+        # per-block line and the loss function's -- so one absence check
+        # covers every component --compile.enable switches on.
+        compiled_marker="with torch.compile",
         failure_markers=("falling back to the PyTorch",),
         check_ac_line=True,
         check_regions=True,
@@ -67,6 +81,12 @@ VALIDATION_PROFILES = {
         # benchmarks.e2e.megatron.train.MODE_LINE; the trailing comma pins
         # the mode token without pinning which graph implementation ran.
         mode_line=lambda mode: f"Megatron-LM training loop (mode={mode},",
+        # None on purpose: megatron-core sets jit_fuser = torch.compile at
+        # import and decorates 41 functions with it, so no log line proves a
+        # megatron arm ran uncompiled. The piper1b_megatron scenario declines
+        # the uncompiled modes for that reason, and validate_arm refuses one
+        # here if it ever reaches this profile.
+        compiled_marker=None,
         failure_markers=(),
         check_ac_line=False,
         check_regions=False,
@@ -107,8 +127,23 @@ def validate_arm(
     log = log_path.read_text(errors="replace")
     if profile.completion_marker not in log:
         raise RuntimeError(f"{arm.name}: training did not complete; see {log_path}")
+    if compile_mode in UNCOMPILED_COMPILE_MODES:
+        # Rule 8 inverts here: an uncompiled arm prints no compile line, so
+        # the proof is the absence of one. Never relax this into "skip the
+        # check" -- a run that silently compiled would then publish as eager.
+        if profile.compiled_marker is None:
+            raise RuntimeError(
+                f"{arm.name}: validation profile {arm.validation!r} cannot "
+                f"prove compile mode {compile_mode!r}; that engine compiles "
+                "regions it exposes no switch for"
+            )
+        if profile.compiled_marker in log:
+            raise RuntimeError(
+                f"{arm.name}: compile mode {compile_mode!r} requested but the "
+                f"engine compiled the model; see {log_path}"
+            )
     # The engine reports which mode it actually applied.
-    if profile.mode_line(compile_mode) not in log:
+    elif profile.mode_line(compile_mode) not in log:
         raise RuntimeError(
             f"{arm.name}: compile mode {compile_mode!r} did not apply; "
             f"see {log_path}"

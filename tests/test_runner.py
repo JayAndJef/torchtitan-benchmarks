@@ -17,6 +17,7 @@ from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import (
     Arm,
+    TORCH_COMPILE_MODE,
     PIPER_1B_LM_HEAD,
     PIPER_1B_QKV,
     PIPER_1B_ROPE,
@@ -869,6 +870,78 @@ class ValidationTests(unittest.TestCase):
                     compile_mode="cuda-graph",
                     ac_mode="none",
                 )
+
+    def test_an_uncompiled_mode_requires_the_compile_line_to_be_absent(self) -> None:
+        arm = PIPER_1B_ROPE.arm("baseline")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=False)
+
+            # No compile line at all: this is what an eager arm looks like.
+            log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
+            validate_arm(
+                arm, root, log, PIPER_1B_ROPE.workload, compile_mode="none"
+            )
+
+            # The block compile line proves the arm was compiled, so the run
+            # measured the wrong treatment under an eager label.
+            log.write_text(
+                _compiled_line("default") + _SAC_LINE + _SIZE_LINE
+                + "Training completed\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "engine compiled the model"):
+                validate_arm(
+                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode="none"
+                )
+
+            # The loss compile line proves it too: one marker covers every
+            # component --compile.enable switches on.
+            log.write_text(
+                "[titan] - root - INFO - Compiling the loss function with "
+                "torch.compile\n" + _SAC_LINE + _SIZE_LINE + "Training completed\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "engine compiled the model"):
+                validate_arm(
+                    arm, root, log, PIPER_1B_ROPE.workload, compile_mode="none"
+                )
+
+    def test_an_engine_that_cannot_prove_eager_execution_is_refused(self) -> None:
+        # megatron-core compiles its jit_fuser regions at import, so its
+        # profile declares no compiled_marker. An uncompiled mode that
+        # reached it must fail rather than pass unchecked.
+        arm = Arm(
+            name="baseline",
+            description="megatron",
+            launcher="megatron",
+            validation="megatron",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root, cudagraphs=False)
+            log.write_text(_SIZE_LINE + "Training completed\n")
+            with self.assertRaisesRegex(RuntimeError, "cannot prove compile mode"):
+                validate_arm(
+                    arm,
+                    root,
+                    log,
+                    PIPER_1B_ROPE.workload,
+                    compile_mode="none",
+                    ac_mode="none",
+                )
+
+    def test_the_compiled_marker_is_part_of_the_mode_line(self) -> None:
+        # The two halves of rule 8 must name the same log line: mode_line is
+        # required to be present under a compiled mode, compiled_marker to be
+        # absent under an uncompiled one.
+        from benchmarks.e2e.validation import VALIDATION_PROFILES
+
+        profile = VALIDATION_PROFILES["torchtitan"]
+        for mode in TORCH_COMPILE_MODE:
+            self.assertIn(profile.compiled_marker, profile.mode_line(mode))
+            self.assertIn(
+                profile.compiled_marker,
+                _compiled_line(TORCH_COMPILE_MODE[mode]),
+            )
 
     def test_megatron_mode_line_matches_the_driver_constant(self) -> None:
         # The validation profile and the driver define the contract in two

@@ -1238,7 +1238,10 @@ TEST_CENSUS = {
     # manifest separately, and 2 pin that collecting them reports a
     # diagnostic instead of failing the run.
     "test_provenance": 6,
-    "test_runner": 42,
+    # +3 with the inverted half of validation rule 8: that an uncompiled mode
+    # needs the compile line absent, that an engine which cannot prove eager
+    # execution is refused, and that both halves of the rule name one line.
+    "test_runner": 45,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1259,7 +1262,7 @@ TEST_CENSUS = {
     # kernel builder blanks which part.
     "test_megatron_model": 26,
 }
-TEST_CENSUS_TOTAL = 1150
+TEST_CENSUS_TOTAL = 1153
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

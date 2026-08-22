@@ -38,6 +38,18 @@ COMPILE_MODES = ("default", "cuda-graph")
 TORCH_COMPILE_MODE = {"default": "default", "cuda-graph": "reduce-overhead"}
 CUDAGRAPH_COMPILE_MODES = frozenset({"cuda-graph"})
 
+# Modes that apply no torch.compile at all. Such a run has no torch-level
+# mode name, so TORCH_COMPILE_MODE deliberately holds no entry for one: a
+# caller that asks for the name of a mode the run never used gets a KeyError
+# rather than a name to record. Two consequences follow, and both are
+# inversions rather than relaxations. The run emits no compiled-graph
+# annotations, so it declares no regions (benchmarks.e2e.runner), exactly as
+# a 1-layer shape and the megatron scenario already do. And validation rule 8
+# reads the other way: the compile log line must be absent, because its
+# presence would mean the arm compiled under an uncompiled label
+# (benchmarks.e2e.validation).
+UNCOMPILED_COMPILE_MODES = frozenset({"none"})
+
 # Activation checkpointing modes selectable per run (schema 8). "sac" is
 # TorchTitan's per-op SelectiveAC (the historical treatment, implied by
 # schema <= 7 manifests); "none" disables checkpointing entirely, delivered
