@@ -119,6 +119,7 @@ import torch.nn as nn
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     _assert_kernel_marker,
     _compile_module,
     _randn,
@@ -690,7 +691,10 @@ def _mcore_arm(
 
     before = torch.cuda.memory_allocated()
     model = build_model(
-        seq_len=workload.seq_len, shape=shape, profile=profile
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=profile,
+        blank_parts=MCORE_BLANK_MLP,
     )
     config = model.config
     _assert_rope_config(config, profile, shape)

@@ -251,6 +251,7 @@ import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     _randn,
     initialize_megatron_single_rank,
 )
@@ -772,7 +773,12 @@ def _mcore_arm(
         profile.config_overrides.get("cross_entropy_fusion_impl") == "te"
     ):
         _assert_te_cross_entropy_available(profile)
-    model = build_model(seq_len=workload.seq_len, shape=shape, profile=profile)
+    model = build_model(
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=profile,
+        blank_parts=MCORE_BLANK_MLP,
+    )
     _assert_profile_took(profile, model.config)
     compute_loss = model.compute_language_model_loss
     _release_model_parameters(model)

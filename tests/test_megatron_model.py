@@ -344,5 +344,101 @@ class BuildModelWiringTests(unittest.TestCase):
         self.assertEqual(re.findall(r"layers\[(\d+)\]", body), ["0"])
 
 
+class OperationsBlankingTests(unittest.TestCase):
+    """Which kernel builder blanks which part, pinned per module.
+
+    ``blank_parts`` is safe only when the scenario never reads the part it
+    removes, and nothing in the code can tell which cut a builder times. So
+    the mapping is stated here, and every module that builds a megatron model
+    must appear in exactly one of the three sets below.
+    """
+
+    # The cut these scenarios time sits outside the mlp part, so they blank
+    # it. See ``benchmarks/kernel/operations/common.py``'s ``MCORE_BLANK_MLP``
+    # for why the timed module keeps its exact weights.
+    BLANKS_THE_MLP = {
+        "attention_core",
+        "attn_out_proj",
+        "attn_residual",
+        "cross_entropy",
+        "ffn_norm",
+        "lm_head_projection",
+        "moe_residual",
+        "qk_norm",
+        "qkv_prep",
+        "rope",
+    }
+
+    # These four time a cut **inside** the mlp part: the experts, the router,
+    # and the token dispatcher twice. They build the whole layer.
+    CUTS_INSIDE_THE_MLP = {
+        "dispatch_permute",
+        "expert_mlp",
+        "moe_combine",
+        "moe_router",
+    }
+
+    # These two read no part of the transformer layer at all, so they could
+    # blank more than the mlp. They are not converted, and the reason is
+    # scheduling rather than safety: a concurrent change owns both files.
+    NOT_CONVERTED = {"embedding_stage", "final_norm"}
+
+    @staticmethod
+    def _operations() -> dict[str, str]:
+        directory = (
+            Path(__file__).resolve().parent.parent
+            / "benchmarks/kernel/operations"
+        )
+        return {
+            path.stem: path.read_text()
+            for path in sorted(directory.glob("*.py"))
+            if "build_model(" in path.read_text()
+        }
+
+    def test_every_megatron_builder_is_classified(self) -> None:
+        """A new builder must state which set it belongs to.
+
+        Without this a module added later would build the whole layer by
+        default and nobody would notice the omission.
+        """
+        classified = (
+            self.BLANKS_THE_MLP | self.CUTS_INSIDE_THE_MLP | self.NOT_CONVERTED
+        )
+        self.assertEqual(set(self._operations()), classified)
+
+    def test_the_cuts_outside_the_mlp_blank_it(self) -> None:
+        sources = self._operations()
+        for name in sorted(self.BLANKS_THE_MLP):
+            with self.subTest(module=name):
+                self.assertIn("blank_parts=MCORE_BLANK_MLP", sources[name])
+                self.assertIn("    MCORE_BLANK_MLP,", sources[name])
+
+    def test_the_cuts_inside_the_mlp_build_the_whole_layer(self) -> None:
+        """The decisive rule. A builder that timed the experts or the router
+        against a blanked mlp would raise, but a builder that timed the
+        layer's own parts against a blanked one would measure a different
+        model in silence.
+        """
+        sources = self._operations()
+        for name in sorted(self.CUTS_INSIDE_THE_MLP | self.NOT_CONVERTED):
+            with self.subTest(module=name):
+                self.assertNotIn("blank_parts", sources[name])
+
+    def test_no_builder_names_a_part_of_its_own(self) -> None:
+        """One constant carries the justification, so a reader finds it once.
+
+        A literal tuple at a call site would put the choice next to the call
+        and the reason nowhere.
+        """
+        for name, source in sorted(self._operations().items()):
+            with self.subTest(module=name):
+                self.assertNotIn("blank_parts=(", source)
+
+    def test_the_constant_names_the_mlp_part_alone(self) -> None:
+        from benchmarks.kernel.operations.common import MCORE_BLANK_MLP
+
+        self.assertEqual(MCORE_BLANK_MLP, ("mlp",))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -73,6 +73,31 @@ WEIGHT_STD = 0.02
 # rather than anything a table reports.
 MCORE_INIT_SEED = 42
 
+# The transformer-layer part every megatron arm outside the four MoE cuts
+# builds and never reads. ``build_model`` turns each named part into
+# megatron's own ``IdentityOp``, which allocates nothing.
+#
+# **Why the mlp part, and why only it.** The mlp holds the router gate and
+# every expert weight, which is 93% of a transformer layer at ``1b`` and 97%
+# at ``48b``. The attention part is the remaining 3% to 7%, so blanking it
+# would buy little and would move the position of the mlp weights in the
+# random stream. The two norm parts and the three bias-dropout-add parts
+# allocate a vector or nothing at all.
+#
+# **Why the timed module keeps its exact weights.** Megatron builds the nine
+# parts in the order its dataclass declares them, and the mlp is the eighth.
+# So the embedding, the whole self-attention part, and both norms of decoder
+# layer 0 are constructed before anything this constant removes, and their
+# weights are the weights a full build draws. The parts built after the mlp
+# hold no drawn weight: the layer's final norm is a constant fill, and the
+# output layer draws from megatron's model-parallel RNG state, which the mlp
+# never touches -- the expert weights take the expert-parallel state and the
+# router gate takes the host generator.
+#
+# **Who must not use it.** ``expert_mlp``, ``moe_router``, ``dispatch_permute``
+# and ``moe_combine`` time a cut inside the mlp. They build the whole layer.
+MCORE_BLANK_MLP: tuple[str, ...] = ("mlp",)
+
 
 def _randn(
     shape: tuple[int, ...],

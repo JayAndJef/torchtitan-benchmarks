@@ -68,6 +68,7 @@ import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     WEIGHT_STD,
     _compile_module,
     _randn,
@@ -336,7 +337,12 @@ def build_ffn_norm_mcore_base(
 
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
-    model = build_model(seq_len=workload.seq_len, shape=shape, profile=BASE)
+    model = build_model(
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=BASE,
+        blank_parts=MCORE_BLANK_MLP,
+    )
     module = model.decoder.layers[MCORE_LAYER].pre_mlp_layernorm
     kind = f"{type(module).__module__}.{type(module).__qualname__}"
     print(

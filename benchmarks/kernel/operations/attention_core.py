@@ -427,6 +427,7 @@ import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     _assert_kernel_marker,
     _compile_module,
     _navigate,
@@ -1474,7 +1475,10 @@ def _build_mcore_arm(
 
     before = torch.cuda.memory_allocated()
     model = build_model(
-        seq_len=workload.seq_len, shape=shape, profile=profile
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=profile,
+        blank_parts=MCORE_BLANK_MLP,
     )
     attention = _navigate(model, MCORE_SELF_ATTENTION_PATH)
     module = getattr(attention, MCORE_CORE_ATTENTION_ATTR, None)

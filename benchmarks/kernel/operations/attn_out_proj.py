@@ -96,6 +96,7 @@ import torch.nn.functional as F
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     WEIGHT_STD,
     _compile_module,
     _navigate,
@@ -366,6 +367,7 @@ def build_attn_out_proj_mcore_base(
         seq_len=workload.seq_len,
         shape=shape,
         profile=BASE,
+        blank_parts=MCORE_BLANK_MLP,
     )
     linear_proj = _navigate(model, mcore_module_path())
     notes = _assert_mcore_linear_proj(linear_proj, shape)

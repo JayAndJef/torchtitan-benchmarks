@@ -151,6 +151,7 @@ import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     _randn,
     _randn_like,
     _require_grads,
@@ -588,7 +589,12 @@ def _build_mcore_arm(
 
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
-    model = build_model(seq_len=workload.seq_len, shape=shape, profile=profile)
+    model = build_model(
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=profile,
+        blank_parts=MCORE_BLANK_MLP,
+    )
     layer = model.decoder.layers[MCORE_LAYER]
     resolved = _assert_mcore_bda(layer, arm, fused)
     mlp_bda = layer.mlp_bda

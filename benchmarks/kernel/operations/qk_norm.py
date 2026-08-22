@@ -161,6 +161,7 @@ import torch.nn as nn
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     WEIGHT_STD,
     _compile_module,
     _randn,
@@ -694,7 +695,12 @@ def build_qk_norm_mcore_base(
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
     before = torch.cuda.memory_allocated()
-    model = build_model(seq_len=workload.seq_len, shape=shape, profile=BASE)
+    model = build_model(
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=BASE,
+        blank_parts=MCORE_BLANK_MLP,
+    )
     attention = model.decoder.layers[0].self_attention
     q_module = getattr(attention, MCORE_Q_NORM_ATTR)
     k_module = getattr(attention, MCORE_K_NORM_ATTR)

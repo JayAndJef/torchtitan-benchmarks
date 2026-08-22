@@ -165,6 +165,7 @@ import torch.nn.functional as F
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     _navigate,
     _projection_arm,
     _randn,
@@ -591,6 +592,7 @@ def build_lm_head_projection_mcore_base(
         seq_len=workload.seq_len,
         shape=shape,
         profile=BASE,
+        blank_parts=MCORE_BLANK_MLP,
     )
     output_layer = _navigate(model, mcore_module_path())
     notes = _assert_mcore_output_layer(output_layer, shape)

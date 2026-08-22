@@ -478,8 +478,16 @@ class PinnedSourceTests(unittest.TestCase):
             / "benchmarks/kernel/operations/moe_residual.py"
         )
         self.assertEqual(operations.count("build_model("), 1)
+        # One call, with the arm's own profile, and no cuda_graph_impl. The
+        # blanked mlp is the fourth argument and does not reach the layer
+        # class: it removes a part of the layer, never chooses another layer.
         self.assertIn(
-            "build_model(seq_len=workload.seq_len, shape=shape, profile=profile)",
+            "build_model(\n"
+            "        seq_len=workload.seq_len,\n"
+            "        shape=shape,\n"
+            "        profile=profile,\n"
+            "        blank_parts=MCORE_BLANK_MLP,\n"
+            "    )",
             operations,
         )
 

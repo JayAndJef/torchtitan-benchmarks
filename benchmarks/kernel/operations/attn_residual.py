@@ -151,6 +151,7 @@ import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     _randn,
     _randn_like,
     _require_grads,
@@ -745,6 +746,7 @@ def _build_attn_residual_mcore(
         seq_len=workload.seq_len,
         shape=shape,
         profile=profile,
+        blank_parts=MCORE_BLANK_MLP,
     )
     layer = model.decoder.layers[MCORE_LAYER]
     # ``isinstance`` and not an exact type check, deliberately.

@@ -178,6 +178,7 @@ import torch.nn.functional as F
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     WEIGHT_STD,
     _compile_module,
     _navigate,
@@ -908,7 +909,12 @@ def build_qkv_prep_mcore_base(
 
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
-    model = build_model(seq_len=workload.seq_len, shape=shape, profile=BASE)
+    model = build_model(
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=BASE,
+        blank_parts=MCORE_BLANK_MLP,
+    )
     attention = _navigate(model, mcore_attention_path())
     notes = _assert_mcore_qkv_prep(attention, shape, inputs.eps)
     _drop_qk_layernorms(attention)
