@@ -4,7 +4,7 @@ The file builds one bare megatron-core ``GPTModel`` from a ``PiperShape`` and
 an ``McoreProfile``. Two other suites already cover parts of it:
 ``tests/test_model_shape.py`` pins the ``shape`` argument and
 ``tests/test_mcore_profiles.py`` pins the ``profile`` argument. This module
-covers ``blank_parts``, the spec surgery that lets a kernel scenario build
+covers ``blank_parts``, the spec edit that lets a kernel scenario build
 only the part of the transformer layer it times.
 
 Every test here runs on the CPU and builds no model. ``_blank_layer_parts``
@@ -49,7 +49,7 @@ EXPECTED_DEFAULTS = {
 
 
 def _megatron_layer_types():
-    """The megatron classes the surgery operates on, or a skip.
+    """The megatron classes the edit operates on, or a skip.
 
     **Called from inside a test, never at module scope.**
     ``add_megatron_to_path`` inserts the checkout at ``sys.path[0]``, and
@@ -119,7 +119,7 @@ def _block_spec(layers: int = 2):
     """A block spec whose every layer part is a distinct sentinel.
 
     Megatron's own derivation appends the **same** layer-spec object once per
-    layer, so the fixture does too. A surgery that mutated in place, or that
+    layer, so the fixture does too. An edit that mutated in place, or that
     replaced one entry and left the rest, is visible against this.
     """
     (
@@ -182,6 +182,45 @@ class BlankPartsSignatureTests(unittest.TestCase):
                 )
 
 
+class HostInitializationTests(unittest.TestCase):
+    """``blank_parts`` and ``use_cpu_initialization`` may not be combined.
+
+    On the CUDA path the mlp draws from the expert-parallel RNG state and
+    from the host generator, so removing it moves nothing on the
+    model-parallel state the other parts draw from.
+    ``use_cpu_initialization`` sends every weight through
+    ``_initialize_affine_weight_cpu``, which draws from one global host
+    generator with no tracker fork. A blanked part would then shift the value
+    of every part built after it, and every shifted value would stay
+    numerically valid.
+    """
+
+    def test_the_two_arguments_are_refused_together(self) -> None:
+        from benchmarks.models.piper_qwen3.mcore_profiles import BASE
+        from benchmarks.models.piper_qwen3.shape import PIPER_SHAPES
+
+        with self.assertRaisesRegex(ValueError, "use_cpu_initialization"):
+            megatron_model.build_model(
+                seq_len=128,
+                shape=PIPER_SHAPES["1b"],
+                profile=BASE,
+                use_cpu_initialization=True,
+                blank_parts=("mlp",),
+            )
+
+    def test_the_refusal_runs_before_the_first_import(self) -> None:
+        """Which is what lets the test above run with no megatron and no GPU.
+
+        ``build_model`` defers every heavy import into its body. A guard
+        placed after them would need a working megatron checkout to report a
+        caller's mistake.
+        """
+        body = _code_of(megatron_model.build_model)
+        self.assertLess(
+            body.index("use_cpu_initialization"), body.index("import torch")
+        )
+
+
 class BlankLayerPartsTests(unittest.TestCase):
     def test_megatron_declares_the_nine_parts_this_repo_blanks(self) -> None:
         """The roster and the two identity classes are megatron's, not ours.
@@ -197,6 +236,39 @@ class BlankLayerPartsTests(unittest.TestCase):
             if isinstance(field.default, type)
         }
         self.assertEqual(defaults, EXPECTED_DEFAULTS)
+
+    def test_megatron_builds_the_parts_in_the_order_it_declares_them(
+        self,
+    ) -> None:
+        """The order is what makes a blanked part safe for its neighbours.
+
+        A part built before the first blanked one keeps its exact weights.
+        That argument reads the construction order out of
+        ``TransformerLayer.__init__``, and megatron could reorder it in a
+        bump. Read the order rather than trust it.
+        """
+        from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+            megatron_dir,
+        )
+
+        try:
+            root = Path(megatron_dir())
+        except RuntimeError as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(str(error)) from error
+        source = (
+            root / "megatron/core/transformer/transformer_layer.py"
+        ).read_text()
+        start = source.index("class TransformerLayer(")
+        body = source[start : source.index("    def create_mcore", start)]
+        built = [
+            (body.index(f"self.{name} = submodules.{name}(")
+             if f"self.{name} = submodules.{name}(" in body
+             else body.index(f"self.{name} = build_module("), name)
+            for name in EXPECTED_DEFAULTS
+        ]
+        self.assertEqual(
+            [name for _, name in sorted(built)], list(EXPECTED_DEFAULTS)
+        )
 
     def test_blanking_replaces_the_named_part_and_nothing_else(self) -> None:
         identity, *_ = _megatron_layer_types()
@@ -232,7 +304,7 @@ class BlankLayerPartsTests(unittest.TestCase):
 
     def test_every_layer_gets_its_own_blanked_copy(self) -> None:
         """Megatron appends one spec object per layer, and they are the same
-        object. A surgery that replaced the list entry rather than each
+        object. An edit that replaced the list entry rather than each
         entry's contents would blank one layer and leave the rest.
         """
         identity, *_ = _megatron_layer_types()
@@ -286,14 +358,14 @@ class BlankLayerPartsTests(unittest.TestCase):
 
 
 class BuildModelWiringTests(unittest.TestCase):
-    """Source-level pins on how ``build_model`` uses the surgery.
+    """Source-level pins on how ``build_model`` uses the edit.
 
     ``build_model`` allocates a whole model on a CUDA device, so a CPU test
     cannot call it. These read the file instead.
     """
 
-    def test_the_surgery_runs_on_the_derived_spec(self) -> None:
-        """The derivation stays megatron's. The surgery is applied to its
+    def test_the_edit_runs_on_the_derived_spec(self) -> None:
+        """The derivation stays megatron's. The edit is applied to its
         result, never in place of it.
         """
         derivation = MEGATRON_MODEL_SOURCE.index(
@@ -315,7 +387,7 @@ class BuildModelWiringTests(unittest.TestCase):
             MEGATRON_MODEL_SOURCE.index(call),
         )
 
-    def test_the_surgery_writes_no_module_class_of_its_own(self) -> None:
+    def test_the_edit_writes_no_module_class_of_its_own(self) -> None:
         """The whole argument for this change is that it authors no spec.
 
         ``_blank_layer_parts`` may name the two identity classes only by
@@ -328,7 +400,7 @@ class BuildModelWiringTests(unittest.TestCase):
             with self.subTest(symbol=forbidden):
                 self.assertNotIn(forbidden, body)
 
-    def test_the_config_is_built_before_the_surgery_and_never_by_it(
+    def test_the_config_is_built_before_the_edit_and_never_by_it(
         self,
     ) -> None:
         """The declined alternative was ``num_moe_experts=None``, which
@@ -352,7 +424,7 @@ class BuildModelWiringTests(unittest.TestCase):
         megatron_model._assert_parts_are_blank(model, ("mlp",))
 
     def test_the_blank_check_raises_on_a_part_that_survived(self) -> None:
-        """The failure this guards is a surgery that reached no layer.
+        """The failure this guards is an edit that reached no layer.
 
         Nothing downstream would notice: the arm reads another part, the
         gates pass, and the only symptom is a build peak nobody measures.
@@ -434,10 +506,18 @@ class OperationsBlankingTests(unittest.TestCase):
         )
 
     def test_the_cuts_outside_the_mlp_blank_it(self) -> None:
+        """Every ``build_model`` call in the module blanks, not merely one.
+
+        A module with two calls where only one blanked would build a whole
+        layer for an arm the table says is blanked.
+        """
         sources = self._operations()
         for name in sorted(self.BLANKS_THE_MLP):
             with self.subTest(module=name):
-                self.assertIn("blank_parts=MCORE_BLANK_MLP", sources[name])
+                self.assertEqual(
+                    sources[name].count("blank_parts=MCORE_BLANK_MLP"),
+                    sources[name].count("build_model("),
+                )
                 self.assertIn("    MCORE_BLANK_MLP,", sources[name])
 
     def test_the_cuts_inside_the_mlp_build_the_whole_layer(self) -> None:

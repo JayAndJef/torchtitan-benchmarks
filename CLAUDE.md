@@ -917,7 +917,7 @@ drops it before the next, so the pass is bounded by the largest single arm
 rather than by their sum. **`expert_mlp` at `huge` is untested.** Measure it
 before reporting anything about it.
 
-#### A megatron kernel arm builds only the layer parts it times
+### A megatron kernel arm builds only the layer parts it times
 
 A scenario times one cut. It does not need the rest of the transformer layer
 to exist. `build_model` therefore takes `blank_parts`, and each named part
@@ -929,7 +929,7 @@ keep the whole layer because they time a cut inside the mlp: `expert_mlp`,
 `tests/test_megatron_model.py` pins the two sets and requires a new builder
 to name its own.
 
-**This is spec surgery, not spec authoring.** `get_gpt_decoder_block_spec`
+**This edits the derived spec. It writes no spec.** `get_gpt_decoder_block_spec`
 derives the spec exactly as before, `_blank_layer_parts` replaces one field
 of the derived result with that field's own declared default, and megatron
 then builds the layer through its own constructor. **The config is not
@@ -940,14 +940,17 @@ build (`num_moe_experts=None`) would move one of those three and was declined
 for that reason; blanking moves none of them.
 
 **The timed module keeps its exact weights.** Megatron builds the nine layer
-parts in the order its dataclass declares them and the mlp is the eighth, so
+parts in the order its dataclass declares them, and the mlp is the eighth. So
 the embedding, the whole self-attention part and the pre-mlp norm of decoder
 layer 0 are built first. The parts built after the mlp draw nothing the mlp
-moves: the decoder's final norm is a constant fill, and the output layer
-draws from megatron's model-parallel RNG state, while the expert weights take
-the expert-parallel state and the router gate takes the host generator. Every
-affected arm also either overwrites the parameters it measures from the
-scenario's shared inputs or measures a cut that holds none.
+moves. The decoder's final norm is a constant fill. The output layer draws
+from megatron's model-parallel RNG state, and the mlp touches neither that
+state nor the position of anything in it: the expert weights take the
+expert-parallel state and the router gate takes the host generator. Every
+affected arm also either overwrites the parameters it measures or measures a
+cut that holds none. **The argument holds for the CUDA initialization path
+only**, so `build_model` refuses `blank_parts` together with
+`use_cpu_initialization`, which draws every weight from one host generator.
 
 **The saving is a transient build peak, not the published memory column.**
 Every one of these builders releases the model before `memory_pass` runs, so
@@ -963,8 +966,10 @@ reading. Build peak, by arithmetic over `PiperShape` and not by measurement:
 | `giant` | 31.77 | 10.77 | 66.1% |
 | `48b` | 88.82 | 4.82 | 94.6% |
 
-**None of this has run on a GPU.** The surgery is proved on the CPU against
-megatron's own derived spec; no arm has been built with a blanked layer.
+**None of this has run on a GPU.** The CPU tests exercise the edit against
+megatron's own ``TransformerLayerSubmodules``, whose field names and identity
+defaults they also pin. They build no spec and no model, because both need a
+device. No arm has been built with a part left out.
 
 ### Scenarios and arms
 
@@ -2184,7 +2189,7 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The suite is CPU-only and runs 1223 tests in about 45 seconds at this rev.
+The suite is CPU-only and runs 1226 tests in about 45 seconds at this rev.
 Re-derive that count rather than quoting it; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
@@ -2344,7 +2349,7 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about 45 seconds at 1223 tests.
+  and takes about 45 seconds at 1226 tests.
 - **Do not let "declared" become "measured".** Much of the kernel registry has
   never executed: 8 of the 16 cross-engine scenarios have never had an arm
   built, the single-engine `lm_head` has not run, 29 of the 71 declared arms

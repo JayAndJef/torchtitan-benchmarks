@@ -1253,12 +1253,13 @@ TEST_CENSUS = {
     "test_retired_paths": 15,
     # New with build_model's blank_parts: 2 that pin the argument's default
     # and the two callers that must never take it, 9 that exercise the spec
-    # surgery against megatron's own TransformerLayerSubmodules, 5 that pin
-    # how build_model wires it and check its raise path, and 5 that pin which
+    # edit against megatron's own TransformerLayerSubmodules, 5 that pin
+    # how build_model wires it and check its raise path, 2 that refuse
+    # blank_parts on the host initialization path, and 5 that pin which
     # kernel builder blanks which part.
-    "test_megatron_model": 23,
+    "test_megatron_model": 26,
 }
-TEST_CENSUS_TOTAL = 1147
+TEST_CENSUS_TOTAL = 1150
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

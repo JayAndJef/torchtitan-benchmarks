@@ -91,7 +91,7 @@ def _blank_layer_parts(spec: Any, parts: tuple[str, ...]) -> Any:
     and 97% at ``48b``. This function removes a part before megatron
     allocates it.
 
-    **This is spec surgery, not spec authoring.**
+    **This edits the derived spec. It writes no spec.**
     ``get_gpt_decoder_block_spec`` derives the spec exactly as it always did,
     and this replaces one field of the derived result. Megatron then builds
     the layer through its own ``TransformerLayer.__init__``. Nothing here
@@ -101,11 +101,13 @@ def _blank_layer_parts(spec: Any, parts: tuple[str, ...]) -> Any:
     ``dataclasses.fields`` rather than written here. Megatron blanks a part
     the same way throughout ``gpt_layer_specs.py`` -- ``q_layernorm``,
     ``pre_mlp_layernorm`` and others -- so the mechanism is the one the file
-    already uses. Reading the default is also what keeps the two identity
-    classes apart: the six module slots default to ``IdentityOp`` and the
-    three bias-dropout-add slots default to ``IdentityFuncOp``, which returns
-    a function rather than a tensor, and a caller that swapped them would get
-    a confusing failure at call time.
+    already uses.
+
+    Reading the default also keeps the two identity classes apart. The six
+    module slots default to ``IdentityOp``. The three bias-dropout-add slots
+    default to ``IdentityFuncOp``, which returns a function rather than a
+    tensor. A caller that wrote the wrong one of the two would get a
+    confusing failure at call time.
 
     A field is blankable only when its declared default is an ``IdentityOp``
     subclass. That excludes ``sharded_state_dict_keys_map``, which is a dict,
@@ -117,13 +119,22 @@ def _blank_layer_parts(spec: Any, parts: tuple[str, ...]) -> Any:
     and ``qk_layernorm`` keep the values the profile and the shape gave them,
     so the hazard this module's docstring warns about -- a config that says
     one thing and a spec that says another, which megatron checks nowhere --
-    is not reached. A scenario that asks for a part it blanked gets an
-    ``AttributeError`` from the ``IdentityOp``, which is loud.
+    is not reached.
 
-    **What a caller must obey.** Blank only parts the scenario never reads.
-    Megatron constructs the nine parts in the declared order, so every part
-    built before the first blanked one keeps its exact weights; see
-    ``build_model``'s callers for the per-scenario choice.
+    **What a caller must obey. Blank only the parts the scenario never
+    reads.** Two failure modes follow, and only one of them is loud. A caller
+    that **navigates** into a blanked part -- ``layer.mlp.experts`` -- gets an
+    ``AttributeError``, because an ``IdentityOp`` holds no child. A caller
+    that **calls** a blanked part gets its own input back, times an identity,
+    and reads as a large win. ``benchmarks/kernel/operations/common.py``'s
+    ``MCORE_BLANK_MLP`` names which builders may pass it, and
+    ``tests/test_megatron_model.py`` pins that roster, because no run-time
+    check can separate an identity from a fast kernel.
+
+    **What a caller may rely on.** Megatron constructs the nine parts in the
+    order this dataclass declares them, so every part built before the first
+    blanked one keeps its exact weights. That statement holds for the GPU
+    initialization path; see ``build_model`` for why the host path is refused.
     """
     import dataclasses
 
@@ -182,7 +193,7 @@ def _assert_parts_are_blank(model: Any, parts: tuple[str, ...]) -> None:
         if not isinstance(part, IdentityOp):
             raise RuntimeError(
                 f"blank_parts asked for {name!r} to be blank, and decoder "
-                f"layer 0 holds a {type(part).__name__}. The spec surgery "
+                f"layer 0 holds a {type(part).__name__}. The spec edit "
                 f"did not reach the built layer."
             )
 
@@ -214,7 +225,32 @@ def build_model(
     nothing and returns its first argument. The default builds every part, so
     an omitted argument keeps the historical model. See ``_blank_layer_parts``
     for the rules a caller must obey.
+
+    **``blank_parts`` and ``use_cpu_initialization`` are refused together.**
+    The promise a blanking caller relies on is that every part built before
+    the first blanked one keeps its exact weights. On the CUDA path that
+    holds: the expert weights fork the expert-parallel RNG state and the
+    router gate takes the host generator, so removing the mlp part moves
+    nothing on the model-parallel state that the other parts and the output
+    layer draw from. On the host path it does not hold.
+    ``use_cpu_initialization`` sends every weight through
+    ``_initialize_affine_weight_cpu``
+    (``tensor_parallel/layers.py:184-225``), which draws from the one global
+    host generator with no tracker fork, so a removed part shifts every draw
+    after it. No caller asks for both today. This raises rather than trusting
+    that, because the shift is silent and every affected value stays
+    numerically valid.
     """
+    # Checked before the first import, so a CPU test reaches it without
+    # megatron on sys.path and without a device.
+    if blank_parts and use_cpu_initialization:
+        raise ValueError(
+            "blank_parts and use_cpu_initialization cannot be combined: the "
+            "host initialization path draws every weight from one global "
+            "generator, so a blanked part shifts the values of every part "
+            "built after it"
+        )
+
     import torch
     import torch.nn.functional as F
     from megatron.core.models.gpt import GPTModel
