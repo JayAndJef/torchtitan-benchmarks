@@ -140,6 +140,8 @@ titan arm pays for torchtitan, and neither pays for the other.
 
 from __future__ import annotations
 
+import gc
+import weakref
 from dataclasses import dataclass
 
 import torch
@@ -691,6 +693,83 @@ def _assert_mcore_embedding(module, shape: PiperShape) -> None:
         )
 
 
+def _watch_released_parameters(
+    model: object, module: torch.nn.Module, kept: torch.Tensor
+) -> tuple[weakref.ref, ...]:
+    """Take a weak reference to every parameter this arm does not keep.
+
+    The arm keeps one tensor, the embedding table.
+    ``_assert_mcore_embedding`` has already refused a learned position
+    embedding and a token-type embedding, so the module owns nothing else.
+    This re-reads the module and proves that rather than assuming it: a
+    second parameter here would stay alive for a good reason, and
+    ``_assert_parameters_released`` could then no longer separate it from a
+    leak.
+    """
+    also_kept = [
+        parameter for parameter in module.parameters() if parameter is not kept
+    ]
+    if also_kept:
+        raise RuntimeError(
+            f"{MCORE_ARM_NAME}: the embedding holds {len(also_kept)} "
+            "parameters besides the table, so the release check cannot "
+            "separate a kept tensor from a leaked one"
+        )
+    return tuple(
+        weakref.ref(parameter)
+        for parameter in model.parameters()
+        if parameter is not kept
+    )
+
+
+def _assert_parameters_released(watched: tuple[weakref.ref, ...]) -> None:
+    """Refuse to time an arm that still holds the model it dropped.
+
+    ``memory_pass`` reads ``torch.cuda.max_memory_allocated``, which is a
+    total and not a delta. It therefore charges every live allocation to the
+    arm. A surviving ``GPTModel`` adds about 2 GiB to this arm's peak memory
+    at the 1b shape and nothing to the titan arm's. The transient window
+    between the build and the first sample loop costs more: the model is
+    88.8 GiB at the 48b shape, and a device that carries it into that window
+    can run out of memory.
+
+    **This reads object identity, and a byte budget could not do the job
+    here.** ``rope`` and ``qk_norm`` compare ``torch.cuda.memory_allocated``
+    against a 64 MiB budget, which works because each of them keeps a few
+    hundred bytes. This arm keeps the whole table: 297 MiB at the 1b shape
+    and 1.16 GiB at 48b, both far above any budget that could still find a
+    leaked layer. A weak reference has no such problem, and it needs no CUDA
+    device to answer.
+
+    **This also raises where those two print a warning.** Allocator rounding
+    moves a byte count, so a failure there can come from the host. A weak
+    reference that survives ``gc.collect()`` means this file kept a
+    reference, which is a defect here and nowhere else. This arm is the
+    scenario anchor, and a lost anchor writes no ``results.json`` at all;
+    that price is accepted, because the check runs in the correctness pass,
+    ahead of every timing worker, so a false alarm costs a run rather than a
+    published number. A peak memory column that quietly grew is what this
+    check exists to prevent, and a printed warning does not prevent it.
+    """
+    alive = [
+        parameter
+        for parameter in (reference() for reference in watched)
+        if parameter is not None
+    ]
+    if not alive:
+        return
+    resident = sum(
+        parameter.numel() * parameter.element_size() for parameter in alive
+    )
+    raise RuntimeError(
+        f"{MCORE_ARM_NAME}: {len(alive)} of {len(watched)} megatron "
+        f"parameters survived the release ({resident / 2**20:.0f} MiB still "
+        "resident). The builder kept a reference to the GPTModel, so this "
+        "arm's peak_memory_gib would report the model and the table "
+        "together."
+    )
+
+
 def build_embedding_stage_mcore_base(
     shape: PiperShape,
     workload: KernelWorkload,
@@ -731,9 +810,15 @@ def build_embedding_stage_mcore_base(
     with torch.no_grad():
         module.word_embeddings.weight.copy_(inputs.weight)
     weight = module.word_embeddings.weight
-    # Best effort: nothing else here references the rest of the model, so the
-    # other parameters are free to be collected while the embedding is timed.
+    # Nothing else here references the rest of the model, so the other
+    # parameters are free while the embedding is timed. The collect is what
+    # makes them go: a GPTModel holds reference cycles, so dropping the name
+    # alone leaves the parameters resident until the next collection.
+    watched = _watch_released_parameters(model, module, weight)
     del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    _assert_parameters_released(watched)
 
     def call(ids: torch.Tensor) -> torch.Tensor:
         # position_ids is unused at position_embedding_type='rope', which

@@ -23,6 +23,8 @@ The gate constants below mirror the ones the scenario declares. A test that
 invented its own tolerance would pass while the run failed.
 """
 
+import gc
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -40,9 +42,12 @@ from benchmarks.kernel.operations.embedding_stage import (
     _assert_layout_conversion_is_free,
     _assert_mcore_embedding,
     _assert_output_layout,
+    _assert_parameters_released,
     _assert_titan_embedding,
     _embedding_stage_arm,
+    _watch_released_parameters,
     build_embedding_stage_copy_floor,
+    build_embedding_stage_mcore_base,
     build_embedding_stage_titan,
     embedding_stage_inputs,
     embedding_stage_reference,
@@ -748,6 +753,90 @@ class WeightMapTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(tensor.shape), (TINY.vocab_size, TINY.dim)
+        )
+
+
+class ModelReleaseTests(unittest.TestCase):
+    """The mcore arm drops its ``GPTModel`` and keeps the table alone.
+
+    The builder needs CUDA, megatron and TransformerEngine, so the release is
+    proved in two pieces. The two helpers run here on a stand-in model, and
+    the builder's own source pins the order it calls them in. Neither piece
+    is a measurement, and neither claims to be one.
+    """
+
+    @staticmethod
+    def stand_in() -> tuple[nn.Module, nn.Module, torch.Tensor]:
+        """A model shaped like the one the builder walks.
+
+        ``LanguageModelEmbedding`` owns ``word_embeddings`` and, at
+        ``position_embedding_type='rope'`` with no token types, nothing else.
+        ``_assert_mcore_embedding`` refuses every other case, so the stand-in
+        has the property the helpers are written against.
+        """
+        model = nn.Module()
+        model.embedding = nn.Module()
+        model.embedding.word_embeddings = nn.Embedding(
+            TINY.vocab_size, TINY.dim
+        )
+        model.decoder = nn.Linear(TINY.dim, TINY.dim)
+        module = model.embedding
+        return model, module, module.word_embeddings.weight
+
+    def test_the_watch_covers_every_parameter_except_the_kept_table(
+        self,
+    ) -> None:
+        model, module, weight = self.stand_in()
+        watched = _watch_released_parameters(model, module, weight)
+        self.assertEqual(len(watched), len(list(model.parameters())) - 1)
+        self.assertFalse(any(reference() is weight for reference in watched))
+
+    def test_dropping_the_model_releases_every_watched_parameter(self) -> None:
+        model, module, weight = self.stand_in()
+        watched = _watch_released_parameters(model, module, weight)
+        del model
+        gc.collect()
+        self.assertIsNone(_assert_parameters_released(watched))
+        self.assertTrue(all(reference() is None for reference in watched))
+        # The one tensor the arm keeps is untouched by the release.
+        self.assertIs(module.word_embeddings.weight, weight)
+
+    def test_a_surviving_parameter_fails_the_arm_and_names_the_count(
+        self,
+    ) -> None:
+        """The model stays alive here, which is the defect under test."""
+        model, module, weight = self.stand_in()
+        watched = _watch_released_parameters(model, module, weight)
+        with self.assertRaises(RuntimeError) as caught:
+            _assert_parameters_released(watched)
+        message = str(caught.exception)
+        self.assertIn(f"{len(watched)} of {len(watched)} megatron", message)
+        self.assertIn("MiB still resident", message)
+        self.assertIsNotNone(model)
+
+    def test_the_watch_refuses_a_kept_module_that_owns_a_second_parameter(
+        self,
+    ) -> None:
+        """A second kept tensor would read as a leak, so the watch says so."""
+        model, module, weight = self.stand_in()
+        module.position_embeddings = nn.Embedding(TINY.vocab_size, TINY.dim)
+        with self.assertRaises(RuntimeError) as caught:
+            _watch_released_parameters(model, module, weight)
+        self.assertIn("besides the table", str(caught.exception))
+
+    def test_the_builder_collects_and_checks_after_it_drops_the_model(
+        self,
+    ) -> None:
+        """The bare ``del model`` left the parameters resident until the
+        next collection, which is the transient window a large shape cannot
+        afford."""
+        self.assertIn(
+            "    watched = _watch_released_parameters(model, module, weight)\n"
+            "    del model\n"
+            "    gc.collect()\n"
+            "    torch.cuda.empty_cache()\n"
+            "    _assert_parameters_released(watched)\n",
+            inspect.getsource(build_embedding_stage_mcore_base),
         )
 
 

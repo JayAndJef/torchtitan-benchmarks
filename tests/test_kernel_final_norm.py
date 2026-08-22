@@ -14,6 +14,8 @@ The gate constants below mirror the ones the scenario declares. A test that
 invented its own tolerance would pass while the run failed.
 """
 
+import gc
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -28,11 +30,14 @@ from benchmarks.kernel.engine.run import resolve_symbol
 from benchmarks.kernel.operations.final_norm import (
     FinalNormInputs,
     build_final_norm_copy_floor,
+    build_final_norm_mcore_base,
     build_final_norm_titan,
     final_norm_inputs,
     final_norm_reference,
     titan_final_norm_module,
+    _assert_parameters_released,
     _final_norm_arm,
+    _watch_released_parameters,
 )
 from benchmarks.kernel.schema import KernelWorkload
 from benchmarks.models.piper_qwen3.mcore_profiles import BASE
@@ -296,6 +301,86 @@ class WeightMapTests(unittest.TestCase):
         _, _, tensor = self.final_norm_transfers()[0]
         self.assertTrue(torch.equal(tensor, self.state["norm.weight"]))
         self.assertEqual(tuple(tensor.shape), (TINY.dim,))
+
+
+class ModelReleaseTests(unittest.TestCase):
+    """The mcore arm drops its ``GPTModel`` and keeps the norm gain alone.
+
+    The builder needs CUDA, megatron and TransformerEngine, so the release is
+    proved in two pieces. The two helpers run here on a stand-in model, and
+    the builder's own source pins the order it calls them in. Neither piece
+    is a measurement, and neither claims to be one.
+    """
+
+    @staticmethod
+    def stand_in() -> tuple[nn.Module, nn.Module, torch.Tensor]:
+        """A model shaped like the one the builder walks.
+
+        ``te.RMSNorm`` owns its gain and nothing else, and ``nn.RMSNorm``
+        owns the same one parameter, so the stand-in has the property the
+        helpers are written against.
+        """
+        model = nn.Module()
+        model.decoder = nn.Module()
+        model.decoder.final_layernorm = nn.RMSNorm(TINY.dim)
+        model.decoder.layer = nn.Linear(TINY.dim, TINY.dim)
+        module = model.decoder.final_layernorm
+        return model, module, module.weight
+
+    def test_the_watch_covers_every_parameter_except_the_kept_gain(
+        self,
+    ) -> None:
+        model, module, weight = self.stand_in()
+        watched = _watch_released_parameters(model, module, weight)
+        self.assertEqual(len(watched), len(list(model.parameters())) - 1)
+        self.assertFalse(any(reference() is weight for reference in watched))
+
+    def test_dropping_the_model_releases_every_watched_parameter(self) -> None:
+        model, module, weight = self.stand_in()
+        watched = _watch_released_parameters(model, module, weight)
+        del model
+        gc.collect()
+        self.assertIsNone(_assert_parameters_released(watched))
+        self.assertTrue(all(reference() is None for reference in watched))
+        # The one tensor the arm keeps is untouched by the release.
+        self.assertIs(module.weight, weight)
+
+    def test_a_surviving_parameter_fails_the_arm_and_names_the_count(
+        self,
+    ) -> None:
+        """The model stays alive here, which is the defect under test."""
+        model, module, weight = self.stand_in()
+        watched = _watch_released_parameters(model, module, weight)
+        with self.assertRaises(RuntimeError) as caught:
+            _assert_parameters_released(watched)
+        message = str(caught.exception)
+        self.assertIn(f"{len(watched)} of {len(watched)} megatron", message)
+        self.assertIn("MiB still resident", message)
+        self.assertIsNotNone(model)
+
+    def test_the_watch_refuses_a_kept_module_that_owns_a_second_parameter(
+        self,
+    ) -> None:
+        """A second kept tensor would read as a leak, so the watch says so."""
+        model, _, weight = self.stand_in()
+        with self.assertRaises(RuntimeError) as caught:
+            _watch_released_parameters(model, model.decoder, weight)
+        self.assertIn("besides the gain", str(caught.exception))
+
+    def test_the_builder_collects_and_checks_after_it_drops_the_model(
+        self,
+    ) -> None:
+        """The bare ``del model`` left the parameters resident until the
+        next collection, which is the transient window a large shape cannot
+        afford."""
+        self.assertIn(
+            "    watched = _watch_released_parameters(model, module, weight)\n"
+            "    del model\n"
+            "    gc.collect()\n"
+            "    torch.cuda.empty_cache()\n"
+            "    _assert_parameters_released(watched)\n",
+            inspect.getsource(build_final_norm_mcore_base),
+        )
 
 
 if __name__ == "__main__":

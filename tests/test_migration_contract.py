@@ -1092,7 +1092,9 @@ TEST_CENSUS = {
     # floor's traffic and both arm closures -- plus the titan extraction,
     # which is one config read here because the norm is a model-level module
     # and not a per-layer one.
-    "test_kernel_final_norm": 22,
+    # +5 for the mcore arm's model release: four run the two helpers on a
+    # stand-in model, and one pins the order the builder calls them in.
+    "test_kernel_final_norm": 27,
     # Scenario 1, and the widest module here at 55, because the scenario's
     # claim is a negative one: the layout conversion megatron enters is free
     # at our THD packing, so a large part of the module proves that -- both
@@ -1102,7 +1104,10 @@ TEST_CENSUS = {
     # builders, the guards that refuse a module of the wrong class or with a
     # tensor-parallel group, and the one weight transfer that joins the two
     # embeddings.
-    "test_kernel_embedding_stage": 55,
+    # +5 for the mcore arm's model release, the same five ``final_norm``
+    # carries: four run the two helpers on a stand-in model, and one pins the
+    # order the builder calls them in.
+    "test_kernel_embedding_stage": 60,
     # Scenario 2: 40 covering the shared inputs and both weight layouts, the
     # fp64 reference, all three arm builders, and the guards that refuse an
     # mcore module of the wrong class, with the wrong epsilon, or above one
@@ -1247,7 +1252,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1114
+TEST_CENSUS_TOTAL = 1124
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
