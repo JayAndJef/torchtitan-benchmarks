@@ -71,6 +71,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.cli.kernel",
     "benchmarks.cli.rendering",
     "benchmarks.e2e.registry",
+    # The parallelism run axis. Parent-side for the same reason the shape
+    # registry is: it declares degrees, schedules and the rules that refuse
+    # an illegal set, and it resolves none of them against a device.
+    "benchmarks.e2e.parallelism",
     "benchmarks.e2e.launch",
     "benchmarks.e2e.runner",
     "benchmarks.e2e.results",
