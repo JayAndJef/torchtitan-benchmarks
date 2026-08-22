@@ -11,7 +11,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from benchmarks.e2e.registry import TORCH_COMPILE_MODE, Arm, Workload
+from benchmarks.e2e.registry import (
+    TORCH_COMPILE_MODE,
+    UNCOMPILED_COMPILE_MODES,
+    Arm,
+    Workload,
+)
 
 
 def command_for_arm(
@@ -35,6 +40,12 @@ def command_for_arm(
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
+    uncompiled = compile_mode in UNCOMPILED_COMPILE_MODES
+    # CompileConfig.enable is False in the fork, so an uncompiled run omits
+    # the flag: there is no negation to pass. The flag keeps its position in
+    # the list, so every compiled mode builds the command line it built
+    # before this mode existed.
+    compile_flags = () if uncompiled else ("--compile.enable",)
     args = [
         "./run_train.sh",
         "--module",
@@ -52,7 +63,7 @@ def command_for_arm(
         str(workload.steps),
         "--training.local-batch-size",
         str(workload.local_batch_size),
-        "--compile.enable",
+        *compile_flags,
         "--profiler.enable_profiling",
         "--profiler.profile_freq",
         str(workload.profile_freq),
@@ -65,7 +76,7 @@ def command_for_arm(
         # The replay loader materializes exactly this many steps of samples
         # and hard-fails when the run asks for more, so it must track --steps.
         args.extend(("--dataloader.replay-steps", str(workload.steps)))
-    if compile_mode != "default":
+    if not uncompiled and compile_mode != "default":
         args.extend(("--compile.mode", TORCH_COMPILE_MODE[compile_mode]))
     if workload.seed is not None:
         args.extend(("--debug.seed", str(workload.seed)))
@@ -106,6 +117,14 @@ def _megatron_command(
         raise ValueError(
             f"{arm.name}: the megatron arm always runs without recompute; "
             f"ac mode {ac_mode!r} has no Megatron parity (use --ac none)"
+        )
+    if compile_mode in UNCOMPILED_COMPILE_MODES:
+        # The scenario declines this mode, so the runner refuses it first.
+        # Restated here because a caller may build a command without one.
+        raise ValueError(
+            f"{arm.name}: compile mode {compile_mode!r} turns off the "
+            f"whole-block torch.compile a titan arm gets, and Megatron never "
+            f"has one; it cannot apply to this arm"
         )
     if workload.seed is None:
         raise ValueError(

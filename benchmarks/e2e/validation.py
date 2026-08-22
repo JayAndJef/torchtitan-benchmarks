@@ -83,9 +83,10 @@ VALIDATION_PROFILES = {
         mode_line=lambda mode: f"Megatron-LM training loop (mode={mode},",
         # None on purpose: megatron-core sets jit_fuser = torch.compile at
         # import and decorates 41 functions with it, so no log line proves a
-        # megatron arm ran uncompiled. The piper1b_megatron scenario declines
-        # the uncompiled modes for that reason, and validate_arm refuses one
-        # here if it ever reaches this profile.
+        # megatron arm ran uncompiled, and disable_jit_fuser() cannot make
+        # one true (see the piper1b_megatron declaration). That scenario
+        # declines the uncompiled modes, and validate_arm refuses one here if
+        # it ever reaches this profile.
         compiled_marker=None,
         failure_markers=(),
         check_ac_line=False,

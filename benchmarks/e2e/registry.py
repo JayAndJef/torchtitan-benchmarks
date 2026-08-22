@@ -34,7 +34,15 @@ EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
 # showed them to be GPU-time regressions at these shapes (see
 # reports/20260807-mode-matrix-plain-bf16.md); schema <= 7 manifests may
 # still record them and the old reduce-overhead name.
-COMPILE_MODES = ("default", "cuda-graph")
+#
+# "none" runs every arm eager. It is a value of this axis rather than a flag
+# of its own, because the axis already carries what an uncompiled run needs:
+# the manifest records it, --resume gates it, and it is a stated
+# comparability boundary. A separate boolean would also make "uncompiled
+# plus cuda-graph" expressible, and that cell means nothing. The manifest
+# schema stays 9: no field is renamed or reinterpreted, and an older reader
+# refuses the new value loudly as an unknown compile mode.
+COMPILE_MODES = ("default", "cuda-graph", "none")
 TORCH_COMPILE_MODE = {"default": "default", "cuda-graph": "reduce-overhead"}
 CUDAGRAPH_COMPILE_MODES = frozenset({"cuda-graph"})
 
@@ -119,6 +127,10 @@ class Scenario:
     whose arms cannot honor a mode (e.g. an engine with no SAC-parity
     recompute) lists only the modes it supports; ``run-all --all-scenarios``
     skips unsupported combinations and a direct request errors.
+    ``supported_compile_modes`` restricts the global ``--compile-mode`` axis
+    the same way, and for the same reason: a run records one mode for every
+    arm in it, so a scenario holding an arm that cannot receive the treatment
+    must decline the mode rather than let the manifest claim it.
     """
 
     name: str
@@ -127,6 +139,7 @@ class Scenario:
     arms: tuple[Arm, ...]
     regions: tuple[Region, ...] = ()
     supported_ac_modes: tuple[str, ...] = ("sac", "none")
+    supported_compile_modes: tuple[str, ...] = COMPILE_MODES
 
     def arm(self, name: str) -> Arm:
         for arm in self.arms:
@@ -342,6 +355,28 @@ _PIPER_OPTIMIZED_SWIGLU_INDUCTOR = (
 # detail for the titan arms lives in the four scenarios above). ac mode is
 # pinned to "none": Megatron-at-its-best does no recompute and its recompute
 # options are not parity with titan's per-op SAC.
+#
+# The compile axis is pinned to its two compiled modes, and the reason is
+# what the axis names: whole-block torch.compile, which apply_compile applies
+# to a titan model. Megatron never has that, so the mode has nothing to turn
+# off there, and a run recording "none" for every arm would claim a treatment
+# one arm never received.
+#
+# Turning megatron's own fusion off instead was measured on 2026-08-22 and
+# rejected. megatron-core sets jit_fuser = torch.compile at import and
+# decorates 41 functions with it. It ships disable_jit_fuser(), but @jit_fuser
+# binds the value at decoration time and "import megatron.core" already
+# imports six consumers, so a later call flips the global and leaves
+# bias_swiglu, swiglu and weighted_swiglu as dynamo wrappers. No import order
+# of ours wins, because megatron/core/__init__.py runs first; megatron's own
+# --disable-jit-fuser flag has the same hole. Two stronger objections stand
+# behind the mechanics: TransformerEngine's hand-written kernels would remain,
+# so the arm still would not be eager, and handicapping megatron to match a
+# titan treatment is the mistake this file already records, where fusions off
+# cost 11.9 GPU ms/step and produced a bogus engine verdict.
+#
+# The list is spelled out rather than derived, so a compile mode added later
+# is declined here until somebody checks that Megatron can honor it.
 PIPER_1B_MEGATRON = Scenario(
     name="piper1b_megatron",
     description=(
@@ -351,6 +386,7 @@ PIPER_1B_MEGATRON = Scenario(
     workload=PIPER_1B_MEGATRON_WORKLOAD,
     regions=(),
     supported_ac_modes=("none",),
+    supported_compile_modes=("default", "cuda-graph"),
     arms=(
         Arm(
             name="baseline",

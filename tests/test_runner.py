@@ -17,6 +17,8 @@ from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import (
     Arm,
+    COMPILE_MODES,
+    SCENARIOS,
     TORCH_COMPILE_MODE,
     PIPER_1B_LM_HEAD,
     PIPER_1B_QKV,
@@ -399,6 +401,42 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--compile.mode", command)
         self.assertIn("--compile.enable", command)
 
+    def test_uncompiled_mode_drops_only_the_compile_flag(self) -> None:
+        # CompileConfig.enable is False in the fork, so the uncompiled command
+        # omits the flag rather than negating it. Everything else must be the
+        # command the default mode builds, token for token: this is the
+        # assertion that keeps the new mode from moving an existing default.
+        compiled = command_for_arm(
+            PIPER_1B_ROPE.workload,
+            PIPER_1B_ROPE.arm("baseline"),
+            Path("/out/baseline"),
+            [],
+        )
+        eager = command_for_arm(
+            PIPER_1B_ROPE.workload,
+            PIPER_1B_ROPE.arm("baseline"),
+            Path("/out/baseline"),
+            [],
+            "none",
+        )
+        self.assertNotIn("--compile.enable", eager)
+        self.assertNotIn("--compile.mode", eager)
+        self.assertEqual(
+            eager, [token for token in compiled if token != "--compile.enable"]
+        )
+
+    def test_a_megatron_command_refuses_an_uncompiled_mode(self) -> None:
+        scenario = scenario_by_name("piper1b_megatron")
+        with self.assertRaisesRegex(ValueError, "cannot apply to this arm"):
+            command_for_arm(
+                scenario.workload,
+                scenario.arm("baseline"),
+                Path("/out/baseline"),
+                [],
+                "none",
+                "none",
+            )
+
     def test_ac_none_adds_the_subcommand_token_last(self) -> None:
         command = command_for_arm(
             PIPER_1B_ROPE.workload,
@@ -514,6 +552,11 @@ class MegatronScenarioTests(unittest.TestCase):
         self.assertEqual(baseline.validation, "megatron")
         self.assertIn("--ac never affects this arm", baseline.description)
         self.assertEqual(scenario.supported_ac_modes, ("none",))
+        # The uncompiled mode names a titan treatment Megatron never has, so
+        # the scenario declines it rather than record it for every arm.
+        self.assertEqual(
+            scenario.supported_compile_modes, ("default", "cuda-graph")
+        )
         self.assertEqual(scenario.regions, ())
         self.assertEqual(scenario.workload.seed, 42)
         for arm in scenario.arms[1:]:
@@ -558,6 +601,23 @@ class MegatronScenarioTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
+
+    def test_run_refuses_the_uncompiled_mode_for_the_megatron_scenario(self) -> None:
+        request = RunRequest(
+            gpu="0",
+            scenario_name="piper1b_megatron",
+            compile_mode="none",
+            ac_mode="none",
+        )
+        with self.assertRaisesRegex(ValueError, "does not support compile mode"):
+            execute_run(request, environment={"PATH": os.environ["PATH"]})
+
+    def test_every_other_scenario_supports_every_compile_mode(self) -> None:
+        for name, scenario in SCENARIOS.items():
+            if name == "piper1b_megatron":
+                continue
+            with self.subTest(scenario=name):
+                self.assertEqual(scenario.supported_compile_modes, COMPILE_MODES)
 
 
 class CpuPinningTests(unittest.TestCase):
@@ -666,6 +726,80 @@ class ManifestTests(unittest.TestCase):
         self.assertIn(PIPER_OPTIMIZED_SWIGLU_OVERRIDE, fused_command)
         self.assertIn("--debug.seed", fused_command)
         self.assertEqual(fused_command[-2], "--dump-folder")
+
+
+class UncompiledRunTests(unittest.TestCase):
+    """What --compile-mode none records, and what it declines to claim."""
+
+    def _run(self, out_dir: Path) -> dict:
+        metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+        }
+
+        def fake_process(command, **kwargs):
+            # No compile line: this is what an eager arm's log looks like.
+            kwargs["stdout"].write(_SAC_LINE + _SIZE_LINE + "Training completed\n")
+            arm_dir = Path(command[command.index("--dump-folder") + 1])
+            for iteration in (20, 40):
+                trace = (
+                    arm_dir
+                    / f"profiling/traces/iteration_{iteration}/rank0_trace.json.gz"
+                )
+                trace.parent.mkdir(parents=True, exist_ok=True)
+                with gzip.open(trace, "wt") as trace_file:
+                    trace_file.write("cudaLaunchKernel\n")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            execute_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name="piper1b_rope",
+                    arm_name="baseline",
+                    out_dir=out_dir,
+                    compile_mode="none",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": os.environ["PATH"]},
+            )
+        return json.loads((out_dir / "manifest.json").read_text())
+
+    def test_an_uncompiled_run_records_the_mode_and_declares_no_regions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = self._run(Path(temporary) / "run")
+
+        self.assertEqual(manifest["schema_version"], 9)
+        self.assertEqual(manifest["compile_mode"], "none")
+        # Region pooling reads Inductor's compiled-graph annotations, and an
+        # eager run emits none. The run says so rather than declare a region
+        # rule 7 would then fail to find.
+        self.assertEqual(manifest["regions"], [])
+        self.assertNotIn("--compile.enable", manifest["commands"]["baseline"])
+
+    def test_a_resume_refuses_to_cross_the_uncompiled_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            self._run(out_dir)
+            with self.assertRaisesRegex(Exception, "compile_mode"):
+                execute_run(
+                    RunRequest(
+                        gpu="0",
+                        arm_name="baseline",
+                        resume_dir=out_dir,
+                        compile_mode="default",
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
+                )
 
 
 def _compiled_line(torch_mode: str) -> str:

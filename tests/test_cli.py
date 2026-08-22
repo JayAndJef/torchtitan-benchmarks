@@ -305,6 +305,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len({request.timestamp for request in requests}), 1)
         self.assertIsNotNone(requests[0].timestamp)
 
+    def test_all_scenarios_at_compile_none_skips_the_megatron_scenario(self) -> None:
+        # The uncompiled mode names a titan treatment Megatron never has, so
+        # the sweep skips that scenario with a message instead of recording a
+        # mode one of its arms could not receive.
+        supported = [
+            name
+            for name, scenario in SCENARIOS.items()
+            if "none" in scenario.supported_compile_modes
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(
+                    cli,
+                    ["run-all", "0", "--all-scenarios", "--compile-mode", "none"],
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        names = [call.args[0].scenario_name for call in execute.call_args_list]
+        self.assertEqual(names, supported)
+        self.assertNotIn("piper1b_megatron", supported)
+        self.assertIn("skipped: does not support compile mode 'none'", result.output)
+
     def test_all_scenarios_at_ac_none_includes_the_megatron_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))

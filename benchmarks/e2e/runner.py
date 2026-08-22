@@ -27,6 +27,7 @@ from benchmarks.e2e.registry import (
     AC_MODES,
     COMPILE_MODES,
     SCENARIOS,
+    UNCOMPILED_COMPILE_MODES,
     Arm,
     Scenario,
     Workload,
@@ -223,8 +224,15 @@ def _resolve_run(
     scenario = replace(scenario, workload=workload)
     if scenario.regions:
         # A regioned scenario declares the per-block regions of the model it
-        # actually runs; a shape whose block graph is not structurally
-        # identifiable declares none (see piper_block_regions).
+        # actually runs. Two runs declare none instead. A shape whose block
+        # graph is not structurally identifiable declares none (see
+        # piper_block_regions), and an uncompiled run declares none because
+        # it emits no compiled-graph annotations at all -- the same honest
+        # reason the megatron scenario declares none. Validation rule 7 then
+        # guards neither, and rules 8, 10 and 11 do.
+        regions_apply = shape.supports_block_regions and (
+            compile_mode not in UNCOMPILED_COMPILE_MODES
+        )
         scenario = replace(
             scenario,
             regions=(
@@ -232,9 +240,15 @@ def _resolve_run(
                     n_layers=shape.n_layers,
                     profiler_active=workload.profiler_active,
                 )
-                if shape.supports_block_regions
+                if regions_apply
                 else ()
             ),
+        )
+    if compile_mode not in scenario.supported_compile_modes:
+        raise ValueError(
+            f"scenario {scenario.name!r} does not support compile mode "
+            f"{compile_mode!r} (supported: "
+            f"{', '.join(scenario.supported_compile_modes)})"
         )
     if ac_mode not in scenario.supported_ac_modes:
         raise ValueError(

@@ -917,8 +917,9 @@ TEST_CENSUS = {
     # 16 pre-migration, +1 for the assertion that importing
     # benchmarks.cli.main alone yields all five commands -- the failure mode
     # the cli.add_command wiring exists to prevent, added when the CLI split
-    # into main/e2e/kernel/rendering.
-    "test_cli": 18,
+    # into main/e2e/kernel/rendering. +1 with the uncompiled compile mode:
+    # the sweep skips a scenario that declines it, as it already does for ac.
+    "test_cli": 19,
     # 19 pre-fix, +2 for the two halves of the correctness verdict: a failed
     # gate fragment beside a clean exit code, and a timing worker that dies
     # after it writes. +2 more for the arm that measured nothing, as a
@@ -1241,7 +1242,12 @@ TEST_CENSUS = {
     # +3 with the inverted half of validation rule 8: that an uncompiled mode
     # needs the compile line absent, that an engine which cannot prove eager
     # execution is refused, and that both halves of the rule name one line.
-    "test_runner": 45,
+    # +6 with the mode itself: that an uncompiled command drops only the
+    # compile flag, that a megatron command refuses the mode, that the
+    # megatron scenario declines it while every other scenario takes it,
+    # that a run records the mode and declares no regions, and that a
+    # resume refuses to cross the boundary.
+    "test_runner": 51,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1262,7 +1268,7 @@ TEST_CENSUS = {
     # kernel builder blanks which part.
     "test_megatron_model": 26,
 }
-TEST_CENSUS_TOTAL = 1153
+TEST_CENSUS_TOTAL = 1160
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

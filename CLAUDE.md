@@ -226,12 +226,45 @@ default, which means "not requested" exactly as `--compile-mode`, `--ac` and
 `--compile-mode` picks the compile treatment for the whole run -- every arm
 in it, any scenario. E2e only; `kernel-bench` has no such flag and always
 compiles at the default mode. Since manifest schema 8 the axis is
-engine-neutral and has exactly two values:
+engine-neutral. It has three values, and `default` remains the default:
 
 | mode | TorchTitan arms get | megatron arm gets |
 |---|---|---|
 | `default` | per-block `torch.compile`, mode default | TE modules uncompiled and uncaptured (its `@jit_fuser` regions still compile) |
 | `cuda-graph` | per-block `torch.compile(mode="reduce-overhead")` | Megatron's local per-layer partial graphs |
+| `none` | no `torch.compile` at all: no per-block compile, no compiled loss | **unsupported; the scenario declines the mode** |
+
+**`none` answers "what does per-block compile buy end to end?", and nothing
+else did.** Every titan number this repo published before it is compiled per
+block. The mode omits `--compile.enable`, because `CompileConfig.enable` is
+`False` in the fork and there is no negation to pass; every compiled mode
+builds the command line it built before the mode existed.
+
+Two things change under `none`, and both are inversions rather than
+relaxations. **The run declares no regions**, because region pooling reads
+Inductor's compiled-graph annotations and an eager run emits none -- the same
+honest reason the 1-layer shapes and `piper1b_megatron` declare none. So rule
+7 guards nothing here, and rules 8, 10 and 11 do. **Rule 8 reads the other
+way**: `validate_arm` requires the compile log line to be *absent*, so a run
+that silently compiled cannot be published as eager.
+
+**`piper1b_megatron` declines `none`**, through the new
+`Scenario.supported_compile_modes` field, exactly as it declines `--ac sac`.
+The mode names a titan treatment -- whole-block `torch.compile` -- and
+Megatron never has one, so there is nothing to turn off. Turning megatron's
+own fusion off instead was measured on 2026-08-22 and rejected:
+`@jit_fuser` binds `torch.compile` at decoration time and `import
+megatron.core` already imports six consumers, so a later `disable_jit_fuser()`
+leaves `bias_swiglu`, `swiglu` and `weighted_swiglu` as dynamo wrappers. No
+import order of ours wins, TransformerEngine's hand-written kernels would
+remain anyway, and handicapping megatron to match a titan treatment is the
+mistake recorded below, where fusions off cost 11.9 GPU ms/step.
+
+**`piper1b_attention/flex_flash` cannot honor `none`, and validation says
+so.** `kernel_options={"BACKEND": "FLASH"}` is an Inductor lowering hint, so
+without compile the arm runs the same eager FlexAttention as `baseline`. Rule
+6 fails the arm on its absent FA4 marker. The scenario is not restricted,
+because its other two arms are honest uncompiled measurements.
 
 `cuda-graph` is the renamed `reduce-overhead` (schema <= 7 manifests record
 the torch-level name); the two max-autotune modes were **removed** after the
@@ -275,9 +308,9 @@ requires the `Applied SelectiveAC` log line to match the requested mode.
 Scenarios may restrict the axis via `Scenario.supported_ac_modes`:
 `piper1b_megatron` supports only `none` (Megatron's recompute options are
 not parity with per-op SAC, and the megatron arm itself always runs without
-recompute -- `--ac` never affects it). `run-all --all-scenarios` skips
-unsupported scenario x ac combinations; a direct `--scenario` request
-errors.
+recompute -- `--ac` never affects it). `Scenario.supported_compile_modes` is
+its twin on the compile axis. `run-all --all-scenarios` skips a scenario that
+declines either mode; a direct `--scenario` request errors.
 
 **Numbers are only comparable within one `compile_mode` and one `ac_mode`.**
 Cite both alongside `torch_version` and `torchtitan_git_rev`; the manifest
@@ -658,7 +691,11 @@ are not comparable; `--resume` refuses to mix them.
 8. The engine's mode line names a mode other than the requested one, or is
    missing entirely: `Compiling each TransformerBlock with torch.compile
    (mode=<torch-level name>)` for titan arms, `Megatron-LM training loop
-   (mode=...)` for the megatron arm.
+   (mode=...)` for the megatron arm. Under `--compile-mode none` the rule
+   inverts: `ValidationProfile.compiled_marker` (`with torch.compile`) must
+   be **absent**, so a run that silently compiled cannot pass as eager. A
+   profile that declares no marker cannot prove eager execution, and an
+   uncompiled run reaching it is refused.
 9. `cudaGraphLaunch` absent from every trace under `cuda-graph` -- graphs
    declined to capture (either engine), so the arm is not measuring the
    mode it claims.

@@ -116,7 +116,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             help=(
                 "Compile mode applied to every arm in the run [default: "
                 "default]. cuda-graph maps to torch.compile reduce-overhead "
-                "for TorchTitan arms. Results are only comparable within one "
+                "for TorchTitan arms; none runs them eager and declares no "
+                "compiled regions. Results are only comparable within one "
                 "mode."
             ),
         ),
@@ -274,7 +275,17 @@ def run_all_command(
     # One stamp for the sweep so every scenario lands under out/<stamp>/.
     timestamp = run_timestamp()
     ac_mode = options.get("ac_mode") or "sac"
+    compile_mode = options.get("compile_mode") or "default"
     for name, scenario in SCENARIOS.items():
+        # A sweep skips a scenario that declines either global axis, rather
+        # than aborting: the axis restriction is a declaration, not a fault.
+        if compile_mode not in scenario.supported_compile_modes:
+            click.echo(
+                f"\n===== scenario: {name} ====="
+                f"\nskipped: does not support compile mode {compile_mode!r} "
+                f"(supported: {', '.join(scenario.supported_compile_modes)})"
+            )
+            continue
         if ac_mode not in scenario.supported_ac_modes:
             click.echo(
                 f"\n===== scenario: {name} ====="
