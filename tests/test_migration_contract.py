@@ -1267,8 +1267,14 @@ TEST_CENSUS = {
     # blank_parts on the host initialization path, and 5 that pin which
     # kernel builder blanks which part.
     "test_megatron_model": 26,
+    # The parallelism run axis, landed before anything imports it. Every one
+    # of the fourteen validator rules in both directions, the two
+    # preconditions on the arguments it borrows, the spec's own positivity
+    # guard, the four derivations, and the schedule registry checked against
+    # the PyTorch classes it names.
+    "test_parallelism": 85,
 }
-TEST_CENSUS_TOTAL = 1160
+TEST_CENSUS_TOTAL = 1245
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
