@@ -137,6 +137,18 @@ def _block_spec(layers: int = 2):
     return block_submodules(layer_specs=[layer_spec] * layers, layer_norm=None)
 
 
+def _stub_model(**parts):
+    """The smallest object ``_assert_parts_are_blank`` can walk.
+
+    The check reads ``model.decoder.layers[0]`` and one attribute off it.
+    Building a real ``GPTModel`` needs a CUDA device, and this test suite
+    has none.
+    """
+    layer = type("Layer", (), parts)()
+    decoder = type("Decoder", (), {"layers": [layer]})()
+    return type("Model", (), {"decoder": decoder})()
+
+
 class BlankPartsSignatureTests(unittest.TestCase):
     def test_the_default_builds_every_part(self) -> None:
         """An omitted argument must keep the historical model.
@@ -333,6 +345,21 @@ class BuildModelWiringTests(unittest.TestCase):
             MEGATRON_MODEL_SOURCE.index("config = TransformerConfig(**kwargs)"),
             MEGATRON_MODEL_SOURCE.index("spec = _blank_layer_parts("),
         )
+
+    def test_the_blank_check_passes_on_a_blanked_layer(self) -> None:
+        identity, *_ = _megatron_layer_types()
+        model = _stub_model(mlp=identity())
+        megatron_model._assert_parts_are_blank(model, ("mlp",))
+
+    def test_the_blank_check_raises_on_a_part_that_survived(self) -> None:
+        """The failure this guards is a surgery that reached no layer.
+
+        Nothing downstream would notice: the arm reads another part, the
+        gates pass, and the only symptom is a build peak nobody measures.
+        """
+        model = _stub_model(mlp=_Sentinel("MoELayer"))
+        with self.assertRaisesRegex(RuntimeError, "did not reach the built"):
+            megatron_model._assert_parts_are_blank(model, ("mlp",))
 
     def test_the_blank_check_reads_decoder_layer_zero_only(self) -> None:
         """Every caller reads layer 0, and blanking applies to every layer,
