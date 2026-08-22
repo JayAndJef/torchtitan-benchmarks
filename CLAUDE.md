@@ -166,8 +166,8 @@ audit allowlists them for exactly that reason.
 
 ```bash
 ./run_bench.sh scenarios                    # list scenarios and arms
-./run_bench.sh run <gpu> [OPTIONS] [-- TORCHTITAN_ARGS]
-./run_bench.sh run-all <gpu> [OPTIONS] [-- TORCHTITAN_ARGS]
+./run_bench.sh run <gpu> --scenario NAME [OPTIONS] [-- TORCHTITAN_ARGS]
+./run_bench.sh run-all <gpu> --scenario NAME [OPTIONS] [-- TORCHTITAN_ARGS]
 ./run_bench.sh evaluate <out_dir> [--arm NAME]... [--results PATH]
 ```
 
@@ -176,6 +176,9 @@ and `NGPU=1`, so runs are single-GPU and the index is stable.
 
 - `run` executes and validates only. `run-all` also evaluates and writes
   `results.json`.
+- Both need a `--scenario`. There is no default, and an omitted one fails the
+  run. `run-all` is the one exception, and only when `--all-scenarios` or
+  `--resume` supplies the name instead.
 - `run` accepts `--arm NAME` to execute a single arm; it is **not**
   repeatable, unlike `kernel-bench --arm` and `evaluate --arm`. `run-all`
   does not accept it; it always runs every arm in the scenario.
@@ -193,7 +196,7 @@ Shared options, with env equivalents:
 
 | flag | env | default |
 |---|---|---|
-| `--scenario` | -- | `piper1b_rope` |
+| `--scenario` | -- | **none; required** (see below) |
 | `--hardware` | -- | `auto` (slugified GPU name) |
 | `--out` | `OUT` | `out/<UTC timestamp>/<scenario>/<hardware>` |
 | `--seq-len` | `SEQ` | workload value (1024) |
@@ -204,6 +207,19 @@ Shared options, with env equivalents:
 | `--compile-mode` | `COMPILE_MODE` | `default` |
 | `--ac` | `AC_MODE` | `sac` |
 | `--model-size` | `MODEL_SIZE` | `normal` |
+
+**`--scenario` has no default, and an omitted one fails the run.** A default
+scenario can only be reached by an omission, and it would then measure one
+scenario under whatever label the operator assumed -- a wrong result rather
+than a missing one. The same argument governs `build_model` in
+`benchmarks/models/piper_qwen3/megatron_model.py`. The rule lives in **one**
+place, `_resolve_run` in `benchmarks/e2e/runner.py`, and no name is written
+anywhere as a default. Two callers legitimately pass no `--scenario`, and
+both supply the scenario themselves: `run-all --all-scenarios` names each
+scenario in turn, and `run-all --resume` reads the name from the manifest.
+`RunRequest.scenario_name` therefore stays `str | None` with a `None`
+default, which means "not requested" exactly as `--compile-mode`, `--ac` and
+`--model-size` do.
 
 ### Compile modes
 

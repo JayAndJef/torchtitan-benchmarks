@@ -918,7 +918,7 @@ TEST_CENSUS = {
     # benchmarks.cli.main alone yields all five commands -- the failure mode
     # the cli.add_command wiring exists to prevent, added when the CLI split
     # into main/e2e/kernel/rendering.
-    "test_cli": 17,
+    "test_cli": 18,
     # 19 pre-fix, +2 for the two halves of the correctness verdict: a failed
     # gate fragment beside a clean exit code, and a timing worker that dies
     # after it writes. +2 more for the arm that measured nothing, as a
@@ -1233,7 +1233,7 @@ TEST_CENSUS = {
     # manifest separately, and 2 pin that collecting them reports a
     # diagnostic instead of failing the run.
     "test_provenance": 6,
-    "test_runner": 41,
+    "test_runner": 42,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1247,7 +1247,7 @@ TEST_CENSUS = {
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
 }
-TEST_CENSUS_TOTAL = 1112
+TEST_CENSUS_TOTAL = 1114
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

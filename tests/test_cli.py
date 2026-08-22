@@ -327,6 +327,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual(execute.call_count, 1)
         evaluate.assert_not_called()
 
+    def test_an_omitted_scenario_fails_on_both_execution_commands(self) -> None:
+        """``--scenario`` is required, and an omitted one runs nothing.
+
+        ``piper1b_rope`` was the default until this change. A default could
+        only be reached by an omission, and would then measure that scenario
+        under whatever label the operator assumed. ``benchmarks/e2e/runner.py``
+        holds the rule in one place, so both commands that take the flag
+        inherit it and the CLI adds no default of its own.
+
+        Click cannot state the rule as ``required=True``: the option block is
+        shared with ``run-all``, whose ``--all-scenarios`` and ``--resume``
+        each supply the scenario themselves. Two tests above cover that half.
+
+        The patch on ``hardware_metadata`` proves the refusal lands before the
+        runner probes the host, so no scenario runs.
+        """
+        for command in (["run", "2"], ["run-all", "0"]):
+            with self.subTest(command=command[0]):
+                with mock.patch(
+                    "benchmarks.e2e.runner.hardware_metadata",
+                    side_effect=AssertionError("the host was probed"),
+                ):
+                    result = self.runner.invoke(cli, command)
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("no scenario requested", result.output)
+                self.assertIn("--scenario", result.output)
+
     def test_all_scenarios_rejects_conflicting_options(self) -> None:
         for conflicting in (
             ["--scenario", "piper1b_rope"],

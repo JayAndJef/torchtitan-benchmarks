@@ -27,10 +27,20 @@ with ``@cli.command`` instead would require importing the group from
 ``__main__.py`` and both CLI test modules do -- would yield a group holding
 only whichever commands some other import had already loaded.
 
+**There is no default scenario, and this module must not add one.**
+``_request`` passes ``--scenario`` through unchanged, so an omitted flag
+reaches ``RunRequest`` as ``None``. ``benchmarks/e2e/runner.py`` holds the
+rule in one place: a resume reads the scenario from the manifest, and every
+other run is refused. A default here could only be reached by an omission,
+and would then measure one scenario under whatever label the operator
+assumed. Click cannot state the rule instead, because ``_execution_options``
+is shared with ``run-all``, whose ``--all-scenarios`` and ``--resume`` both
+supply the scenario themselves; ``required=True`` would refuse both.
+
 The private helpers are the CLI's whole share of run logic: ``_request``
-turns option keywords into a ``RunRequest`` and supplies the default scenario
-only when this is not a resume, ``_execute`` narrows the runner's exceptions
-to ``ClickException``, ``_evaluate`` renders an evaluation and says where the
+turns option keywords into a ``RunRequest``, ``_execute`` narrows the
+runner's exceptions to
+``ClickException``, ``_evaluate`` renders an evaluation and says where the
 machine-readable copy landed, and ``_run_and_evaluate`` records an evaluation
 failure in ``run_state.json`` so a later ``--resume`` retries it. The tests
 patch ``execute_run`` and ``_evaluate`` at *this* module, because that is
@@ -61,7 +71,14 @@ PASSTHROUGH_CONTEXT = {
 
 def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     options = [
-        click.option("--scenario", help="Declarative benchmark scenario name."),
+        click.option(
+            "--scenario",
+            help=(
+                "Declarative benchmark scenario name. Required, because there "
+                "is no default; run-all supplies it from --all-scenarios or "
+                "from the manifest of --resume."
+            ),
+        ),
         click.option(
             "--hardware",
             default="auto",
@@ -140,9 +157,8 @@ def _request(
     resume_dir: Path | None = None,
     **options: Any,
 ) -> RunRequest:
+    # Popped before the ``**options`` expansion below, which must not see it.
     scenario_name = options.pop("scenario")
-    if scenario_name is None and resume_dir is None:
-        scenario_name = "piper1b_rope"
     return RunRequest(
         gpu=gpu,
         scenario_name=scenario_name,

@@ -123,6 +123,12 @@ diverge.
 `results.json` automatically. `run` performs only execution and validation.
 Pass additional TorchTitan arguments after `--`.
 
+`--scenario` is required and has no default. An omitted one fails the run
+rather than measuring one scenario under whatever label you assumed.
+`--all-scenarios` and `--resume` are the two exceptions, because each supplies
+the scenario itself: the first names every scenario in turn, and the second
+reads the name from the manifest.
+
 `--all-scenarios` runs every scenario in sequence and stops at the first
 failure. It cannot be combined with `--scenario`, `--out`, `--resume`, or
 `--results`.

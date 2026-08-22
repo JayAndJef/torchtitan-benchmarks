@@ -26,6 +26,7 @@ from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import (
     AC_MODES,
     COMPILE_MODES,
+    SCENARIOS,
     Arm,
     Scenario,
     Workload,
@@ -53,7 +54,12 @@ class RunRequest:
     """User-selected inputs for one benchmark execution."""
 
     gpu: str
-    scenario_name: str | None = "piper1b_rope"
+    # No default scenario. ``None`` means "not requested", which only a resume
+    # may leave unanswered: the recorded manifest names the scenario there. A
+    # default could only be reached by an omission, and would then measure one
+    # scenario under whatever label the operator assumed, which is a wrong
+    # result rather than a missing one. ``_resolve_run`` refuses it otherwise.
+    scenario_name: str | None = None
     arm_name: str | None = None
     hardware: str = "auto"
     out_dir: Path | None = None
@@ -146,7 +152,13 @@ def _resolve_run(
         scenario_name = manifest_scenario
     else:
         resume_dir = None
-        scenario_name = request.scenario_name or "piper1b_rope"
+        if request.scenario_name is None:
+            raise ValueError(
+                "no scenario requested, and there is no default. Pass "
+                "--scenario. Available scenarios: "
+                f"{', '.join(SCENARIOS)}"
+            )
+        scenario_name = request.scenario_name
 
     scenario = scenario_by_name(str(scenario_name))
     if existing_manifest is not None:

@@ -61,6 +61,39 @@ PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
 
 
 class ScenarioTests(unittest.TestCase):
+    def test_a_request_without_a_scenario_is_refused_and_starts_nothing(
+        self,
+    ) -> None:
+        """There is no default scenario, and an omission fails the run.
+
+        A default could only be reached by an omission, and it would then
+        measure ``piper1b_rope`` under whatever label the operator assumed --
+        a wrong result rather than a missing one. ``_resolve_run`` holds the
+        rule, so the CLI and every programmatic caller inherit it, and no
+        scenario name is written anywhere as a default.
+
+        The two patches prove the refusal lands before any work starts.
+        ``hardware_metadata`` is the first host probe ``_resolve_run`` makes
+        after it resolves the scenario, and ``process_runner`` launches the
+        training subprocess; neither may run.
+        """
+
+        def never(*args, **kwargs):
+            raise AssertionError("a run started without a scenario")
+
+        self.assertIsNone(RunRequest(gpu="0").scenario_name)
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
+        ):
+            with self.assertRaises(ValueError) as caught:
+                execute_run(
+                    RunRequest(gpu="0"),
+                    process_runner=never,
+                    environment={"PATH": os.environ["PATH"]},
+                )
+        self.assertIn("no scenario requested", str(caught.exception))
+        self.assertIn("--scenario", str(caught.exception))
+
     def test_piper_lm_head_has_four_full_token_configs(self) -> None:
         scenario = scenario_by_name("piper1b_lm_head")
         self.assertEqual(
