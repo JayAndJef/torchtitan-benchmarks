@@ -148,6 +148,7 @@ import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     WEIGHT_STD,
     _randn,
     _require_grads,
@@ -800,7 +801,12 @@ def build_embedding_stage_mcore_base(
     tokens = batch * seq
 
     initialize_megatron_single_rank(torch.initial_seed())
-    model = build_model(seq_len=seq, shape=shape, profile=BASE)
+    model = build_model(
+        seq_len=seq,
+        shape=shape,
+        profile=BASE,
+        blank_parts=MCORE_BLANK_MLP,
+    )
     module = model.embedding
     if module is None:
         raise RuntimeError(

@@ -89,6 +89,7 @@ import torch
 
 from benchmarks.kernel.engine.arm import BuiltArm
 from benchmarks.kernel.operations.common import (
+    MCORE_BLANK_MLP,
     WEIGHT_STD,
     _randn,
     _randn_like,
@@ -392,7 +393,12 @@ def build_final_norm_mcore_base(
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
     initialize_megatron_single_rank(torch.initial_seed())
-    model = build_model(seq_len=workload.seq_len, shape=shape, profile=BASE)
+    model = build_model(
+        seq_len=workload.seq_len,
+        shape=shape,
+        profile=BASE,
+        blank_parts=MCORE_BLANK_MLP,
+    )
     module = model.decoder.final_layernorm
     if module is None:
         raise RuntimeError(

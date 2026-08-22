@@ -350,7 +350,7 @@ class OperationsBlankingTests(unittest.TestCase):
     ``blank_parts`` is safe only when the scenario never reads the part it
     removes, and nothing in the code can tell which cut a builder times. So
     the mapping is stated here, and every module that builds a megatron model
-    must appear in exactly one of the three sets below.
+    must appear in exactly one of the two sets below.
     """
 
     # The cut these scenarios time sits outside the mlp part, so they blank
@@ -363,6 +363,8 @@ class OperationsBlankingTests(unittest.TestCase):
         "cross_entropy",
         "ffn_norm",
         "lm_head_projection",
+        "embedding_stage",
+        "final_norm",
         "moe_residual",
         "qk_norm",
         "qkv_prep",
@@ -377,11 +379,6 @@ class OperationsBlankingTests(unittest.TestCase):
         "moe_combine",
         "moe_router",
     }
-
-    # These two read no part of the transformer layer at all, so they could
-    # blank more than the mlp. They are not converted, and the reason is
-    # scheduling rather than safety: a concurrent change owns both files.
-    NOT_CONVERTED = {"embedding_stage", "final_norm"}
 
     @staticmethod
     def _operations() -> dict[str, str]:
@@ -401,10 +398,13 @@ class OperationsBlankingTests(unittest.TestCase):
         Without this a module added later would build the whole layer by
         default and nobody would notice the omission.
         """
-        classified = (
-            self.BLANKS_THE_MLP | self.CUTS_INSIDE_THE_MLP | self.NOT_CONVERTED
+        self.assertEqual(
+            set(self._operations()),
+            self.BLANKS_THE_MLP | self.CUTS_INSIDE_THE_MLP,
         )
-        self.assertEqual(set(self._operations()), classified)
+        self.assertEqual(
+            self.BLANKS_THE_MLP & self.CUTS_INSIDE_THE_MLP, set()
+        )
 
     def test_the_cuts_outside_the_mlp_blank_it(self) -> None:
         sources = self._operations()
@@ -420,7 +420,7 @@ class OperationsBlankingTests(unittest.TestCase):
         model in silence.
         """
         sources = self._operations()
-        for name in sorted(self.CUTS_INSIDE_THE_MLP | self.NOT_CONVERTED):
+        for name in sorted(self.CUTS_INSIDE_THE_MLP):
             with self.subTest(module=name):
                 self.assertNotIn("blank_parts", sources[name])
 

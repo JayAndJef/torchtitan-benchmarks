@@ -921,13 +921,12 @@ before reporting anything about it.
 
 A scenario times one cut. It does not need the rest of the transformer layer
 to exist. `build_model` therefore takes `blank_parts`, and each named part
-becomes megatron's own `IdentityOp`, which allocates nothing. **Ten of the
+becomes megatron's own `IdentityOp`, which allocates nothing. **Twelve of the
 sixteen megatron builders pass `("mlp",)`** through
-`benchmarks/kernel/operations/common.py`'s `MCORE_BLANK_MLP`. Four keep the
-whole layer because they time a cut inside the mlp -- `expert_mlp`,
-`moe_router`, `dispatch_permute` and `moe_combine` -- and two more keep it
-because nobody has converted them yet: `embedding_stage` and `final_norm`.
-`tests/test_megatron_model.py` pins the three sets and requires a new builder
+`benchmarks/kernel/operations/common.py`'s `MCORE_BLANK_MLP`. The other four
+keep the whole layer because they time a cut inside the mlp: `expert_mlp`,
+`moe_router`, `dispatch_permute` and `moe_combine`.
+`tests/test_megatron_model.py` pins the two sets and requires a new builder
 to name its own.
 
 **This is spec surgery, not spec authoring.** `get_gpt_decoder_block_spec`
