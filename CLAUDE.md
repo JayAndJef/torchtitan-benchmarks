@@ -105,7 +105,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
 | `benchmarks/models/piper_qwen3/mcore_profiles.py` | Megatron behaviour as data: one `McoreProfile` per variant, torch-free and parent-side |
 | `benchmarks/models/piper_qwen3/megatron_bootstrap.py` | Megatron location/provenance and the TE environment setup |
-| `benchmarks/models/piper_qwen3/megatron_model.py` | The Qwen3-1B megatron-core `GPTModel` builder; takes a shape and a profile |
+| `benchmarks/models/piper_qwen3/megatron_model.py` | The Qwen3-1B megatron-core `GPTModel` builder; takes a shape, a profile, and the layer parts to leave out |
 | `benchmarks/models/piper_qwen3/megatron_weights.py` | The titan-to-megatron per-parameter map, tagged by component so a caller can take a slice |
 | `benchmarks/models/piper_qwen3/titan_model.py` | The in-process titan build, and the override count that replaces the `[Override]` log check |
 | `benchmarks/models/piper_qwen3/components/rope/` | TE RoPE override + `te_rope_standalone.cu` |
@@ -916,6 +916,56 @@ the residency change: `run_correctness_pass` now builds one arm at a time and
 drops it before the next, so the pass is bounded by the largest single arm
 rather than by their sum. **`expert_mlp` at `huge` is untested.** Measure it
 before reporting anything about it.
+
+#### A megatron kernel arm builds only the layer parts it times
+
+A scenario times one cut. It does not need the rest of the transformer layer
+to exist. `build_model` therefore takes `blank_parts`, and each named part
+becomes megatron's own `IdentityOp`, which allocates nothing. **Ten of the
+sixteen megatron builders pass `("mlp",)`** through
+`benchmarks/kernel/operations/common.py`'s `MCORE_BLANK_MLP`. Four keep the
+whole layer because they time a cut inside the mlp -- `expert_mlp`,
+`moe_router`, `dispatch_permute` and `moe_combine` -- and two more keep it
+because nobody has converted them yet: `embedding_stage` and `final_norm`.
+`tests/test_megatron_model.py` pins the three sets and requires a new builder
+to name its own.
+
+**This is spec surgery, not spec authoring.** `get_gpt_decoder_block_spec`
+derives the spec exactly as before, `_blank_layer_parts` replaces one field
+of the derived result with that field's own declared default, and megatron
+then builds the layer through its own constructor. **The config is not
+touched**, so `num_moe_experts`, `moe_grouped_gemm` and `qk_layernorm` -- the
+three fields megatron turns into a module-class choice and then checks
+nowhere -- keep the values the profile and the shape gave them. A dense-layer
+build (`num_moe_experts=None`) would move one of those three and was declined
+for that reason; blanking moves none of them.
+
+**The timed module keeps its exact weights.** Megatron builds the nine layer
+parts in the order its dataclass declares them and the mlp is the eighth, so
+the embedding, the whole self-attention part and both norms of decoder layer
+0 are drawn first. The parts built after the mlp draw nothing the mlp moves:
+the decoder's final norm is a constant fill, and the output layer draws from
+megatron's model-parallel RNG state, while the expert weights take the
+expert-parallel state and the router gate takes the host generator. Every
+affected arm also overwrites the parameters it measures from the scenario's
+shared inputs.
+
+**The saving is a transient build peak, not the published memory column.**
+Every one of these builders releases the model before `memory_pass` runs, so
+`peak_memory_gib` is unchanged and no number under `out/` needs a different
+reading. Build peak, by arithmetic over `PiperShape` and not by measurement:
+
+| shape | full build | with the mlp blanked | saved |
+|---|---|---|---|
+| `1b` | 1.99 GiB | 0.67 GiB | 66.1% |
+| `large` | 7.94 | 2.69 | 66.1% |
+| `9b` | 17.38 | 1.63 | 90.6% |
+| `huge` | 19.61 | 7.80 | 60.2% |
+| `giant` | 31.77 | 10.77 | 66.1% |
+| `48b` | 88.82 | 4.82 | 94.6% |
+
+**None of this has run on a GPU.** The surgery is proved on the CPU against
+megatron's own derived spec; no arm has been built with a blanked layer.
 
 ### Scenarios and arms
 
@@ -2135,7 +2185,7 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The suite is CPU-only and runs 1190 tests in about 45 seconds at this rev.
+The suite is CPU-only and runs 1221 tests in about 45 seconds at this rev.
 Re-derive that count rather than quoting it; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
@@ -2295,7 +2345,7 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about 45 seconds at 1190 tests.
+  and takes about 45 seconds at 1221 tests.
 - **Do not let "declared" become "measured".** Much of the kernel registry has
   never executed: 8 of the 16 cross-engine scenarios have never had an arm
   built, the single-engine `lm_head` has not run, 29 of the 71 declared arms
