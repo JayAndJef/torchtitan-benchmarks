@@ -753,12 +753,12 @@ claim needs profiler-summed device time, which nothing in this repo currently
 measures. Do not apply the replacement more loosely than the tool it replaces.
 
 The **cross-engine** case -- attributing a megatron-vs-titan gap to particular
-components -- is what the 16 cross-engine kernel scenarios are for. Fifteen of
-them are declarations at this rev and nothing more. The sixteenth,
-`attention_core`, has produced **one** cell: two of its six arms, at one long
-sequence length. So there is one cross-engine component number to cite, it
-covers inner attention alone, and it is not a component breakdown of anything
-else. See "Exactly one cross-engine number exists" below.
+components -- is what the 16 cross-engine kernel scenarios are for. **Eight of
+them have run. Eight have never been built.** The eight that ran cover one cut
+each, at one shape and one sequence length, except `attention_core`, which was
+swept. So there are eight cross-engine cuts to cite, and together they are
+still not a component breakdown of a training step: they omit eight cuts, and
+isolated component times are not additive. See "What has been measured" below.
 
 
 Measured three times on 2026-08-09, twice producing a published claim that
@@ -969,18 +969,47 @@ because it publishes no cross-engine row. `./run_bench.sh scenarios` prints
 every scenario with its description. Read the registry rather than this table
 for that half.
 
-**Exactly one cross-engine number exists**, and it is two arms of one
-scenario. 53 kernel `results.json` files exist under `out/` and **one**
-contains the string `mcore/`:
-`out/20260821T042516Z/kernels/attention_core/nvidia-h200/`. Re-derive both
-counts rather than trusting this line:
+**What has been measured.** Eight of the 16 cross-engine scenarios have run.
+**Every count in this section moves with every run. Re-derive them:**
 
 ```bash
 find out -path '*kernels*' -name results.json | wc -l
-find out -path '*kernels*' -name results.json -exec grep -l "mcore/" {} +
+find out -path '*kernels*' -name results.json -exec grep -l "mcore/" {} + | wc -l
 ```
 
-That run is a **two-arm selection**: `--arm mcore/base --arm titan` at
+At this writing there are 73 kernel `results.json` under `out/`, and 21 of
+them contain `mcore/`.
+
+| scenario | arms `ok` | measured at |
+|---|---|---|
+| `qkv_prep` | 3 of 3 | `large`, batch 4, seq 2048 |
+| `qk_norm` | 3 of 3 | `large`, batch 4, seq 2048 |
+| `attn_out_proj` | 2 of 2 | `large`, batch 4, seq 2048 |
+| `ffn_norm` | 3 of 3 | `large`, batch 4, seq 2048 |
+| `moe_router` | 5 of 5 | `large`, batch 4, seq 2048 |
+| `expert_mlp` | 8 of 8 | `large`, batch 4, seq 2048 |
+| `final_norm` | 3 of 3 | `large`, batch 4, seq 2048 |
+| `attention_core` | 2 of 6 | `normal`/`large`/`huge` at seq 2048 and 8192, plus `normal` at seq 16384 |
+
+Seven of the eight ran **every** declared arm, so their gates are complete.
+`attention_core` is the exception, and only because an `--arm` selection asked
+for two of its six. 29 of the 71 declared arms have ever reported `ok`.
+
+**Eight cross-engine scenarios have still never been built**: `rope`,
+`embedding_stage`, `attn_residual`, `dispatch_permute`, `moe_combine`,
+`moe_residual`, `lm_head_projection` and `cross_entropy`. No arm was
+constructed, no `_assert_mcore_*` guard ran, and no gate compared a real
+tensor. The correct reading of one of those is "a declaration whose builders
+have never executed", which is weaker than "untested" and much weaker than
+"measured". The single-engine `lm_head` has not run either.
+
+`reports/20260821-cross-engine-first-numbers.md` holds the raw tables and the
+grading of every row that ran. Read it before citing any of them: four of its
+six group-B comparisons are usable, and two are noise.
+
+**The longest-sequence `attention_core` cell**
+(`out/20260821T042516Z/kernels/attention_core/nvidia-h200/`) is a **two-arm
+selection**: `--arm mcore/base --arm titan` at
 `--seq-len 16384`, batch 4, `normal` shape, 5 replicates. The other four arms
 carry `status: skipped` with the selection as the reason, so the file holds 2
 comparison rows and no ratio against FA3, FA4 or the unfused arm. `titan`
@@ -997,13 +1026,11 @@ residual inside +/-0.7%, far below the 2% flag, where the same two arms at
 seq 1024 are dispatch-bound and their ratio would move with `k`. Read it as
 one cell of one scenario at one long sequence, not as an engine verdict.
 
-**15 of the 16 cross-engine scenarios have still never been built.** No arm
-was constructed, no `_assert_mcore_*` guard ran, and no gate compared a real
-tensor. Only `attention_core` has been built and gated, on 2026-08-20
-(`reports/20260820-attention_core-firstrun.md`): all six arms built and all
-24 enforcing gates passed. So the correct reading of any other cross-engine
-scenario at this rev is "a declaration whose builders have never executed",
-which is weaker than "untested" and much weaker than "measured".
+`attention_core` was the first cross-engine scenario built and gated, on
+2026-08-20 (`reports/20260820-attention_core-firstrun.md`): all six arms
+built and all 24 enforcing gates passed. The other seven followed on
+2026-08-21, in one correctness sweep of 27 arms and 204 gates with zero
+failures.
 
 
 The `attention_core` scenario measures **inner attention only** -- the level
@@ -2108,7 +2135,7 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The suite is CPU-only and runs 1124 tests in about 40 seconds at this rev.
+The suite is CPU-only and runs 1190 tests in about 45 seconds at this rev.
 Re-derive that count rather than quoting it; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
@@ -2268,12 +2295,13 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about 40 seconds at 1124 tests.
-- **Do not let "declared" become "measured".** Most of the kernel registry has
-  never executed: 15 of the 16 cross-engine scenarios have never had an arm
-  built, one cross-engine scenario has produced two arms at one sequence
-  length, and no span has been measured at all. Report what such a scenario
-  declares, never what it measures.
+  and takes about 45 seconds at 1190 tests.
+- **Do not let "declared" become "measured".** Much of the kernel registry has
+  never executed: 8 of the 16 cross-engine scenarios have never had an arm
+  built, the single-engine `lm_head` has not run, 29 of the 71 declared arms
+  have ever reported `ok`, and no span has been measured at all. Report what
+  such a scenario declares, never what it measures. Re-derive the counts; the
+  command is under "What has been measured".
 
 
 - **Commit in single, self-contained steps, as the work happens.** One commit
