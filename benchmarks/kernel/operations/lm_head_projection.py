@@ -567,8 +567,9 @@ def build_lm_head_projection_mcore_base(
     resident memory: ``max_memory_allocated`` is a maximum over time of the
     bytes currently allocated, so the first allocation inside the timed call
     lifts the peak to resident-plus-new. A retained model would therefore be
-    charged to the arm. It holds about 1.99 GiB of bf16 parameters at the
-    normal shape and about 19.6 GiB at ``huge``, in a process that the
+    charged to the arm. It holds 0.67 GiB of bf16 parameters at ``1b`` and
+    7.80 GiB at ``huge`` -- ``MCORE_BLANK_MLP`` leaves the mlp part out -- in
+    a process that the
     correctness pass also asks to build the titan arm and to hold the fp64
     reference.
 

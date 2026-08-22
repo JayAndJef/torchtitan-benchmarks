@@ -728,11 +728,12 @@ def _assert_parameters_released(watched: tuple[weakref.ref, ...]) -> None:
 
     ``memory_pass`` reads ``torch.cuda.max_memory_allocated``, which is a
     total and not a delta. It therefore charges every live allocation to the
-    arm. A surviving ``GPTModel`` adds about 2 GiB to this arm's peak memory
-    at the 1b shape and nothing to the titan arm's. The transient window
-    between the build and the first sample loop costs more: the model is
-    88.8 GiB at the 48b shape, and a device that carries it into that window
-    can run out of memory.
+    arm. A surviving ``GPTModel`` adds its whole build to this arm's peak
+    memory and nothing to the titan arm's: 0.67 GiB at the 1b shape, because
+    ``MCORE_BLANK_MLP`` leaves the mlp part out. The transient window between
+    the build and the first sample loop costs more: the build is 4.82 GiB at
+    the 48b shape, and a device that carries it into that window can run out
+    of memory.
 
     **This reads object identity, and a byte budget could not do the job
     here.** ``rope`` and ``qk_norm`` compare ``torch.cuda.memory_allocated``

@@ -343,8 +343,9 @@ def build_attn_out_proj_mcore_base(
     resident memory: ``max_memory_allocated`` is a maximum over time of the
     bytes currently allocated, so the first allocation inside the timed call
     lifts the peak to resident-plus-new. A retained model would therefore be
-    charged to the arm. It holds ~2.1 GiB of bf16 parameters at the normal
-    shape and ~21 GiB at ``huge``, in a process that the correctness pass also
+    charged to the arm. It holds 0.67 GiB of bf16 parameters at ``1b`` and
+    7.80 GiB at ``huge`` -- ``MCORE_BLANK_MLP`` leaves the mlp part out --
+    in a process that the correctness pass also
     asks to build every other arm of the scenario, so dropping it buys
     headroom as well.
 

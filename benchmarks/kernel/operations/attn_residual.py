@@ -718,8 +718,9 @@ def _build_attn_residual_mcore(
 
     **Reading it off a real model costs a real model.** ``build_model``
     allocates the whole network to hand back one function reference, two
-    bools and a float: about 2.1 GiB of bf16 parameters at ``normal`` and
-    about 21 GiB at ``huge``, and the correctness pass builds it twice in one
+    bools and a float: 0.67 GiB of bf16 parameters at ``1b`` and 7.80 GiB at
+    ``huge``, with ``MCORE_BLANK_MLP`` leaving the mlp part out, and the
+    correctness pass builds it twice in one
     interpreter, once per mcore arm. The builds are sequential and each is
     dropped before the next, so the peak is one model rather than two -- but
     at ``huge`` this is by far the most expensive thing in the scenario, and

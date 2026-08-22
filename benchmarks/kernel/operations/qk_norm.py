@@ -142,8 +142,10 @@ whole layer. Report the ratio as a comparison of two treatments.
 **The mcore arm builds the real GPTModel and navigates to the submodule.**
 That is what makes the arm unrefutable: the class of ``q_layernorm`` comes
 from megatron's own spec derivation, and no code here rebuilds it. The arm
-keeps the two norm modules, drops the model, and collects, so the rest of the
-1.07 B parameters do not sit inside ``memory_pass``.
+keeps the two norm modules, drops the model, and collects, so the rest of
+the build does not sit inside ``memory_pass``. The build itself is smaller
+than the shape says: this arm passes ``MCORE_BLANK_MLP``, so megatron leaves
+the mlp part out.
 
 Every megatron, TransformerEngine and torchtitan import is deferred into the
 builder that needs it. Per-arm process isolation only pays off when a process
@@ -655,9 +657,11 @@ def _report_build_residual(before: int) -> None:
     """Say so if the dropped GPTModel did not free.
 
     ``memory_pass`` reports ``max_memory_allocated``, which counts every live
-    allocation. A surviving reference to the 1.07 B-parameter model adds about
-    2 GiB to this arm's peak memory and nothing to the titan arm's, so the
-    memory column would then compare two engines and one model.
+    allocation. A surviving reference to the model adds its whole build to
+    this arm's peak memory and nothing to the titan arm's, so the memory
+    column would then compare two engines and one model. That build is
+    0.67 GiB at ``1b`` and 7.80 GiB at ``huge``, because ``MCORE_BLANK_MLP``
+    leaves the mlp part out.
 
     This reports and does not raise. The timing columns are unaffected, and
     peak memory is the secondary metric of this scenario, so a hard failure
@@ -681,9 +685,9 @@ def build_qk_norm_mcore_base(
     The two modules come off a real ``GPTModel``: the class is whatever
     megatron's own spec derivation chooses, so nothing here can build a
     lookalike by mistake. The model itself is then dropped, and only the two
-    norms stay alive. Peak memory is a published column, so a resident 1.07 B
-    parameters would make the mcore arm look expensive for a reason that has
-    nothing to do with the norm.
+    norms stay alive. Peak memory is a published column, so a resident model
+    would make the mcore arm look expensive for a reason that has nothing to
+    do with the norm.
 
     The arm reads a contiguous query and a **strided key**, because that is
     what ``get_query_key_value_tensors`` hands its two norms. TE materializes

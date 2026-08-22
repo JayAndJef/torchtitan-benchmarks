@@ -1426,8 +1426,10 @@ def _report_build_residual(arm: str, before: int) -> None:
     """Say so if the dropped GPTModel did not free.
 
     ``memory_pass`` reports ``max_memory_allocated``, which counts every live
-    allocation. A surviving reference to the 1.07 B-parameter model adds
-    about 2 GiB to this arm's peak memory and nothing to a titan arm's, so
+    allocation. A surviving reference to the model adds its whole build to
+    this arm's peak memory -- 0.67 GiB at ``1b`` and 7.80 GiB at ``huge``,
+    because ``MCORE_BLANK_MLP`` leaves the mlp part out -- and nothing to a
+    titan arm's, so
     the memory column would then compare two engines and one model.
 
     This reports and does not raise. The timing columns are unaffected, and
@@ -1456,9 +1458,9 @@ def _build_mcore_arm(
     The module comes off a real ``GPTModel``, so its class is whatever
     megatron's own spec derivation chooses and nothing here can build a
     lookalike by mistake. The model is then dropped and only the module
-    stays alive: peak memory is a published column, and a resident 1.07 B
-    parameters would make every megatron arm look expensive for a reason
-    that has nothing to do with attention.
+    stays alive: peak memory is a published column, and a resident model
+    would make every megatron arm look expensive for a reason that has
+    nothing to do with attention.
 
     The profile, the ``AttnBackend`` member it names and the selection
     TransformerEngine must then make all come from ``MCORE_ARMS``. The last

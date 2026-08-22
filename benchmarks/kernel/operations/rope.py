@@ -600,8 +600,10 @@ def _report_build_residual(name: str, before: int) -> None:
     """Say so if the dropped GPTModel did not free.
 
     ``memory_pass`` reports ``max_memory_allocated``, which counts every live
-    allocation, so a surviving reference to the 1.07 B-parameter model would
-    add about 2 GiB to this arm's peak memory and nothing to a titan arm's.
+    allocation. A surviving reference to the model would add its whole build
+    to this arm's peak memory and nothing to a titan arm's. That build is
+    0.67 GiB at ``1b`` and 7.80 GiB at ``huge``, because ``MCORE_BLANK_MLP``
+    leaves the mlp part out.
     This reports and does not raise: the timing columns are unaffected, peak
     memory is a secondary metric here, and a hard failure would cost the
     anchor and with it the whole scenario. The worker's stdout lands in
@@ -678,8 +680,8 @@ def _mcore_arm(
     nothing here can build a lookalike by mistake. The closure then repeats
     ``attention.py:1495-1524`` -- query first, key second, one ``cu_seqlens``
     and one ``mscale`` for both -- and the model is dropped, because peak
-    memory is a published column and a resident 1.07 B parameters would make
-    every mcore arm look expensive for a reason unrelated to the rotation.
+    memory is a published column and a resident model would make every mcore
+    arm look expensive for a reason unrelated to the rotation.
     """
     initialize_megatron_single_rank()
     from megatron.core.models.common.embeddings.rope_utils import (

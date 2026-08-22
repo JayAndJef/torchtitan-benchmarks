@@ -290,7 +290,7 @@ MCORE_LOSS_ATTRIBUTES = ("config", "pg_collection", "tp_group")
 
 # The submodules the loss method never touches. Dropping them is what keeps
 # ``peak_memory_gib`` a statement about the loss rather than about a resident
-# 2 GiB model -- ``memory_pass`` reads ``torch.cuda.max_memory_allocated``,
+# model -- ``memory_pass`` reads ``torch.cuda.max_memory_allocated``,
 # which counts everything resident, and memory is a headline metric here
 # because the arms differ in exactly that (an fp32 gradient buffer, an fp32
 # softmax kept for backward, or neither).
@@ -705,7 +705,8 @@ def _release_model_parameters(model) -> None:
     ``self.pg_collection`` and ``self.tp_group`` and nothing else
     (``language_module.py:172-205``), so the embedding, the decoder and the
     output layer are dead weight once the bound method is in hand -- but they
-    are ~2 GiB of *resident* weight at the normal shape, and ``memory_pass``
+    are 0.67 GiB of *resident* weight at ``1b`` and 7.80 GiB at ``huge``
+    (``MCORE_BLANK_MLP`` leaves the mlp part out), and ``memory_pass``
     reports ``torch.cuda.max_memory_allocated``, which counts them. Peak
     memory is a headline metric for this scenario precisely because the arms
     differ in what the loss keeps alive, so a resident model would drown the
