@@ -57,7 +57,13 @@ import click
 from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
-from benchmarks.e2e.registry import AC_MODES, COMPILE_MODES, SCENARIOS
+from benchmarks.e2e.registry import (
+    AC_MODES,
+    COMPILE_MODES,
+    DEFAULT_AC_MODE,
+    DEFAULT_COMPILE_MODE,
+    SCENARIOS,
+)
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
 from benchmarks.e2e.runner import RunRequest, RunResult, execute_run
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
@@ -274,8 +280,8 @@ def run_all_command(
 
     # One stamp for the sweep so every scenario lands under out/<stamp>/.
     timestamp = run_timestamp()
-    ac_mode = options.get("ac_mode") or "sac"
-    compile_mode = options.get("compile_mode") or "default"
+    ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
+    compile_mode = options.get("compile_mode") or DEFAULT_COMPILE_MODE
     for name, scenario in SCENARIOS.items():
         # A sweep skips a scenario that declines either global axis, rather
         # than aborting: the axis restriction is a declaration, not a fault.

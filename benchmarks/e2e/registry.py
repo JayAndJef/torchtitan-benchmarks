@@ -64,6 +64,15 @@ UNCOMPILED_COMPILE_MODES = frozenset({"none"})
 # to TorchTitan as the tyro subcommand token "activation-checkpoint:none".
 AC_MODES = ("sac", "none")
 
+# Default values of the three global run axes.
+# ``_resolve_run`` (benchmarks.e2e.runner) and the ``run-all
+# --all-scenarios`` pre-pass (benchmarks.cli.e2e) read these constants.
+# Neither site repeats the literal value now. This gives a future fourth
+# axis (parallelism) one default location instead of two.
+DEFAULT_COMPILE_MODE = "default"
+DEFAULT_AC_MODE = "sac"
+DEFAULT_MODEL_SIZE = "1b"
+
 
 @dataclass(frozen=True)
 class Workload:

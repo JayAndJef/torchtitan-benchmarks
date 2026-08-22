@@ -26,6 +26,9 @@ from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.registry import (
     AC_MODES,
     COMPILE_MODES,
+    DEFAULT_AC_MODE,
+    DEFAULT_COMPILE_MODE,
+    DEFAULT_MODEL_SIZE,
     SCENARIOS,
     UNCOMPILED_COMPILE_MODES,
     Arm,
@@ -173,19 +176,19 @@ def _resolve_run(
             else request.extra_args
         )
         compile_mode = (
-            str(existing_manifest.get("compile_mode", "default"))
+            str(existing_manifest.get("compile_mode", DEFAULT_COMPILE_MODE))
             if request.compile_mode is None
             else request.compile_mode
         )
         # Schema <= 7 manifests imply the historical SAC treatment.
         ac_mode = (
-            str(existing_manifest.get("ac_mode", "sac"))
+            str(existing_manifest.get("ac_mode", DEFAULT_AC_MODE))
             if request.ac_mode is None
             else request.ac_mode
         )
         # Schema <= 8 manifests predate the model-size axis.
         model_size = (
-            str(existing_manifest.get("model_size", "1b"))
+            str(existing_manifest.get("model_size", DEFAULT_MODEL_SIZE))
             if request.model_size is None
             else request.model_size
         )
@@ -198,9 +201,9 @@ def _resolve_run(
             environment=environment,
         )
         extra_args = request.extra_args or ()
-        compile_mode = request.compile_mode or "default"
-        ac_mode = request.ac_mode or "sac"
-        model_size = request.model_size or "1b"
+        compile_mode = request.compile_mode or DEFAULT_COMPILE_MODE
+        ac_mode = request.ac_mode or DEFAULT_AC_MODE
+        model_size = request.model_size or DEFAULT_MODEL_SIZE
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
             f"unknown compile mode {compile_mode!r} (schema <= 7 manifests "
