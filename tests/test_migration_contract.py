@@ -1251,8 +1251,13 @@ TEST_CENSUS = {
     # path survives anywhere git would ship. Censused like the rest so it
     # cannot quietly stop being discovered.
     "test_retired_paths": 15,
+    # New with build_model's blank_parts: 2 that pin the argument's default
+    # and the two callers that must never take it, 9 that exercise the spec
+    # surgery against megatron's own TransformerLayerSubmodules, and 5 that
+    # pin how build_model wires it.
+    "test_megatron_model": 16,
 }
-TEST_CENSUS_TOTAL = 1124
+TEST_CENSUS_TOTAL = 1140
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
