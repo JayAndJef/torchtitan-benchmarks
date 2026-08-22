@@ -941,13 +941,13 @@ for that reason; blanking moves none of them.
 
 **The timed module keeps its exact weights.** Megatron builds the nine layer
 parts in the order its dataclass declares them and the mlp is the eighth, so
-the embedding, the whole self-attention part and both norms of decoder layer
-0 are drawn first. The parts built after the mlp draw nothing the mlp moves:
-the decoder's final norm is a constant fill, and the output layer draws from
-megatron's model-parallel RNG state, while the expert weights take the
-expert-parallel state and the router gate takes the host generator. Every
-affected arm also overwrites the parameters it measures from the scenario's
-shared inputs.
+the embedding, the whole self-attention part and the pre-mlp norm of decoder
+layer 0 are built first. The parts built after the mlp draw nothing the mlp
+moves: the decoder's final norm is a constant fill, and the output layer
+draws from megatron's model-parallel RNG state, while the expert weights take
+the expert-parallel state and the router gate takes the host generator. Every
+affected arm also either overwrites the parameters it measures from the
+scenario's shared inputs or measures a cut that holds none.
 
 **The saving is a transient build peak, not the published memory column.**
 Every one of these builders releases the model before `memory_pass` runs, so
