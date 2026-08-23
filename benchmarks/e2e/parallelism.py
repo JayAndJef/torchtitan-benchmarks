@@ -359,6 +359,18 @@ def execution_model(spec: ParallelismSpec) -> str:
     size 1 neither engine wraps the model at all, so it is true of both.
     ``titan_mesh``'s engine-specific resolution belongs in ``describe``,
     under names that say whose it is.
+
+    **``plain-bf16`` is a statement about the STATE, and above ``dp`` 1 the
+    two engines differ on one thing it does not cover.** Parameters,
+    gradients and optimizer states stay bf16 on both engines at every
+    degree, with no fp32 masters, which is what the term has always meant
+    here. The gradient **collective** is not state and is not named:
+    TorchTitan's FSDP2 reduces in fp32 and casts back, because the fork
+    types ``training.mixed_precision_reduce`` as ``Literal["float32"]``,
+    where megatron reduces in bf16. A term for that would have to name one
+    engine's mechanism, which is what the paragraph above forbids, so the
+    difference is documented rather than encoded. Cite it beside a
+    cross-engine dp number.
     """
     devices = "single-gpu" if spec.world_size == 1 else f"{spec.world_size}-gpu"
     data_parallel = "no-fsdp" if skip_dp(spec) else f"dp{spec.dp}"
@@ -388,6 +400,14 @@ def describe(
     ``n_microbatches`` is arithmetic over two fields in the same record, and
     at ``pp == 1`` it describes no split that happens: neither engine
     microbatches without a pipeline. Read it beside ``pp``.
+
+    That makes it disagree with the megatron log line arm rule 12 validates,
+    by construction: the driver's ``pipeline_settings`` returns one
+    microbatch at ``pp`` 1 and the rule demands ``microbatches=1`` there,
+    while this record says ``local_batch_size // pp_microbatch_size``. **The
+    log is the run and this is the arithmetic.** A ``dp`` degree above 1 is
+    the first spec that makes the disagreement reachable with more than one
+    rank, so a reader of such a manifest meets it for the first time there.
     """
     replicate, shard = titan_mesh(spec)
     return {

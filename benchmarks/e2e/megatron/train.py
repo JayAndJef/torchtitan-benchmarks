@@ -484,9 +484,14 @@ def main(argv: list[str] | None = None) -> None:
         # so the gradients would be captured and then thrown away. Nothing
         # would fail -- the run would train on stale zeros.
         #
-        # **The combination is unreachable today**, because parallelism rule
-        # 13 refuses cuda-graph at any world size above 1 and use_ddp needs
-        # dp above 1. The guard is written for the day that rule lifts.
+        # **No harness run reaches the combination today**, because
+        # parallelism rule 13 refuses cuda-graph at any world size above 1
+        # and use_ddp needs dp above 1. That rule governs a run, not this
+        # module: ``torchrun ... -m benchmarks.e2e.megatron.train --dp 2
+        # --mode cuda-graph`` is a supported direct entry point and
+        # ``refuse_unsupported_mesh`` does not refuse it, which is the same
+        # reason that function restates the refusals at all. So the guard is
+        # reachable now, and it is also what the day rule 13 lifts needs.
         for parameter in model.parameters():
             parameter.main_grad = torch.zeros_like(parameter)
     num_params = sum(parameter.numel() for parameter in model.parameters())

@@ -15,13 +15,15 @@ defaults it to the config's own ``training.steps`` and the benchmark runner
 delivers ``--dataloader.replay-steps`` next to ``--training.steps`` for every
 arm of a scenario whose workload sets ``replay_dataloader``.
 
-**Under a data-parallel degree each rank replays its own shard.** The loader
-refused ``dp_world_size != 1`` while no run could ask for one. It now
-forwards ``dp_rank`` and ``dp_world_size`` to the stock dataset class, whose
-``split_dataset_by_node`` is the split TorchTitan's own loader uses; the
-megatron driver drains the same class with the same two values, so the
-engines stay bit-identical rank for rank. The materialized count is per
-rank, and a rank still hard-fails at exhaustion.
+**Under a data-parallel degree each rank replays its own shard.** The
+forwarding was always here: ``dp_rank`` and ``dp_world_size`` have reached
+the stock dataset class since this loader was written, and its
+``split_dataset_by_node`` is the split TorchTitan's own loader uses. What
+stood above it was a refusal of ``dp_world_size != 1``, kept while no run
+could ask for one, and only that refusal is gone. The megatron driver
+drains the same class with the same two values, so the engines stay
+bit-identical rank for rank. The materialized count is per rank, and a rank
+still hard-fails at exhaustion.
 """
 
 from __future__ import annotations

@@ -115,7 +115,7 @@ def parallelize_piper1b(
     if not skip_dp and parallel_dims.dp_shard != 1:
         raise RuntimeError(
             "piper1b benchmark configs run TorchTitan's data-parallel path "
-            "at shard degree 1, which its own config calls DDP; a shard "
+            "at shard degree 1, which replicates rather than shards; a shard "
             "degree above 1 shards the parameters instead and the manifest "
             f"would record replication (got dp_replicate="
             f"{parallel_dims.dp_replicate}, dp_shard={parallel_dims.dp_shard})"

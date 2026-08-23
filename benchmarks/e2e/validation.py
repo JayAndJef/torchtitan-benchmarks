@@ -91,6 +91,16 @@ _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
 # above is one of several a correct run can produce, and pinning it whole
 # would fail an honest run whose buckets chose another. What is fixed is the
 # operation in the name.
+#
+# **UNTESTED against megatron above dp 1, and it can fail an honest run.**
+# mcore issues its bucket reductions inside a ``_coalescing_manager``
+# (``param_and_grad_buffer.py``), and a grouped NCCL launch can surface as
+# ``ncclDevKernel_Generic`` rather than naming the operation. No dp run of
+# either engine has been traced. The failure is the safe direction -- the arm
+# fails rather than publishing -- but read an arm rule 13 failure on the
+# megatron arm as a question about this string before reading it as a missing
+# reduction, and settle it by looking at the arm's own trace. Widening this
+# to a bare ``nccl`` is not the repair: see the paragraph above.
 ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
 
 

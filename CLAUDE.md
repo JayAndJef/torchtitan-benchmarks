@@ -836,6 +836,15 @@ are not comparable; `--resume` refuses to mix them.
     built it. Cite the two together, and do not read rule 13 alone as proof
     that gradients were reduced.
 
+    **The marker is untested against megatron above `dp` 1, and it can fail
+    an honest run.** mcore reduces its buckets inside a
+    `_coalescing_manager`, and a grouped NCCL launch can surface as
+    `ncclDevKernel_Generic` rather than naming the operation. That is the
+    safe failure direction, but read a rule 13 failure on the megatron arm
+    as a question about the marker string first, and settle it from that
+    arm's own trace. Widening it to a bare `nccl` is not the repair -- a
+    pipeline's `SendRecv` would then satisfy it.
+
 **The log rules run once per rank.** One `<arm>.log` holds every rank's
 output, so a rule read against the whole file asks "did *some* rank do
 this". Rule 4 is the sharpest case: a kernel that silently degraded on rank
@@ -877,6 +886,13 @@ FA3 and FA4 markers. **A pipelined arm therefore has strictly less
 fallback coverage than the same arm at one rank.** Before publishing any
 `--pp 2` number that rests on a marker, read both ranks' traces by hand and
 say that you did.
+
+**Arm rule 7 at `--dp 2, --pp 1` has never been exercised.** A run without
+a pipeline still declares its regions, so the 80-invocations-per-window
+identity has to survive `fully_shard` wrapping compiled blocks and turning
+their parameters into DTensors. If Inductor repartitions, the arm fails --
+the safe direction, and nobody has read such a trace. Do not relax the rule
+to make the first one pass; find out what the trace says first.
 
 **Under `--pp 2` a run declares no regions, so rule 7 guards nothing and
 rules 8 to 12 do.** `piper_block_regions` identifies a block graph by its
@@ -2339,9 +2355,13 @@ would leave the ranks reducing nothing. It logs `piper1b data parallel:
 fully_shard applied (dp_replicate=R, dp_shard=S)`, which is arm rule 12's
 data-parallel marker.
 
-**A DP spec asks for `dp_replicate=dp, dp_shard=1`**, which TorchTitan's own
-config calls DDP: the parameters are replicated, not sharded, so the model
-each rank holds is still the plain-bf16 model above. The harness always
+**A DP spec asks for `dp_replicate=dp, dp_shard=1`**: the parameters are
+replicated, not sharded, so the model each rank holds is still the
+plain-bf16 model above. **The delegate logs it as `Applied HSDP to the
+model`**, because it takes the two-dimensional mesh branch whenever a
+replicate degree exists; the shard group is one rank wide, so nothing is
+sharded. Say "replication at shard degree 1", never "TorchTitan calls it
+DDP" -- its config names the flag that way and its log does not. The harness always
 sends the shard-degree flag for such a spec, because
 `data_parallel_shard_degree` defaults to **-1** and an omitted flag would
 turn `--dp 2` into ZeRO-3 silently. `parallelize_piper1b` refuses
