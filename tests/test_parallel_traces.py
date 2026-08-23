@@ -576,9 +576,15 @@ class ValidationRulesGotStricterTests(unittest.TestCase):
 
     Rule 5 asked for a window count over the whole arm and now asks it of
     every rank, which is the same question at one rank and a stronger one
-    above it. Rule 7 asked one structural question of one rank's graphs and
-    now asks it of each rank's graphs; a pooled call would have asked it of
-    two processes' graphs at once, which is not the same question.
+    above it.
+
+    Rule 7 changed less than an earlier draft of this docstring claimed. Its
+    structural predicate already ran per window, because
+    ``trace_window_metrics`` reads one file, so a rank whose graphs did not
+    match failed under the old code as well. What changed is the attribution
+    -- the error now names the rank -- and the fact that the per-window
+    step-consistency check no longer spans two ranks. The test below
+    discriminates on the message for that reason, and claims nothing more.
 
     Rules 6 and 9 read every rank's traces as one set, which is what they did
     when one rank was all there was. They are deliberately not per rank; the
@@ -816,6 +822,7 @@ def launch_events(count: int, start: float = 700_000.0) -> list:
          "pid": 0, "tid": 1, "ts": start + index, "dur": 1.0}
         for index in range(count)
     ]
+
 
 def host_step(name: str, duration: float, start: float = 0.0) -> dict:
     """One profiler step, named on the host. This is the normal case."""

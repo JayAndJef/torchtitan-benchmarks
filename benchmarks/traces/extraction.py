@@ -74,6 +74,15 @@ KERNEL_CATEGORIES = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
 # rename of the longer one is visible here rather than silently reclassifying
 # every collective as compute. Unverified against a real multi-rank trace --
 # see the module docstring.
+#
+# **This tuple gates more than the two new columns.** A name that matches
+# leaves ``raw_kernels``, so it also leaves ``region_kernel`` and therefore
+# ``region_kernel_ms_per_step``, which every run under ``out/`` already
+# publishes. A false positive would silently shrink a long-published number
+# rather than only mis-split a new one. The evidence that it does not, today:
+# a scan of 367 arm directories under ``out/`` found no device kernel whose
+# name begins with ``nccl`` on either engine. Re-run that scan before you
+# widen this tuple.
 COLLECTIVE_KERNEL_PREFIXES = ("nccl", "ncclDevKernel")
 
 

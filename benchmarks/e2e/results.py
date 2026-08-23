@@ -17,6 +17,14 @@ because a slow rank is the thing a reader most needs to see.
 The published figures other than the step cost -- regions, launch latency, the
 collective split, the busy basis -- are the **busiest rank's own** figures,
 not a per-field maximum. Mixing fields across ranks produces incoherent rows:
+``other_kernel_ms_per_step`` **includes every collective**: it is
+``kernel - regions``, and a collective is a kernel that lies outside every
+declared region. So on a multi-rank run the ``other ms`` column holds the
+NCCL wait as well as the non-region compute, and a reader who takes it for
+compute reads a bubble as work. ``compute ms`` and ``nccl ms`` are the split;
+read those two instead. For the same reason ``region_span - region_kernel``
+is not purely host idle once a collective shares a region's stream.
+
 ``other_kernel_ms_per_step`` is ``kernel - regions``, and taking each side
 from a different rank can make it negative. ``published_rank`` names the rank
 every such field came from, and ``per_rank`` carries the rest.
