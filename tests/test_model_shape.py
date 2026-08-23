@@ -25,6 +25,7 @@ from benchmarks.artifacts.manifests import (
     write_manifest,
 )
 from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
     piper_block_regions,
@@ -566,6 +567,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             "default",
             "sac",
             "normal",
+            parallelism=TRIVIAL_SPEC,
         )
         self.assertEqual(recorded["model_size"], "1b")
         self.assertEqual(recorded["model_shape"]["name"], "1b")
@@ -598,6 +600,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                     "default",
                     "sac",
                     "1b",
+                    parallelism=TRIVIAL_SPEC,
                 )
                 # Written by hand, because manifest_data canonicalises: an
                 # on-disk manifest from before the rename says "normal".
@@ -613,6 +616,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                         "default",
                         "sac",
                         requested,
+                        parallelism=TRIVIAL_SPEC,
                     ),
                     [],
                 )
@@ -627,6 +631,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             "default",
             "sac",
             "normal",
+            parallelism=TRIVIAL_SPEC,
         )
         self.assertEqual(
             _resume_mismatches(
@@ -639,6 +644,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                 "default",
                 "sac",
                 "huge",
+                parallelism=TRIVIAL_SPEC,
             ),
             ["model_size"],
         )
@@ -1035,7 +1041,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 9)
+        self.assertEqual(manifest["schema_version"], 10)
         self.assertEqual(manifest["model_size"], "huge")
         self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=1024))
         # Rule 7's structural matcher cannot identify a 1-layer block graph,
@@ -1118,6 +1124,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                 "default",
                 "sac",
                 "normal",
+                parallelism=TRIVIAL_SPEC,
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             del manifest["model_size"]
@@ -1138,6 +1145,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                     "default",
                     "sac",
                     "normal",
+                    parallelism=TRIVIAL_SPEC,
                 ),
                 [],
             )
@@ -1153,6 +1161,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                     "default",
                     "sac",
                     "huge",
+                    parallelism=TRIVIAL_SPEC,
                 ),
             )
 

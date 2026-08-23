@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts.layout import trace_files
 from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     Arm,
     COMPILE_MODES,
@@ -700,10 +701,11 @@ class ManifestTests(unittest.TestCase):
                 "cuda-graph",
                 "none",
                 "1b",
+                parallelism=TRIVIAL_SPEC,
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 9)
+        self.assertEqual(manifest["schema_version"], 10)
         self.assertEqual(manifest["compile_mode"], "cuda-graph")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
@@ -778,7 +780,7 @@ class UncompiledRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 9)
+        self.assertEqual(manifest["schema_version"], 10)
         self.assertEqual(manifest["compile_mode"], "none")
         # Region pooling reads Inductor's compiled-graph annotations, and an
         # eager run emits none. The run says so rather than declare a region

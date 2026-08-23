@@ -4,6 +4,12 @@ Command construction is the seam between a declarative arm and the engine
 that actually trains it: ``command_for_arm`` dispatches on ``arm.launcher``
 and each branch delivers the scenario workload, the global run axes, and the
 arm's own overrides in that engine's own spelling.
+
+**At the trivial parallelism spec the argv is the argv this repo has always
+built.** ``_titan_parallelism_flags`` returns an empty tuple there, so no
+``--parallelism.*`` token appears and every published command line is
+reproduced token for token. ``tests/test_migration_contract.py`` asserts that
+mechanically over every arm of every scenario, not by reading a golden list.
 """
 
 from __future__ import annotations
@@ -11,12 +17,131 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from benchmarks.e2e.parallelism import (
+    PP_SCHEDULES,
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    titan_mesh,
+)
 from benchmarks.e2e.registry import (
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
     Workload,
 )
+
+
+def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
+    """The ``--parallelism.*`` block TorchTitan needs for this spec.
+
+    Empty at the trivial spec, which is what keeps a single-GPU argv exactly
+    the argv it was before this axis existed.
+
+    Two of the flags are sent whenever they apply, and neither is optional:
+
+    ``--parallelism.data-parallel-shard-degree`` -- TorchTitan defaults
+    ``data_parallel_shard_degree`` to ``-1`` (``config/configs.py``), which
+    resolves to "every remaining rank". An omitted flag therefore turns a
+    dp 2 run into ZeRO-3 rather than the intended replication, and neither
+    the log nor the manifest would say so. ``titan_mesh`` decides the pair
+    and both halves are delivered.
+
+    **The pair is gated on the mesh, not on ``dp``.** An expert-parallel run
+    moves the shard degree without moving ``dp``: ``titan_mesh`` returns
+    ``(dp // ep, ep)`` at ``ep > 1``, so a spec with ``ep`` above 1 needs the
+    flag even where ``dp`` is 1. Rule 14 refuses ``ep > 1`` today, so no such
+    spec reaches here -- but a ``dp``-gated test would emit the expert degree
+    with no shard degree the day it lifts, which is the silent ZeRO-3
+    substitution this whole paragraph exists to prevent.
+
+    ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
+    ``last`` twin -- both default to **1**, which counts the embedding and
+    the output head as layers. At 16 layers and 2 stages the two conventions
+    agree, but at 4 stages the default splits [4, 5, 4, 3] where weight 0
+    splits [4, 4, 4, 4], and Megatron always divides ``config.num_layers``
+    evenly. Rule 7 of ``benchmarks/e2e/parallelism.py`` checks
+    ``n_layers % (pp * stages_per_rank)``, which is the arithmetic weight 0
+    produces; these two flags are what make that assumption true, and
+    ``_golden_titan_pp2_command`` freezes them so an upstream default change
+    breaks a test rather than a split.
+    """
+    flags: list[str] = []
+    if spec.pp > 1:
+        # Rules 3 and 4 already refuse both cases for a run. Restated here
+        # because a caller may build a command line without a run, and a
+        # bare KeyError names neither the flag nor the reason.
+        if spec.pp_schedule not in PP_SCHEDULES:
+            raise ValueError(
+                f"pp {spec.pp} needs a registered pipeline schedule, got "
+                f"{spec.pp_schedule!r}; choose one of "
+                + ", ".join(PP_SCHEDULES)
+            )
+        schedule = PP_SCHEDULES[spec.pp_schedule]
+        flags.extend(
+            (
+                "--parallelism.pipeline-parallel-degree",
+                str(spec.pp),
+                "--parallelism.pipeline-parallel-schedule",
+                schedule.titan_name,
+                "--parallelism.pipeline-parallel-microbatch-size",
+                str(spec.pp_microbatch_size),
+                "--parallelism.pipeline-parallel-first-stage-less-layers",
+                "0",
+                "--parallelism.pipeline-parallel-last-stage-less-layers",
+                "0",
+            )
+        )
+    replicate, shard = titan_mesh(spec)
+    if (replicate, shard) != (1, 1):
+        flags.extend(
+            (
+                "--parallelism.data-parallel-replicate-degree",
+                str(replicate),
+                "--parallelism.data-parallel-shard-degree",
+                str(shard),
+            )
+        )
+    if spec.ep > 1:
+        flags.extend(("--parallelism.expert-parallel-degree", str(spec.ep)))
+    return tuple(flags)
+
+
+def _refuse_parallelism_passthrough(
+    arm: Arm, extra_args: list[str] | tuple[str, ...]
+) -> None:
+    """Refuse a ``--parallelism.*`` token in the TorchTitan passthrough.
+
+    The passthrough lands **after** the block above, and tyro is last-wins on
+    a repeated flag: measured through the fork's own ``ConfigManager``, a
+    trailing ``--parallelism.data-parallel-shard-degree 4`` beats the ``1``
+    the harness delivered. The manifest's ``parallelism`` block would still
+    record ``dp_shard: 1``, so the run would carry a recorded fact its own
+    argv contradicts -- exactly the wrongness this axis exists to prevent.
+
+    The same route also reaches ``--parallelism.tensor-parallel-degree``,
+    which ``ParallelismSpec`` deliberately cannot express, so the spec would
+    no longer describe the mesh at all.
+
+    **Refused, not repaired.** Silently dropping the token would run a
+    command the operator did not ask for, and honoring it would publish a
+    mesh the manifest does not name. The megatron branch already refuses the
+    whole passthrough for a comparable reason.
+
+    Nothing is refused at the trivial spec that was accepted before: the
+    block is empty there, and TorchTitan's own ``ParallelDims`` assert
+    rejects any degree product other than 1 at world size 1. So this closes a
+    path rather than narrowing a working one.
+    """
+    offenders = [
+        token for token in extra_args if token.startswith("--parallelism.")
+    ]
+    if offenders:
+        raise ValueError(
+            f"{arm.name}: {', '.join(offenders)} cannot be passed through: "
+            "the parallelism block is built from --dp/--pp/--ep and recorded "
+            "in the manifest, and a trailing flag would override it while "
+            "the record still named the requested mesh"
+        )
 
 
 def command_for_arm(
@@ -28,18 +153,37 @@ def command_for_arm(
     ac_mode: str = "sac",
     *,
     model_size: str = "1b",
+    parallelism: ParallelismSpec = TRIVIAL_SPEC,
 ) -> list[str]:
     """Build the training command for one arm, dispatching on its launcher.
 
-    ``model_size`` is keyword-only: the six positional parameters are the
-    historical signature and callers pass them positionally.
+    ``model_size`` and ``parallelism`` are keyword-only: the six positional
+    parameters are the historical signature and callers pass them
+    positionally.
+
+    ``parallelism`` defaults to ``TRIVIAL_SPEC`` rather than being required,
+    and the asymmetry with ``manifest_data`` -- which takes its parallelism
+    with no default at all -- is deliberate. A manifest states what a run
+    **was**, so a defaulted value there could publish a parallel run under a
+    single-GPU claim. A command line is **built**, and this default builds
+    the single-GPU command line, which is the identity: it cannot introduce
+    a ``--parallelism.*`` token. ``_resolve_run`` passes the run's own spec
+    explicitly either way.
     """
     if arm.launcher == "megatron":
         return _megatron_command(
-            workload, arm, arm_dir, extra_args, compile_mode, ac_mode, model_size
+            workload,
+            arm,
+            arm_dir,
+            extra_args,
+            compile_mode,
+            ac_mode,
+            model_size,
+            parallelism,
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
+    _refuse_parallelism_passthrough(arm, extra_args)
     uncompiled = compile_mode in UNCOMPILED_COMPILE_MODES
     # CompileConfig.enable is False in the fork, so an uncompiled run omits
     # the flag: there is no negation to pass. The flag keeps its position in
@@ -71,6 +215,8 @@ def command_for_arm(
         str(workload.profiler_active),
         "--profiler.profiler_warmup",
         str(workload.profiler_warmup),
+        # Empty at the trivial spec, so the argv below it is unchanged.
+        *_titan_parallelism_flags(parallelism),
     ]
     if workload.replay_dataloader:
         # The replay loader materializes exactly this many steps of samples
@@ -100,6 +246,7 @@ def _megatron_command(
     compile_mode: str,
     ac_mode: str,
     model_size: str = "1b",
+    parallelism: ParallelismSpec = TRIVIAL_SPEC,
 ) -> list[str]:
     """Launch command for the Megatron baseline driver.
 
@@ -107,7 +254,21 @@ def _megatron_command(
     parameters that cross the seam are the workload sizes, the seed, the
     profiler schedule, and the compile mode (mapped to Megatron's native
     CUDA-graph mechanism by the driver).
+
+    **The driver is single-rank, so a non-trivial spec raises here.** It
+    reads no ``RANK`` and no ``WORLD_SIZE``, it passes no
+    ``pipeline_model_parallel_size`` to ``initialize_model_parallel``, and it
+    splits no batch into microbatches. Building a single-rank command line
+    for a pipelined run would launch one process that trains the whole model
+    and publish it under a ``pp`` label. The refusal is the
+    declaration-without-a-builder pattern this repo already uses: the failure
+    lands on the module that owns the missing work.
     """
+    if parallelism != TRIVIAL_SPEC:
+        raise ValueError(
+            f"{arm.name}: the megatron driver runs one rank; it cannot honor "
+            f"dp {parallelism.dp} x pp {parallelism.pp} (ep {parallelism.ep})"
+        )
     if extra_args:
         raise ValueError(
             f"{arm.name}: TorchTitan passthrough arguments cannot apply to a "

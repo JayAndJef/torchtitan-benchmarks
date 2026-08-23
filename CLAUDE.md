@@ -87,6 +87,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 |---|---|
 | `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans |
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
+| `benchmarks/e2e/parallelism.py` | The parallelism run axis: `ParallelismSpec`, the `PP_SCHEDULES` registry, the four derivations and `validate_parallelism`'s fourteen rules. Parent-side and torch-free |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |
 | `benchmarks/e2e/validation.py` | `validate_arm` and the `ValidationProfile` registry |
@@ -113,7 +114,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/models/piper_qwen3/components/lm_head/` | Vendored TE cross-entropy, Piper-optimized CE, losses |
 | `benchmarks/traces/` | `schema.py` (the `Region` declaration) and `extraction.py` (trace parsing, window and region pooling) |
 | `benchmarks/artifacts/` | On-disk artifacts: `layout.py` (output layout, `trace_files`, `atomic_write_json` -- the only JSON writer), `manifests.py` (the manifest schema and the resume predicate; the one module here coupled to `e2e/`), `run_state.py` (the per-arm ledger) and `summaries.py` (`SampleSummary`, shared by both systems) |
-| `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning), `provenance.py` (`hardware_metadata`, including the two cuDNN fields -- see "Which cuDNN a megatron arm runs"), `events.py` (`RunEvent`, `ProcessRunner`) |
+| `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `devices.py` (`parse_devices`, the `<gpu>` positional read as a device set), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning, one node per device), `provenance.py` (`hardware_metadata`, including the two cuDNN fields -- see "Which cuDNN a megatron arm runs"), `events.py` (`RunEvent`, `ProcessRunner`) |
 | `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), and the two argv-driven trace diagnostics `analyze.py` and `per_block.py` |
 | `tests/` | CPU + GPU unit tests. Deliberately **flat** -- every module does `sys.path.insert(0, <repo root>)` at a fixed depth, and `unittest discover -s tests` needs no `__init__.py` |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
@@ -186,8 +187,30 @@ test. Every one of the four files carries a digest in
 ./run_bench.sh evaluate <out_dir> [--arm NAME]... [--results PATH]
 ```
 
-`<gpu>` is a PCI index. The runner always sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`
-and `NGPU=1`, so runs are single-GPU and the index is stable.
+`<gpu>` is a PCI index, or a comma-separated set of them (`0,1`). The runner
+always sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so the index is stable, and it
+sets `NGPU` to the requested world size. `benchmarks/execution/devices.py`'s
+`parse_devices` is what says whether the string is a legal device set; it
+accepts decimal indices separated by single commas and refuses everything
+else, including a repeat. **A `GPU-<uuid>` is refused**, which both
+`nvidia-smi --id=` and `CUDA_VISIBLE_DEVICES` accept and which is the only
+spelling that selects a MIG instance -- widen the grammar before running on
+a MIG host. The string itself is never rewritten: it reaches
+`CUDA_VISIBLE_DEVICES` and `hardware_metadata.requested_gpu` exactly as
+typed. `kernel-bench` refuses more than one device.
+
+`run 0,1` used to run **one** GPU -- `NGPU` was 1, so training took the
+first visible device while the manifest recorded `"0,1"`. That is a wrong
+recorded fact rather than a missing one, and it now fails.
+
+**Every run is still single-GPU.** Two refusals stand between an operator
+and a second rank, and they give different messages. A bare `run 0,1` dies
+at parallelism rule 1, which compares `dp * pp` against the device count:
+"parallelism world size 1 (dp 1 x pp 1) does not match the 2 device(s)
+requested". A `run 0,1 --pp 2 --pp-schedule 1F1B` passes every rule and then
+dies at `_resolve_run`'s own refusal, because neither engine starts a second
+rank yet and such a run would train the whole model in one process under a
+parallel label. Both land before any host probe.
 
 - `run` executes and validates only. `run-all` also evaluates and writes
   `results.json`.
@@ -222,6 +245,19 @@ Shared options, with env equivalents:
 | `--compile-mode` | `COMPILE_MODE` | `default` |
 | `--ac` | `AC_MODE` | `sac` |
 | `--model-size` | `MODEL_SIZE` | `normal` |
+| `--dp` | -- | 1 |
+| `--pp` | -- | 1 |
+| `--ep` | -- | 1 |
+| `--pp-schedule` | -- | none |
+| `--pp-microbatch-size` | -- | 1 |
+
+**The five parallelism options take no environment variable, and the three
+axes above them do.** Each parallelism value has to agree with the `<gpu>`
+positional, and a positional has no environment form; an exported `PP=2`
+would make a plain `run 0 --scenario X` fail its own world-size check. The
+degrees, the schedule registry and the fourteen rules that refuse an illegal
+set live in `benchmarks/e2e/parallelism.py`; read that module, not this
+table, for what a combination means.
 
 **`--scenario` has no default, and an omitted one fails the run.** A default
 scenario can only be reached by an omission, and it would then measure one
@@ -611,7 +647,7 @@ sets `replay_dataloader=True` and `command_for_arm` delivers
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 9: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, execution_model, hardware_metadata
+  manifest.json     # schema 10: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 4: throughput, memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -678,9 +714,12 @@ leave zero `/usr/lib64/libcudnn` mappings.
 The training step is host-bound at benchmark sizes, so unpinned runs measure
 scheduler placement, not kernels. The runner therefore binds each training
 process to the GPU's own NUMA node with `numactl --cpunodebind --membind`,
-resolved from the GPU's PCI bus id via sysfs. When that cannot be resolved
-(no `numactl`, unknown bus id, or the device reports no NUMA affinity) the
-run proceeds unpinned and `cpu_pinning` records why. Pinned and unpinned runs
+resolved from the GPU's PCI bus id via sysfs, once per requested device.
+When that cannot be resolved (no `numactl`, unknown bus id, the device
+reports no NUMA affinity, or the requested devices sit on **different**
+nodes) the run proceeds unpinned and `cpu_pinning` records why. One
+`numactl` prefix leads one command line, so a set that spans nodes cannot be
+pinned without binding every rank to one node. Pinned and unpinned runs
 are not comparable; `--resume` refuses to mix them.
 
 ### Validation
@@ -734,14 +773,24 @@ wrongness. Never work around them by relaxing the check.
 skips those that already pass, archives partial artifacts under `attempts/`,
 and re-runs the rest. It aborts if any of these changed since the manifest was
 written: scenario, workload, selected arms, hardware label, extra TorchTitan
-args, `compile_mode`, `ac_mode`, `model_size`, `nvidia_smi`, `cpu_pinning`,
-`torchtitan_git_rev`, `benchmarks_git_rev`, `megatron_git_rev`. A different
-GPU or a different commit will not resume -- that is intentional. Omitting
-`--compile-mode`, `--ac`, or `--model-size` on a resume inherits the
-recorded value; passing a different one is refused. Schema <= 8 manifests
-carry no `model_size` and resume as `normal`; schema <= 7 manifests cannot be
-resumed by this code at all (they record pre-rename mode names and imply
-`ac=sac`).
+args, `compile_mode`, `ac_mode`, `model_size`, `parallelism`, `nvidia_smi`,
+`cpu_pinning`, `torchtitan_git_rev`, `benchmarks_git_rev`,
+`megatron_git_rev`. A different GPU or a different commit will not resume --
+that is intentional. Omitting `--compile-mode`, `--ac`, or `--model-size` on
+a resume inherits the recorded value; passing a different one is refused.
+Schema <= 8 manifests carry no `model_size` and resume as `normal`; schema
+<= 7 manifests cannot be resumed by this code at all (they record pre-rename
+mode names and imply `ac=sac`).
+
+**`parallelism` does not inherit, and the asymmetry is deliberate.** The
+three axes above are single strings, so a resume can read one back and
+rebuild the run from it. A spec is five fields that together decide every
+arm's command line, and `--resume` compares no command line -- so a
+reconstruction that dropped one field would relaunch the arms differently
+and the gate would not see it. Omitting the flags on a resume therefore asks
+for the trivial spec, which matches every schema <= 9 directory (they carry
+no `parallelism` key and are read through the trivial record) and is refused
+against any other.
 
 ### Evaluation
 

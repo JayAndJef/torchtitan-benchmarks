@@ -57,6 +57,7 @@ import click
 from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
+from benchmarks.e2e.parallelism import PP_SCHEDULE_CHOICES, ParallelismSpec
 from benchmarks.e2e.registry import (
     AC_MODES,
     COMPILE_MODES,
@@ -76,6 +77,25 @@ PASSTHROUGH_CONTEXT = {
 
 
 def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
+    """The option block ``run`` and ``run-all`` share.
+
+    **The five parallelism options take no environment variable, and the
+    three older axes do.** The asymmetry is deliberate and the reason is
+    specific: each parallelism value has to agree with the ``<gpu>``
+    positional, which names the device set, and a positional has no
+    environment form. An exported ``PP=2`` would therefore make a plain
+    ``run 0 --scenario X`` fail its own world-size check -- rule 1 of
+    ``benchmarks/e2e/parallelism.py`` compares ``dp * pp`` against the number
+    of devices requested -- and the operator would see a refusal naming a
+    flag they did not pass. ``COMPILE_MODE``, ``AC_MODE`` and ``MODEL_SIZE``
+    have no such partner and stay exported.
+
+    Each of the five defaults to ``None``, meaning "not requested", exactly
+    as ``--model-size`` does: ``_request`` builds a ``ParallelismSpec`` only
+    when at least one was given, so an untouched command line reaches
+    ``_resolve_run`` with ``parallelism=None`` and resolves to the trivial
+    spec.
+    """
     options = [
         click.option(
             "--scenario",
@@ -150,10 +170,88 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "comparable within one size."
             ),
         ),
+        # The five parallelism options. No envvar on any of them; the
+        # docstring above gives the reason.
+        click.option(
+            "--dp",
+            "dp",
+            type=click.IntRange(min=1),
+            help=(
+                "Data-parallel degree [default: 1]. dp x pp must equal the "
+                "number of devices in the <gpu> argument."
+            ),
+        ),
+        click.option(
+            "--pp",
+            "pp",
+            type=click.IntRange(min=1),
+            help=(
+                "Pipeline-parallel degree [default: 1]. Above 1 it needs "
+                "--pp-schedule."
+            ),
+        ),
+        click.option(
+            "--ep",
+            "ep",
+            type=click.IntRange(min=1),
+            help=(
+                "Expert-parallel degree [default: 1]. Declared and refused; "
+                "ep takes its ranks out of the dp axis."
+            ),
+        ),
+        click.option(
+            "--pp-schedule",
+            "pp_schedule",
+            type=click.Choice(PP_SCHEDULE_CHOICES),
+            help="Pipeline schedule; required at --pp above 1.",
+        ),
+        click.option(
+            "--pp-microbatch-size",
+            "pp_microbatch_size",
+            type=click.IntRange(min=1),
+            help=(
+                "Rows per pipeline microbatch [default: 1]. The local batch "
+                "size must divide by it."
+            ),
+        ),
     ]
     for option in reversed(options):
         command = option(command)
     return command
+
+
+# The five option names that make up one ``ParallelismSpec``, paired with
+# the spec's own default for each. ``_parallelism`` pops all five, so a
+# renamed option here is a renamed keyword there and nowhere else.
+_PARALLELISM_OPTIONS = (
+    ("dp", 1),
+    ("pp", 1),
+    ("ep", 1),
+    ("pp_schedule", None),
+    ("pp_microbatch_size", 1),
+)
+
+
+def _parallelism(options: dict[str, Any]) -> ParallelismSpec | None:
+    """Pop the five parallelism options and build the spec they describe.
+
+    Returns ``None`` when the operator gave none of them, which is what
+    ``RunRequest.parallelism`` reads as "not requested". A spec built from
+    all five defaults would be the same object, but ``None`` is what lets a
+    later reader tell an untouched command line from one that asked for the
+    trivial spec by name.
+    """
+    given = {
+        name: options.pop(name, None) for name, _ in _PARALLELISM_OPTIONS
+    }
+    if all(value is None for value in given.values()):
+        return None
+    return ParallelismSpec(
+        **{
+            name: (given[name] if given[name] is not None else default)
+            for name, default in _PARALLELISM_OPTIONS
+        }
+    )
 
 
 def _request(
@@ -166,11 +264,13 @@ def _request(
 ) -> RunRequest:
     # Popped before the ``**options`` expansion below, which must not see it.
     scenario_name = options.pop("scenario")
+    parallelism = _parallelism(options)
     return RunRequest(
         gpu=gpu,
         scenario_name=scenario_name,
         arm_name=arm_name,
         resume_dir=resume_dir,
+        parallelism=parallelism,
         extra_args=(
             None if resume_dir is not None and not torchtitan_args else torchtitan_args
         ),

@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
 from benchmarks.e2e.registry import SCENARIOS, scenario_by_name
 from benchmarks.e2e.validation import VALIDATION_PROFILES
 from benchmarks.execution.paths import BENCH_DIR, TITAN_DIR
@@ -636,6 +637,63 @@ def _golden_titan_command(size: str) -> list[str]:
     ]
 
 
+# The same arm at pp 2, under the modes a real pipeline run would use:
+# --compile-mode default (rule 13 refuses cuda-graph above world size 1) and
+# --ac none (the scenario supports nothing else).
+#
+# **This golden exists to freeze the two ``less-layers 0`` flags.** TorchTitan
+# defaults ``pipeline_parallel_first_stage_less_layers`` and its ``last`` twin
+# to 1, which counts the embedding and the output head as layers; at 4 stages
+# that splits 16 layers [4, 5, 4, 3] where weight 0 splits [4, 4, 4, 4], and
+# Megatron always divides evenly. Rule 7 of benchmarks/e2e/parallelism.py
+# assumes the weight-0 arithmetic, so an upstream default change must break a
+# test here rather than a split at run time.
+GOLDEN_TITAN_PP2_SPEC = ParallelismSpec(pp=2, pp_schedule="1F1B")
+
+
+def _golden_titan_pp2_command(size: str) -> list[str]:
+    return [
+        "./run_train.sh",
+        "--module",
+        TITAN_CONFIG_MODULE,
+        "--config",
+        "qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+        "--config-arg",
+        f"size={size}",
+        "--training.seq-len",
+        "1024",
+        "--training.steps",
+        "40",
+        "--training.local-batch-size",
+        "4",
+        "--compile.enable",
+        "--profiler.enable_profiling",
+        "--profiler.profile_freq",
+        "20",
+        "--profiler.profiler_active",
+        "5",
+        "--profiler.profiler_warmup",
+        "5",
+        "--parallelism.pipeline-parallel-degree",
+        "2",
+        "--parallelism.pipeline-parallel-schedule",
+        "1F1B",
+        "--parallelism.pipeline-parallel-microbatch-size",
+        "1",
+        "--parallelism.pipeline-parallel-first-stage-less-layers",
+        "0",
+        "--parallelism.pipeline-parallel-last-stage-less-layers",
+        "0",
+        "--dataloader.replay-steps",
+        "40",
+        "--debug.seed",
+        "42",
+        "--dump-folder",
+        "/tmp/arm-dir",
+        "activation-checkpoint:none",
+    ]
+
+
 # The plain path, and the only golden that carries an override: no seed, no
 # replay loader, no --compile.mode, no trailing ac token.
 GOLDEN_OVERRIDE_ARM = ("piper1b_swiglu", "piper_optimized_inductor")
@@ -699,8 +757,13 @@ def _golden_megatron_tail(size: str) -> list[str]:
 
 
 class GoldenCommandTests(unittest.TestCase):
-    def _command(self, pinned, size, compile_mode, ac_mode) -> list[str]:
+    def _command(
+        self, pinned, size, compile_mode, ac_mode, parallelism=None
+    ) -> list[str]:
         scenario = scenario_by_name(pinned[0])
+        # Omitted rather than passed when no spec is named, so these calls
+        # keep exercising the default the pre-parallelism callers get.
+        extra = {} if parallelism is None else {"parallelism": parallelism}
         return command_for_arm(
             scenario.workload,
             scenario.arm(pinned[1]),
@@ -709,6 +772,7 @@ class GoldenCommandTests(unittest.TestCase):
             compile_mode,
             ac_mode,
             model_size=size,
+            **extra,
         )
 
     def test_titan_argv_at_normal(self) -> None:
@@ -747,6 +811,206 @@ class GoldenCommandTests(unittest.TestCase):
         command = self._command(GOLDEN_MEGATRON_ARM, "huge", "default", "none")
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(command[1:], _golden_megatron_tail("huge"))
+
+    # ----------------------------------------------------------------
+    # The parallelism axis, read mechanically rather than by eye.
+    # ----------------------------------------------------------------
+
+    def test_the_trivial_spec_argv_is_the_pre_parallelism_argv(self) -> None:
+        """No ``--parallelism.*`` token exists at the trivial spec.
+
+        Every arm of every scenario, and both ways of asking: omitting the
+        argument and naming ``TRIVIAL_SPEC``. The goldens above pin two argv
+        exactly; this pins the property they stand for over the whole
+        registry, so nobody has to read a list to check it.
+        """
+        for scenario in SCENARIOS.values():
+            for arm in scenario.arms:
+                with self.subTest(scenario=scenario.name, arm=arm.name):
+                    megatron = arm.launcher == "megatron"
+                    positional = (
+                        scenario.workload,
+                        arm,
+                        Path("/tmp/arm-dir"),
+                        (),
+                        "default",
+                        "none" if megatron else "sac",
+                    )
+                    omitted = command_for_arm(*positional)
+                    named = command_for_arm(
+                        *positional, parallelism=TRIVIAL_SPEC
+                    )
+                    self.assertEqual(omitted, named)
+                    self.assertEqual(
+                        [
+                            token
+                            for token in omitted
+                            if token.startswith("--parallelism.")
+                        ],
+                        [],
+                    )
+
+    def test_titan_pp2_argv_freezes_the_two_less_layers_flags(self) -> None:
+        for size in ("normal", "huge"):
+            with self.subTest(size=size):
+                self.assertEqual(
+                    self._command(
+                        GOLDEN_TITAN_ARM,
+                        size,
+                        "default",
+                        "none",
+                        GOLDEN_TITAN_PP2_SPEC,
+                    ),
+                    _golden_titan_pp2_command(size),
+                )
+
+    def test_the_only_difference_between_pp1_and_pp2_is_the_parallelism_block(
+        self,
+    ) -> None:
+        pp1 = self._command(GOLDEN_TITAN_ARM, "normal", "default", "none")
+        pp2 = self._command(
+            GOLDEN_TITAN_ARM, "normal", "default", "none", GOLDEN_TITAN_PP2_SPEC
+        )
+        # Drop each --parallelism.* flag together with the value after it.
+        stripped, block, skip = [], [], False
+        for token in pp2:
+            if skip:
+                block.append(token)
+                skip = False
+                continue
+            if token.startswith("--parallelism."):
+                block.append(token)
+                skip = True
+                continue
+            stripped.append(token)
+        self.assertEqual(stripped, pp1)
+        self.assertEqual(
+            block,
+            [
+                "--parallelism.pipeline-parallel-degree",
+                "2",
+                "--parallelism.pipeline-parallel-schedule",
+                "1F1B",
+                "--parallelism.pipeline-parallel-microbatch-size",
+                "1",
+                "--parallelism.pipeline-parallel-first-stage-less-layers",
+                "0",
+                "--parallelism.pipeline-parallel-last-stage-less-layers",
+                "0",
+            ],
+        )
+
+    def test_a_data_parallel_argv_always_carries_the_shard_degree(self) -> None:
+        """The flag is not optional, and an omission would be silent.
+
+        ``data_parallel_shard_degree`` defaults to **-1** in TorchTitan
+        (``config/configs.py``), which resolves to every remaining rank. A dp
+        2 run that omitted the flag would therefore run ZeRO-3 rather than
+        the intended replication, and neither the log nor the manifest would
+        say so.
+        """
+        command = self._command(
+            GOLDEN_TITAN_ARM, "normal", "default", "none", ParallelismSpec(dp=2)
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.data-parallel-shard-degree") + 1
+            ],
+            "1",
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.data-parallel-replicate-degree") + 1
+            ],
+            "2",
+        )
+
+    def test_an_expert_argv_carries_the_shard_degree_too(self) -> None:
+        """The pair is gated on the mesh, not on ``dp``.
+
+        ``titan_mesh`` moves the shard degree for an expert-parallel run, so
+        a ``dp``-gated test would emit the expert degree with no shard
+        degree and TorchTitan's -1 default would take every remaining rank.
+        Rule 14 refuses ``ep > 1`` today; this pins the command builder so
+        the day it lifts is not the day a run silently becomes ZeRO-3.
+        """
+        command = self._command(
+            GOLDEN_TITAN_ARM,
+            "normal",
+            "default",
+            "none",
+            ParallelismSpec(dp=2, ep=2),
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.data-parallel-shard-degree") + 1
+            ],
+            "2",
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.data-parallel-replicate-degree") + 1
+            ],
+            "1",
+        )
+        self.assertEqual(
+            command[command.index("--parallelism.expert-parallel-degree") + 1],
+            "2",
+        )
+
+    def test_a_parallelism_flag_cannot_be_passed_through(self) -> None:
+        """tyro is last-wins, so the passthrough would beat the built block.
+
+        Measured through the fork's own ConfigManager: a trailing
+        ``--parallelism.data-parallel-shard-degree 4`` resolves to 4 over the
+        harness's own 1, while the manifest still records ``dp_shard: 1``.
+        """
+        scenario = scenario_by_name(GOLDEN_OVERRIDE_ARM[0])
+        for token in (
+            "--parallelism.data-parallel-shard-degree",
+            "--parallelism.tensor-parallel-degree=4",
+        ):
+            with self.subTest(token=token):
+                with self.assertRaisesRegex(ValueError, "cannot be passed"):
+                    command_for_arm(
+                        scenario.workload,
+                        scenario.arm(GOLDEN_OVERRIDE_ARM[1]),
+                        Path("/tmp/arm-dir"),
+                        (token, "4"),
+                    )
+        # Every other passthrough argument still reaches the command line.
+        command = command_for_arm(
+            scenario.workload,
+            scenario.arm(GOLDEN_OVERRIDE_ARM[1]),
+            Path("/tmp/arm-dir"),
+            ("--debug.deterministic",),
+        )
+        self.assertIn("--debug.deterministic", command)
+
+    def test_a_pipeline_without_a_schedule_names_the_flag(self) -> None:
+        with self.assertRaisesRegex(ValueError, "registered pipeline schedule"):
+            self._command(
+                GOLDEN_TITAN_ARM,
+                "normal",
+                "default",
+                "none",
+                ParallelismSpec(pp=2),
+            )
+
+    def test_the_megatron_command_refuses_a_non_trivial_spec(self) -> None:
+        """The driver is single-rank, so it says so rather than launching.
+
+        A single-rank argv built for a pipelined run would train the whole
+        model in one process and be published under a pp label.
+        """
+        with self.assertRaisesRegex(ValueError, "one rank"):
+            self._command(
+                GOLDEN_MEGATRON_ARM,
+                "normal",
+                "default",
+                "none",
+                GOLDEN_TITAN_PP2_SPEC,
+            )
 
     def test_the_megatron_driver_module_is_importable_as_a_module(self) -> None:
         # python -m needs the module to exist under the runner's PYTHONPATH;
@@ -1291,8 +1555,14 @@ TEST_CENSUS = {
     # guard, the four derivations, and the schedule registry checked against
     # the PyTorch classes it names.
     "test_parallelism": 85,
+    # The axis threaded through the harness, still on one GPU. The <gpu>
+    # positional read as a device set, the five CLI options and the
+    # environment variable none of them takes, the child environment, the
+    # multi-device provenance query and NUMA walk, manifest schema 10 both
+    # ways, and the two refusals _resolve_run now makes.
+    "test_parallelism_plumbing": 42,
 }
-TEST_CENSUS_TOTAL = 1296
+TEST_CENSUS_TOTAL = 1338
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
