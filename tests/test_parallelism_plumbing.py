@@ -411,9 +411,9 @@ class ManifestSchemaTenTests(unittest.TestCase):
             parallelism=parallelism,
         )
 
-    def test_the_schema_is_ten(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 10)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 10)
+    def test_the_schema_is_eleven(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 11)
+        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 11)
 
     def test_the_trivial_spec_round_trips_through_json(self) -> None:
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))

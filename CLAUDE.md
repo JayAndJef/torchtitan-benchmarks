@@ -647,9 +647,9 @@ sets `replay_dataloader=True` and `command_for_arm` delivers
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 10: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism, execution_model, hardware_metadata
+  manifest.json     # schema 11: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism, throughput_definition, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
-  results.json      # schema 4: throughput, memory, gpu_time, region stats, significance
+  results.json      # schema 5: throughput (per rank), memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
   <arm>/profiling/traces/iteration_*/rank<n>_trace.json.gz
   attempts/<ts>/<arm>/   # archived artifacts from a failed prior attempt
@@ -805,6 +805,36 @@ Requires `baseline` among the arms. Reports:
   so prefer it to tokens/s -- but it is **not autotuning-immune**, and on
   arms that differ in one component it is not evidence. See the next
   section before ranking anything with it.
+
+**Every tokens/s figure is PER DEVICE, and the published one is the
+MINIMUM over ranks.** Both engines divide one rank's own token count by
+`cp * tp * pp`: the ranks of one pipeline share a batch, and each
+data-parallel rank reads a batch of its own, so the data-parallel degree is
+absent from the divisor. The manifest records this in
+`throughput_definition`, because tensor and context parallelism would each
+move the divisor again and an old directory cannot otherwise say which
+definition produced its numbers. **At one rank the divisor is 1**, so every
+figure this repo has published is unmoved.
+
+The reduction is a minimum for the reason the trace reduction is a maximum:
+a schedule holds the ranks in step, so the mesh runs at the pace of its
+slowest participant and a mean would report a rate no device achieved. A
+rank whose log holds no stable sample sorts last rather than winning as a
+zero -- "no sample" is a measurement that did not happen. `results.json`
+carries `rank_reduction`, `published_rank`, `ranks`, `per_rank` and
+`tokens_per_second_global` (the published figure times the world size)
+beside it, and evaluation **warns when the ranks spread more than 1.15x**,
+in the style of the launch-latency warning: that wide, one rank is starved
+or the ranks are not running one job.
+
+**The loss and grad-norm trajectories come from one rank, not from every
+rank concatenated.** TorchTitan computes the loss on the last pipeline stage
+and every rank still prints a step line, so a first-stage rank's line
+carries its own local value; `loss_visible_rank` is TorchTitan's own
+`_get_metrics_rank` arithmetic, `(world_size // pp) * (pp - 1)`, and the
+megatron driver satisfies it by broadcasting the last stage's loss. It is
+right for the two schedules this repo runs and **not** for `ZBVZeroBubble`,
+which parallelism rule 5 refuses for any run holding a megatron arm.
 
 **Every trace figure is read per rank, and the published one is the
 MAXIMUM over ranks. It is never the mean.** One rank is one process on one

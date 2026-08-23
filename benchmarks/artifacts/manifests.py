@@ -92,7 +92,23 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 10
+MANIFEST_SCHEMA_VERSION = 11
+
+# What the ``tps`` figure in every step log line, and therefore
+# ``stable_tokens_per_second`` in ``results.json``, counts.
+#
+# Both engines divide one rank's own token count by ``cp * tp * pp``: the
+# ranks of one pipeline share a batch, and each data-parallel rank reads a
+# batch of its own, so the data-parallel degree is absent from the divisor
+# and the value is per device either way. Recorded rather than assumed
+# because tensor and context parallelism would each move the divisor again,
+# and a reader of an old directory cannot tell which definition produced its
+# numbers.
+#
+# It is not resume-gated. The value follows from this code rather than from
+# an operator's choice, so two directories written by one revision cannot
+# disagree, and gating a constant would refuse nothing.
+THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
 
 
 def _parallelism_record(
@@ -152,6 +168,7 @@ def manifest_data(
         "model_size": model_size,
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
         "parallelism": _parallelism_record(scenario, parallelism),
+        "throughput_definition": THROUGHPUT_DEFINITION,
         "execution_model": EXECUTION_MODEL,
     }
 

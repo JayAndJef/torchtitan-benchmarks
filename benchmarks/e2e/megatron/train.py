@@ -139,6 +139,25 @@ def pipeline_settings(args: argparse.Namespace) -> tuple[int, int]:
     return args.pp_microbatch_size, args.batch // args.pp_microbatch_size
 
 
+def tokens_per_second(
+    local_tokens_per_step: int, elapsed_seconds: float, pipeline_degree: int
+) -> int:
+    """Tokens per second PER DEVICE, which is the published figure.
+
+    TorchTitan reports the same quantity: ``metrics.py`` divides a rank's own
+    token count by ``non_data_parallel_size``, which is ``cp * tp * pp``. The
+    ranks of one pipeline share a batch, so this rank's tokens have to be
+    divided by the pipeline degree. The data-parallel degree is absent from
+    the divisor because each data-parallel rank reads a batch of its own.
+
+    **At ``pipeline_degree`` 1 the divisor is 1**, so the value is exactly
+    the value this driver has always printed and no published number moves.
+    """
+    if pipeline_degree < 1:
+        raise ValueError(f"pipeline degree {pipeline_degree} must be >= 1")
+    return round(local_tokens_per_step / (elapsed_seconds * pipeline_degree))
+
+
 def refuse_unsupported_pipeline(args: argparse.Namespace, world_size: int) -> None:
     """Reject a pipeline request this driver cannot honor, before it builds.
 
@@ -332,6 +351,17 @@ def main(argv: list[str] | None = None) -> None:
         microbatch_data[start : start + num_microbatches]
         for start in range(0, len(microbatch_data), num_microbatches)
     ]
+    # The tokens this rank reads per step, and the tokens the whole job
+    # retires per step. They are equal here because the ranks of one pipeline
+    # share a batch; a data-parallel degree would multiply the global figure
+    # and leave the local one alone. Printed so a reader can recover the
+    # job's rate from the per-device rate the step lines carry.
+    local_tokens_per_step = args.batch * args.seq_len
+    print(
+        f"tokens_per_step_global: {local_tokens_per_step} "
+        f"(dp 1 x batch {args.batch} x seq_len {args.seq_len})",
+        flush=True,
+    )
     print(
         f"Materialized {len(step_data)} steps of c4_test batches "
         f"({args.batch}x{args.seq_len}, {num_microbatches} microbatch(es) of "
@@ -591,7 +621,9 @@ def main(argv: list[str] | None = None) -> None:
                 parameter.main_grad.zero_()
 
             now = time.perf_counter()
-            tps = round(args.batch * args.seq_len / (now - last_time))
+            tps = tokens_per_second(
+                local_tokens_per_step, now - last_time, args.pp
+            )
             last_time = now
             reserved = torch.cuda.max_memory_reserved()
             torch.cuda.reset_peak_memory_stats()

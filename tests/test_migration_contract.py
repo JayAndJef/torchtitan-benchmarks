@@ -1598,8 +1598,13 @@ TEST_CENSUS = {
     # engines derive the same microbatch count, and that a profile which can
     # prove nothing refuses the run.
     "test_parallel_validation": 22,
+    # What a tokens/s figure counts, at the three places that decide it: the
+    # megatron driver's own arithmetic, the manifest key that records the
+    # definition, and evaluation's min-over-ranks publication with its
+    # per-rank rows and its spread warning.
+    "test_throughput": 24,
 }
-TEST_CENSUS_TOTAL = 1390
+TEST_CENSUS_TOTAL = 1414
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

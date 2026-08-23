@@ -765,7 +765,7 @@ class ManifestTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 10)
+        self.assertEqual(manifest["schema_version"], 11)
         self.assertEqual(manifest["compile_mode"], "cuda-graph")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
@@ -840,7 +840,7 @@ class UncompiledRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 10)
+        self.assertEqual(manifest["schema_version"], 11)
         self.assertEqual(manifest["compile_mode"], "none")
         # Region pooling reads Inductor's compiled-graph annotations, and an
         # eager run emits none. The run says so rather than declare a region

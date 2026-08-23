@@ -563,9 +563,9 @@ class PublishedNumberIsTheMaximumTests(unittest.TestCase):
         self.assertIn("MAX over ranks, never the mean", report)
         self.assertIn("per-rank gpu time", report)
 
-    def test_the_written_file_declares_schema_four(self) -> None:
+    def test_the_written_file_declares_schema_five(self) -> None:
         machine = self.result.to_dict()
-        self.assertEqual(machine["schema_version"], 4)
+        self.assertEqual(machine["schema_version"], 5)
         gpu = machine["gpu_time"]["baseline"]
         self.assertEqual(gpu["ranks"], [0, 1])
         self.assertEqual([row["rank"] for row in gpu["per_rank"]], [0, 1])
@@ -708,7 +708,7 @@ class LegacyInertnessTests(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 8)
         self.assertEqual(manifest["scenario"], "piper1b_qkv")
         self.assertEqual(self.recorded["schema_version"], 3)
-        self.assertEqual(self.result.to_dict()["schema_version"], 4)
+        self.assertEqual(self.result.to_dict()["schema_version"], 5)
 
     def test_the_widened_glob_finds_exactly_what_the_old_one_found(self) -> None:
         arm_dir = self.out_dir / "baseline"
