@@ -50,6 +50,14 @@ os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 # Keep in sync.
 MODE_LINE = "Megatron-LM training loop (mode={mode}, cuda_graph_impl={impl})"
 FUSION_LINE = "Megatron fusions: {state}"
+# What arm rule 12 matches. Every rank prints it, and it states what this
+# process really resolved rather than what it was asked for: the degrees come
+# from the environment and the microbatch count from pipeline_settings. A run
+# that ignored the flags therefore cannot produce it.
+PARALLELISM_LINE = (
+    "Megatron-LM parallelism: dp={dp} pp={pp} schedule={schedule} "
+    "microbatches={microbatches} stages={stages}"
+)
 
 # Megatron's per-layer partial-capture recipe for MoE models: the router and
 # dispatch preprocessing are graphed (MoETransformerLayer's partial mode);
@@ -221,6 +229,20 @@ def main(argv: list[str] | None = None) -> None:
         f"{CUDA_GRAPH_IMPL}:{'+'.join(CUDA_GRAPH_MODULES)}" if graphs else "none"
     )
     print(MODE_LINE.format(mode=args.mode, impl=impl), flush=True)
+    print(
+        PARALLELISM_LINE.format(
+            # No data-parallel path here, and refuse_unsupported_pipeline has
+            # already refused a world size that is not the pipeline degree.
+            dp=1,
+            pp=args.pp,
+            schedule=args.pp_schedule,
+            microbatches=num_microbatches,
+            # 1F1B is the one schedule this driver runs, and it gives each
+            # rank one stage.
+            stages=args.pp,
+        ),
+        flush=True,
+    )
     # The MFU/tflops denominator, printed so the report has an audit trail.
     print(
         f"num_flops_per_token: {num_flops_per_token:,} "

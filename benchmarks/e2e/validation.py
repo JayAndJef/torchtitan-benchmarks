@@ -18,6 +18,12 @@ checked against exactly the text it was checked against before.
 A rank that wrote nothing is in neither the log split nor the trace
 grouping, so no rule fires for it. The declared world size is what makes
 that visible, and it is why this module takes a ``ParallelismSpec``.
+
+**Arm rule 12 is the other half of that spec.** Both engines log what mesh
+they really built, and a run that ignored the ``--parallelism.*`` flags --
+or a driver that read no ``RANK`` -- passes every other rule while training
+something else. The rule is consulted only above one rank, where there is a
+mesh to get wrong.
 """
 
 from __future__ import annotations
@@ -29,7 +35,13 @@ from pathlib import Path
 from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
-from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
+from benchmarks.e2e.parallelism import (
+    PP_SCHEDULES,
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    n_microbatches,
+    titan_mesh,
+)
 from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
     TORCH_COMPILE_MODE,
@@ -63,6 +75,13 @@ class ValidationProfile:
     switch for, which is a statement that the engine cannot run uncompiled at
     all; ``validate_arm`` then refuses such a run rather than publishing a
     treatment nothing checked.
+
+    ``parallelism_markers`` is arm rule 12: the log lines that prove this
+    engine really ran the requested mesh. It is a callable rather than a
+    string because every value in those lines comes from the spec and the
+    workload. An empty tuple means this engine logs nothing that proves this
+    spec, and ``validate_arm`` then refuses the run rather than publishing a
+    mesh nothing checked -- the same shape as ``compiled_marker`` above.
     """
 
     completion_marker: str
@@ -71,6 +90,67 @@ class ValidationProfile:
     failure_markers: tuple[str, ...]
     check_ac_line: bool
     check_regions: bool
+    parallelism_markers: Callable[
+        [ParallelismSpec, Workload], tuple[str, ...]
+    ]
+
+
+def _titan_parallelism_markers(
+    spec: ParallelismSpec, workload: Workload
+) -> tuple[str, ...]:
+    """What TorchTitan logs about the mesh it really built.
+
+    The first line comes from ``ParallelDims``, which TorchTitan builds from
+    the command line it was given, so it states the degrees that took effect
+    rather than the ones the harness asked for -- and it names ``cp`` and
+    ``tp``, which ``ParallelismSpec`` cannot express and which must therefore
+    both read 1.
+
+    The second is the pipeline schedule and the microbatch count, and it is
+    the one that catches the hazard this axis carries: two engines that agree
+    on the split but disagree on how many microbatches they move through it
+    would publish two different schedules under one label.
+    """
+    replicate, shard = titan_mesh(spec)
+    markers = [
+        f"Building device mesh with parallelism: pp={spec.pp}, "
+        f"dp_replicate={replicate}, dp_shard={shard}, cp=1, tp=1, "
+        f"ep={spec.ep}"
+    ]
+    if spec.pp > 1:
+        schedule = PP_SCHEDULES[spec.pp_schedule]
+        microbatches = n_microbatches(
+            spec, local_batch_size=workload.local_batch_size
+        )
+        markers.append(
+            f"Using pipeline schedule {schedule.titan_name} with "
+            f"{microbatches} microbatches and "
+            f"{spec.pp * schedule.stages_per_rank} stages"
+        )
+    return tuple(markers)
+
+
+def _megatron_parallelism_markers(
+    spec: ParallelismSpec, workload: Workload
+) -> tuple[str, ...]:
+    """``benchmarks.e2e.megatron.train.PARALLELISM_LINE``. Keep in sync.
+
+    The driver prints what it resolved: the degrees from the environment and
+    the microbatch count from its own ``pipeline_settings``. The count here
+    is ``n_microbatches``, and the two agree at every ``pp`` above 1, which
+    is the only place this rule is consulted. At ``pp`` 1 they differ on
+    purpose -- the driver runs one pack and ``n_microbatches`` describes a
+    split neither engine performs -- and a megatron arm cannot reach world
+    size above 1 at ``pp`` 1, because that driver has no data-parallel path.
+    """
+    microbatches = n_microbatches(
+        spec, local_batch_size=workload.local_batch_size
+    )
+    return (
+        f"Megatron-LM parallelism: dp={spec.dp} pp={spec.pp} "
+        f"schedule={spec.pp_schedule} microbatches={microbatches} "
+        f"stages={spec.pp}",
+    )
 
 
 VALIDATION_PROFILES = {
@@ -87,6 +167,7 @@ VALIDATION_PROFILES = {
         failure_markers=("falling back to the PyTorch",),
         check_ac_line=True,
         check_regions=True,
+        parallelism_markers=_titan_parallelism_markers,
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -103,6 +184,7 @@ VALIDATION_PROFILES = {
         failure_markers=(),
         check_ac_line=False,
         check_regions=False,
+        parallelism_markers=_megatron_parallelism_markers,
     ),
 }
 
@@ -131,8 +213,9 @@ def _validate_log(
     compile_mode: str,
     ac_mode: str,
     model_size: str,
+    parallelism_markers: tuple[str, ...] = (),
 ) -> None:
-    """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10 and 11.
+    """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
 
     Every one of them is a statement about a process. Read against the whole
     file they become "some rank did this", which is the weaker question -- a
@@ -214,6 +297,15 @@ def _validate_log(
                 f"{arm.name}: silent fallback marker {marker!r} found in the "
                 f"log{where}"
             )
+    # Arm rule 12. Empty at the trivial spec, where there are no parallelism
+    # flags to ignore. Every rank logs these, because neither engine guards
+    # the line on the rank.
+    for marker in parallelism_markers:
+        if marker not in log:
+            raise RuntimeError(
+                f"{arm.name}: the requested parallelism did not apply; the "
+                f"engine never logged {marker!r}{where}"
+            )
 
 
 def validate_arm(
@@ -244,6 +336,23 @@ def validate_arm(
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     logs = logs_by_rank(log_path.read_text(errors="replace"))
     expected_ranks = set(range(parallelism.world_size))
+    # Arm rule 12 is consulted only where there is a mesh to prove. A profile
+    # that names no marker for a non-trivial spec cannot prove the run ran
+    # what it claims, and the run is refused rather than published -- the
+    # same reading arm rule 8 gives an engine that cannot prove eager
+    # execution.
+    parallelism_markers: tuple[str, ...] = ()
+    if parallelism.world_size > 1:
+        parallelism_markers = profile.parallelism_markers(
+            parallelism, workload
+        )
+        if not parallelism_markers:
+            raise RuntimeError(
+                f"{arm.name}: validation profile {arm.validation!r} logs "
+                f"nothing that proves dp {parallelism.dp} x pp "
+                f"{parallelism.pp}; the run cannot be published under a mesh "
+                "no rule checked"
+            )
     if parallelism.world_size > 1 and set(logs) != expected_ranks:
         raise RuntimeError(
             f"{arm.name}: the run declares {parallelism.world_size} ranks and "
@@ -262,6 +371,7 @@ def validate_arm(
             compile_mode=compile_mode,
             ac_mode=ac_mode,
             model_size=model_size,
+            parallelism_markers=parallelism_markers,
         )
 
     # Arm rules 5 and 7 are per rank. Every rank runs the same number of

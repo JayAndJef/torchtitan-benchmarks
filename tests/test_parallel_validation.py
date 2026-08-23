@@ -18,14 +18,22 @@ import gzip
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import logs_by_rank
-from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
+from benchmarks.e2e.megatron import train
+from benchmarks.e2e.parallelism import (
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    n_microbatches,
+)
 from benchmarks.e2e.registry import PIPER_1B_ROPE, PIPER_1B_SWIGLU
-from benchmarks.e2e.validation import validate_arm
+from benchmarks.e2e.validation import VALIDATION_PROFILES, validate_arm
 from benchmarks.execution.environment import LOG_RANK_TEMPLATE
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.environment import runtime_environment
@@ -156,14 +164,32 @@ class _ArmFixture:
         )
 
 
-_TITAN_TAIL = (
-    _compiled_line("default").rstrip("\n")
-    + "\n"
-    + _SAC_LINE.rstrip("\n")
-    + "\n"
-    + _SIZE_LINE.rstrip("\n")
-    + "\nTraining completed"
-)
+def _titan_log(spec: ParallelismSpec = PP2) -> str:
+    """One rank's titan output: every log line the rules read, and nothing else.
+
+    The two parallelism lines are what arm rule 12 matches. They are built
+    here from the same profile the validator uses, so this fixture cannot
+    drift from the rule -- what it pins is that a rank whose OTHER lines are
+    wrong still fails, not the wording of these two.
+    """
+    markers = "\n".join(
+        VALIDATION_PROFILES["torchtitan"].parallelism_markers(
+            spec, PIPER_1B_ROPE.workload
+        )
+    )
+    return (
+        _compiled_line("default").rstrip("\n")
+        + "\n"
+        + _SAC_LINE.rstrip("\n")
+        + "\n"
+        + _SIZE_LINE.rstrip("\n")
+        + "\n"
+        + markers
+        + "\nTraining completed"
+    )
+
+
+_TITAN_TAIL = _titan_log()
 
 
 class PerRankLogRuleTests(unittest.TestCase):
@@ -312,6 +338,170 @@ class RankCoverageTests(unittest.TestCase):
                 PIPER_1B_ROPE.workload,
                 parallelism=TRIVIAL_SPEC,
             )
+
+
+class ArmRuleTwelveTests(unittest.TestCase):
+    """Both engines must log the mesh they really built.
+
+    Without this rule a run that ignored every ``--parallelism.*`` flag, or a
+    megatron driver that read no ``RANK``, trains the whole model in one
+    process and passes every other check.
+    """
+
+    def test_the_trivial_spec_asks_for_nothing(self) -> None:
+        """There are no flags to ignore at one rank, and no old log to break.
+
+        Every megatron directory under ``out/`` predates the driver's own
+        parallelism line, and ``--resume`` re-validates what is on disk.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0,))
+            fixture.log.write_text(
+                _compiled_line("default") + _SAC_LINE + _SIZE_LINE
+                + "Training completed\n"
+            )
+            validate_arm(
+                PIPER_1B_ROPE.arm("baseline"),
+                fixture.root,
+                fixture.log,
+                PIPER_1B_ROPE.workload,
+            )
+
+    def test_a_missing_mesh_line_fails_the_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            without = "\n".join(
+                line
+                for line in _titan_log().splitlines()
+                if "Building device mesh" not in line
+            )
+            fixture.write({0: without, 1: _TITAN_TAIL})
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=PP2,
+                )
+
+    def test_a_mesh_line_naming_another_mesh_fails_the_arm(self) -> None:
+        """The line states what TorchTitan built, so a wrong one is the bug."""
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            wrong = _titan_log().replace("pp=2", "pp=1")
+            fixture.write({0: wrong, 1: wrong})
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=PP2,
+                )
+
+    def test_a_wrong_microbatch_count_fails_the_arm(self) -> None:
+        """The hazard this stage carries, on the titan side.
+
+        Two engines that agree on the layer split and disagree on how many
+        microbatches they move through it run two schedules under one label.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            wrong = _titan_log().replace("with 4 microbatches", "with 2 microbatches")
+            fixture.write({0: wrong, 1: wrong})
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=PP2,
+                )
+
+    def test_the_titan_markers_name_the_degrees_and_the_schedule(self) -> None:
+        markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
+            PP2, PIPER_1B_ROPE.workload
+        )
+        self.assertEqual(
+            markers,
+            (
+                "Building device mesh with parallelism: pp=2, "
+                "dp_replicate=1, dp_shard=1, cp=1, tp=1, ep=1",
+                "Using pipeline schedule 1F1B with 4 microbatches and 2 stages",
+            ),
+        )
+
+    def test_the_megatron_marker_is_the_line_the_driver_prints(self) -> None:
+        """The validator and the driver state one line in two places.
+
+        MODE_LINE already carries that cost, and the same comment. This test
+        is the link: the driver formats its own constant with the values
+        ``pipeline_settings`` gives it, and the two strings must be equal.
+        """
+        args = SimpleNamespace(batch=4, pp=2, pp_microbatch_size=1)
+        microbatch_rows, microbatches = train.pipeline_settings(args)
+        printed = train.PARALLELISM_LINE.format(
+            dp=1,
+            pp=args.pp,
+            schedule="1F1B",
+            microbatches=microbatches,
+            stages=args.pp,
+        )
+        self.assertEqual(
+            VALIDATION_PROFILES["megatron"].parallelism_markers(
+                PP2, PIPER_1B_ROPE.workload
+            ),
+            (printed,),
+        )
+
+    def test_both_engines_move_the_same_number_of_microbatches(self) -> None:
+        """The named hazard of this stage, stated as one assertion.
+
+        TorchTitan derives ``local_batch_size // pipeline_parallel_microbatch
+        _size`` inside ``_build_pipeline_schedule``; the megatron driver
+        derives its own count in ``pipeline_settings``. A disagreement runs
+        two schedules under one label, and no correctness gate could see it.
+        """
+        for batch, microbatch_size in ((4, 1), (8, 2), (8, 1)):
+            with self.subTest(batch=batch, microbatch_size=microbatch_size):
+                spec = ParallelismSpec(
+                    pp=2, pp_schedule="1F1B", pp_microbatch_size=microbatch_size
+                )
+                titan = n_microbatches(spec, local_batch_size=batch)
+                _, megatron = train.pipeline_settings(
+                    SimpleNamespace(
+                        batch=batch, pp=2, pp_microbatch_size=microbatch_size
+                    )
+                )
+                self.assertEqual(titan, megatron)
+
+    def test_a_profile_that_can_prove_nothing_refuses_the_run(self) -> None:
+        """An empty marker tuple is a refusal, never a pass.
+
+        No profile returns one today. The day one does -- a data-parallel
+        titan run has no schedule line, for instance -- the run must fail
+        rather than publish a mesh nothing checked.
+        """
+        silent = replace(
+            VALIDATION_PROFILES["torchtitan"],
+            parallelism_markers=lambda spec, workload: (),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
+            with mock.patch.dict(
+                "benchmarks.e2e.validation.VALIDATION_PROFILES",
+                {"torchtitan": silent},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "logs nothing"):
+                    validate_arm(
+                        PIPER_1B_ROPE.arm("baseline"),
+                        fixture.root,
+                        fixture.log,
+                        PIPER_1B_ROPE.workload,
+                        parallelism=PP2,
+                    )
 
 
 if __name__ == "__main__":

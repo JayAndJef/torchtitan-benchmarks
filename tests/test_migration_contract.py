@@ -1591,9 +1591,15 @@ TEST_CENSUS = {
     # the fallback marker on rank 1 alone as the case that motivates the
     # split; and that a rank which wrote no log line or no trace is refused
     # rather than skipped, while neither check narrows a trivial-spec run.
-    "test_parallel_validation": 14,
+    # +8 with arm rule 12: that the trivial spec asks for nothing, that a
+    # missing mesh line, a mesh line naming another mesh and a wrong
+    # microbatch count each fail the arm, what each engine's markers say,
+    # that the driver's own line is the one the validator expects, that both
+    # engines derive the same microbatch count, and that a profile which can
+    # prove nothing refuses the run.
+    "test_parallel_validation": 22,
 }
-TEST_CENSUS_TOTAL = 1382
+TEST_CENSUS_TOTAL = 1390
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
