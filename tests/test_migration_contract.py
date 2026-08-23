@@ -1231,6 +1231,24 @@ TEST_CENSUS = {
     # records the canonical name, and a manifest recording either name
     # resumes against the other.
     "test_model_shape": 42,
+    # New when trace reading became rank-aware. A run may now hold more than
+    # one rank, and the arithmetic that turns several ranks into one published
+    # figure is the highest-risk part of it: pooling two ranks' windows gives
+    # a mean across ranks, which is neither one rank's cost nor the step's and
+    # which passes every other check silently. 13 pin the grouping and the
+    # refusal, 8 the collective split and the two bases, 8 the maximum, the
+    # sum and the per-rank vector, and 9 prove on a real recorded run that
+    # none of it moved a number already published.
+    # +6 from the adversarial review, all of them ranks that get dropped
+    # rather than averaged: 3 for a rank whose windows carry no ProfilerStep
+    # and would rank as zero in the maximum, 1 for a collective sharing a
+    # region's stream, and 2 for a step wall that any annotation carrying the
+    # step's name could set.
+    # +5 that execute validation rules 5 and 7 per rank, because "the rule
+    # got stricter, not weaker" is a claim that has to be run rather than
+    # argued: the short rank, the one-rank message, no traces at all, one
+    # rank's repartitioned graphs, and a clean two-rank arm.
+    "test_parallel_traces": 45,
     "test_profile_regions": 19,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
@@ -1268,7 +1286,7 @@ TEST_CENSUS = {
     # kernel builder blanks which part.
     "test_megatron_model": 26,
 }
-TEST_CENSUS_TOTAL = 1160
+TEST_CENSUS_TOTAL = 1205
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

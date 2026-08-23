@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from benchmarks.artifacts.layout import trace_files
+from benchmarks.artifacts.layout import trace_files_by_rank
 from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
     TORCH_COMPILE_MODE,
@@ -26,7 +26,7 @@ from benchmarks.e2e.registry import (
     Workload,
 )
 from benchmarks.models.piper_qwen3.shape import shape_by_name
-from benchmarks.traces.extraction import pooled_window_metrics
+from benchmarks.traces.extraction import per_rank_pooled_metrics
 from benchmarks.traces.schema import Region
 
 
@@ -194,13 +194,37 @@ def validate_arm(
                 f"log; see {log_path}"
             )
 
-    traces = trace_files(arm_dir)
-    if len(traces) < workload.min_trace_windows:
-        raise RuntimeError(
-            f"{arm.name}: expected at least {workload.min_trace_windows} "
-            "profiler windows, "
-            f"found {len(traces)} under {arm_dir}"
-        )
+    # Rules 5 and 7 are per rank. Every rank runs the same number of profiler
+    # windows, so a rank short of them is as broken as a run short of them,
+    # and pooling two ranks' windows for rule 7 would ask one structural
+    # question of two different processes' graphs.
+    #
+    # Both rules see the ranks that wrote *something*. A rank that wrote no
+    # file at all is not a key here, so neither rule fires for it, and the
+    # evaluation would then publish a maximum over the survivors. Closing
+    # that needs the world size, which no manifest records yet; the rule that
+    # every rank must write traces belongs with the commit that puts the
+    # parallelism spec in the manifest.
+    traces_by_rank = trace_files_by_rank(arm_dir)
+    traces = [path for paths in traces_by_rank.values() for path in paths]
+    for rank, rank_traces in (traces_by_rank or {0: []}).items():
+        if len(rank_traces) < workload.min_trace_windows:
+            where = f"under {arm_dir}" if len(traces_by_rank) <= 1 else (
+                f"for rank {rank} under {arm_dir}"
+            )
+            raise RuntimeError(
+                f"{arm.name}: expected at least {workload.min_trace_windows} "
+                "profiler windows, "
+                f"found {len(rank_traces)} {where}"
+            )
+    # Rules 6 and 9 read every rank's traces as one set, which is what they
+    # already did when one rank was all there was. They are deliberately NOT
+    # per rank, and the reason is that nobody knows yet which way they should
+    # go: under PP a stage holds only some of the layers, so a marker kernel
+    # can be legitimately absent from a rank, and requiring it on every rank
+    # would fail an honest run. Requiring it on one is the weaker reading.
+    # Neither can be settled without a real multi-rank trace, so this commit
+    # changes neither, and the stage that produces such a trace must decide.
     for marker in arm.trace_kernel_markers:
         if not any(_trace_contains(path, marker) for path in traces):
             raise RuntimeError(
@@ -215,7 +239,7 @@ def validate_arm(
         )
     if regions and profile.check_regions:
         try:
-            pooled_window_metrics(traces, regions)
+            per_rank_pooled_metrics(traces_by_rank, regions)
         except ValueError as error:
             raise RuntimeError(
                 f"{arm.name}: profiler traces failed structural validation: {error}"

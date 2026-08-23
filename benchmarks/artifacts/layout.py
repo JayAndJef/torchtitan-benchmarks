@@ -9,6 +9,16 @@ dragged ``benchmarks.e2e.registry`` -- every scenario, arm and workload
 declaration in the repository -- into the kernel system's import graph for a
 four-line JSON writer. ``benchmarks.e2e.validation`` and
 ``tools/collect_matrix.py`` are in the same position for ``trace_files``.
+(``benchmarks.traces.schema`` is the one first-party import here. It is a
+frozen dataclass, a regex and a glob string, with no first-party imports of
+its own, and it owns the trace file-name grammar this module globs.)
+
+``trace_files`` returns **every rank's** traces. That is not the unit any
+measurement is taken over: pooling two ranks' windows into one figure gives
+an arithmetic mean across ranks, which is neither one rank's cost nor the
+step's. ``trace_files_by_rank`` is the grouping every measurement path must
+use, and ``benchmarks.traces.extraction.pooled_window_metrics`` refuses a
+mixed-rank call outright rather than trusting each caller to remember.
 
 ``atomic_write_json`` is the only place anything under ``benchmarks/``
 writes JSON -- manifests, run state, and both systems' ``results.json`` all
@@ -43,13 +53,41 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from benchmarks.execution.paths import BENCH_DIR
+from benchmarks.traces.schema import TRACE_FILE_GLOB, rank_of_trace
 
 if TYPE_CHECKING:
     from benchmarks.e2e.registry import Scenario
 
 
 def trace_files(arm_dir: Path) -> list[Path]:
-    return sorted(arm_dir.glob("profiling/traces*/iteration_*/rank0_trace.json.gz"))
+    """Every profiler window this arm wrote, from every rank.
+
+    Use it to answer "does this arm have traces at all" and "does any trace
+    contain this marker". Do **not** feed the result to a pooling call: see
+    ``trace_files_by_rank``.
+    """
+    return sorted(
+        arm_dir.glob(f"profiling/traces*/iteration_*/{TRACE_FILE_GLOB}")
+    )
+
+
+def trace_files_by_rank(arm_dir: Path) -> dict[int, list[Path]]:
+    """The same files, grouped by the rank that wrote them, rank order.
+
+    One rank is one process on one GPU, and its windows are the only set a
+    per-step figure may be pooled over. A single-GPU run yields exactly one
+    entry, keyed 0, holding what ``trace_files`` returns.
+    """
+    by_rank: dict[int, list[Path]] = {}
+    for path in trace_files(arm_dir):
+        rank = rank_of_trace(path)
+        if rank is None:
+            raise ValueError(
+                f"{path}: matched the trace glob {TRACE_FILE_GLOB!r} but does "
+                "not name a rank; a trace file is 'rank<n>_trace.json.gz'"
+            )
+        by_rank.setdefault(rank, []).append(path)
+    return {rank: by_rank[rank] for rank in sorted(by_rank)}
 
 
 def atomic_write_json(path: Path, value: Any) -> None:

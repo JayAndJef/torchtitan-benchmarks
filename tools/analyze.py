@@ -13,6 +13,12 @@ Reports, for each trace and as a diff:
 import json
 import sys
 from collections import defaultdict
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from benchmarks.traces.extraction import busy_union as _busy_union_intervals
 
 DEVICE_CATS = ("kernel", "gpu_memcpy", "gpu_memset")
 
@@ -35,21 +41,15 @@ def span(evs):
 
 
 def busy_union(evs):
-    """Total wall time during which at least one event is running (handles overlap)."""
-    iv = sorted((e["ts"], e["ts"] + e.get("dur", 0)) for e in evs)
-    total = 0.0
-    cur_s, cur_e = None, None
-    for s, e in iv:
-        if cur_s is None:
-            cur_s, cur_e = s, e
-        elif s > cur_e:
-            total += cur_e - cur_s
-            cur_s, cur_e = s, e
-        else:
-            cur_e = max(cur_e, e)
-    if cur_s is not None:
-        total += cur_e - cur_s
-    return total
+    """Total wall time during which at least one event is running (handles overlap).
+
+    The arithmetic lives in ``benchmarks.traces.extraction`` beside the other
+    trace arithmetic, because ``results.json`` now records the same basis. This
+    is the chrome-event adapter for it, not a second implementation.
+    """
+    return _busy_union_intervals(
+        (e["ts"], e["ts"] + e.get("dur", 0)) for e in evs
+    )
 
 
 def by_name(evs):

@@ -160,6 +160,21 @@ under `tests/fixtures/legacy/` are byte-frozen evidence of runs that actually
 happened, the retired strings are the payload under test, and the retired-path
 audit allowlists them for exactly that reason.
 
+**One directory there holds two kinds of file, and the difference is
+labelled.** `tests/fixtures/legacy/e2e_results3/` is the `baseline` arm of
+`out/20260807T175156Z/piper1b_qkv/nvidia-h200`. Its `manifest.json` and
+`results.json` are verbatim copies, like every other fixture here. Its two
+trace windows are a **projection** of that run's real traces: every event
+that reaches a state-mutating branch of `trace_window_metrics` is kept,
+carrying only the fields those branches read, which takes each window from
+about 35,450 events and 1.0 MB to 11,775 events and 175 KB. A full trace
+cannot be checked in, and a synthetic one would prove nothing about a real
+run. The projection is not taken on trust: `tests/test_parallel_traces.py`
+re-evaluates the arm from those traces and compares field by field against
+the verbatim `results.json`, so a dropped event that mattered fails the
+test. Every one of the four files carries a digest in
+`tests/test_retired_paths.py`, and none of them may be edited.
+
 ## End-to-end scenarios
 
 ### Commands
@@ -598,9 +613,9 @@ sets `replay_dataloader=True` and `command_for_arm` delivers
 out/<timestamp>/<scenario>/<hardware>/
   manifest.json     # schema 9: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
-  results.json      # schema 3: throughput, memory, gpu_time, region stats, significance
+  results.json      # schema 4: throughput, memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
-  <arm>/profiling/traces/iteration_*/rank0_trace.json.gz
+  <arm>/profiling/traces/iteration_*/rank<n>_trace.json.gz
   attempts/<ts>/<arm>/   # archived artifacts from a failed prior attempt
 ```
 
@@ -741,6 +756,61 @@ Requires `baseline` among the arms. Reports:
   so prefer it to tokens/s -- but it is **not autotuning-immune**, and on
   arms that differ in one component it is not evidence. See the next
   section before ranking anything with it.
+
+**Every trace figure is read per rank, and the published one is the
+MAXIMUM over ranks. It is never the mean.** One rank is one process on one
+GPU, and its own profiler windows are the only set a per-step figure may be
+pooled over: pooling two ranks gives a mean across ranks, which is neither
+one rank's cost nor the step's total. A parallel schedule holds the ranks in
+step, so the step is as long as its busiest participant.
+`benchmarks/traces/extraction.py`'s `per_rank_pooled_metrics` is the entry
+point, and `pooled_window_metrics` **refuses** a call carrying two ranks
+rather than averaging them. Validation rules 5 and 7 are per rank for the
+same reason.
+
+`gpu_time` therefore also carries `published_rank` (the rank every scalar in
+the row came from -- the row is one rank's, not a per-field maximum, because
+`other = kernel - regions` taken from two ranks can go negative), `ranks`,
+`per_rank` and `kernel_ms_per_step_summed_over_ranks`. **A single-GPU run
+holds one rank, so every one of these figures equals what schema 3
+recorded**; that is proved against a real recorded run in
+`tests/test_parallel_traces.py`.
+
+Three further per-step columns exist because the summed kernel total stops
+answering the question once a run has more than one rank:
+
+- `collective_ms_per_step` and `compute_ms_per_step`. An NCCL kernel carries
+  `cat: "kernel"`, so it joins the total like any other -- but a blocking
+  collective's duration includes waiting for a peer, so counting it as
+  compute absorbs the pipeline bubble as work and makes one rank's figure
+  depend on another rank's speed. `compute` is the total without them, and
+  it is the value that compares to a single-GPU run. The region columns
+  exclude them for the same reason, so `region_kernel_ms_per_step` never
+  exceeds `compute_ms_per_step` and a collective sharing a region's stream
+  cannot read as that region's work. **The NCCL name prefix is declared and
+  unverified**: no multi-rank trace from this harness has been read. Confirm
+  it against a real one before citing the split.
+- `busy_kernel_ms_per_step`. The interval-union basis. Summing double-counts
+  whatever overlaps, which already overstates megatron's five streams
+  against titan's one by about 6.5%, and a collective adds a stream of its
+  own. Both bases are recorded; neither is chosen for the reader. On a
+  single-stream arm the two agree to within float accumulation order -- 5e-4
+  us in 402,484 on the checked-in fixture -- so a small difference there is
+  not evidence of overlap.
+- `wall_ms_per_step`, from the profiler's **host** `ProfilerStep#`
+  annotation. A bubble runs no kernel, so no kernel-derived total sees it;
+  `bubble = wall - busy` is what explains a pipeline result. The profiler
+  emits each step twice, on the host and on the device, and only the host
+  span is the step's wall clock -- taking the longer of the two would be
+  right on a host-bound run and wrong on a device-bound one.
+
+**A rank the profiler never measured is refused, not ranked as zero.** A
+rank whose windows carry no `ProfilerStep` annotation has no per-step cost,
+and treating that as 0 would drop it from the maximum -- possibly the
+busiest rank. `busiest_rank` raises on a run that mixes stepped and stepless
+ranks, exactly as `pooled_window_metrics` already raises on that mixture
+between one rank's own windows. A run where **no** rank has steps is not a
+mixture and keeps its old answer.
 
 ### Total kernel time cannot rank arms that differ in one component
 
@@ -1954,8 +2024,11 @@ published conclusion, and all of which outlive the tool that found them:
 - **Summed kernel time overcounts whenever streams overlap.** Megatron runs
   5 CUDA streams to titan's 1, so summing overstates it ~6.5% -- enough to
   *invert the sign* of a cross-engine MoE expert-GEMM comparison. Compare on
-  the busy (interval-union) basis whenever the arms differ in stream count;
-  `analyze.py`'s `busy_union` computes it.
+  the busy (interval-union) basis whenever the arms differ in stream count.
+  The arithmetic is `benchmarks/traces/extraction.py`'s `busy_union`, which
+  `results.json` records as `busy_kernel_ms_per_step` beside the summed
+  total; `analyze.py`'s function of the same name is the chrome-event
+  adapter for it, not a second implementation.
 - **A fused component reads as zero, not as absent.** Inductor folds titan's
   RoPE into the qk-norm kernels, so a per-kernel split reports 0.0 RoPE and a
   `norm` number that is not comparable to megatron's separate norm. Never
