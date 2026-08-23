@@ -332,11 +332,17 @@ def loss_visible_rank(*, world_size: int, pp: int) -> int:
     """The rank whose step line carries the run's real loss.
 
     TorchTitan computes the loss on the last pipeline stage and every rank
-    calls ``MetricsProcessor.log``, so a first-stage rank prints a step line
-    whose loss is its own local value rather than the batch's. This is
-    TorchTitan's own ``_get_metrics_rank`` arithmetic, and the megatron
-    driver satisfies it too: it broadcasts the last stage's loss, so every
-    rank prints the real one and this rank is one of them.
+    calls ``MetricsProcessor.log``. A rank without that stage does not print
+    a smaller or noisier loss -- it prints a **sentinel**: ``trainer.py``
+    sets ``loss = torch.tensor([-1.0])`` there, and at ``dp 1`` that reaches
+    the step line unreduced, so rank 0 of a pp2 run logs ``loss: -1.00000``.
+    Pooling that with the real trajectory would not add noise, it would add
+    a constant that is not a loss at all.
+
+    This is TorchTitan's own ``_get_metrics_rank`` arithmetic. The megatron
+    driver satisfies it too, by a different route: it broadcasts the last
+    stage's loss, so every rank prints the real one and this rank is one of
+    them.
 
     At the trivial spec it is 0, which is the rank a single-GPU run has.
 
@@ -694,9 +700,27 @@ def evaluate_run(
                 "rank is starved or the ranks are not running one job"
             )
 
+    # The twin of the caption on baseline_kernel_ratio, for the same reason:
+    # each side of the ratio names its own slowest rank, and under a pipeline
+    # split those two rank indices hold different partitions of the model.
+    for arm in arms:
+        if arm == "baseline":
+            continue
+        if (
+            training[arm].published_rank
+            != training["baseline"].published_rank
+        ):
+            warnings.append(
+                f"{arm}: the tokens/s 'ratio' divides rank "
+                f"{training[arm].published_rank} by baseline rank "
+                f"{training['baseline'].published_rank}; each side is its "
+                "own slowest rank, so under a pipeline split the two hold "
+                "different partitions of the model"
+            )
+
     # One rank's trajectory, not every rank's concatenated. Under a pipeline
-    # split the loss lives on the last stage, and a first-stage rank still
-    # prints a step line -- carrying its own local value.
+    # split the loss lives on the last stage, and a rank without it still
+    # prints a step line -- carrying TorchTitan's -1.0 sentinel.
     trajectory_rank = loss_visible_rank(
         world_size=world_size, pp=int(recorded_parallelism.get("pp", 1))
     )

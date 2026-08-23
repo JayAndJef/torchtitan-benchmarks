@@ -302,6 +302,73 @@ class TwoRanksPublishTheSlowestTests(unittest.TestCase):
         self.assertEqual([row["rank"] for row in machine["per_rank"]], [0, 1])
 
 
+class TheThroughputRatioSaysWhichRanksItDividedTests(unittest.TestCase):
+    """The twin of the caption on ``baseline_kernel_ratio``.
+
+    Each side of the ratio names its own slowest rank. Under a pipeline
+    split those two rank indices hold different partitions of the model, so
+    the file says so rather than leaving a reader to derive it.
+    """
+
+    def _evaluate(self, baseline: tuple[int, int], optimized: tuple[int, int]):
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {
+                    arm: _prefixed(_step_lines(tps=rows[0]), 0)
+                    + _prefixed(_step_lines(tps=rows[1]), 1)
+                    for arm, rows in (
+                        ("baseline", baseline),
+                        ("optimized", optimized),
+                    )
+                },
+                {"world_size": 2, "pp": 2},
+                ranks=(0, 1),
+            )
+            return evaluate_run(out_dir)
+
+    def _ratio_warnings(self, result) -> list[str]:
+        return [
+            warning for warning in result.warnings if "tokens/s 'ratio'" in warning
+        ]
+
+    def test_one_rank_each_raises_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {
+                    "baseline": _step_lines(tps=1000),
+                    "optimized": _step_lines(tps=1200),
+                },
+                {"world_size": 1, "pp": 1},
+            )
+            result = evaluate_run(out_dir)
+        self.assertEqual(self._ratio_warnings(result), [])
+
+    def test_two_arms_that_agree_on_the_slowest_rank_raise_nothing(self) -> None:
+        result = self._evaluate((1000, 900), (1200, 1100))
+        self.assertEqual(result.training["baseline"].published_rank, 1)
+        self.assertEqual(result.training["optimized"].published_rank, 1)
+        self.assertEqual(self._ratio_warnings(result), [])
+
+    def test_two_arms_that_disagree_name_both_ranks(self) -> None:
+        result = self._evaluate((1000, 900), (1100, 1200))
+        self.assertEqual(result.training["baseline"].published_rank, 1)
+        self.assertEqual(result.training["optimized"].published_rank, 0)
+        warning = self._ratio_warnings(result)[0]
+        self.assertIn("rank 0", warning)
+        self.assertIn("baseline rank 1", warning)
+
+    def test_the_ratio_is_still_published(self) -> None:
+        """The caption qualifies the number. It does not withhold it."""
+        result = self._evaluate((1000, 900), (1100, 1200))
+        self.assertAlmostEqual(
+            result.training["optimized"].baseline_ratio, 1100 / 900
+        )
+
+
 class ARankWithNoSampleDoesNotWinTests(unittest.TestCase):
     """"No sample" is a measurement that did not happen, not a slow rank."""
 
