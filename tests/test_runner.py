@@ -267,24 +267,61 @@ class ParallelizeTests(unittest.TestCase):
                     )
                     self.assertEqual(config.training.dtype, "bfloat16")
 
-    def test_parallelize_rejects_multi_gpu_and_non_bf16(self) -> None:
-        # Both guards fire before the model is touched, so dummies suffice.
-        common = dict(
-            model=object(),
-            parallelism=None,
-            compile_config=None,
-            ac_config=None,
-            dump_folder="",
-        )
-        multi_gpu = ParallelDims(
-            dp_replicate=1, dp_shard=2, cp=1, tp=1, pp=1, ep=1, world_size=2
-        )
-        with self.assertRaisesRegex(RuntimeError, "single-GPU only"):
-            parallelize_piper1b(
-                parallel_dims=multi_gpu,
-                training=TrainingConfig(dtype="bfloat16"),
-                **common,
-            )
+    # Every guard fires before the model is touched, so dummies suffice.
+    _PARALLELIZE_COMMON = dict(
+        model=object(),
+        parallelism=None,
+        compile_config=None,
+        ac_config=None,
+        dump_folder="",
+    )
+
+    def test_parallelize_refuses_each_axis_for_its_own_reason(self) -> None:
+        """One message per axis, because the axes fail for different reasons.
+
+        One ``world_size != 1`` check stood here before, and it refused a
+        pipeline rank -- which needs no gradient reduction and keeps exactly
+        this plain-bf16 model -- for the data-parallel axis's reason.
+        """
+        for name, dims, expected in (
+            (
+                "tp",
+                ParallelDims(
+                    dp_replicate=1, dp_shard=1, cp=1, tp=2, pp=1, ep=1, world_size=2
+                ),
+                "tensor parallelism",
+            ),
+            (
+                "cp",
+                ParallelDims(
+                    dp_replicate=1, dp_shard=1, cp=2, tp=1, pp=1, ep=1, world_size=2
+                ),
+                "context parallelism",
+            ),
+            (
+                "dp_shard",
+                ParallelDims(
+                    dp_replicate=1, dp_shard=2, cp=1, tp=1, pp=1, ep=1, world_size=2
+                ),
+                "no gradient reduction",
+            ),
+            (
+                "dp_replicate",
+                ParallelDims(
+                    dp_replicate=2, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=2
+                ),
+                "no gradient reduction",
+            ),
+        ):
+            with self.subTest(axis=name):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    parallelize_piper1b(
+                        parallel_dims=dims,
+                        training=TrainingConfig(dtype="bfloat16"),
+                        **self._PARALLELIZE_COMMON,
+                    )
+
+    def test_parallelize_rejects_non_bf16(self) -> None:
         single_gpu = ParallelDims(
             dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
         )
@@ -292,8 +329,31 @@ class ParallelizeTests(unittest.TestCase):
             parallelize_piper1b(
                 parallel_dims=single_gpu,
                 training=TrainingConfig(dtype="float32"),
-                **common,
+                **self._PARALLELIZE_COMMON,
             )
+
+    def test_parallelize_lets_a_pipeline_rank_through(self) -> None:
+        """A pipeline stage keeps the plain-bf16 model, and still skips DP.
+
+        PP splits the layers and synchronizes no gradient, so ``dp`` stays 1
+        and ``skip_dp`` stays right. That is what makes PP the cheapest
+        honest parallel measurement this repo can take.
+        """
+        pipelined = ParallelDims(
+            dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=2, ep=1, world_size=2
+        )
+        sentinel = object()
+        with mock.patch(
+            "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+            return_value=sentinel,
+        ) as delegate:
+            result = parallelize_piper1b(
+                parallel_dims=pipelined,
+                training=TrainingConfig(dtype="bfloat16"),
+                **self._PARALLELIZE_COMMON,
+            )
+        self.assertIs(result, sentinel)
+        self.assertIs(delegate.call_args.kwargs["skip_dp"], True)
 
 
 class CommandTests(unittest.TestCase):

@@ -1529,7 +1529,11 @@ TEST_CENSUS = {
     # megatron scenario declines it while every other scenario takes it,
     # that a run records the mode and declares no regions, and that a
     # resume refuses to cross the boundary.
-    "test_runner": 51,
+    # +2 with the per-axis parallelize refusals: one ``world_size != 1``
+    # check became one refusal per axis, so the axes are named separately,
+    # the dtype guard stands on its own, and a pipeline rank is let through
+    # to the delegate with skip_dp still true.
+    "test_runner": 53,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1562,7 +1566,7 @@ TEST_CENSUS = {
     # ways, and the two refusals _resolve_run now makes.
     "test_parallelism_plumbing": 42,
 }
-TEST_CENSUS_TOTAL = 1338
+TEST_CENSUS_TOTAL = 1340
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
