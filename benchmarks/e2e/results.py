@@ -574,6 +574,29 @@ def evaluate_run(
                 for rank in sorted(per_rank[arm])
             ),
         )
+    # The ratio divides one rank of this arm by one rank of the baseline, and
+    # each side names its own busiest rank. Under a pipeline split those two
+    # rank indices hold different partitions of the model, so the ratio stops
+    # being "the same work, two implementations". It is still the right
+    # comparison of step costs -- the schedule holds the ranks together -- but
+    # a reader of results.json holds no docstring, so the file says so.
+    #
+    # Captioned rather than pinned to one rank index. Pinning would divide two
+    # ranks nobody chose for being busy, which is a different and weaker
+    # figure, and it would move the ratio a single-GPU run has always
+    # published the moment a run has two ranks.
+    for arm in arms:
+        if arm == "baseline":
+            continue
+        if gpu_time[arm].published_rank != gpu_time["baseline"].published_rank:
+            warnings.append(
+                f"{arm}: the 'vs base' ratio divides rank "
+                f"{gpu_time[arm].published_rank} by baseline rank "
+                f"{gpu_time['baseline'].published_rank}; each side is its own "
+                "busiest rank, so under a pipeline split the two hold "
+                "different partitions of the model. Read it as a ratio of "
+                "step costs, never as one component against itself"
+            )
     comparisons = {
         arm: region_comparison(pooled["baseline"], pooled[arm], declared_regions)
         for arm in arms

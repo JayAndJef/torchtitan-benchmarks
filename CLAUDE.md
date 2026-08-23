@@ -806,6 +806,16 @@ Requires `baseline` among the arms. Reports:
   arms that differ in one component it is not evidence. See the next
   section before ranking anything with it.
 
+  **`baseline_kernel_ratio` divides each side's OWN busiest rank**, so the
+  two rank indices need not match. That is the right comparison of step
+  costs -- the schedule holds the ranks together -- and it is not one
+  component against itself once those two ranks hold different partitions
+  of the model. Evaluation **warns and names both rank indices** whenever
+  they differ; a single-GPU run has one rank on each side and never raises
+  it. Captioned rather than pinned to a rank index: pinning would divide two
+  ranks nobody chose for being busy, and it would move a figure every
+  single-GPU run has already published.
+
 **Every tokens/s figure is PER DEVICE, and the published one is the
 MINIMUM over ranks.** Both engines divide one rank's own token count by
 `cp * tp * pp`: the ranks of one pipeline share a batch, and each
@@ -2180,8 +2190,21 @@ they are a convergence sanity check only.
 `parallelize_fn` is
 `benchmarks/models/piper_qwen3/parallelize.py:parallelize_piper1b`, which
 delegates to the fork's `parallelize_qwen3` with `skip_dp=True` (AC and
-per-block compile applied, FSDP skipped) and hard-errors at `world_size > 1`
-or any `training.dtype` other than `bfloat16`. `training.dtype="bfloat16"`
+per-block compile applied, FSDP skipped) and hard-errors on any
+`training.dtype` other than `bfloat16`.
+
+**Its parallel refusals are per axis, and each names its own reason.** One
+`world_size != 1` check stood there before, and it refused every axis for
+one axis's reason. It now refuses `tp > 1` and `cp > 1` (the harness cannot
+express either degree, so the manifest could not record such a run) and a
+data-parallel degree above 1 (`skip_dp` returns before `fully_shard`, so
+those ranks would never reduce their gradients and would report roughly
+twice the true throughput). **A pipeline rank passes**, because it holds a
+slice of the layers, needs no gradient synchronization, and therefore keeps
+exactly the plain-bf16 model above. The module reads the `ParallelDims`
+TorchTitan builds from the command line, never
+`benchmarks/e2e/parallelism.py`: it runs inside the training subprocess,
+where the harness's own spec is neither present nor needed. `training.dtype="bfloat16"`
 puts params, grads, and optimizer states in bf16 with no fp32 masters --
 matching piper's own execution and the treatment kernel-bench already gives
 its modules. It is the only *framework-level* dtype mechanism in the run:
@@ -2200,6 +2223,22 @@ is `expert_mlp/titan`; the `swiglu/baseline` this sentence used to name is
 deleted.) Manifests
 record `execution_model`; runs from schema <= 6 used FSDP2 mixed precision
 and are not comparable.
+
+**`execution_model` names the mesh the run had, and is no longer a
+constant.** `benchmarks/e2e/parallelism.py`'s `execution_model` composes it
+from the run's own spec: the device count, the parameter treatment, the
+data-parallel treatment, then the pipeline and expert axes when they are
+not trivial. **The trivial spec still returns
+`single-gpu-plain-bf16-no-fsdp`, character for character** -- that string is
+a fixed point every manifest since schema 7 carries, `EXECUTION_MODEL` in
+`benchmarks/e2e/registry.py` is what pins it, and a test compares the two.
+A pipelined run records `2-gpu-plain-bf16-no-fsdp-pp2-1F1B`. **The parts
+name degrees, not mechanisms**, because one manifest carries one
+`execution_model` for a whole run and a cross-engine run holds arms of both
+engines: `dp2` is true of both, where `fsdp2-replicate2-shard1` would
+describe TorchTitan's path and misdescribe Megatron's. The field is **not**
+resume-gated -- `parallelism` is, and this is derived from it, so gating
+both would refuse the same run twice.
 
 An arm changes behavior one of two ways:
 

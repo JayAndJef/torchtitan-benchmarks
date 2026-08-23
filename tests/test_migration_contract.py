@@ -1527,7 +1527,11 @@ TEST_CENSUS = {
     # got stricter, not weaker" is a claim that has to be run rather than
     # argued: the short rank, the one-rank message, no traces at all, one
     # rank's repartitioned graphs, and a clean two-rank arm.
-    "test_parallel_traces": 51,
+    # +4 that the 'vs base' ratio names the two ranks it divided: two arms
+    # on one rank each, two that agree on the busiest rank, two that
+    # disagree, and that the caption qualifies the ratio without
+    # withholding it.
+    "test_parallel_traces": 55,
     "test_profile_regions": 19,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
@@ -1583,7 +1587,11 @@ TEST_CENSUS = {
     # environment variable none of them takes, the child environment, the
     # multi-device provenance query and NUMA walk, manifest schema 10 both
     # ways, and the two refusals _resolve_run now makes.
-    "test_parallelism_plumbing": 42,
+    # +5 that the manifest's execution_model follows the run's own mesh: the
+    # trivial string unchanged, a pipelined one, agreement with the module
+    # that composes it, and that the derived field is not resume-gated while
+    # the spec it derives from is.
+    "test_parallelism_plumbing": 47,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -1604,7 +1612,7 @@ TEST_CENSUS = {
     # per-rank rows and its spread warning.
     "test_throughput": 24,
 }
-TEST_CENSUS_TOTAL = 1414
+TEST_CENSUS_TOTAL = 1423
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

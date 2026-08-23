@@ -571,6 +571,108 @@ class PublishedNumberIsTheMaximumTests(unittest.TestCase):
         self.assertEqual([row["rank"] for row in gpu["per_rank"]], [0, 1])
 
 
+class TheBaselineRatioSaysWhichRanksItDividedTests(unittest.TestCase):
+    """Each side of the ratio names its own busiest rank.
+
+    That is the right comparison of step costs, because the schedule holds
+    the ranks together. It is not one component against itself once the two
+    rank indices hold different partitions of the model, so the file says so
+    rather than leaving the reader to derive it.
+
+    Captioned rather than pinned: pinning to one rank index would divide two
+    ranks nobody chose for being busy, and it would move the ratio a
+    single-GPU run has always published.
+    """
+
+    def _evaluate(self, out_dir: Path, arms: tuple[str, ...]):
+        manifest = {
+            "schema_version": 9,
+            "scenario": "synthetic_parallel",
+            "hardware": "test-gpu",
+            "workload": {},
+            "regions": [
+                {
+                    "name": region.name,
+                    "phase": region.phase,
+                    "invocations_per_window": region.invocations_per_window,
+                }
+                for region in REGIONS
+            ],
+            "selected_arms": list(arms),
+        }
+        (out_dir / "manifest.json").write_text(json.dumps(manifest))
+        return evaluate_run(out_dir)
+
+    def _arm(self, arm_dir: Path, *, busiest: int) -> None:
+        """One arm, two ranks, with the named rank the expensive one."""
+        heavy = {"bwd": ("backward", [200.0] * 4), "fwd": ("forward", [20.0] * 4)}
+        light = {"bwd": ("backward", [100.0] * 4), "fwd": ("forward", [10.0] * 4)}
+        for rank in (0, 1):
+            write_trace(
+                arm_dir
+                / f"profiling/traces/iteration_20/rank{rank}_trace.json.gz",
+                heavy if rank == busiest else light,
+                [step_event(1500.0 if rank == busiest else 1000.0)],
+            )
+
+    def test_two_arms_on_one_rank_each_raise_no_caption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            for arm in ("baseline", "optimized"):
+                write_trace(
+                    out_dir
+                    / arm
+                    / "profiling/traces/iteration_20/rank0_trace.json.gz",
+                    {"bwd": ("backward", [100.0] * 4),
+                     "fwd": ("forward", [10.0] * 4)},
+                    [step_event(1000.0)],
+                )
+            result = self._evaluate(out_dir, ("baseline", "optimized"))
+        self.assertEqual(
+            [line for line in result.warnings if "vs base" in line], []
+        )
+
+    def test_two_arms_that_agree_on_the_busiest_rank_raise_no_caption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            self._arm(out_dir / "baseline", busiest=1)
+            self._arm(out_dir / "optimized", busiest=1)
+            result = self._evaluate(out_dir, ("baseline", "optimized"))
+        self.assertEqual(result.gpu_time["baseline"].published_rank, 1)
+        self.assertEqual(result.gpu_time["optimized"].published_rank, 1)
+        self.assertEqual(
+            [line for line in result.warnings if "vs base" in line], []
+        )
+
+    def test_two_arms_that_disagree_name_both_ranks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            self._arm(out_dir / "baseline", busiest=1)
+            self._arm(out_dir / "optimized", busiest=0)
+            result = self._evaluate(out_dir, ("baseline", "optimized"))
+            report = render_evaluation(result)
+        self.assertEqual(result.gpu_time["baseline"].published_rank, 1)
+        self.assertEqual(result.gpu_time["optimized"].published_rank, 0)
+        warning = next(
+            line for line in result.warnings if "vs base" in line
+        )
+        self.assertIn("optimized", warning)
+        self.assertIn("rank 0", warning)
+        self.assertIn("baseline rank 1", warning)
+        self.assertIn(warning, report)
+
+    def test_the_ratio_is_still_published(self) -> None:
+        """The caption qualifies the number. It does not withhold it."""
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            self._arm(out_dir / "baseline", busiest=1)
+            self._arm(out_dir / "optimized", busiest=0)
+            result = self._evaluate(out_dir, ("baseline", "optimized"))
+        self.assertAlmostEqual(
+            result.gpu_time["optimized"].baseline_kernel_ratio, 1.0
+        )
+
+
 class ValidationRulesGotStricterTests(unittest.TestCase):
     """Rules 5 and 7 now run per rank, and neither reading is weaker.
 

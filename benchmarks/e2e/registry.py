@@ -20,10 +20,17 @@ from benchmarks.models.piper_qwen3.shape import PIPER_1B
 from benchmarks.traces.schema import Region
 
 
-# How the training process executes the model. Constant since schema 7:
-# plain bf16 params on one GPU, no FSDP wrapper, no fp32 masters
-# (benchmarks.models.piper_qwen3.parallelize). Recorded so a manifest
-# self-describes without a git-rev lookup; earlier schemas ran under FSDP2
+# How a SINGLE-GPU training process executes the model: plain bf16 params on
+# one GPU, no FSDP wrapper, no fp32 masters
+# (benchmarks.models.piper_qwen3.parallelize). Every manifest since schema 7
+# records this string, so it is a fixed point rather than a format.
+#
+# The manifest no longer reads it. benchmarks/e2e/parallelism.py's
+# execution_model composes the field from the run's own mesh, and this
+# constant is what its trivial answer must reproduce character for
+# character; tests/test_parallelism.py pins the two against each other. A
+# manifest that self-describes has to describe the run it recorded, and a
+# constant cannot describe two of them. Earlier schemas ran under FSDP2
 # mixed precision.
 EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
 

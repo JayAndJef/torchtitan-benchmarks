@@ -33,8 +33,13 @@ from benchmarks.artifacts.manifests import (
 )
 from benchmarks.cli.e2e import _execution_options, run_command
 from benchmarks.cli.main import cli
-from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC, describe
-from benchmarks.e2e.registry import scenario_by_name
+from benchmarks.e2e.parallelism import (
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    describe,
+    execution_model,
+)
+from benchmarks.e2e.registry import EXECUTION_MODEL, scenario_by_name
 from benchmarks.e2e.runner import RunRequest, _resolve_run
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
@@ -447,6 +452,131 @@ class ManifestSchemaTenTests(unittest.TestCase):
                 "sac",
                 "1b",
             )
+
+
+class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
+    """The manifest describes the run it recorded, not a constant.
+
+    A manifest exists so a directory self-describes without a git-rev
+    lookup. One constant cannot describe two meshes, so the field is
+    composed from the run's own spec -- and the trivial answer has to be the
+    string every directory since schema 7 already carries.
+    """
+
+    def _manifest(self, parallelism: ParallelismSpec) -> dict:
+        scenario = scenario_by_name("piper1b_rope")
+        return manifest_data(
+            scenario,
+            (scenario.arm("baseline"),),
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "1b",
+            parallelism=parallelism,
+        )
+
+    def test_the_trivial_spec_records_the_string_it_always_recorded(self) -> None:
+        self.assertEqual(
+            self._manifest(TRIVIAL_SPEC)["execution_model"],
+            "single-gpu-plain-bf16-no-fsdp",
+        )
+        self.assertEqual(
+            self._manifest(TRIVIAL_SPEC)["execution_model"], EXECUTION_MODEL
+        )
+
+    def test_a_pipelined_spec_records_its_own_mesh(self) -> None:
+        spec = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
+        self.assertEqual(
+            self._manifest(spec)["execution_model"],
+            "2-gpu-plain-bf16-no-fsdp-pp2-1F1B",
+        )
+
+    def test_the_field_is_whatever_the_spec_module_composes(self) -> None:
+        # One derivation, so the manifest cannot drift from the module that
+        # owns the vocabulary.
+        for spec in (
+            TRIVIAL_SPEC,
+            ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2),
+        ):
+            self.assertEqual(
+                self._manifest(spec)["execution_model"], execution_model(spec)
+            )
+
+
+class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
+    """It is derived from ``parallelism``, which the resume already gates.
+
+    Gating it too would refuse the same run twice and report the derived
+    field rather than the field an operator set.
+    """
+
+    def setUp(self) -> None:
+        self.scenario = scenario_by_name("piper1b_rope")
+        self.arms = (self.scenario.arm("baseline"),)
+
+    def test_a_manifest_whose_only_difference_is_the_derived_field_resumes(
+        self,
+    ) -> None:
+        manifest = manifest_data(
+            self.scenario,
+            self.arms,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "1b",
+            parallelism=TRIVIAL_SPEC,
+        )
+        manifest["execution_model"] = "something-else-entirely"
+        self.assertEqual(
+            _resume_mismatches(
+                manifest,
+                self.scenario,
+                self.arms,
+                "test-gpu",
+                _METADATA,
+                (),
+                "default",
+                "sac",
+                "1b",
+                parallelism=TRIVIAL_SPEC,
+            ),
+            [],
+        )
+
+    def test_the_spec_it_derives_from_is_gated(self) -> None:
+        manifest = manifest_data(
+            self.scenario,
+            self.arms,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "1b",
+            parallelism=TRIVIAL_SPEC,
+        )
+        self.assertIn(
+            "parallelism",
+            _resume_mismatches(
+                manifest,
+                self.scenario,
+                self.arms,
+                "test-gpu",
+                _METADATA,
+                (),
+                "default",
+                "sac",
+                "1b",
+                parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
+            ),
+        )
 
 
 class ResumeParallelismTests(unittest.TestCase):
