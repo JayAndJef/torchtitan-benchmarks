@@ -3,10 +3,12 @@
 Two builders, in the order the runners call them.
 
 ``runtime_environment`` constructs the isolated environment every arm of a
-run shares. Three of its entries are load-bearing rather than cosmetic:
+run shares. Four of its entries are load-bearing rather than cosmetic:
 ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` with ``CUDA_VISIBLE_DEVICES`` is what makes
 the CLI's ``<gpu>`` argument a stable PCI index rather than a
 driver-enumeration accident; ``NGPU`` states how many ranks the run starts;
+``LOG_RANK`` decides whose output reaches the log at all, and above one rank
+it names every rank rather than TorchTitan's default of only the first;
 and ``PYTHONPATH`` gets the repository root prepended, which is how the
 training subprocess resolves ``--module benchmarks.models.piper_qwen3`` and
 every ``--override.imports`` path. (Prepended, not replaced -- an inherited
@@ -55,6 +57,35 @@ from typing import Mapping
 from benchmarks.execution.paths import RuntimePaths
 
 
+# What a multi-rank run adds, and nothing else does.
+#
+# ``LOG_RANK`` is TorchTitan's own variable: ``run_train.sh`` forwards it to
+# ``torchrun --local-ranks-filter``, and it defaults to ``0`` there -- so
+# without this every rank but the first writes to a console nobody reads,
+# and a kernel that degraded on rank 1 alone is invisible.
+#
+# ``TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE`` names the **global** rank on
+# every tee'd line. torchrun's own default is
+# ``[${role_name}${local_rank}]:``, which renders the same shape on one node
+# and a colliding one across nodes. ``benchmarks.artifacts.layout``'s
+# ``logs_by_rank`` reads what this produces.
+#
+# **Neither is set at world size 1**, so a single-GPU log is byte for byte
+# the log this repo has always written -- torchrun still prefixes it
+# ``[rank0]:`` through its own default, and ``logs_by_rank`` returns such a
+# log whole.
+LOG_RANK_TEMPLATE = "[rank${rank}]:"
+
+
+def _rank_logging(world_size: int) -> dict[str, str]:
+    if world_size == 1:
+        return {}
+    return {
+        "LOG_RANK": ",".join(str(rank) for rank in range(world_size)),
+        "TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE": LOG_RANK_TEMPLATE,
+    }
+
+
 def runtime_environment(
     paths: RuntimePaths,
     gpu: str,
@@ -83,6 +114,7 @@ def runtime_environment(
                 "TRITON_CACHE_DIR", str(paths.cache_root / "triton_cache")
             ),
             "NGPU": str(world_size),
+            **_rank_logging(world_size),
         }
     )
     return result

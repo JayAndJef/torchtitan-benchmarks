@@ -495,7 +495,7 @@ class ComparisonTests(unittest.TestCase):
             machine = json.loads(results_path.read_text())
             report = render_evaluation(result)
 
-        self.assertEqual(machine["schema_version"], 4)
+        self.assertEqual(machine["schema_version"], 5)
         self.assertEqual(
             machine["training"]["optimized"]["stable_tokens_per_second"], 1200
         )

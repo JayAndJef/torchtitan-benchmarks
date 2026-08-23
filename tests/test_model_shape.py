@@ -517,6 +517,88 @@ class PinnedShapeTests(unittest.TestCase):
         self.assertEqual(set(PINNED_SHAPES), set(PIPER_SHAPES))
 
 
+class StageParamCountTests(unittest.TestCase):
+    """The per-stage split, which is what makes arm rule 11 work under PP.
+
+    A pipelined rank builds a slice of the model, so the whole model's count
+    is no longer what it can assert. These pin the split both engines use:
+    the embedding and the output head are not layers, so every stage holds
+    ``n_layers // pipeline_degree`` of them and the two end stages carry a
+    table each.
+    """
+
+    def test_one_stage_is_the_whole_model(self) -> None:
+        for name, shape in PIPER_SHAPES.items():
+            with self.subTest(size=name):
+                self.assertEqual(
+                    shape.stage_param_count(pipeline_degree=1, stage_index=0),
+                    shape.param_count,
+                )
+
+    def test_the_stages_sum_to_the_whole_model(self) -> None:
+        """The property a driver asserts across the world, at every degree.
+
+        A split that lost or double-counted a tensor would show here and
+        nowhere else: each stage's own count would still look plausible.
+        """
+        for name, shape in PIPER_SHAPES.items():
+            for degree in (1, 2, 4):
+                if shape.n_layers % degree:
+                    continue
+                with self.subTest(size=name, degree=degree):
+                    self.assertEqual(
+                        sum(
+                            shape.stage_param_count(
+                                pipeline_degree=degree, stage_index=stage
+                            )
+                            for stage in range(degree)
+                        ),
+                        shape.param_count,
+                    )
+
+    def test_the_two_end_stages_carry_the_tables(self) -> None:
+        """Written from the tensor list, not from the closed form.
+
+        At pp 2 the difference between the two stages is exactly the final
+        norm: the first holds the embedding table and the last holds the
+        output head plus that norm, and both tables are ``vocab_size x dim``.
+        """
+        shape = PIPER_1B
+        layers_each = shape.n_layers // 2
+        per_layer = (
+            shape.dim
+            + shape.qkv_out_features * shape.dim
+            + 2 * shape.head_dim
+            + shape.n_heads * shape.head_dim * shape.dim
+            + shape.dim
+            + shape.num_experts * shape.dim
+            + shape.num_experts * 3 * shape.moe_hidden_dim * shape.dim
+        )
+        table = shape.vocab_size * shape.dim
+        self.assertEqual(
+            shape.stage_param_count(pipeline_degree=2, stage_index=0),
+            layers_each * per_layer + table,
+        )
+        self.assertEqual(
+            shape.stage_param_count(pipeline_degree=2, stage_index=1),
+            layers_each * per_layer + table + shape.dim,
+        )
+
+    def test_an_uneven_split_raises_rather_than_rounding(self) -> None:
+        # HUGE holds one layer, which is why parallelism rule 7 refuses it at
+        # pp 2. This is the same refusal, one level down.
+        with self.assertRaisesRegex(ValueError, "do not divide evenly"):
+            HUGE.stage_param_count(pipeline_degree=2, stage_index=0)
+
+    def test_a_stage_outside_the_pipeline_raises(self) -> None:
+        for degree, stage in ((2, 2), (2, -1), (0, 0)):
+            with self.subTest(degree=degree, stage=stage):
+                with self.assertRaises(ValueError):
+                    PIPER_1B.stage_param_count(
+                        pipeline_degree=degree, stage_index=stage
+                    )
+
+
 class ModelSizeAliasTests(unittest.TestCase):
     """``normal`` is the retired name of ``1b``, and it must keep working.
 
@@ -1041,7 +1123,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 10)
+        self.assertEqual(manifest["schema_version"], 11)
         self.assertEqual(manifest["model_size"], "huge")
         self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=1024))
         # Rule 7's structural matcher cannot identify a 1-layer block graph,

@@ -756,6 +756,63 @@ def _golden_megatron_tail(size: str) -> list[str]:
     ]
 
 
+# The megatron twin of the titan pp2 golden, at the same spec.
+#
+# **It freezes the launcher, which is the half a flag list cannot state.**
+# The titan arms reach torchrun through ``run_train.sh``, which reads NGPU
+# and LOG_RANK from the environment; nothing wraps the megatron driver, so
+# the harness builds the launcher itself. Every flag below has a consumer:
+# ``--local-ranks-filter`` names every rank rather than torchrun's default of
+# rank 0 alone, and ``--role rank --tee 3`` is what puts the prefix that
+# ``benchmarks/artifacts/layout.py``'s ``logs_by_rank`` reads back on each
+# line. Drop one and a rank's output, or its rank label, is gone.
+#
+# sys.executable leads this argv too, so the literal starts at the first -m.
+def _golden_megatron_pp2_tail(size: str) -> list[str]:
+    return [
+        "-m",
+        "torch.distributed.run",
+        "--nproc-per-node=2",
+        "--rdzv-backend",
+        "c10d",
+        "--rdzv-endpoint",
+        "localhost:0",
+        "--local-ranks-filter",
+        "0,1",
+        "--role",
+        "rank",
+        "--tee",
+        "3",
+        "-m",
+        MEGATRON_DRIVER_MODULE,
+        "--seq-len",
+        "1024",
+        "--steps",
+        "40",
+        "--batch",
+        "4",
+        "--seed",
+        "42",
+        "--profile-freq",
+        "20",
+        "--profiler-warmup",
+        "5",
+        "--profiler-active",
+        "5",
+        "--mode",
+        "default",
+        "--model-size",
+        size,
+        "--pp",
+        "2",
+        "--pp-schedule",
+        "1F1B",
+        "--pp-microbatch-size",
+        "1",
+        "/tmp/arm-dir",
+    ]
+
+
 class GoldenCommandTests(unittest.TestCase):
     def _command(
         self, pinned, size, compile_mode, ac_mode, parallelism=None
@@ -997,20 +1054,60 @@ class GoldenCommandTests(unittest.TestCase):
                 ParallelismSpec(pp=2),
             )
 
-    def test_the_megatron_command_refuses_a_non_trivial_spec(self) -> None:
-        """The driver is single-rank, so it says so rather than launching.
+    def test_megatron_argv_at_pp2(self) -> None:
+        command = self._command(
+            GOLDEN_MEGATRON_ARM,
+            "normal",
+            "default",
+            "none",
+            GOLDEN_TITAN_PP2_SPEC,
+        )
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1:], _golden_megatron_pp2_tail("normal"))
 
-        A single-rank argv built for a pipelined run would train the whole
-        model in one process and be published under a pp label.
+    def test_both_engines_are_told_the_same_pipeline(self) -> None:
+        """One spec, two spellings, and they must not drift apart.
+
+        The stage hazard of this axis is a split or a microbatch count that
+        differs between the engines: both runs would pass every other check
+        and the cross-engine row would compare two different jobs.
         """
-        with self.assertRaisesRegex(ValueError, "one rank"):
-            self._command(
-                GOLDEN_MEGATRON_ARM,
-                "normal",
-                "default",
-                "none",
-                GOLDEN_TITAN_PP2_SPEC,
-            )
+        titan = self._command(
+            GOLDEN_TITAN_ARM, "normal", "default", "none", GOLDEN_TITAN_PP2_SPEC
+        )
+        megatron = self._command(
+            GOLDEN_MEGATRON_ARM,
+            "normal",
+            "default",
+            "none",
+            GOLDEN_TITAN_PP2_SPEC,
+        )
+        for titan_flag, megatron_flag in (
+            ("--parallelism.pipeline-parallel-degree", "--pp"),
+            ("--parallelism.pipeline-parallel-schedule", "--pp-schedule"),
+            (
+                "--parallelism.pipeline-parallel-microbatch-size",
+                "--pp-microbatch-size",
+            ),
+        ):
+            with self.subTest(flag=titan_flag):
+                self.assertEqual(
+                    titan[titan.index(titan_flag) + 1],
+                    megatron[megatron.index(megatron_flag) + 1],
+                )
+        # And the batch each engine splits is the same batch.
+        self.assertEqual(
+            titan[titan.index("--training.local-batch-size") + 1],
+            megatron[megatron.index("--batch") + 1],
+        )
+
+    def test_the_trivial_spec_starts_no_launcher(self) -> None:
+        """The megatron argv at one rank is the interpreter, not torchrun."""
+        command = self._command(GOLDEN_MEGATRON_ARM, "normal", "default", "none")
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1:3], ["-m", MEGATRON_DRIVER_MODULE])
+        self.assertNotIn("torch.distributed.run", command)
+        self.assertNotIn("--pp", command)
 
     def test_the_megatron_driver_module_is_importable_as_a_module(self) -> None:
         # python -m needs the module to exist under the runner's PYTHONPATH;
@@ -1472,8 +1569,23 @@ TEST_CENSUS = {
     # megatron_model.build_model to resolve. The third -- that an unknown
     # backend name is refused like an unknown activation -- is one more
     # assertion inside the existing refusal test, so it adds no row.
-    "test_mcore_profiles": 20,
+    # +3 with the pipeline degree: that a degree of 1 writes no key, that a
+    # degree above 1 moves exactly one config field, and that no profile
+    # carries a parallelism degree at all -- a profile records behaviour and
+    # cannot see initialize_model_parallel.
+    "test_mcore_profiles": 23,
     "test_megatron_data": 5,
+    # The megatron driver's pipeline handling, which needs two GPUs to run
+    # and none to check: how a batch splits into microbatches, which
+    # pipeline requests the driver refuses (an interleaved schedule by
+    # name, a world size that is not the pipeline degree), and that every
+    # branch it grew takes the single-rank value at --pp 1 -- no repack, no
+    # collective, and the trace file named for the rank that wrote it.
+    # +4 that the microbatch loss reduction is a sum: one microbatch, four
+    # microbatches against the mean this replaced, an empty stage, and the
+    # detach aliasing the sum depends on, pinned against torch. +1 that the
+    # Materialized log line is the recorded one at the trivial spec.
+    "test_megatron_driver": 22,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1494,7 +1606,11 @@ TEST_CENSUS = {
     # registry entry, an unknown size is still refused, a fresh manifest
     # records the canonical name, and a manifest recording either name
     # resumes against the other.
-    "test_model_shape": 42,
+    # +5 with the per-stage parameter count: that one stage is the whole
+    # model, that the stages sum to it at every degree, that the two end
+    # stages carry the tables, and that an uneven split or a stage outside
+    # the pipeline raises rather than rounding.
+    "test_model_shape": 47,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -1512,7 +1628,11 @@ TEST_CENSUS = {
     # got stricter, not weaker" is a claim that has to be run rather than
     # argued: the short rank, the one-rank message, no traces at all, one
     # rank's repartitioned graphs, and a clean two-rank arm.
-    "test_parallel_traces": 51,
+    # +4 that the 'vs base' ratio names the two ranks it divided: two arms
+    # on one rank each, two that agree on the busiest rank, two that
+    # disagree, and that the caption qualifies the ratio without
+    # withholding it.
+    "test_parallel_traces": 55,
     "test_profile_regions": 19,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
@@ -1529,7 +1649,11 @@ TEST_CENSUS = {
     # megatron scenario declines it while every other scenario takes it,
     # that a run records the mode and declares no regions, and that a
     # resume refuses to cross the boundary.
-    "test_runner": 51,
+    # +2 with the per-axis parallelize refusals: one ``world_size != 1``
+    # check became one refusal per axis, so the axes are named separately,
+    # the dtype guard stands on its own, and a pipeline rank is let through
+    # to the delegate with skip_dp still true.
+    "test_runner": 53,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1548,7 +1672,11 @@ TEST_CENSUS = {
     # how build_model wires it and check its raise path, 2 that refuse
     # blank_parts on the host initialization path, and 5 that pin which
     # kernel builder blanks which part.
-    "test_megatron_model": 26,
+    # +3 with the pipeline split: that all three of its arguments default to
+    # one whole model on one rank, that only the shape and the profile are
+    # required, and that the degree reaches the config while the two ends
+    # reach GPTModel.
+    "test_megatron_model": 29,
     # The parallelism run axis, landed before anything imports it. Every one
     # of the fourteen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
@@ -1560,9 +1688,41 @@ TEST_CENSUS = {
     # environment variable none of them takes, the child environment, the
     # multi-device provenance query and NUMA walk, manifest schema 10 both
     # ways, and the two refusals _resolve_run now makes.
-    "test_parallelism_plumbing": 42,
+    # +5 that the manifest's execution_model follows the run's own mesh: the
+    # trivial string unchanged, a pipelined one, agreement with the module
+    # that composes it, and that the derived field is not resume-gated while
+    # the spec it derives from is.
+    # +3 with the two-GPU run: that a legal mesh now resolves rather than
+    # raising, that a single-GPU run still declares its two block regions at
+    # 80 invocations, that a pipelined run declares none, and that the
+    # scenario which already declared none is unaffected. One of the four
+    # replaces the refusal test.
+    "test_parallelism_plumbing": 50,
+    # Validation under a pipeline split. 14: what logs_by_rank returns for
+    # an unprefixed log, a one-rank log and a two-rank log; that neither
+    # rank-logging variable is set at world size 1 and both are above it;
+    # arm rules 1, 2 and 4 asked of each rank rather than of the file, with
+    # the fallback marker on rank 1 alone as the case that motivates the
+    # split; and that a rank which wrote no log line or no trace is refused
+    # rather than skipped, while neither check narrows a trivial-spec run.
+    # +8 with arm rule 12: that the trivial spec asks for nothing, that a
+    # missing mesh line, a mesh line naming another mesh and a wrong
+    # microbatch count each fail the arm, what each engine's markers say,
+    # that the driver's own line is the one the validator expects, that both
+    # engines derive the same microbatch count, and that a profile which can
+    # prove nothing refuses the run.
+    # +2 that a lone non-zero rank keeps its own number and an unprefixed
+    # log is still rank 0.
+    "test_parallel_validation": 24,
+    # What a tokens/s figure counts, at the three places that decide it: the
+    # megatron driver's own arithmetic, the manifest key that records the
+    # definition, and evaluation's min-over-ranks publication with its
+    # per-rank rows and its spread warning.
+    # +4 that the tokens/s ratio names the two ranks it divided, matching
+    # the caption on baseline_kernel_ratio.
+    "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1338
+TEST_CENSUS_TOTAL = 1437
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

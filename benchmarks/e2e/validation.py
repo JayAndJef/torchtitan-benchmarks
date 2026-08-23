@@ -7,6 +7,23 @@ kernel markers, ``cudaGraphLaunch`` under cuda-graph mode, override counting,
 and the parameter-count line -- are shared. Compiled-region structure is
 *not*: it is a per-profile field (``check_regions``), because the megatron
 arm has no Inductor graph annotations to match.
+
+**The log rules run once per rank.** One ``<arm>.log`` holds every rank's
+output, so a rule read against the whole file asks "did some rank do this".
+Arm rule 4 is the sharpest case: a kernel that silently degraded on rank 1
+alone leaves rank 0's log clean. ``benchmarks.artifacts.layout.logs_by_rank``
+does the split and returns a single-rank log whole, so a one-GPU arm is
+checked against exactly the text it was checked against before.
+
+A rank that wrote nothing is in neither the log split nor the trace
+grouping, so no rule fires for it. The declared world size is what makes
+that visible, and it is why this module takes a ``ParallelismSpec``.
+
+**Arm rule 12 is the other half of that spec.** Both engines log what mesh
+they really built, and a run that ignored the ``--parallelism.*`` flags --
+or a driver that read no ``RANK`` -- passes every other rule while training
+something else. The rule is consulted only above one rank, where there is a
+mesh to get wrong.
 """
 
 from __future__ import annotations
@@ -17,7 +34,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from benchmarks.artifacts.layout import trace_files_by_rank
+from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
+from benchmarks.e2e.parallelism import (
+    PP_SCHEDULES,
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    n_microbatches,
+    titan_mesh,
+)
 from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
     TORCH_COMPILE_MODE,
@@ -51,6 +75,13 @@ class ValidationProfile:
     switch for, which is a statement that the engine cannot run uncompiled at
     all; ``validate_arm`` then refuses such a run rather than publishing a
     treatment nothing checked.
+
+    ``parallelism_markers`` is arm rule 12: the log lines that prove this
+    engine really ran the requested mesh. It is a callable rather than a
+    string because every value in those lines comes from the spec and the
+    workload. An empty tuple means this engine logs nothing that proves this
+    spec, and ``validate_arm`` then refuses the run rather than publishing a
+    mesh nothing checked -- the same shape as ``compiled_marker`` above.
     """
 
     completion_marker: str
@@ -59,6 +90,67 @@ class ValidationProfile:
     failure_markers: tuple[str, ...]
     check_ac_line: bool
     check_regions: bool
+    parallelism_markers: Callable[
+        [ParallelismSpec, Workload], tuple[str, ...]
+    ]
+
+
+def _titan_parallelism_markers(
+    spec: ParallelismSpec, workload: Workload
+) -> tuple[str, ...]:
+    """What TorchTitan logs about the mesh it really built.
+
+    The first line comes from ``ParallelDims``, which TorchTitan builds from
+    the command line it was given, so it states the degrees that took effect
+    rather than the ones the harness asked for -- and it names ``cp`` and
+    ``tp``, which ``ParallelismSpec`` cannot express and which must therefore
+    both read 1.
+
+    The second is the pipeline schedule and the microbatch count, and it is
+    the one that catches the hazard this axis carries: two engines that agree
+    on the split but disagree on how many microbatches they move through it
+    would publish two different schedules under one label.
+    """
+    replicate, shard = titan_mesh(spec)
+    markers = [
+        f"Building device mesh with parallelism: pp={spec.pp}, "
+        f"dp_replicate={replicate}, dp_shard={shard}, cp=1, tp=1, "
+        f"ep={spec.ep}"
+    ]
+    if spec.pp > 1:
+        schedule = PP_SCHEDULES[spec.pp_schedule]
+        microbatches = n_microbatches(
+            spec, local_batch_size=workload.local_batch_size
+        )
+        markers.append(
+            f"Using pipeline schedule {schedule.titan_name} with "
+            f"{microbatches} microbatches and "
+            f"{spec.pp * schedule.stages_per_rank} stages"
+        )
+    return tuple(markers)
+
+
+def _megatron_parallelism_markers(
+    spec: ParallelismSpec, workload: Workload
+) -> tuple[str, ...]:
+    """``benchmarks.e2e.megatron.train.PARALLELISM_LINE``. Keep in sync.
+
+    The driver prints what it resolved: the degrees from the environment and
+    the microbatch count from its own ``pipeline_settings``. The count here
+    is ``n_microbatches``, and the two agree at every ``pp`` above 1, which
+    is the only place this rule is consulted. At ``pp`` 1 they differ on
+    purpose -- the driver runs one pack and ``n_microbatches`` describes a
+    split neither engine performs -- and a megatron arm cannot reach world
+    size above 1 at ``pp`` 1, because that driver has no data-parallel path.
+    """
+    microbatches = n_microbatches(
+        spec, local_batch_size=workload.local_batch_size
+    )
+    return (
+        f"Megatron-LM parallelism: dp={spec.dp} pp={spec.pp} "
+        f"schedule={spec.pp_schedule} microbatches={microbatches} "
+        f"stages={spec.pp}",
+    )
 
 
 VALIDATION_PROFILES = {
@@ -75,6 +167,7 @@ VALIDATION_PROFILES = {
         failure_markers=("falling back to the PyTorch",),
         check_ac_line=True,
         check_regions=True,
+        parallelism_markers=_titan_parallelism_markers,
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -91,6 +184,7 @@ VALIDATION_PROFILES = {
         failure_markers=(),
         check_ac_line=False,
         check_regions=False,
+        parallelism_markers=_megatron_parallelism_markers,
     ),
 }
 
@@ -109,28 +203,39 @@ def _trace_contains(trace_path: Path, marker: str) -> bool:
         return False
 
 
-def validate_arm(
+def _validate_log(
     arm: Arm,
-    arm_dir: Path,
-    log_path: Path,
-    workload: Workload,
+    log: str,
+    where: str,
     *,
-    regions: tuple[Region, ...] = (),
-    compile_mode: str = "default",
-    ac_mode: str = "sac",
-    model_size: str = "1b",
+    profile: ValidationProfile,
+    shape,
+    compile_mode: str,
+    ac_mode: str,
+    model_size: str,
+    parallelism_markers: tuple[str, ...] = (),
 ) -> None:
-    """Reject partial or wrongly configured runs before analysis."""
-    profile = VALIDATION_PROFILES[arm.validation]
-    shape = shape_by_name(model_size)
-    if not log_path.is_file():
-        raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
-    log = log_path.read_text(errors="replace")
+    """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
+
+    Every one of them is a statement about a process. Read against the whole
+    file they become "some rank did this", which is the weaker question -- a
+    kernel that silently degraded on rank 1 alone, or a rank that never
+    reached the end of training, passes it. ``where`` names the rank in the
+    message and is empty at one rank, so a single-GPU failure reads exactly
+    as it read before.
+
+    The expected values do not change per rank, and that is a property of
+    both engines rather than an assumption. TorchTitan applies the overrides
+    and prints the parameter count while building the whole model, before
+    ``pipelining_fn`` splits it, so every rank states the same counts. The
+    megatron driver prints the declared total on every rank and puts its own
+    stage's count on a separate line.
+    """
     if profile.completion_marker not in log:
-        raise RuntimeError(f"{arm.name}: training did not complete; see {log_path}")
+        raise RuntimeError(f"{arm.name}: training did not complete{where}")
     if compile_mode in UNCOMPILED_COMPILE_MODES:
-        # Rule 8 inverts here: an uncompiled arm prints no compile line, so
-        # the proof is the absence of one. Never relax this into "skip the
+        # Arm rule 8 inverts here: an uncompiled arm prints no compile line,
+        # so the proof is the absence of one. Never relax this into "skip the
         # check" -- a run that silently compiled would then publish as eager.
         if profile.compiled_marker is None:
             raise RuntimeError(
@@ -141,13 +246,12 @@ def validate_arm(
         if profile.compiled_marker in log:
             raise RuntimeError(
                 f"{arm.name}: compile mode {compile_mode!r} requested but the "
-                f"engine compiled the model; see {log_path}"
+                f"engine compiled the model{where}"
             )
     # The engine reports which mode it actually applied.
     elif profile.mode_line(compile_mode) not in log:
         raise RuntimeError(
-            f"{arm.name}: compile mode {compile_mode!r} did not apply; "
-            f"see {log_path}"
+            f"{arm.name}: compile mode {compile_mode!r} did not apply{where}"
         )
     if profile.check_ac_line:
         # The AC policy logs its application; its presence must match the
@@ -156,12 +260,12 @@ def validate_arm(
         if ac_mode == "sac" and not sac_applied:
             raise RuntimeError(
                 f"{arm.name}: ac mode 'sac' requested but SelectiveAC was not "
-                f"applied; see {log_path}"
+                f"applied{where}"
             )
         if ac_mode == "none" and sac_applied:
             raise RuntimeError(
                 f"{arm.name}: ac mode 'none' requested but SelectiveAC was "
-                f"applied; see {log_path}"
+                f"applied{where}"
             )
     # Both engines print this line; without the check a run whose --config
     # or --model-size silently fell back to another shape would pass every
@@ -170,7 +274,7 @@ def validate_arm(
     if size_marker not in log:
         raise RuntimeError(
             f"{arm.name}: model size {model_size!r} "
-            f"({shape.param_count:,} parameters) did not apply; see {log_path}"
+            f"({shape.param_count:,} parameters) did not apply{where}"
         )
     if arm.overrides_per_block:
         expected_overrides = arm.overrides_per_block * shape.n_layers
@@ -179,34 +283,114 @@ def validate_arm(
             raise RuntimeError(
                 f"{arm.name}: expected {expected_overrides} override "
                 "applications, "
-                f"found {override_count}; see {log_path}"
+                f"found {override_count}{where}"
             )
         for override_import in arm.override_imports:
             if f"[Override] {override_import}:" not in log:
                 raise RuntimeError(
-                    f"{arm.name}: override {override_import!r} did not apply; "
-                    f"see {log_path}"
+                    f"{arm.name}: override {override_import!r} did not "
+                    f"apply{where}"
                 )
     for marker in profile.failure_markers:
         if marker in log:
             raise RuntimeError(
                 f"{arm.name}: silent fallback marker {marker!r} found in the "
-                f"log; see {log_path}"
+                f"log{where}"
+            )
+    # Arm rule 12. Empty at the trivial spec, where there are no parallelism
+    # flags to ignore. Every rank logs these, because neither engine guards
+    # the line on the rank.
+    for marker in parallelism_markers:
+        if marker not in log:
+            raise RuntimeError(
+                f"{arm.name}: the requested parallelism did not apply; the "
+                f"engine never logged {marker!r}{where}"
             )
 
-    # Rules 5 and 7 are per rank. Every rank runs the same number of profiler
-    # windows, so a rank short of them is as broken as a run short of them,
-    # and pooling two ranks' windows for rule 7 would ask one structural
-    # question of two different processes' graphs.
-    #
-    # Both rules see the ranks that wrote *something*. A rank that wrote no
-    # file at all is not a key here, so neither rule fires for it, and the
-    # evaluation would then publish a maximum over the survivors. Closing
-    # that needs the world size, which no manifest records yet; the rule that
-    # every rank must write traces belongs with the commit that puts the
-    # parallelism spec in the manifest.
+
+def validate_arm(
+    arm: Arm,
+    arm_dir: Path,
+    log_path: Path,
+    workload: Workload,
+    *,
+    regions: tuple[Region, ...] = (),
+    compile_mode: str = "default",
+    ac_mode: str = "sac",
+    model_size: str = "1b",
+    parallelism: ParallelismSpec = TRIVIAL_SPEC,
+) -> None:
+    """Reject partial or wrongly configured runs before analysis.
+
+    ``parallelism`` is the run's declared mesh, and it is what turns "the
+    ranks that wrote something" into "the ranks this run asked for". Without
+    it a rank that died before it opened its log or its first trace file is
+    invisible: no rule fires for a rank that left nothing behind, and the
+    evaluation then publishes a maximum over the survivors. It defaults to
+    the trivial spec, under which every check below is the check this
+    function has always made.
+    """
+    profile = VALIDATION_PROFILES[arm.validation]
+    shape = shape_by_name(model_size)
+    if not log_path.is_file():
+        raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
+    logs = logs_by_rank(log_path.read_text(errors="replace"))
+    expected_ranks = set(range(parallelism.world_size))
+    # Arm rule 12 is consulted only where there is a mesh to prove. A profile
+    # that names no marker for a non-trivial spec cannot prove the run ran
+    # what it claims, and the run is refused rather than published -- the
+    # same reading arm rule 8 gives an engine that cannot prove eager
+    # execution.
+    parallelism_markers: tuple[str, ...] = ()
+    if parallelism.world_size > 1:
+        parallelism_markers = profile.parallelism_markers(
+            parallelism, workload
+        )
+        if not parallelism_markers:
+            raise RuntimeError(
+                f"{arm.name}: validation profile {arm.validation!r} logs "
+                f"nothing that proves dp {parallelism.dp} x pp "
+                f"{parallelism.pp}; the run cannot be published under a mesh "
+                "no rule checked"
+            )
+    if parallelism.world_size > 1 and set(logs) != expected_ranks:
+        raise RuntimeError(
+            f"{arm.name}: the run declares {parallelism.world_size} ranks and "
+            f"{log_path} carries output from {sorted(logs)}; a rank that "
+            "wrote nothing is a rank no rule can check"
+        )
+    for rank, rank_log in logs.items():
+        _validate_log(
+            arm,
+            rank_log,
+            f" on rank {rank}; see {log_path}"
+            if parallelism.world_size > 1
+            else f"; see {log_path}",
+            profile=profile,
+            shape=shape,
+            compile_mode=compile_mode,
+            ac_mode=ac_mode,
+            model_size=model_size,
+            parallelism_markers=parallelism_markers,
+        )
+
+    # Arm rules 5 and 7 are per rank. Every rank runs the same number of
+    # profiler windows, so a rank short of them is as broken as a run short of
+    # them, and pooling two ranks' windows for arm rule 7 would ask one
+    # structural question of two different processes' graphs.
     traces_by_rank = trace_files_by_rank(arm_dir)
     traces = [path for paths in traces_by_rank.values() for path in paths]
+    # A rank that wrote no trace file at all is not a key in that mapping, so
+    # neither of those two rules would fire for it and the evaluation would
+    # publish a maximum over the survivors. The declared world size is what
+    # closes that, and it is the reason this function takes one.
+    if parallelism.world_size > 1 and set(traces_by_rank) != expected_ranks:
+        raise RuntimeError(
+            f"{arm.name}: the run declares {parallelism.world_size} ranks and "
+            f"only {sorted(traces_by_rank)} wrote profiler traces under "
+            f"{arm_dir}; a rank with no trace is a rank no per-step figure "
+            "measures"
+        )
     for rank, rank_traces in (traces_by_rank or {0: []}).items():
         if len(rank_traces) < workload.min_trace_windows:
             where = f"under {arm_dir}" if len(traces_by_rank) <= 1 else (
@@ -217,14 +401,23 @@ def validate_arm(
                 "profiler windows, "
                 f"found {len(rank_traces)} {where}"
             )
-    # Rules 6 and 9 read every rank's traces as one set, which is what they
-    # already did when one rank was all there was. They are deliberately NOT
-    # per rank, and the reason is that nobody knows yet which way they should
-    # go: under PP a stage holds only some of the layers, so a marker kernel
-    # can be legitimately absent from a rank, and requiring it on every rank
-    # would fail an honest run. Requiring it on one is the weaker reading.
-    # Neither can be settled without a real multi-rank trace, so this commit
-    # changes neither, and the stage that produces such a trace must decide.
+    # Arm rules 6 and 9 read every rank's traces as one set, which is what
+    # they already did when one rank was all there was. They are deliberately
+    # NOT per rank, and this stage does not change either.
+    #
+    # Arm rule 9 is unreachable: parallelism rule 13 refuses cuda-graph for
+    # every parallel run, and this rule fires only under cuda-graph. Arm rule
+    # 6 IS reachable, and the question it raises is open rather than
+    # answered. Under PP a stage holds some of the layers, so a marker kernel
+    # can be legitimately absent from a rank and "every rank" would fail an
+    # honest run; "any rank" passes a run where rank 0 silently degraded.
+    # **No multi-rank trace from this harness has ever been read**, so the
+    # reading is left as it is rather than guessed at. What decides it is one
+    # PP2 trace per rank: if the megatron arm's cuDNN attention marker
+    # appears on both stages, "every rank" is the honest rule and costs
+    # nothing; if a stage legitimately lacks it, the rule has to become a
+    # per-arm declaration of which ranks must carry which marker. Do not
+    # weaken it to make a hypothetical run pass.
     for marker in arm.trace_kernel_markers:
         if not any(_trace_contains(path, marker) for path in traces):
             raise RuntimeError(

@@ -20,6 +20,14 @@ step's. ``trace_files_by_rank`` is the grouping every measurement path must
 use, and ``benchmarks.traces.extraction.pooled_window_metrics`` refuses a
 mixed-rank call outright rather than trusting each caller to remember.
 
+``logs_by_rank`` is the same grouping for the other artifact a rank writes.
+One ``<arm>.log`` holds every rank's output, because the runner gives one
+subprocess one file, and torchrun prefixes each tee'd line with the rank
+that wrote it. A rule read against the whole file therefore asks "did some
+rank do this", which is the weaker question: a kernel that degraded on rank
+1 alone passes it. The grammar is a launcher fact rather than a scenario
+one, which is why the reader sits here beside the trace-file grammar.
+
 ``atomic_write_json`` is the only place anything under ``benchmarks/``
 writes JSON -- manifests, run state, and both systems' ``results.json`` all
 go through it. It
@@ -48,6 +56,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
@@ -57,6 +66,17 @@ from benchmarks.traces.schema import TRACE_FILE_GLOB, rank_of_trace
 
 if TYPE_CHECKING:
     from benchmarks.e2e.registry import Scenario
+
+
+# The prefix torchrun puts on every tee'd line. Two spellings reach a log
+# here and this matches both: torchrun's own default is
+# ``[${role_name}${local_rank}]:`` and TorchTitan's run_train.sh passes
+# ``--role rank``, which renders ``[rank0]:``; a multi-rank run additionally
+# sets TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE to ``[rank${rank}]:``, which
+# renders the same shape from the GLOBAL rank. The two agree on one node and
+# would not across nodes, which is why the multi-rank case names the global
+# rank rather than trusting the default.
+_LOG_LINE_RANK = re.compile(r"^\[rank(\d+)\]:")
 
 
 def trace_files(arm_dir: Path) -> list[Path]:
@@ -88,6 +108,48 @@ def trace_files_by_rank(arm_dir: Path) -> dict[int, list[Path]]:
             )
         by_rank.setdefault(rank, []).append(path)
     return {rank: by_rank[rank] for rank in sorted(by_rank)}
+
+
+def logs_by_rank(text: str) -> dict[int, str]:
+    """One arm log, split into the text each rank wrote.
+
+    A log with **fewer than two** ranks in it comes back whole, under the one
+    rank it names. That is not a convenience: it is what makes this reader
+    inert on every log written so far. A single-rank log holds unprefixed
+    lines too -- the runner's own header, the ``nvidia-smi`` block, and
+    ``run_train.sh``'s shell trace -- and those belong to no rank, so a split
+    would drop them and change what every rule reads today. Two ranks make
+    the split necessary and the unprefixed lines the launcher's.
+
+    **The key is the rank the file names, never 0 by assumption.** A log
+    written only by rank 1, because rank 0 died before it wrote anything,
+    comes back as ``{1: ...}``. Returning it under 0 would be a repair, and
+    a caller that does not validate -- ``evaluate`` on its own does not --
+    would then publish rank 1's rows under rank 0's name. A file that names
+    no rank at all is a single-rank log from before the prefix existed, and
+    0 is what it was.
+
+    A rank that wrote nothing therefore does not appear, and a two-rank run
+    where one rank died silently comes back as one entry. The caller checks
+    the returned ranks against the world size it asked for; this function
+    reports what is in the file and repairs nothing.
+
+    **Known limit.** The split reads a line prefix, so it inherits whatever
+    the launcher wrote. torchrun tees each rank's streams from separate
+    threads onto one merged descriptor, so a torn write could in principle
+    put two prefixes on one line, and this reader would credit the first.
+    Nobody has produced one. It is recorded rather than guarded.
+    """
+    by_rank: dict[int, list[str]] = {}
+    for line in text.splitlines(keepends=True):
+        match = _LOG_LINE_RANK.match(line)
+        if match:
+            by_rank.setdefault(int(match.group(1)), []).append(
+                line[match.end() :]
+            )
+    if len(by_rank) < 2:
+        return {next(iter(by_rank), 0): text}
+    return {rank: "".join(by_rank[rank]) for rank in sorted(by_rank)}
 
 
 def atomic_write_json(path: Path, value: Any) -> None:

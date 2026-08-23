@@ -388,6 +388,7 @@ def transformer_config_kwargs(
     cuda_graph_impl: str | None = None,
     cuda_graph_modules: tuple[str, ...] = (),
     use_cpu_initialization: bool = False,
+    pipeline_model_parallel_size: int = 1,
 ) -> dict[str, Any]:
     """Every ``TransformerConfig`` keyword, with torch values still encoded.
 
@@ -396,11 +397,19 @@ def transformer_config_kwargs(
     the correctness pass builds several arms in one process, so a mutated
     profile mapping would contaminate the next build.
 
+    ``pipeline_model_parallel_size`` is a runtime knob and not a profile
+    field, which is the same rule ``cuda_graph_impl`` follows. A profile
+    records behaviour; a degree records topology, and a profile cannot see
+    ``initialize_model_parallel``. It is written only above 1, so the payload
+    at the default is the payload this function has always returned.
+
     Torch-free by construction, which is what lets the frozen-literal test
     assert the whole payload on CPU without importing megatron.
     """
     kwargs: dict[str, Any] = geometry_config_kwargs(shape)
     kwargs.update(profile.config_overrides)
+    if pipeline_model_parallel_size > 1:
+        kwargs["pipeline_model_parallel_size"] = pipeline_model_parallel_size
     if use_cpu_initialization:
         kwargs["use_cpu_initialization"] = True
     if cuda_graph_impl is not None:

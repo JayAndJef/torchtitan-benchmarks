@@ -27,11 +27,11 @@ one file.
 ``benchmarks.e2e.registry`` at runtime, which inverts the intuitive layering
 (``artifacts/`` looks lower-level than ``e2e/`` and is not). It is
 *structural* rather than incidental: a manifest is a serialization of a run's
-scenario and arms, so the builders here need those types by construction. Two
-names cross at runtime, ``Workload`` (``_resume_workload`` reconstructs and
-revalidates it from recorded JSON) and ``EXECUTION_MODEL`` (a manifest
-self-description field); ``Scenario`` and ``Arm`` are annotation-only and are
-imported under ``TYPE_CHECKING``, so they cost nothing at runtime.
+scenario and arms, so the builders here need those types by construction. One
+name crosses at runtime, ``Workload`` (``_resume_workload`` reconstructs and
+revalidates it from recorded JSON); ``Scenario`` and ``Arm`` are
+annotation-only and are imported under ``TYPE_CHECKING``, so they cost
+nothing at runtime.
 
 Be precise about what does and does not cycle. At *module* granularity there
 is no cycle: ``e2e/registry.py`` imports nothing from ``artifacts/``. At
@@ -48,11 +48,10 @@ candidate resolution is to move this module into ``e2e/`` outright, leaving
 ``artifacts/`` engine-neutral; splitting ``layout.py`` and ``run_state.py``
 off was the step that reduced it to a single-file move, since every symbol
 that would have had to stay behind is already elsewhere. The cheapest
-partial step remains relocating ``EXECUTION_MODEL`` into this module, whose
-``manifest_data`` is its only consumer repo-wide, which deletes one of the
-two runtime names outright and leaves ``Workload`` as the single genuinely
-structural edge. Neither is done here: this commit splits by concern, and
-the redesign is deferred rather than made permanent.
+partial step is already taken: ``execution_model`` composes the field from
+the run's own mesh and lives in ``benchmarks/e2e/parallelism.py``, so
+``Workload`` is now the single genuinely structural edge. The move itself is
+deferred rather than made permanent.
 
 A **second and unrelated** ``e2e`` edge exists here: ``load_run`` imports
 ``PIPER_1B_REGIONS`` to infer regions for schema-<8 manifests. That
@@ -74,10 +73,10 @@ from benchmarks.e2e.parallelism import (
     ParallelismSpec,
     TRIVIAL_SPEC,
     describe as describe_parallelism,
+    execution_model,
 )
 from benchmarks.e2e.registry import (
     DEFAULT_MODEL_SIZE,
-    EXECUTION_MODEL,
     PIPER_1B_REGIONS,
     Workload,
 )
@@ -92,7 +91,23 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 10
+MANIFEST_SCHEMA_VERSION = 11
+
+# What the ``tps`` figure in every step log line, and therefore
+# ``stable_tokens_per_second`` in ``results.json``, counts.
+#
+# Both engines divide one rank's own token count by ``cp * tp * pp``: the
+# ranks of one pipeline share a batch, and each data-parallel rank reads a
+# batch of its own, so the data-parallel degree is absent from the divisor
+# and the value is per device either way. Recorded rather than assumed
+# because tensor and context parallelism would each move the divisor again,
+# and a reader of an old directory cannot tell which definition produced its
+# numbers.
+#
+# It is not resume-gated. The value follows from this code rather than from
+# an operator's choice, so two directories written by one revision cannot
+# disagree, and gating a constant would refuse nothing.
+THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
 
 
 def _parallelism_record(
@@ -152,7 +167,8 @@ def manifest_data(
         "model_size": model_size,
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
         "parallelism": _parallelism_record(scenario, parallelism),
-        "execution_model": EXECUTION_MODEL,
+        "throughput_definition": THROUGHPUT_DEFINITION,
+        "execution_model": execution_model(parallelism),
     }
 
 

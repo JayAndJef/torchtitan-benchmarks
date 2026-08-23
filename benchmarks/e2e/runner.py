@@ -252,28 +252,6 @@ def _resolve_run(
         )
     shape = PIPER_SHAPES[model_size]
     scenario = replace(scenario, workload=workload)
-    if scenario.regions:
-        # A regioned scenario declares the per-block regions of the model it
-        # actually runs. Two runs declare none instead. A shape whose block
-        # graph is not structurally identifiable declares none (see
-        # piper_block_regions), and an uncompiled run declares none because
-        # it emits no compiled-graph annotations at all -- the same honest
-        # reason the megatron scenario declares none. Validation rule 7 then
-        # guards neither, and rules 8, 10 and 11 do.
-        regions_apply = shape.supports_block_regions and (
-            compile_mode not in UNCOMPILED_COMPILE_MODES
-        )
-        scenario = replace(
-            scenario,
-            regions=(
-                piper_block_regions(
-                    n_layers=shape.n_layers,
-                    profiler_active=workload.profiler_active,
-                )
-                if regions_apply
-                else ()
-            ),
-        )
     if compile_mode not in scenario.supported_compile_modes:
         raise ValueError(
             f"scenario {scenario.name!r} does not support compile mode "
@@ -303,18 +281,48 @@ def _resolve_run(
         engines={arm.launcher for arm in arms},
         device_count=len(devices),
     )
-    # The plumbing lands one stage ahead of the engines that would use it.
-    # Nothing here starts a second rank: ``parallelize_piper1b`` still
-    # refuses any world size except 1, and the Megatron driver reads no
-    # ``RANK``. A run that got past this line would launch one process and
-    # publish it under a mesh label, so the refusal is here and not in a
-    # comment.
-    if parallelism.world_size > 1:
-        raise ValueError(
-            f"world size {parallelism.world_size} (dp {parallelism.dp} x pp "
-            f"{parallelism.pp}) is declared and not implemented: neither "
-            "engine starts a second rank yet, so this run would train the "
-            "whole model in one process and record a parallel label"
+    # Both engines start a second rank now, so the blanket refusal that stood
+    # here is gone. What refuses an unimplemented mesh is the fourteen rules
+    # above plus the engines themselves: ``parallelize_piper1b`` refuses a
+    # tensor, context or data-parallel degree per axis, and the Megatron
+    # driver refuses a schedule it does not implement. Each failure lands on
+    # the module that owns the missing work.
+
+    if scenario.regions:
+        # A regioned scenario declares the per-block regions of the model it
+        # actually runs. Three runs declare none instead. A shape whose block
+        # graph is not structurally identifiable declares none (see
+        # piper_block_regions), an uncompiled run declares none because it
+        # emits no compiled-graph annotations at all, and a pipelined run
+        # declares none because no rank holds every block -- the same honest
+        # reason the megatron scenario declares none. Validation rule 7 then
+        # guards none of the three, and arm rules 8, 10, 11 and 12 do.
+        #
+        # The pipeline condition is about the invocation count that IS the
+        # region's identity. ``piper_block_regions`` asks for
+        # ``n_layers * profiler_active`` invocations per window, and a rank
+        # of a pipeline holds ``n_layers / pp`` blocks and runs each of them
+        # once per microbatch. So the count a rank really reaches is
+        # ``(n_layers / pp) * n_microbatches * profiler_active``, which is a
+        # different number and is not the same number on every rank under an
+        # interleaved schedule. Deriving a per-rank count instead would be
+        # rule 7 rewritten rather than rule 7 applied, and nobody has read a
+        # pipelined trace to check what is unique in one.
+        regions_apply = (
+            shape.supports_block_regions
+            and compile_mode not in UNCOMPILED_COMPILE_MODES
+            and parallelism.pp == 1
+        )
+        scenario = replace(
+            scenario,
+            regions=(
+                piper_block_regions(
+                    n_layers=shape.n_layers,
+                    profiler_active=workload.profiler_active,
+                )
+                if regions_apply
+                else ()
+            ),
         )
 
     requested_hardware = request.hardware
@@ -464,6 +472,7 @@ def execute_run(
                     compile_mode=compile_mode,
                     ac_mode=ac_mode,
                     model_size=model_size,
+                    parallelism=parallelism,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -526,6 +535,7 @@ def execute_run(
                 compile_mode=compile_mode,
                 ac_mode=ac_mode,
                 model_size=model_size,
+                parallelism=parallelism,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

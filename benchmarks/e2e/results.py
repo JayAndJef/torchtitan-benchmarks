@@ -41,7 +41,11 @@ from typing import Any
 
 from scipy import stats as scipy_stats
 
-from benchmarks.artifacts.layout import atomic_write_json, trace_files_by_rank
+from benchmarks.artifacts.layout import (
+    atomic_write_json,
+    logs_by_rank,
+    trace_files_by_rank,
+)
 from benchmarks.artifacts.manifests import load_run
 from benchmarks.artifacts.summaries import (
     SampleSummary,
@@ -134,11 +138,43 @@ class GpuTimeSummary:
 
 
 @dataclass(frozen=True)
+class RankThroughput:
+    """One rank's own throughput, before any reduction across ranks."""
+
+    rank: int
+    stable_tokens_per_second: float | None
+    stable_sample_count: int
+
+
+@dataclass(frozen=True)
 class TrainingSummary:
+    """Tokens per second per device, and what the mesh did with them.
+
+    ``stable_tokens_per_second`` is the **minimum** over ranks, which is the
+    throughput twin of the maximum this module takes over each rank's kernel
+    time: a schedule that locks the ranks together runs at the pace of the
+    slowest one, and a mean would report a rate nobody achieved. At one rank
+    it is that rank's own median, exactly as before.
+
+    ``tokens_per_second_global`` is that figure times the world size. The
+    relation holds under pipeline and data parallelism alike, because both
+    engines divide a rank's own token count by ``cp * tp * pp`` and each
+    data-parallel rank reads a batch of its own. The manifest records the
+    definition in ``throughput_definition``.
+
+    ``peak_memory_gib`` is the maximum over every rank, which needs no
+    reduction rule: it is the most memory any device in the mesh held.
+    """
+
     stable_tokens_per_second: float | None
     stable_sample_count: int
     baseline_ratio: float | None
     peak_memory_gib: float | None
+    tokens_per_second_global: float | None
+    rank_reduction: str
+    published_rank: int
+    ranks: tuple[int, ...]
+    per_rank: tuple[RankThroughput, ...]
 
 
 @dataclass(frozen=True)
@@ -161,7 +197,7 @@ class EvaluationResult:
 
     def to_dict(self) -> dict[str, Any]:
         value = {
-            "schema_version": 4,
+            "schema_version": 5,
             "output_dir": self.output_dir,
             "scenario": self.scenario,
             "hardware": self.hardware,
@@ -276,43 +312,100 @@ def region_comparison(
     return rows
 
 
-def _trajectory(log_path: Path, pattern: re.Pattern[str]) -> list[tuple[int, float]]:
+def _log_by_rank(log_path: Path) -> dict[int, str]:
+    """This arm's log, split into what each rank wrote. Empty when missing."""
     if not log_path.exists():
-        return []
+        return {}
+    return logs_by_rank(log_path.read_text(errors="replace"))
+
+
+def _trajectory(text: str, pattern: re.Pattern[str]) -> list[tuple[int, float]]:
     values = []
-    with log_path.open(errors="replace") as log_file:
-        for line in log_file:
-            match = pattern.search(line)
-            if match:
-                values.append((int(match.group(1)), float(match.group(2))))
+    for line in text.splitlines():
+        match = pattern.search(line)
+        if match:
+            values.append((int(match.group(1)), float(match.group(2))))
     return values
 
 
-def losses(log_path: Path) -> list[tuple[int, float]]:
-    return _trajectory(log_path, LOSS_METRIC)
+def loss_visible_rank(*, world_size: int, pp: int) -> int:
+    """The rank whose step line carries the run's real loss.
+
+    TorchTitan computes the loss on the last pipeline stage and every rank
+    calls ``MetricsProcessor.log``. A rank without that stage does not print
+    a smaller or noisier loss -- it prints a **sentinel**: ``trainer.py``
+    sets ``loss = torch.tensor([-1.0])`` there, and at ``dp 1`` that reaches
+    the step line unreduced, so rank 0 of a pp2 run logs ``loss: -1.00000``.
+    Pooling that with the real trajectory would not add noise, it would add
+    a constant that is not a loss at all.
+
+    This is TorchTitan's own ``_get_metrics_rank`` arithmetic. The megatron
+    driver satisfies it too, by a different route: it broadcasts the last
+    stage's loss, so every rank prints the real one and this rank is one of
+    them.
+
+    At the trivial spec it is 0, which is the rank a single-GPU run has.
+
+    **It is right for the two schedules this repo runs and not for every
+    schedule.** ``ZBVZeroBubble`` returns the loss on rank 0, and TorchTitan
+    special-cases it; parallelism rule 5 refuses that schedule for any run
+    holding a megatron arm and this repo has never run one, so the case is
+    recorded rather than handled.
+    """
+    return (world_size // pp) * (pp - 1)
 
 
-def grad_norms(log_path: Path) -> list[tuple[int, float]]:
-    return _trajectory(log_path, GRAD_NORM_METRIC)
+def losses(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
+    return _trajectory(_log_by_rank(log_path).get(rank, ""), LOSS_METRIC)
+
+
+def grad_norms(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
+    return _trajectory(_log_by_rank(log_path).get(rank, ""), GRAD_NORM_METRIC)
+
+
+def _rows(text: str) -> list[tuple[int, float, int]]:
+    rows = []
+    for line in text.splitlines():
+        match = STEP_METRICS.search(line)
+        if match:
+            rows.append(
+                (
+                    int(match.group(1)),
+                    float(match.group(2)),
+                    int(match.group(3).replace(",", "")),
+                )
+            )
+    return rows
+
+
+def per_rank_training_metrics(
+    log_path: Path,
+) -> dict[int, list[tuple[int, float, int]]]:
+    """(step, peak-memory-GiB, tokens/s) rows, per the rank that printed them.
+
+    Both engines print a step line on every rank, each carrying that rank's
+    own throughput, so a run with two ranks writes two rows per step into one
+    file. Pooling them would take a median over twice as many samples as the
+    run has steps, and it would hide the case this split exists to show: one
+    rank running slower than the rest.
+    """
+    return {
+        rank: _rows(text) for rank, text in _log_by_rank(log_path).items()
+    }
 
 
 def training_metrics(log_path: Path) -> list[tuple[int, float, int]]:
-    """Return (step, peak-memory-GiB, tokens/s) rows from a training log."""
-    if not log_path.exists():
-        return []
-    rows = []
-    with log_path.open(errors="replace") as log_file:
-        for line in log_file:
-            match = STEP_METRICS.search(line)
-            if match:
-                rows.append(
-                    (
-                        int(match.group(1)),
-                        float(match.group(2)),
-                        int(match.group(3).replace(",", "")),
-                    )
-                )
-    return rows
+    """Every rank's rows, pooled in rank order.
+
+    Correct as a *memory* input, where the answer is a maximum over the
+    whole mesh. **Not correct as a throughput input on more than one rank**:
+    see ``per_rank_training_metrics``.
+    """
+    return [
+        row
+        for _, rows in sorted(per_rank_training_metrics(log_path).items())
+        for row in rows
+    ]
 
 
 def stable_tps(
@@ -328,6 +421,39 @@ def stable_tps(
         for step, _, tps in rows
         if 2 <= ((step - 1) % profile_freq) + 1 <= wait
     ]
+
+
+def _slowest_rank(per_rank: dict[int, float | None]) -> int:
+    """The rank with the lowest throughput; ties and empties go to the lowest.
+
+    The throughput twin of ``busiest_rank``: a schedule that locks the ranks
+    together runs at the pace of its slowest participant. A rank whose log
+    holds no stable sample sorts last rather than winning as a zero, because
+    "no sample" is a measurement that did not happen and not a slow rank.
+    """
+    if not per_rank:
+        return 0
+    measured = {
+        rank: value for rank, value in per_rank.items() if value is not None
+    }
+    if not measured:
+        return min(per_rank)
+    return min(measured, key=lambda rank: (measured[rank], rank))
+
+
+def _throughput_spread(per_rank: dict[int, float | None]) -> float | None:
+    """max/min over the ranks that reported, or None below two of them."""
+    values = [value for value in per_rank.values() if value]
+    if len(values) < 2:
+        return None
+    return max(values) / min(values)
+
+
+def _rank_throughput_summary(per_rank: dict[int, float | None]) -> str:
+    return ", ".join(
+        f"rank {rank} {value:,.0f}" if value else f"rank {rank} none"
+        for rank, value in sorted(per_rank.items())
+    )
 
 
 def busiest_rank(per_rank: dict[int, PooledMetrics]) -> int:
@@ -454,6 +580,29 @@ def evaluate_run(
                 for rank in sorted(per_rank[arm])
             ),
         )
+    # The ratio divides one rank of this arm by one rank of the baseline, and
+    # each side names its own busiest rank. Under a pipeline split those two
+    # rank indices hold different partitions of the model, so the ratio stops
+    # being "the same work, two implementations". It is still the right
+    # comparison of step costs -- the schedule holds the ranks together -- but
+    # a reader of results.json holds no docstring, so the file says so.
+    #
+    # Captioned rather than pinned to one rank index. Pinning would divide two
+    # ranks nobody chose for being busy, which is a different and weaker
+    # figure, and it would move the ratio a single-GPU run has always
+    # published the moment a run has two ranks.
+    for arm in arms:
+        if arm == "baseline":
+            continue
+        if gpu_time[arm].published_rank != gpu_time["baseline"].published_rank:
+            warnings.append(
+                f"{arm}: the 'vs base' ratio divides rank "
+                f"{gpu_time[arm].published_rank} by baseline rank "
+                f"{gpu_time['baseline'].published_rank}; each side is its own "
+                "busiest rank, so under a pipeline split the two hold "
+                "different partitions of the model. Read it as a ratio of "
+                "step costs, never as one component against itself"
+            )
     comparisons = {
         arm: region_comparison(pooled["baseline"], pooled[arm], declared_regions)
         for arm in arms
@@ -477,22 +626,43 @@ def evaluate_run(
             )
 
     workload = manifest.get("workload", {})
+    # The declared mesh, read back from the manifest. Schema <= 9 directories
+    # carry no record and every one of them ran on one GPU.
+    recorded_parallelism = manifest.get("parallelism", {})
+    world_size = int(recorded_parallelism.get("world_size", 1))
     raw_training = {
-        arm: training_metrics(out_dir / f"{arm}.log") for arm in arms
+        arm: per_rank_training_metrics(out_dir / f"{arm}.log") for arm in arms
     }
     stable_samples = {
-        arm: stable_tps(rows, workload) for arm, rows in raw_training.items()
+        arm: {
+            rank: stable_tps(rows, workload) for rank, rows in by_rank.items()
+        }
+        for arm, by_rank in raw_training.items()
     }
-    baseline_samples = stable_samples["baseline"]
-    baseline_median = (
-        statistics.median(baseline_samples) if baseline_samples else None
+    throughput = {
+        arm: {
+            rank: statistics.median(samples) if samples else None
+            for rank, samples in by_rank.items()
+        }
+        for arm, by_rank in stable_samples.items()
+    }
+    published_throughput_rank = {
+        arm: _slowest_rank(by_rank) for arm, by_rank in throughput.items()
+    }
+    baseline_median = throughput["baseline"].get(
+        published_throughput_rank["baseline"]
     )
     training = {}
     for arm in arms:
-        samples = stable_samples[arm]
-        median_tps = statistics.median(samples) if samples else None
+        rank = published_throughput_rank[arm]
+        median_tps = throughput[arm].get(rank)
         peak_memory = max(
-            (memory for _, memory, _ in raw_training[arm]), default=None
+            (
+                memory
+                for rows in raw_training[arm].values()
+                for _, memory, _ in rows
+            ),
+            default=None,
         )
         ratio = (
             median_tps / baseline_median
@@ -503,11 +673,57 @@ def evaluate_run(
         )
         training[arm] = TrainingSummary(
             stable_tokens_per_second=median_tps,
-            stable_sample_count=len(samples),
+            stable_sample_count=len(stable_samples[arm].get(rank, ())),
             baseline_ratio=ratio,
             peak_memory_gib=peak_memory,
+            tokens_per_second_global=(
+                median_tps * world_size if median_tps is not None else None
+            ),
+            rank_reduction="min_over_ranks",
+            published_rank=rank,
+            ranks=tuple(sorted(throughput[arm])),
+            per_rank=tuple(
+                RankThroughput(
+                    rank=each,
+                    stable_tokens_per_second=throughput[arm][each],
+                    stable_sample_count=len(stable_samples[arm][each]),
+                )
+                for each in sorted(throughput[arm])
+            ),
         )
+        spread = _throughput_spread(throughput[arm])
+        if spread is not None and spread > 1.15:
+            warnings.append(
+                f"{arm}: tokens/s varies {spread:.2f}x across ranks "
+                f"({_rank_throughput_summary(throughput[arm])}); a schedule "
+                "holds the ranks in step, so a spread this wide means one "
+                "rank is starved or the ranks are not running one job"
+            )
 
+    # The twin of the caption on baseline_kernel_ratio, for the same reason:
+    # each side of the ratio names its own slowest rank, and under a pipeline
+    # split those two rank indices hold different partitions of the model.
+    for arm in arms:
+        if arm == "baseline":
+            continue
+        if (
+            training[arm].published_rank
+            != training["baseline"].published_rank
+        ):
+            warnings.append(
+                f"{arm}: the tokens/s 'ratio' divides rank "
+                f"{training[arm].published_rank} by baseline rank "
+                f"{training['baseline'].published_rank}; each side is its "
+                "own slowest rank, so under a pipeline split the two hold "
+                "different partitions of the model"
+            )
+
+    # One rank's trajectory, not every rank's concatenated. Under a pipeline
+    # split the loss lives on the last stage, and a rank without it still
+    # prints a step line -- carrying TorchTitan's -1.0 sentinel.
+    trajectory_rank = loss_visible_rank(
+        world_size=world_size, pp=int(recorded_parallelism.get("pp", 1))
+    )
     return EvaluationResult(
         output_dir=str(out_dir),
         scenario=manifest.get("scenario", "unknown"),
@@ -518,8 +734,14 @@ def evaluate_run(
         gpu_time=gpu_time,
         comparisons=comparisons,
         training=training,
-        losses={arm: losses(out_dir / f"{arm}.log") for arm in arms},
-        gradient_norms={arm: grad_norms(out_dir / f"{arm}.log") for arm in arms},
+        losses={
+            arm: losses(out_dir / f"{arm}.log", rank=trajectory_rank)
+            for arm in arms
+        },
+        gradient_norms={
+            arm: grad_norms(out_dir / f"{arm}.log", rank=trajectory_rank)
+            for arm in arms
+        },
         significance_methodology=SIGNIFICANCE_METHODOLOGY.copy(),
         warnings=tuple(warnings),
     )
@@ -594,6 +816,45 @@ def _render_rank_split(result: EvaluationResult) -> list[str]:
     return lines
 
 
+def _render_rank_throughput(result: EvaluationResult) -> list[str]:
+    """Each rank's own tokens/s, and the global figure the mesh reached.
+
+    Printed only when a run holds more than one rank. Every run recorded
+    before this existed held one, so a single-GPU report is unchanged,
+    character for character.
+    """
+    if not any(len(result.training[arm].ranks) > 1 for arm in result.arms):
+        return []
+    lines = [
+        "",
+        "per-rank tokens/s (published figure is the MIN over ranks, never "
+        "the mean):",
+        "  " + f"{'arm':22s} {'rank':>4s} {'tokens/s':>12s} {'n':>4s}",
+    ]
+    for arm in result.arms:
+        training = result.training[arm]
+        for rank in training.per_rank:
+            marker = "*" if rank.rank == training.published_rank else " "
+            lines.append(
+                f"  {arm:22s} {rank.rank:>3d}{marker} "
+                f"{_value(rank.stable_tokens_per_second, 12)} "
+                f"{rank.stable_sample_count:4d}"
+            )
+        lines.append(
+            f"  {arm:22s} all  "
+            f"{_value(training.tokens_per_second_global, 12)}"
+        )
+    lines.extend(
+        [
+            "* = the published rank. Every published tokens/s is per device, "
+            "and the 'all' row",
+            "is that figure times the world size. The manifest names the "
+            "definition in throughput_definition.",
+        ]
+    )
+    return lines
+
+
 def render_evaluation(result: EvaluationResult) -> str:
     """Render the complete stable-throughput and compiled-region report."""
     lines = [
@@ -646,6 +907,7 @@ def render_evaluation(result: EvaluationResult) -> str:
             f"{_value(gpu.launch_latency_us, 10, 2)}"
         )
 
+    lines.extend(_render_rank_throughput(result))
     lines.extend(_render_rank_split(result))
 
     for arm in result.arms:

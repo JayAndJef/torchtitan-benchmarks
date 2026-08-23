@@ -33,8 +33,13 @@ from benchmarks.artifacts.manifests import (
 )
 from benchmarks.cli.e2e import _execution_options, run_command
 from benchmarks.cli.main import cli
-from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC, describe
-from benchmarks.e2e.registry import scenario_by_name
+from benchmarks.e2e.parallelism import (
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    describe,
+    execution_model,
+)
+from benchmarks.e2e.registry import EXECUTION_MODEL, scenario_by_name
 from benchmarks.e2e.runner import RunRequest, _resolve_run
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
@@ -411,9 +416,9 @@ class ManifestSchemaTenTests(unittest.TestCase):
             parallelism=parallelism,
         )
 
-    def test_the_schema_is_ten(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 10)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 10)
+    def test_the_schema_is_eleven(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 11)
+        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 11)
 
     def test_the_trivial_spec_round_trips_through_json(self) -> None:
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
@@ -447,6 +452,131 @@ class ManifestSchemaTenTests(unittest.TestCase):
                 "sac",
                 "1b",
             )
+
+
+class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
+    """The manifest describes the run it recorded, not a constant.
+
+    A manifest exists so a directory self-describes without a git-rev
+    lookup. One constant cannot describe two meshes, so the field is
+    composed from the run's own spec -- and the trivial answer has to be the
+    string every directory since schema 7 already carries.
+    """
+
+    def _manifest(self, parallelism: ParallelismSpec) -> dict:
+        scenario = scenario_by_name("piper1b_rope")
+        return manifest_data(
+            scenario,
+            (scenario.arm("baseline"),),
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "1b",
+            parallelism=parallelism,
+        )
+
+    def test_the_trivial_spec_records_the_string_it_always_recorded(self) -> None:
+        self.assertEqual(
+            self._manifest(TRIVIAL_SPEC)["execution_model"],
+            "single-gpu-plain-bf16-no-fsdp",
+        )
+        self.assertEqual(
+            self._manifest(TRIVIAL_SPEC)["execution_model"], EXECUTION_MODEL
+        )
+
+    def test_a_pipelined_spec_records_its_own_mesh(self) -> None:
+        spec = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
+        self.assertEqual(
+            self._manifest(spec)["execution_model"],
+            "2-gpu-plain-bf16-no-fsdp-pp2-1F1B",
+        )
+
+    def test_the_field_is_whatever_the_spec_module_composes(self) -> None:
+        # One derivation, so the manifest cannot drift from the module that
+        # owns the vocabulary.
+        for spec in (
+            TRIVIAL_SPEC,
+            ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2),
+        ):
+            self.assertEqual(
+                self._manifest(spec)["execution_model"], execution_model(spec)
+            )
+
+
+class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
+    """It is derived from ``parallelism``, which the resume already gates.
+
+    Gating it too would refuse the same run twice and report the derived
+    field rather than the field an operator set.
+    """
+
+    def setUp(self) -> None:
+        self.scenario = scenario_by_name("piper1b_rope")
+        self.arms = (self.scenario.arm("baseline"),)
+
+    def test_a_manifest_whose_only_difference_is_the_derived_field_resumes(
+        self,
+    ) -> None:
+        manifest = manifest_data(
+            self.scenario,
+            self.arms,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "1b",
+            parallelism=TRIVIAL_SPEC,
+        )
+        manifest["execution_model"] = "something-else-entirely"
+        self.assertEqual(
+            _resume_mismatches(
+                manifest,
+                self.scenario,
+                self.arms,
+                "test-gpu",
+                _METADATA,
+                (),
+                "default",
+                "sac",
+                "1b",
+                parallelism=TRIVIAL_SPEC,
+            ),
+            [],
+        )
+
+    def test_the_spec_it_derives_from_is_gated(self) -> None:
+        manifest = manifest_data(
+            self.scenario,
+            self.arms,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "sac",
+            "1b",
+            parallelism=TRIVIAL_SPEC,
+        )
+        self.assertIn(
+            "parallelism",
+            _resume_mismatches(
+                manifest,
+                self.scenario,
+                self.arms,
+                "test-gpu",
+                _METADATA,
+                (),
+                "default",
+                "sac",
+                "1b",
+                parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
+            ),
+        )
 
 
 class ResumeParallelismTests(unittest.TestCase):
@@ -523,7 +653,7 @@ class ResumeParallelismTests(unittest.TestCase):
 
 
 class ResolveRunTests(unittest.TestCase):
-    """``_resolve_run`` refuses every mesh, and records the trivial one."""
+    """``_resolve_run`` resolves the mesh, and derives the regions from it."""
 
     def _resolve(self, **kwargs):
         with mock.patch(
@@ -553,18 +683,57 @@ class ResolveRunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             self._resolve(gpu="0", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"))
 
-    def test_a_legal_mesh_is_declared_and_refused(self) -> None:
-        """The plumbing lands one stage ahead of the engines that use it."""
-        with self.assertRaisesRegex(ValueError, "declared and not implemented"):
-            self._resolve(
-                gpu="0,1", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B")
-            )
+    def test_a_legal_mesh_resolves(self) -> None:
+        spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
+        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[10], spec)
+
+    def test_a_single_gpu_run_still_declares_its_block_regions(self) -> None:
+        scenario = self._resolve(gpu="0")[1]
+        self.assertEqual(
+            sorted(region.name for region in scenario.regions),
+            ["backward_block", "forward_block"],
+        )
+        self.assertEqual(
+            [region.invocations_per_window for region in scenario.regions],
+            [80, 80],
+        )
+
+    def test_a_pipelined_run_declares_no_regions(self) -> None:
+        """No rank holds every block, so the declared count is unreachable.
+
+        ``piper_block_regions`` asks for ``n_layers * profiler_active``
+        invocations per window, and that count IS the region's identity. A
+        rank of a two-stage pipeline holds half the layers and runs each of
+        them once per microbatch, so it never reaches 80. Deriving a
+        per-rank count instead would be rule 7 rewritten rather than applied,
+        and nobody has read a pipelined trace to see what is unique in one.
+        """
+        scenario = self._resolve(
+            gpu="0,1", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B")
+        )[1]
+        self.assertEqual(scenario.regions, ())
+
+    def test_the_scenario_that_declares_none_is_unaffected(self) -> None:
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", dict(_METADATA)),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            scenario = _resolve_run(
+                RunRequest(
+                    gpu="0", scenario_name="piper1b_megatron", ac_mode="none"
+                ),
+                {"PATH": os.environ["PATH"]},
+            )[1]
+        self.assertEqual(scenario.regions, ())
 
     def test_a_malformed_device_list_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "comma-separated GPU indices"):
             self._resolve(gpu="gpu0")
 
-    def test_the_refusal_lands_before_any_host_probe(self) -> None:
+    def test_an_illegal_mesh_is_refused_before_any_host_probe(self) -> None:
         def never(*args, **kwargs):
             raise AssertionError("a host probe ran for a refused mesh")
 
