@@ -2656,14 +2656,16 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 
 ## Operating rules
 
-- Check `nvidia-smi` for a free GPU before starting. Runs are single-GPU and a
-  shared GPU invalidates timings.
+- Check `nvidia-smi` for a free GPU before starting -- **one per rank**, so a
+  `--pp 2` run needs two. A shared GPU invalidates timings.
 - Use at least 40 steps. The runner enforces this; do not try to route around it.
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
-  `ac_mode`, and one `model_size` (plus one `megatron_git_rev`/`te_version`
-  for the megatron scenario). `cudnn_loader_resolves` is a **speed** axis
-  only: the version changes no value, measured, so cite it beside a timing
+  `ac_mode`, one `model_size` and one `parallelism` record (plus one
+  `megatron_git_rev`/`te_version` for the megatron scenario). A pipelined
+  run also declares no regions, so it carries no `forward_block` or
+  `backward_block` row a single-GPU run could be compared against.
+  `cudnn_loader_resolves` is a **speed** axis only: the version changes no value, measured, so cite it beside a timing
   number and never call two runs numerically incomparable for it. All are in
   every manifest -- check them before comparing against an older run in
   `out/` (manifests written before schema 6 predate the compile-mode flag
