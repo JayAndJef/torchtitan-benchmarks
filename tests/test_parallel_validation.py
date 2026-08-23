@@ -91,6 +91,23 @@ class LogsByRankTests(unittest.TestCase):
             sorted(logs_by_rank(_prefixed(0, "Training completed"))), [0]
         )
 
+    def test_a_lone_non_zero_rank_keeps_its_own_number(self) -> None:
+        """Rank 0 died before writing; rank 1 must not be renamed to it.
+
+        The rank set is then {1}, which no declared world size matches, so
+        validation fails the arm. Relabelling it 0 would instead hand a
+        caller that does not validate -- ``evaluate`` on its own -- rank 1's
+        rows under rank 0's name.
+        """
+        text = _prefixed(1, "Training completed")
+        self.assertEqual(logs_by_rank(text), {1: text})
+
+    def test_a_log_that_names_no_rank_is_still_rank_zero(self) -> None:
+        # Every directory under out/ predates the prefix, and 0 is what it
+        # was.
+        text = "Training completed\n"
+        self.assertEqual(logs_by_rank(text), {0: text})
+
     def test_the_reader_parses_what_the_environment_asks_torchrun_to_write(
         self,
     ) -> None:
