@@ -2693,6 +2693,21 @@ deltas. The census does not cover every module -- `test_import_boundaries`,
 GPU tests skip themselves when CUDA is unavailable. `test_te_rope.py`
 additionally requires g++ >= 13 and JIT-builds the CUDA extension on import.
 
+**Three tests in `test_megatron_data.py` skip unless the datasets cache is
+writable**, and they are not minor ones: they hold the disjoint per-rank slice
+that the data-parallel axis rests on, the global padding target, and the
+bit-identical stream parity against titan's loader. The skip names its own
+cause and the fix. `run_bench.sh` exports a writable `HF_DATASETS_CACHE`; a
+bare `unittest discover` does not, so run the suite with the same variable
+when you touch the megatron data path:
+
+```bash
+HF_DATASETS_CACHE="$HOME/.cache/hf-datasets" .venv/bin/python -m unittest discover -s tests
+```
+
+See the `HF_HOME` bullet under "Environment" for why the shared cache fails
+only sometimes.
+
 `test_lm_head_losses.py` includes a SHA-256 check that the vendored TE sources
 are unmodified except for import rewrites -- if you touch
 `benchmarks/models/piper_qwen3/components/lm_head/te_*.py`, that test is
