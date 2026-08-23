@@ -103,7 +103,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/kernel/results/` | `schema.py` (kernel `results.json`), `merge.py` (parent-side assembly of the workers' fragments, for a scenario and for a span), `span_statistics.py` (the span-versus-parts estimator, parent-side because one of its two sides is a sum over units the engine never sees) and `reporting.py` |
 | `benchmarks/models/piper_qwen3/shape.py` | `PiperShape` + the four-entry `PIPER_SHAPES` registry (`normal`, `large`, `huge`, `giant`, in ascending parameter count); both engines' single source of geometry |
 | `benchmarks/models/piper_qwen3/config_registry.py` | The `--module benchmarks.models.piper_qwen3` config port; all registered `--config` names |
-| `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn` (single-GPU, plain bf16, no FSDP) |
+| `benchmarks/models/piper_qwen3/parallelize.py` | The ModelSpec `parallelize_fn`: plain bf16, and `fully_shard` only where the delivered mesh asks for a data-parallel degree |
 | `benchmarks/models/piper_qwen3/mcore_profiles.py` | Megatron behaviour as data: one `McoreProfile` per variant, torch-free and parent-side |
 | `benchmarks/models/piper_qwen3/megatron_bootstrap.py` | Megatron location/provenance and the TE environment setup |
 | `benchmarks/models/piper_qwen3/megatron_model.py` | The Qwen3-1B megatron-core `GPTModel` builder; takes a shape, a profile, and the layer parts to leave out |
@@ -215,10 +215,18 @@ compares `dp * pp` against the device count: "parallelism world size 1 (dp 1
 x pp 1) does not match the 2 device(s) requested". That lands before any
 host probe.
 
-**No two-rank run has ever executed.** Every claim in this section is what
-the code does, read from the code. Nothing here has been measured, no
-multi-rank trace from this harness has been read, and the GPU gate is a
-separate task.
+**Two `--pp 2` runs have executed, one arm each, and no data-parallel run
+has.** On 2026-08-23 at rev `d793b9e` an operator ran `piper1b_megatron` at
+`--pp 2 --pp-schedule 1F1B` twice: `baseline` (the megatron engine) and
+`titan_stock`. Both arms completed and both passed `validate_arm`, so every
+rule below held on a real two-rank run of each engine. Their traces are the
+only multi-rank traces this repo has, and they are what the NCCL split and
+arm rule 6's evidence rest on.
+
+**What that does not cover**: no `--dp` run of either engine, no `run-all`
+at a mesh, no evaluation, and only one arm per engine. Every claim about
+the data-parallel axis is still what the code does, read from the code. The
+GPU gate for it is a separate task.
 
 **How each engine starts its ranks differs, and only one of them is the
 harness's own work.** The titan arms run `./run_train.sh`, which already
@@ -801,6 +809,33 @@ are not comparable; `--resume` refuses to mix them.
     same shape as `compiled_marker` under `--compile-mode none`. The rule is
     consulted only above one rank, where there is a mesh to get wrong.
 
+    Above `dp` 1 each engine's marker set gains its own data-parallel line,
+    and that line is the axis's real proof. TorchTitan's
+    `parallelize_piper1b` prints `piper1b data parallel: fully_shard applied
+    (dp_replicate=R, dp_shard=S)` **after** counting the FSDP units it got
+    and raising when there are none; the megatron driver prints
+    `Megatron-LM data parallel: DistributedDataParallel over N ranks (...)`
+    after the wrapper exists. Neither line can be printed by a run that
+    skipped the path.
+13. A rank of a `dp > 1` run whose traces carry no all-reduce kernel
+    (`ncclDevKernel_AllReduce`). **Two ranks that never reduce their
+    gradients train two models and report roughly twice the true
+    throughput**, and every other rule passes. This one reads **every**
+    rank, which is provable here where rule 6's reading is not: at `dp`
+    above 1 every rank sits in a data-parallel group of that size, so every
+    rank reduces.
+    The marker is the **spec's**, never an `Arm.trace_kernel_markers` entry
+    -- a static declaration would fail every single-GPU run of the same arm.
+
+    **It is a necessary condition and not a sufficient one, measured.** The
+    `--pp 2, --dp 1` trace already carries
+    `ncclDevKernel_AllReduce_Sum_bf16_RING_LL` five times per window, from
+    the gradient-norm reduction over the pipeline group, and above `dp` 1
+    both engines also all-reduce the loss on every logged step. So this rule
+    says a collective ran; rule 12's data-parallel line says which mechanism
+    built it. Cite the two together, and do not read rule 13 alone as proof
+    that gradients were reduced.
+
 **The log rules run once per rank.** One `<arm>.log` holds every rank's
 output, so a rule read against the whole file asks "did *some* rank do
 this". Rule 4 is the sharpest case: a kernel that silently degraded on rank
@@ -822,12 +857,16 @@ deliberate.** Rule 9 is unreachable under a mesh, because parallelism rule
 reading is an open question**: under PP a stage holds some of the layers, so
 a marker kernel can be legitimately absent from a rank -- "every rank" would
 fail an honest run, and "any rank" passes a run where rank 0 silently
-degraded. **No multi-rank trace from this harness has been read**, so the
-reading is left as it is rather than guessed at. What decides it is one PP2
-trace per rank: if the megatron arm's cuDNN attention marker appears on both
-stages, "every rank" is honest and free; if a stage legitimately lacks it,
-the rule has to become a per-arm declaration of which ranks carry which
-marker. Do not weaken it to make a hypothetical run pass.
+degraded.
+
+**One PP2 megatron trace per rank has now been read, and the reading still
+does not change.** Both stages of that 16-layer run carry the cuDNN
+fused-attention kernel, `_mul_silu_split` and `_permute_kernel`, so "every
+rank" would cost **that arm at that shape** nothing. It is one arm at one
+shape. A stage that holds no layer of the kind a marker names would still
+lack it, so the general repair is a per-arm declaration of which ranks carry
+which marker, not a blanket "every rank". Do not weaken this rule to make a
+hypothetical run pass, and do not tighten it on one arm's evidence.
 
 **What that costs today is concrete, and it is a coverage hole rather than
 a wrong number.** "Any rank" means one stage satisfies the marker for the
@@ -850,9 +889,9 @@ honest reason the 1-layer shapes, `piper1b_megatron` and `--compile-mode
 none` declare none.
 
 Engine differences live in the `ValidationProfile` registry
-(`VALIDATION_PROFILES`), selected by `Arm.validation`; rules 2/3/5/6/9/11
-are shared. Rules 4, 7, 8, 9, 10, 11 and 12 are the ones that catch silent
-wrongness. Never work around them by relaxing the check.
+(`VALIDATION_PROFILES`), selected by `Arm.validation`; rules 2/3/5/6/9/11/13
+are shared. Rules 4, 7, 8, 9, 10, 11, 12 and 13 are the ones that catch
+silent wrongness. Never work around them by relaxing the check.
 
 ### Resume
 
@@ -968,9 +1007,14 @@ answering the question once a run has more than one rank:
   it is the value that compares to a single-GPU run. The region columns
   exclude them for the same reason, so `region_kernel_ms_per_step` never
   exceeds `compute_ms_per_step` and a collective sharing a region's stream
-  cannot read as that region's work. **The NCCL name prefix is declared and
-  unverified**: no multi-rank trace from this harness has been read. Confirm
-  it against a real one before citing the split.
+  cannot read as that region's work. **The NCCL name prefix is confirmed
+  against a real pipeline trace**: each rank of the `--pp 2` megatron run
+  carries 35 collective device kernels in its window, of 21,885 and 21,581
+  kernel-category events, every one named `ncclDevKernel_*` and every one
+  categorised as a kernel. The three names there are `..._SendRecv`,
+  `..._Broadcast_RING_LL` and `..._AllReduce_Sum_bf16_RING_LL`. **No
+  data-parallel run has been read**, so a fourth name could appear there;
+  re-check the constant before citing a data-parallel split.
 - `busy_kernel_ms_per_step`. The interval-union basis. Summing double-counts
   whatever overlaps, which already overstates megatron's five streams
   against titan's one by about 6.5%, and a collective adds a stream of its
@@ -2278,25 +2322,57 @@ weight tying. Trains on `c4_test` (tokenizer vocab 2020) against the full
 151936-row embedding, so **losses are not comparable to real Qwen3 training** --
 they are a convergence sanity check only.
 
-**Execution model: single GPU, plain bf16, no FSDP.** The ModelSpec's
-`parallelize_fn` is
+**Execution model at the trivial spec: single GPU, plain bf16, no FSDP.**
+The ModelSpec's `parallelize_fn` is
 `benchmarks/models/piper_qwen3/parallelize.py:parallelize_piper1b`, which
-delegates to the fork's `parallelize_qwen3` with `skip_dp=True` (AC and
-per-block compile applied, FSDP skipped) and hard-errors on any
-`training.dtype` other than `bfloat16`.
+delegates to the fork's `parallelize_qwen3` (AC and per-block compile
+applied) and hard-errors on any `training.dtype` other than `bfloat16`.
+
+**`skip_dp` is a function of the delivered mesh, not a constant.**
+`skip_data_parallel(parallel_dims)` is `dp_replicate * dp_shard == 1`, so a
+one-rank run and a pure pipeline still take the early return that skips
+`fully_shard` -- the treatment every published titan number was measured
+under, unchanged. Above that product the delegate runs `fully_shard`, and
+`parallelize_piper1b` then **counts the FSDP units it got back and raises
+when there are none**, because a delegate that silently skipped the wrap
+would leave the ranks reducing nothing. It logs `piper1b data parallel:
+fully_shard applied (dp_replicate=R, dp_shard=S)`, which is arm rule 12's
+data-parallel marker.
+
+**A DP spec asks for `dp_replicate=dp, dp_shard=1`**, which TorchTitan's own
+config calls DDP: the parameters are replicated, not sharded, so the model
+each rank holds is still the plain-bf16 model above. The harness always
+sends the shard-degree flag for such a spec, because
+`data_parallel_shard_degree` defaults to **-1** and an omitted flag would
+turn `--dp 2` into ZeRO-3 silently. `parallelize_piper1b` refuses
+`dp_shard > 1` for the same reason, from the other side.
 
 **Its parallel refusals are per axis, and each names its own reason.** One
 `world_size != 1` check stood there before, and it refused every axis for
 one axis's reason. It now refuses `tp > 1` and `cp > 1` (the harness cannot
-express either degree, so the manifest could not record such a run) and a
-data-parallel degree above 1 (`skip_dp` returns before `fully_shard`, so
-those ranks would never reduce their gradients and would report roughly
-twice the true throughput). **A pipeline rank passes**, because it holds a
-slice of the layers, needs no gradient synchronization, and therefore keeps
-exactly the plain-bf16 model above. The module reads the `ParallelDims`
-TorchTitan builds from the command line, never
+express either degree, so the manifest could not record such a run) and
+`dp_shard > 1` (sharded parameters are a different execution model, and the
+manifest would record this one). **A pipeline rank passes**, because it
+holds a slice of the layers, needs no gradient synchronization, and
+therefore keeps exactly the plain-bf16 model above. The module reads the
+`ParallelDims` TorchTitan builds from the command line, never
 `benchmarks/e2e/parallelism.py`: it runs inside the training subprocess,
-where the harness's own spec is neither present nor needed. `training.dtype="bfloat16"`
+where the harness's own spec is neither present nor needed.
+
+**Gradients are SUMMED over the data-parallel mesh, not averaged, and that
+is correct.** `apply_fsdp_to_decoder` calls
+`disable_fsdp_gradient_division`, and TorchTitan divides its loss by the
+**global** valid-token count instead (`trainer.py` all-reduces
+`local_valid_tokens` over the batch mesh first). Megatron reaches the same
+gradient the other way -- its loss divides by the **local** count and its
+DDP scales each rank by `1/dp` before summing -- and the two agree because
+every rank holds `batch x seq_len` tokens with no padding. Never "fix" one
+side to look like the other. Note also that FSDP2 reduces in **fp32**
+(`mixed_precision_reduce` is `Literal["float32"]` in the fork) where
+megatron reduces in bf16 (`grad_reduce_in_fp32=False`); neither keeps an
+fp32 gradient, and neither setting is reachable from the harness.
+
+`training.dtype="bfloat16"`
 puts params, grads, and optimizer states in bf16 with no fp32 masters --
 matching piper's own execution and the treatment kernel-bench already gives
 its modules. It is the only *framework-level* dtype mechanism in the run:
@@ -2421,6 +2497,16 @@ Faithfulness guarantees, all verified:
   titan's block-diagonal causal flex mask. cu_seqlens are padded to a
   constant length and `max_seqlen` pinned to seq_len in both modes (static
   shapes for graph capture without changing the computation).
+
+  **Above `--dp` 1 each rank reads its own slice**, through the same
+  `dp_rank`/`dp_world_size` arguments the titan replay loader takes, so the
+  two engines put the same tokens on the same rank and no token is trained
+  on twice. Two consequences follow. The `max_documents` padding target is
+  taken over the **global** sample set, by an all-reduce of each rank's own
+  maximum, because a per-rank maximum would give the ranks different
+  `cu_seqlens` lengths and their static shapes would stop matching. And the
+  padding length is the only thing that reduction shares -- the tokens
+  themselves never cross ranks.
 - **Same precision**: plain bf16 params/grads/optimizer states, no fp32
   masters, no autocast, no fp8. No recompute ever (`--ac` never affects
   this arm). **One exception, and it is symmetric: the MoE router runs
@@ -2451,8 +2537,10 @@ Faithfulness guarantees, all verified:
   `_mul_silu_split` / `_permute_kernel` as trace markers.
   `gradient_accumulation_fusion` is the
   one performance default deliberately declined (its fused wgrad path needs
-  apex-style `main_grad` buffers we have no DDP wrapper to provide); its
-  cost is unmeasured.
+  apex-style `main_grad` buffers, which only the `--dp` above 1 path
+  provides; enabling it would make the fusion a property of the mesh rather
+  than of the profile, and the arms would stop being comparable across
+  degrees); its cost is unmeasured.
 - **Cross-entropy implementation is a reporting-sensitive choice.**
   `cross_entropy_fusion_impl="te"` routes the loss through
   `transformer_engine.pytorch.parallel_cross_entropy` -- the same
@@ -2469,10 +2557,11 @@ Faithfulness guarantees, all verified:
   `"te"` = megatron's fastest available loss path, `"native"` = megatron as
   NVIDIA ships it. The driver logs `cross_entropy_fusion_impl=` on the
   `Megatron fusions:` line.
-- **Minimal distributed machinery**: a process group and megatron's own
-  `initialize_model_parallel`, and nothing else -- no Megatron DDP wrapper,
-  no MegatronOptimizer. At one rank that is exactly what it always was: the
-  driver falls back to rank 0 of a world of 1 when torchrun set no
+- **Distributed machinery is the mesh's, and no more**: a process group and
+  megatron's own `initialize_model_parallel`, plus a
+  `DistributedDataParallel` **only above `--dp` 1**. There is no
+  MegatronOptimizer at any degree. At one rank it is exactly what it always
+  was: the driver falls back to rank 0 of a world of 1 when torchrun set no
   variables, and every published megatron number is from such a run.
 
   Above one rank the driver reads `RANK`, `WORLD_SIZE` and `LOCAL_RANK`,
@@ -2484,16 +2573,39 @@ Faithfulness guarantees, all verified:
   nothing else** -- an interleaved schedule needs a model-chunk list, a
   data-iterator list and a virtual pipeline degree, none of which is built,
   so the driver raises rather than running a schedule under the wrong name.
-  **It has no data-parallel path**, so it refuses `WORLD_SIZE != --pp`: every
-  rank is a pipeline stage.
+  The mesh check is `WORLD_SIZE == --dp x --pp`, and it names both degrees.
 
-  The loss lives on the last stage. The driver broadcasts it to every rank
-  so each prints the real one, which is what makes `loss_visible_rank`'s
-  answer true of both engines. Gradient clipping all-reduces the squared
-  norm over the pipeline group. Each rank writes its own
-  `rank<n>_trace.json.gz`.
+  **Above `--dp` 1 the driver wraps the model in megatron's own
+  `DistributedDataParallel`** with `overlap_grad_reduce=True` and
+  `grad_reduce_in_fp32=False`, sets `config.finalize_model_grads_func` and
+  `config.no_sync_func`, and calls `zero_grad_buffer()` at the top of every
+  step. The schedule is what invokes `finalize_model_grads`, at both its
+  pipelined and non-pipelined entry points, and that is what runs the
+  reduction. DDP delivers weight gradients through `param.main_grad` and
+  leaves `.grad` unset, so the step loop points `.grad` at `main_grad`
+  before clipping, exactly as the cuda-graph path already did. It does
+  **not** zero `main_grad` afterwards: the next step's `zero_grad_buffer`
+  does that over the whole bucket, and zeroing a view of a buffer whose
+  reduction has not been waited on would race it. **The two paths never
+  meet today** -- parallelism rule 13 refuses cuda-graph above one rank --
+  and the guard is written for the day that rule lifts.
 
-  **None of this has run.** No two-rank megatron run has executed, and the
+  The loss lives on the last stage. The driver broadcasts it over the
+  **pipeline** group and then takes the mean over the **data-parallel**
+  group, so every rank prints the same real number and it means what
+  TorchTitan's `global_avg_loss` means. Both groups matter as soon as `dp`
+  is above 1: each pipeline has its own last rank, so a broadcast on the
+  default group would have the two pipelines naming different sources for
+  one collective. Gradient clipping all-reduces the squared norm over the
+  pipeline group and takes no data-parallel term, because after the
+  reduction every rank of a dp group holds the same gradients. The
+  parameter-count check sums over the pipeline group for the same reason:
+  over the world it would report `dp x param_count`. Each rank writes its
+  own `rank<n>_trace.json.gz`.
+
+  **`--pp 2` has run and `--dp 2` has not.** The pipeline half was gated on
+  2026-08-23 (`baseline` at `--pp 2 --pp-schedule 1F1B`, completed and
+  validated). No megatron run has ever had a data-parallel degree, and that
   GPU gate is a separate task.
 
 Environment notes: TE's native tuned RMSNorm kernels fail to launch on this
@@ -2533,7 +2645,7 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The suite is CPU-only and runs 1512 tests in about 45 seconds at this rev.
+The suite is CPU-only and runs 1552 tests in about 48 seconds at this rev.
 Re-derive that count rather than quoting it; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
@@ -2671,8 +2783,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 
 ## Operating rules
 
-- Check `nvidia-smi` for a free GPU before starting -- **one per rank**, so a
-  `--pp 2` run needs two. A shared GPU invalidates timings.
+- Check `nvidia-smi` for a free GPU before starting -- **one per rank**, and
+  the rank count is `--dp x --pp`, so either at 2 needs two GPUs. A shared
+  GPU invalidates timings.
 - Use at least 40 steps. The runner enforces this; do not try to route around it.
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
@@ -2695,7 +2808,7 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about 45 seconds at 1512 tests.
+  and takes about 48 seconds at 1552 tests.
 - **Do not let "declared" become "measured".** Much of the kernel registry has
   never executed: 8 of the 16 cross-engine scenarios have never had an arm
   built, the single-engine `lm_head` has not run, 29 of the 71 declared arms
