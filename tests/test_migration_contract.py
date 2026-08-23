@@ -1584,8 +1584,16 @@ TEST_CENSUS = {
     # multi-device provenance query and NUMA walk, manifest schema 10 both
     # ways, and the two refusals _resolve_run now makes.
     "test_parallelism_plumbing": 42,
+    # Validation under a pipeline split. 14: what logs_by_rank returns for
+    # an unprefixed log, a one-rank log and a two-rank log; that neither
+    # rank-logging variable is set at world size 1 and both are above it;
+    # arm rules 1, 2 and 4 asked of each rank rather than of the file, with
+    # the fallback marker on rank 1 alone as the case that motivates the
+    # split; and that a rank which wrote no log line or no trace is refused
+    # rather than skipped, while neither check narrows a trivial-spec run.
+    "test_parallel_validation": 14,
 }
-TEST_CENSUS_TOTAL = 1368
+TEST_CENSUS_TOTAL = 1382
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -464,6 +464,7 @@ def execute_run(
                     compile_mode=compile_mode,
                     ac_mode=ac_mode,
                     model_size=model_size,
+                    parallelism=parallelism,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -526,6 +527,7 @@ def execute_run(
                 compile_mode=compile_mode,
                 ac_mode=ac_mode,
                 model_size=model_size,
+                parallelism=parallelism,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(
