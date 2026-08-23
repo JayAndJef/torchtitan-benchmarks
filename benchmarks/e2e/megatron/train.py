@@ -652,8 +652,17 @@ def main(argv: list[str] | None = None) -> None:
         )
 
         def loss_func(output_tensor):
-            # Mean CE per token, exactly titan's sum / global_valid_tokens
-            # (every token is valid: packing never pads or masks).
+            # Mean CE per token over THIS rank's own tokens. Every token is
+            # valid, because packing never pads and never masks.
+            #
+            # At one rank that is titan's own figure, term for term. Above
+            # one data-parallel rank the two engines reach the same gradient
+            # by different routes, and both are right. Titan divides by the
+            # GLOBAL token count and then SUMS the gradients over the mesh
+            # (``disable_fsdp_gradient_division``). Megatron divides by the
+            # LOCAL count and its DDP scales each rank by ``1/dp`` before the
+            # sum, which is a mean. The two agree because every rank holds
+            # the same token count -- ``batch x seq_len``, with no padding.
             loss = output_tensor.sum() / output_tensor.numel()
             return loss, {"lm loss": loss.detach()}
 

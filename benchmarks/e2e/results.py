@@ -339,10 +339,27 @@ def loss_visible_rank(*, world_size: int, pp: int) -> int:
     Pooling that with the real trajectory would not add noise, it would add
     a constant that is not a loss at all.
 
+    **Above ``dp`` 1 the sentinel is not ``-1.0`` any more, and it is still
+    not a loss.** ``trainer.py`` sums the loss over its ``loss`` mesh, which
+    holds the data-parallel ranks of one pipeline column, so a rank without
+    the last stage prints ``-dp``. The ranks that hold the last stage sum
+    their own halves and print the true global average. So the rank this
+    function names carries a real loss at every degree, and no other rank
+    does.
+
     This is TorchTitan's own ``_get_metrics_rank`` arithmetic. The megatron
     driver satisfies it too, by a different route: it broadcasts the last
-    stage's loss, so every rank prints the real one and this rank is one of
-    them.
+    stage's loss over the pipeline group and takes the mean over the
+    data-parallel group, so every rank prints the real one and this rank is
+    one of them.
+
+    **Both engines' rank layouts were read, and the arithmetic holds on
+    each.** TorchTitan unflattens its mesh as ``(pp, batch, cp, tp)``, so
+    ``pp`` is the outermost axis. Megatron's ``RankGenerator`` runs
+    ``order="tp-cp-ep-dp-pp"``, which puts ``pp`` outermost too: at ``dp 2,
+    pp 2`` its pipeline groups are ``[[0, 2], [1, 3]]`` and its
+    data-parallel groups are ``[[0, 1], [2, 3]]``, so rank 2 is the first
+    rank of the last stage on both engines.
 
     At the trivial spec it is 0, which is the rank a single-GPU run has.
 

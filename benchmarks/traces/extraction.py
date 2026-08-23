@@ -32,9 +32,13 @@ stops answering the question once a run holds more than one rank:
   it. The profiler's own ``ProfilerStep#`` annotation carries the step's wall
   clock, and ``bubble = wall - busy`` is what explains a pipeline result.
 
-**The NCCL name prefix is declared, not verified.** No multi-rank trace from
-this harness has been read. Confirm the prefix against a real one before any
-number that leans on the split is published.
+**The NCCL name prefix is confirmed against a real multi-rank trace.** A
+``pp 2`` megatron run of this harness puts 35 collective device kernels in
+each rank's window, every one of them named ``ncclDevKernel_*`` and every one
+categorised as a kernel. The constant below carries the counts and the three
+kernel names. **What the split is confirmed for is a pipeline**: no
+data-parallel run has been read, and a fourth collective name could appear
+there. Re-check the constant before publishing a data-parallel split.
 
 Pooling happens **per rank** and never across ranks. ``pooled_window_metrics``
 pools one rank's windows; two ranks of input would give an arithmetic mean,
@@ -72,8 +76,17 @@ KERNEL_CATEGORIES = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
 # What a communication kernel is called. ``ncclDevKernel`` is the form torch's
 # profiler emits today and is already covered by ``nccl``; both are named so a
 # rename of the longer one is visible here rather than silently reclassifying
-# every collective as compute. Unverified against a real multi-rank trace --
-# see the module docstring.
+# every collective as compute.
+#
+# **Confirmed against a real multi-rank trace.** A ``pp 2`` megatron run of
+# this harness carries 35 collective device kernels per window on each of its
+# two ranks, of 21,885 and 21,581 kernel-category events. Every one of them
+# begins with ``ncclDevKernel_``, so the ``nccl`` entry matches all of them,
+# and every one carries ``cat: "kernel"`` -- which is what would put a
+# pipeline's wait time into the compute total without this split. The three
+# names there are ``ncclDevKernel_SendRecv``,
+# ``ncclDevKernel_Broadcast_RING_LL`` and
+# ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL``.
 #
 # **This tuple gates more than the two new columns.** A name that matches
 # leaves ``raw_kernels``, so it also leaves ``region_kernel`` and therefore

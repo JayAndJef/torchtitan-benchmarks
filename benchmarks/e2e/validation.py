@@ -70,15 +70,27 @@ _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
 #
 # **It names the all-reduce and not NCCL in general, deliberately.** A
 # pipeline emits ``ncclDevKernel_SendRecv`` and
-# ``ncclDevKernel_Broadcast_RING_LL`` with no gradient reduction anywhere, so
-# a bare ``nccl`` would pass a dp run that reduced nothing -- which is the
-# one thing this rule exists to catch.
+# ``ncclDevKernel_Broadcast_RING_LL`` for its own point-to-point traffic, and
+# neither reduces a gradient, so a bare ``nccl`` would pass a dp run that
+# reduced nothing.
+#
+# **This marker is a necessary condition and not a sufficient one, and that
+# was measured rather than assumed.** A real ``pp 2, dp 1`` trace from this
+# harness carries ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL`` five times per
+# window on both ranks -- one per active step, from the gradient-norm
+# reduction over the pipeline group. Above ``dp`` 1 both engines also reduce
+# the loss over the data-parallel group on every logged step. So an
+# all-reduce kernel proves a collective ran, never which one. What names the
+# mechanism is arm rule 12's per-engine data-parallel log line, which each
+# engine prints only after it has really built the path: TorchTitan after
+# counting its FSDP units, megatron after the DDP wrapper exists. Read the
+# two rules together, and do not strengthen this one by guessing at a count.
 #
 # **The algorithm and protocol suffix is deliberately left off.** NCCL picks
-# those per message size and topology, so the first two-rank run's
-# ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL`` is one of several spellings a
-# correct run can produce, and pinning it whole would fail an honest run
-# whose buckets chose another. What is fixed is the operation in the name.
+# those per message size and topology, so the ``_Sum_bf16_RING_LL`` spelling
+# above is one of several a correct run can produce, and pinning it whole
+# would fail an honest run whose buckets chose another. What is fixed is the
+# operation in the name.
 ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
 
 
@@ -510,17 +522,19 @@ def validate_arm(
     #
     # Arm rule 9 is unreachable: parallelism rule 13 refuses cuda-graph for
     # every parallel run, and this rule fires only under cuda-graph. Arm rule
-    # 6 IS reachable, and the question it raises is open rather than
-    # answered. Under PP a stage holds some of the layers, so a marker kernel
-    # can be legitimately absent from a rank and "every rank" would fail an
-    # honest run; "any rank" passes a run where rank 0 silently degraded.
-    # **No multi-rank trace from this harness has ever been read**, so the
-    # reading is left as it is rather than guessed at. What decides it is one
-    # PP2 trace per rank: if the megatron arm's cuDNN attention marker
-    # appears on both stages, "every rank" is the honest rule and costs
-    # nothing; if a stage legitimately lacks it, the rule has to become a
-    # per-arm declaration of which ranks must carry which marker. Do not
-    # weaken it to make a hypothetical run pass.
+    # 6 IS reachable, and its reading stays "any rank" for now. Under PP a
+    # stage holds some of the layers, so a marker kernel can be legitimately
+    # absent from a rank: "every rank" would fail an honest run, and "any
+    # rank" passes a run where one stage silently degraded.
+    #
+    # **One PP2 megatron trace has now been read, and it says "every rank"
+    # would cost that arm nothing.** Both stages of a 16-layer ``pp 2`` run
+    # carry the cuDNN fused-attention kernel, ``_mul_silu_split`` and
+    # ``_permute_kernel``. That is one arm at one shape: a stage that holds
+    # no layer of the kind a marker names would still lack it, so the general
+    # rule needs a per-arm declaration of which ranks carry which marker
+    # rather than a blanket "every rank". Do not weaken this rule to make a
+    # hypothetical run pass, and do not tighten it on one arm's evidence.
     for marker in arm.trace_kernel_markers:
         if not any(_trace_contains(path, marker) for path in traces):
             raise RuntimeError(
