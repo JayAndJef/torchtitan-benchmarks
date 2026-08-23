@@ -1494,7 +1494,11 @@ TEST_CENSUS = {
     # registry entry, an unknown size is still refused, a fresh manifest
     # records the canonical name, and a manifest recording either name
     # resumes against the other.
-    "test_model_shape": 42,
+    # +5 with the per-stage parameter count: that one stage is the whole
+    # model, that the stages sum to it at every degree, that the two end
+    # stages carry the tables, and that an uneven split or a stage outside
+    # the pipeline raises rather than rounding.
+    "test_model_shape": 47,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -1566,7 +1570,7 @@ TEST_CENSUS = {
     # ways, and the two refusals _resolve_run now makes.
     "test_parallelism_plumbing": 42,
 }
-TEST_CENSUS_TOTAL = 1340
+TEST_CENSUS_TOTAL = 1345
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

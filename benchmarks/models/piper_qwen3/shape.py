@@ -358,6 +358,62 @@ class PiperShape:
     def param_count(self) -> int:
         return self.nparams_dense + self.nparams_sparse
 
+    @property
+    def _per_layer(self) -> int:
+        """Every parameter of one transformer layer, dense and sparse."""
+        return self._per_layer_dense + self._router + self._experts
+
+    def stage_param_count(
+        self, *, pipeline_degree: int, stage_index: int
+    ) -> int:
+        """Parameters one pipeline stage holds, under the split both engines use.
+
+        **The convention is that the embedding and the output head are not
+        layers.** Megatron divides ``config.num_layers`` alone
+        (``transformer_block.py``: ``account_for_embedding_in_pipeline_split``
+        and its loss twin both default False), and the harness sends
+        TorchTitan ``--parallelism.pipeline-parallel-first-stage-less-layers
+        0`` and its ``last`` twin, which is that same arithmetic. So every
+        stage holds ``n_layers // pipeline_degree`` layers, the first stage
+        also holds the embedding table, and the last also holds the final
+        norm and the untied output head.
+
+        This is what makes validation arm rule 11 a real check under a
+        pipeline split. Without it a rank could print any count: the whole
+        model's, or its own, and nothing would separate a stage that built
+        the wrong slice from one that built the right one. The sum over
+        ``range(pipeline_degree)`` is ``param_count`` exactly, which is the
+        other half a driver asserts.
+
+        Rejects a degree the layer count does not divide, rather than
+        rounding: an uneven split is a different model per rank, and
+        ``validate_parallelism``'s rule 7 refuses such a run for the same
+        reason.
+        """
+        if pipeline_degree < 1:
+            raise ValueError(
+                f"{self.name}: pipeline_degree {pipeline_degree} must be >= 1"
+            )
+        if not 0 <= stage_index < pipeline_degree:
+            raise ValueError(
+                f"{self.name}: stage_index {stage_index} is outside the "
+                f"{pipeline_degree} stage(s) of this pipeline"
+            )
+        if self.n_layers % pipeline_degree:
+            raise ValueError(
+                f"{self.name}: {self.n_layers} layers do not divide evenly "
+                f"into {pipeline_degree} pipeline stages"
+            )
+        count = (self.n_layers // pipeline_degree) * self._per_layer
+        if stage_index == 0:
+            count += self.nparams_embedding
+        if stage_index == pipeline_degree - 1:
+            # The final norm and the untied output head. The output head is a
+            # second V x D table, which is why the two end stages are the
+            # heavy ones at every shape this repo registers.
+            count += self.dim + self.vocab_size * self.dim
+        return count
+
     def num_flops_per_token(self, seq_len: int) -> int:
         """The tflops/MFU denominator both engines report against.
 
