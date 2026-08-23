@@ -8,6 +8,23 @@ name used as the output-directory label. The two travel together because both
 are read out of the same ``nvidia-smi`` query, and issuing it twice would let
 the label and the recorded identity disagree.
 
+The query covers **every** device the run asked for. ``nvidia-smi --id=``
+accepts the comma list verbatim and answers one line per device, so a
+one-device run issues the command it always issued and records the same
+string. A run over several devices records every line, and
+``hardware_metadata`` **raises** when two of them name different models: one
+label and one ``model_shape`` describe the whole run, so a mixed device set
+is not one measurement. That raise is the single exception to the rule
+below, and it is deliberate -- it reports a fact about the request rather
+than a failure to collect one.
+
+**The check is conditional on a well-formed answer**, and ``_device_names``
+below states exactly when it stands down. A query that did not return one
+line per requested device is a diagnostic rather than a device roster, so it
+is recorded and the run goes on. That keeps a warning line on stderr from
+killing a one-device run, which is the case every published number comes
+from.
+
 Every lookup here shells out through ``run_text``, which returns
 ``"unavailable: <error>"`` rather than raising. That is deliberate:
 collecting provenance must never be the thing that fails a run. The string is
@@ -112,10 +129,39 @@ def run_text(command: list[str], *, cwd: Path | None = None) -> str:
         return f"unavailable: {error}"
 
 
+def _device_names(gpu: str, query: str) -> list[str]:
+    """The model name each ``nvidia-smi`` line reports.
+
+    **Not in the order the devices were requested.** ``nvidia-smi`` sorts its
+    answer by index, so ``--id=1,0`` reports device 0 first. Only the set and
+    the first entry are read here, so the order does not matter -- but do not
+    index this list by rank.
+
+    Empty unless the query answered with exactly one line per requested
+    device. ``run_text`` returns ``"unavailable: <error>"`` on any failure,
+    and a merged stderr can carry a warning line ahead of the data; neither
+    is a device roster, and reading one as a roster would let a degraded box
+    raise below. Every such case returns an empty list instead, which keeps
+    the rule that collecting provenance never fails a run.
+
+    **That guard also disarms the model check on a degraded multi-device
+    query**, and the trade is deliberate: a mixed set plus one stray stderr
+    line is recorded rather than refused. Refusing a one-device run over a
+    warning line is the worse failure, because every published number so far
+    is a one-device run.
+    """
+    names = [
+        line.split(",")[1].strip() for line in query.splitlines() if "," in line
+    ]
+    return names if len(names) == gpu.count(",") + 1 else []
+
+
 def hardware_metadata(
     paths: RuntimePaths, gpu: str, hardware_label: str
 ) -> tuple[str, dict[str, str]]:
     """Collect the hardware and source provenance stored in the manifest."""
+    # One query for every requested device. --id= takes the comma list as
+    # typed, so a single-device run issues exactly the command it always did.
     query = run_text(
         [
             "nvidia-smi",
@@ -124,6 +170,13 @@ def hardware_metadata(
             "--format=csv,noheader",
         ]
     ).strip()
+    names = _device_names(gpu, query)
+    if len(set(names)) > 1:
+        raise ValueError(
+            f"device list {gpu!r} mixes GPU models ({', '.join(names)}); one "
+            "run records one hardware label, so a mixed set is not one "
+            "measurement"
+        )
     metadata = {
         "requested_gpu": gpu,
         "nvidia_smi": query,
@@ -147,6 +200,11 @@ def hardware_metadata(
     }
     if hardware_label != "auto":
         return hardware_label, metadata
+    # Unchanged, deliberately. The first comma of the whole query is the one
+    # after the first device's index, so this reads the first device's name
+    # for any device count -- and every name is the same string by the check
+    # above. Rewriting it would move the label on a box whose nvidia-smi
+    # fails, and --resume compares the label.
     name = query.split(",")[1].strip() if "," in query else f"gpu{gpu}"
     label = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
     return label, metadata

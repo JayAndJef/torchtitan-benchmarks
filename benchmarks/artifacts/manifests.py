@@ -1,11 +1,11 @@
 """``manifest.json``: what a run is, and whether it may be resumed.
 
 Everything here serializes one run's *identity* -- scenario, arms, the
-command line each arm was launched with, the three global axes
-(``compile_mode`` / ``ac_mode`` / ``model_size``), the resolved model shape,
-the execution model, and the provenance block -- reads one back including
-manifests written by older schemas, and decides whether a recorded run is
-the same run the caller is now asking for.
+command line each arm was launched with, the four global axes
+(``compile_mode`` / ``ac_mode`` / ``model_size`` / ``parallelism``), the
+resolved model shape, the execution model, and the provenance block -- reads
+one back including manifests written by older schemas, and decides whether a
+recorded run is the same run the caller is now asking for.
 
 Those last two are here rather than in modules of their own on purpose. A
 manifest field and its resume rule are two halves of one invariant: adding
@@ -14,7 +14,8 @@ the ``--model-size`` axis (schema 9) added ``model_size`` to
 ``_resume_mismatches`` in a single commit, and a field recorded but not
 gated is a comparability boundary that silently does not hold. Splitting
 reader from writer would divide the same invariant the other way -- a schema
-bump has to move both together, and neither half is meaningful alone.
+bump has to move both together, and neither half is meaningful alone. Schema
+10 added ``parallelism`` the same way, in one commit and to both halves.
 
 What *is* split out is everything engine-neutral: output layout and the
 atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
@@ -69,7 +70,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from benchmarks.artifacts.layout import atomic_write_json
-from benchmarks.e2e.registry import EXECUTION_MODEL, PIPER_1B_REGIONS, Workload
+from benchmarks.e2e.parallelism import (
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    describe as describe_parallelism,
+)
+from benchmarks.e2e.registry import (
+    DEFAULT_MODEL_SIZE,
+    EXECUTION_MODEL,
+    PIPER_1B_REGIONS,
+    Workload,
+)
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
     shape_by_name,
@@ -81,7 +92,23 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 9
+MANIFEST_SCHEMA_VERSION = 10
+
+
+def _parallelism_record(
+    scenario: Scenario, parallelism: ParallelismSpec
+) -> dict[str, Any]:
+    """The ``parallelism`` block for one run, written and compared here.
+
+    ``describe`` needs the local batch size, because the microbatch count is
+    arithmetic over the batch and the microbatch size. Taking it from the
+    scenario's own workload keeps the writer and the resume comparison
+    reading one number: the same call produces the recorded block and the
+    default an older manifest is read through.
+    """
+    return describe_parallelism(
+        parallelism, local_batch_size=scenario.workload.local_batch_size
+    )
 
 
 def manifest_data(
@@ -98,6 +125,12 @@ def manifest_data(
     # defaults what the checker demands is the asymmetry that lets a huge run
     # be recorded, resumed and published as "1b".
     model_size: str,
+    *,
+    # No default either, and for the same reason one step further: an omitted
+    # argument would record dp 1 x pp 1 for a run of any mesh, which is a
+    # single-GPU claim about a job that was not one. Keyword-only because the
+    # nine positional parameters above are the schema-9 signature.
+    parallelism: ParallelismSpec,
 ) -> dict[str, Any]:
     # Recorded canonically, so a fresh manifest never carries a retired name.
     model_size = canonical_size_name(model_size)
@@ -118,6 +151,7 @@ def manifest_data(
         "ac_mode": ac_mode,
         "model_size": model_size,
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
+        "parallelism": _parallelism_record(scenario, parallelism),
         "execution_model": EXECUTION_MODEL,
     }
 
@@ -133,6 +167,8 @@ def write_manifest(
     compile_mode: str,
     ac_mode: str,
     model_size: str,
+    *,
+    parallelism: ParallelismSpec,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -146,6 +182,7 @@ def write_manifest(
             compile_mode,
             ac_mode,
             model_size,
+            parallelism=parallelism,
         ),
     )
 
@@ -170,6 +207,8 @@ def _resume_mismatches(
     compile_mode: str,
     ac_mode: str,
     model_size: str,
+    *,
+    parallelism: ParallelismSpec,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -189,9 +228,22 @@ def _resume_mismatches(
     # disk record the retired name "normal" and 88 more record no size at
     # all, and all of them name the 1B shape. Without that, a resume of a
     # real run would be refused over a rename.
-    recorded = canonical_size_name(str(manifest.get("model_size", "1b")))
+    recorded = canonical_size_name(
+        str(manifest.get("model_size", DEFAULT_MODEL_SIZE))
+    )
     if recorded != canonical_size_name(model_size):
         mismatches.append("model_size")
+    # The same shape of defaulted lookup, one axis later: schema <= 9 output
+    # directories predate the parallelism axis and every one of them ran on
+    # one GPU, so they are read through the trivial spec's own record and
+    # still resume. The default is computed rather than written out, so it
+    # cannot drift from what a trivial-spec request produces for this
+    # workload.
+    recorded_parallelism = manifest.get(
+        "parallelism", _parallelism_record(scenario, TRIVIAL_SPEC)
+    )
+    if recorded_parallelism != _parallelism_record(scenario, parallelism):
+        mismatches.append("parallelism")
     existing_metadata = manifest.get("hardware_metadata", {})
     for key in (
         "nvidia_smi",

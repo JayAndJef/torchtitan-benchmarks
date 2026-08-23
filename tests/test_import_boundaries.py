@@ -86,6 +86,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.artifacts.run_state",
     "benchmarks.artifacts.summaries",
     "benchmarks.execution.affinity",
+    # The ``<gpu>`` positional read as a device set. Stdlib only, and both
+    # CLI surfaces plus three execution modules read it, which is why it is
+    # its own module rather than a helper inside one of them.
+    "benchmarks.execution.devices",
     "benchmarks.execution.environment",
     "benchmarks.execution.events",
     "benchmarks.execution.paths",

@@ -2,17 +2,26 @@
 
 Two builders, in the order the runners call them.
 
-``runtime_environment`` constructs the isolated single-GPU environment every
-arm of a run shares. Three of its entries are load-bearing rather than
-cosmetic: ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` with ``CUDA_VISIBLE_DEVICES`` is
-what makes the CLI's ``<gpu>`` argument a stable PCI index rather than a
-driver-enumeration accident; ``NGPU=1`` pins the run single-GPU; and
-``PYTHONPATH`` gets the repository root prepended, which is how the training
-subprocess resolves ``--module benchmarks.models.piper_qwen3`` and every
-``--override.imports`` path. (Prepended, not replaced -- an inherited
+``runtime_environment`` constructs the isolated environment every arm of a
+run shares. Three of its entries are load-bearing rather than cosmetic:
+``CUDA_DEVICE_ORDER=PCI_BUS_ID`` with ``CUDA_VISIBLE_DEVICES`` is what makes
+the CLI's ``<gpu>`` argument a stable PCI index rather than a
+driver-enumeration accident; ``NGPU`` states how many ranks the run starts;
+and ``PYTHONPATH`` gets the repository root prepended, which is how the
+training subprocess resolves ``--module benchmarks.models.piper_qwen3`` and
+every ``--override.imports`` path. (Prepended, not replaced -- an inherited
 ``PYTHONPATH`` survives behind it.) The three build-cache directories are
 set from ``RuntimePaths.cache_root`` only if the caller has not already set
 them, so ``--cache-root`` is a default and not an override.
+
+``world_size`` defaults to 1, which is the value every published number was
+taken at and the only value ``kernel-bench`` ever asks for: a kernel worker
+holds one arm in one process. The end-to-end runner passes
+``ParallelismSpec.world_size`` instead, so ``NGPU`` follows the requested
+mesh rather than the device count -- the two agree, because rule 1 of
+``benchmarks/e2e/parallelism.py`` refuses a spec that does not fill the
+device list. The parameter is an ``int`` rather than the spec, so this
+module stays free of the end-to-end axis.
 
 That ``PYTHONPATH`` line is one half of the ``benchmarks`` name-shadowing
 hazard: the training subprocess also runs with ``cwd`` inside the torchtitan
@@ -51,8 +60,11 @@ def runtime_environment(
     gpu: str,
     *,
     environment: Mapping[str, str] | None = None,
+    world_size: int = 1,
 ) -> dict[str, str]:
-    """Construct the isolated single-GPU TorchTitan environment."""
+    """Construct the isolated TorchTitan environment for one run."""
+    if world_size < 1:
+        raise ValueError(f"world size {world_size} must be >= 1")
     result = dict(environment or os.environ)
     pythonpath = result.get("PYTHONPATH")
     result.update(
@@ -70,7 +82,7 @@ def runtime_environment(
             "TRITON_CACHE_DIR": result.get(
                 "TRITON_CACHE_DIR", str(paths.cache_root / "triton_cache")
             ),
-            "NGPU": "1",
+            "NGPU": str(world_size),
         }
     )
     return result

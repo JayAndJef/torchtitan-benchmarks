@@ -49,6 +49,7 @@ from typing import Any
 import click
 
 from benchmarks.cli.rendering import _show_event
+from benchmarks.execution.devices import parse_devices
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
 from benchmarks.kernel.results.reporting import (
     render_kernel_results,
@@ -212,6 +213,18 @@ def kernel_bench_command(
     **options: Any,
 ) -> None:
     """Benchmark kernel implementations head-to-head in isolation."""
+    # One device, always. A kernel worker builds one arm in one process and
+    # times it against one anchor, so a second device would sit idle under a
+    # label that names it. The parser is the e2e one, so both surfaces read
+    # the ``<gpu>`` positional the same way.
+    try:
+        devices = parse_devices(gpu)
+    except ValueError as error:
+        raise click.UsageError(str(error)) from error
+    if len(devices) != 1:
+        raise click.UsageError(
+            f"kernel-bench measures one device; {gpu!r} names {len(devices)}"
+        )
     # ``--scenario`` defaults to every scenario; ``--span`` defaults to none.
     # A span drags every scenario it encloses into the run, so a default of
     # "all spans" would silently change what a bare invocation costs. An

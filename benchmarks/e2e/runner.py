@@ -23,6 +23,11 @@ from benchmarks.artifacts.run_state import (
     update_run_state,
 )
 from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.parallelism import (
+    ParallelismSpec,
+    TRIVIAL_SPEC,
+    validate_parallelism,
+)
 from benchmarks.e2e.registry import (
     AC_MODES,
     COMPILE_MODES,
@@ -39,6 +44,7 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import resolve_cpu_pinning
+from benchmarks.execution.devices import parse_devices
 from benchmarks.execution.environment import (
     add_compiler_environment,
     runtime_environment,
@@ -57,6 +63,11 @@ from benchmarks.models.piper_qwen3.shape import (
 class RunRequest:
     """User-selected inputs for one benchmark execution."""
 
+    # The ``<gpu>`` positional, kept exactly as the operator typed it. It
+    # names a device *set* -- ``parse_devices`` splits it -- but the string
+    # itself is never rewritten: roughly one hundred manifests under ``out/``
+    # record it as ``hardware_metadata.requested_gpu``, and
+    # ``CUDA_VISIBLE_DEVICES`` is set from the same value.
     gpu: str
     # No default scenario. ``None`` means "not requested", which only a resume
     # may leave unanswered: the recorded manifest names the scenario there. A
@@ -80,6 +91,21 @@ class RunRequest:
     compile_mode: str | None = None
     ac_mode: str | None = None
     model_size: str | None = None
+    # The fourth global run axis. ``None`` means "not requested" and resolves
+    # to ``TRIVIAL_SPEC``, exactly as the three above resolve to their own
+    # defaults.
+    #
+    # **A resume does not inherit it, and that is not an oversight.** The
+    # three axes above are single strings, so a resume can read one back and
+    # rebuild the run from it. A spec is five fields that together decide
+    # every arm's command line, and ``--resume`` compares no command line --
+    # so a reconstruction that dropped one field would relaunch the arms
+    # differently and the gate would not see it. Omitting the flags on a
+    # resume therefore asks for the trivial spec, which matches a
+    # single-GPU directory and is refused against any other. The stage that
+    # first runs a parallel job may add inheritance, with the round trip
+    # under test.
+    parallelism: ParallelismSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +159,7 @@ def _resolve_run(
     str,
     str,
     str,
+    ParallelismSpec,
     bool,
 ]:
     paths = RuntimePaths.resolve(
@@ -260,6 +287,36 @@ def _resolve_run(
         )
     arms = (scenario.arm(request.arm_name),) if request.arm_name else scenario.arms
 
+    # The fourth global axis, resolved and checked before any host probe.
+    # ``engines`` is the launcher set of the arms this run will really start,
+    # so the Megatron restrictions follow the arms rather than a scenario
+    # name. ``run --arm NAME`` narrows that set on purpose: a run of one
+    # titan arm has no megatron opponent to match, and refusing it for the
+    # sake of an arm nobody asked for would refuse a legal run.
+    parallelism = request.parallelism or TRIVIAL_SPEC
+    devices = parse_devices(request.gpu)
+    validate_parallelism(
+        parallelism,
+        shape=shape,
+        workload=workload,
+        compile_mode=compile_mode,
+        engines={arm.launcher for arm in arms},
+        device_count=len(devices),
+    )
+    # The plumbing lands one stage ahead of the engines that would use it.
+    # Nothing here starts a second rank: ``parallelize_piper1b`` still
+    # refuses any world size except 1, and the Megatron driver reads no
+    # ``RANK``. A run that got past this line would launch one process and
+    # publish it under a mesh label, so the refusal is here and not in a
+    # comment.
+    if parallelism.world_size > 1:
+        raise ValueError(
+            f"world size {parallelism.world_size} (dp {parallelism.dp} x pp "
+            f"{parallelism.pp}) is declared and not implemented: neither "
+            "engine starts a second rank yet, so this run would train the "
+            "whole model in one process and record a parallel label"
+        )
+
     requested_hardware = request.hardware
     if existing_manifest is not None and requested_hardware == "auto":
         requested_hardware = str(existing_manifest.get("hardware", "auto"))
@@ -279,6 +336,7 @@ def _resolve_run(
             compile_mode,
             ac_mode,
             model_size=model_size,
+            parallelism=parallelism,
         )
         for arm in arms
     }
@@ -294,6 +352,7 @@ def _resolve_run(
             compile_mode,
             ac_mode,
             model_size,
+            parallelism=parallelism,
         )
         if mismatches:
             raise ValueError(
@@ -311,6 +370,7 @@ def _resolve_run(
         compile_mode,
         ac_mode,
         model_size,
+        parallelism,
         resumed,
     )
 
@@ -335,6 +395,7 @@ def execute_run(
         compile_mode,
         ac_mode,
         model_size,
+        parallelism,
         resumed,
     ) = _resolve_run(request, host_environment)
 
@@ -354,6 +415,7 @@ def execute_run(
             compile_mode,
             ac_mode,
             model_size,
+            parallelism=parallelism,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -374,10 +436,19 @@ def execute_run(
     _emit(event_handler, "summary", f"compile mode: {compile_mode}")
     _emit(event_handler, "summary", f"ac mode: {ac_mode}")
     _emit(event_handler, "summary", f"model size: {model_size}")
+    _emit(
+        event_handler,
+        "summary",
+        f"parallelism: dp {parallelism.dp} x pp {parallelism.pp} "
+        f"(ep {parallelism.ep}, world size {parallelism.world_size})",
+    )
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
-        paths, request.gpu, environment=host_environment
+        paths,
+        request.gpu,
+        environment=host_environment,
+        world_size=parallelism.world_size,
     )
     for arm in arms:
         arm_dir = out_dir / arm.name

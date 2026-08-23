@@ -53,6 +53,7 @@ from benchmarks.artifacts.manifests import (
     load_manifest,
     load_run,
 )
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import scenario_by_name
 from benchmarks.e2e.runner import RunRequest, execute_run
 from benchmarks.execution.affinity import CpuPinning
@@ -325,6 +326,10 @@ class LegacyResumeTests(unittest.TestCase):
             self.manifest["compile_mode"],
             self.manifest["ac_mode"],
             "normal",
+            # A legacy fixture predates the parallelism axis, so it carries no
+            # ``parallelism`` key and is read through the trivial spec's own
+            # record. Requesting that spec is what a plain resume does.
+            parallelism=TRIVIAL_SPEC,
         )
 
     def test_the_git_rev_field_is_the_guard(self) -> None:
