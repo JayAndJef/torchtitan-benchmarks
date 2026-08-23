@@ -33,7 +33,11 @@ from benchmarks.e2e.parallelism import (
     n_microbatches,
 )
 from benchmarks.e2e.registry import PIPER_1B_ROPE, PIPER_1B_SWIGLU
-from benchmarks.e2e.validation import VALIDATION_PROFILES, validate_arm
+from benchmarks.e2e.validation import (
+    ALL_REDUCE_MARKER,
+    VALIDATION_PROFILES,
+    validate_arm,
+)
 from benchmarks.execution.environment import LOG_RANK_TEMPLATE
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.environment import runtime_environment
@@ -46,6 +50,7 @@ from tests.test_runner import (
 
 
 PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
+DP2 = ParallelismSpec(dp=2)
 
 
 def _prefixed(rank: int, text: str) -> str:
@@ -152,6 +157,29 @@ class RankLoggingEnvironmentTests(unittest.TestCase):
         )
 
 
+def _write_traces(
+    root: Path, rank: int, *, windows=(20, 40), markers=()
+) -> None:
+    """One rank's profiler windows, carrying the named kernels and no more.
+
+    Per rank rather than per fixture, so a test can give two ranks different
+    kernels -- which is what arm rule 13's "every rank" reading needs.
+    """
+    for iteration in windows:
+        trace = (
+            root
+            / "profiling"
+            / "traces"
+            / f"iteration_{iteration}"
+            / f"rank{rank}_trace.json.gz"
+        )
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(trace, "wt") as handle:
+            handle.write("cudaLaunchKernel\n")
+            for marker in markers:
+                handle.write(marker + "\n")
+
+
 class _ArmFixture:
     """A validated two-rank arm directory, so a test can spoil one rank."""
 
@@ -160,19 +188,7 @@ class _ArmFixture:
     ) -> None:
         self.root = root
         for rank in ranks:
-            for iteration in windows:
-                trace = (
-                    root
-                    / "profiling"
-                    / "traces"
-                    / f"iteration_{iteration}"
-                    / f"rank{rank}_trace.json.gz"
-                )
-                trace.parent.mkdir(parents=True, exist_ok=True)
-                with gzip.open(trace, "wt") as handle:
-                    handle.write("cudaLaunchKernel\n")
-                    for marker in markers:
-                        handle.write(marker + "\n")
+            _write_traces(root, rank, windows=windows, markers=markers)
         self.log = root / "baseline.log"
 
     def write(self, per_rank: dict[int, str]) -> None:
@@ -417,6 +433,129 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
         self.assertIsNotNone(pattern.search(_titan_log(PP2)))
 
 
+class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
+    """The same inversion on the data-parallel axis, where it matters more.
+
+    A pipeline rank and a single-GPU rank publish the same per-device
+    throughput, so a pipeline published as one GPU misstates the mesh and
+    not the rate. A data-parallel rank reads a batch of its own, so a
+    ``dp 2`` run published under the trivial spec reads as roughly twice the
+    true rate -- and every other rule passes, because the positive markers
+    ask nothing when nothing was requested.
+    """
+
+    def test_a_titan_data_parallel_log_is_refused_at_the_trivial_spec(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0,))
+            fixture.log.write_text(_titan_log(DP2) + "\n")
+            with self.assertRaisesRegex(
+                RuntimeError, "declares no data parallelism"
+            ):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=TRIVIAL_SPEC,
+                )
+
+    def test_a_titan_trivial_log_still_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0,))
+            fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
+            validate_arm(
+                PIPER_1B_ROPE.arm("baseline"),
+                fixture.root,
+                fixture.log,
+                PIPER_1B_ROPE.workload,
+                parallelism=TRIVIAL_SPEC,
+            )
+
+    def test_each_pattern_names_two_witnesses(self) -> None:
+        """The engine's own mesh line, and this repo's wrapper line.
+
+        The mesh line is logged whatever this repo's code does, so a degree
+        above 1 shows there even in a run that never reached the wrapper.
+        Either alone must fail the arm.
+        """
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNotNone(
+            titan.search(
+                "Building device mesh with parallelism: pp=1, "
+                "dp_replicate=2, dp_shard=1, cp=1, tp=1, ep=1"
+            )
+        )
+        self.assertIsNotNone(
+            titan.search(
+                "piper1b data parallel: fully_shard applied "
+                "(dp_replicate=2, dp_shard=1); 17 FSDP units"
+            )
+        )
+        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        self.assertIsNotNone(
+            megatron.search(
+                "Megatron-LM parallelism: dp=2 pp=1 schedule=None "
+                "microbatches=1 stages=1"
+            )
+        )
+        self.assertIsNotNone(
+            megatron.search(
+                "Megatron-LM data parallel: DistributedDataParallel over 2 "
+                "ranks (overlap_grad_reduce=True, grad_reduce_in_fp32=False)"
+            )
+        )
+
+    def test_a_shard_degree_is_data_parallelism_too(self) -> None:
+        """ZeRO-3 is what an omitted shard-degree flag produces.
+
+        ``parallelize_piper1b`` refuses it in the training process. This
+        pattern is what stops such a log being published as single-GPU if
+        the refusal is ever lifted.
+        """
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNotNone(
+            titan.search(
+                "Building device mesh with parallelism: pp=1, "
+                "dp_replicate=1, dp_shard=2, cp=1, tp=1, ep=1"
+            )
+        )
+
+    def test_a_pipeline_only_log_is_not_data_parallel(self) -> None:
+        """Read off the real ``pp 2, dp 1`` logs this harness has written.
+
+        Both engines print their degrees on one line, so a pattern that
+        matched the line rather than the degree would fail every honest
+        pipeline run.
+        """
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNone(
+            titan.search(
+                "Building device mesh with parallelism: pp=2, "
+                "dp_replicate=1, dp_shard=1, cp=1, tp=1, ep=1"
+            )
+        )
+        self.assertIsNone(titan.search(_titan_log(PP2)))
+        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        self.assertIsNone(
+            megatron.search(
+                "Megatron-LM parallelism: dp=1 pp=2 schedule=1F1B "
+                "microbatches=4 stages=2"
+            )
+        )
+
+    def test_a_double_digit_degree_is_not_read_as_one(self) -> None:
+        """``dp=1`` must not match ``dp=12``, and the reverse."""
+        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        self.assertIsNotNone(
+            megatron.search("Megatron-LM parallelism: dp=12 pp=1 schedule=None")
+        )
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNotNone(titan.search("dp_replicate=10, dp_shard=1,"))
+        self.assertIsNone(titan.search("dp_replicate=1, dp_shard=1,"))
+
+
 class ArmRuleTwelveTests(unittest.TestCase):
     """Both engines must log the mesh they really built.
 
@@ -509,28 +648,214 @@ class ArmRuleTwelveTests(unittest.TestCase):
             ),
         )
 
+    def test_the_titan_dp_marker_is_the_line_parallelize_prints(self) -> None:
+        """The one titan marker that proves a gradient reduction.
+
+        TorchTitan logs its mesh line from ``ParallelDims``, before
+        ``parallelize_fn`` runs, so that line survives a run that skipped the
+        data-parallel path entirely. ``parallelize_piper1b`` counts the FSDP
+        units the delegate really built and prints its own line after the
+        count. ``validation.py`` cannot import that constant -- it would pull
+        torch into the parent -- so the string is stated twice and this test
+        is the link.
+        """
+        from benchmarks.models.piper_qwen3.parallelize import (
+            DATA_PARALLEL_LINE,
+        )
+
+        markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
+            DP2, PIPER_1B_ROPE.workload
+        )
+        self.assertIn(
+            DATA_PARALLEL_LINE.format(replicate=2, shard=1), markers
+        )
+
+    def test_no_dp_marker_where_no_reduction_happens(self) -> None:
+        """A pipeline rank reduces no gradient, so it prints no such line.
+
+        Asking for the line there would fail an honest run, which is the
+        direction a validation rule must never take.
+        """
+        for spec in (TRIVIAL_SPEC, PP2):
+            with self.subTest(spec=spec):
+                markers = VALIDATION_PROFILES[
+                    "torchtitan"
+                ].parallelism_markers(spec, PIPER_1B_ROPE.workload)
+                self.assertEqual(
+                    [m for m in markers if "data parallel" in m], []
+                )
+
+    def test_a_dp_run_that_skipped_fully_shard_fails_the_arm(self) -> None:
+        """The named hazard of this stage, stated as one assertion.
+
+        The mesh line is present and every other rule passes. Without the
+        third marker the arm would publish roughly twice the true speed.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            whole = _titan_log(DP2)
+            unwrapped = "\n".join(
+                line
+                for line in whole.splitlines()
+                if "data parallel" not in line
+            )
+            fixture.write({0: unwrapped, 1: unwrapped})
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=DP2,
+                )
+
+    def test_every_rank_must_carry_an_all_reduce_under_dp(self) -> None:
+        """Arm rule 13, and its reading is EVERY rank rather than any.
+
+        At dp above 1 every rank sits in a data-parallel group of that size,
+        so every rank reduces. That is what makes "every rank" provable here
+        where arm rule 6's reading is still open.
+        """
+        for missing in (0, 1):
+            with self.subTest(rank_without_the_marker=missing):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = _ArmFixture(root, ranks=())
+                    for rank in (0, 1):
+                        _write_traces(
+                            root,
+                            rank,
+                            markers=()
+                            if rank == missing
+                            else (ALL_REDUCE_MARKER,),
+                        )
+                    log = _titan_log(DP2)
+                    fixture.write({0: log, 1: log})
+                    with self.assertRaisesRegex(
+                        RuntimeError, f"rank {missing}'s profiler traces"
+                    ):
+                        validate_arm(
+                            PIPER_1B_ROPE.arm("baseline"),
+                            fixture.root,
+                            fixture.log,
+                            PIPER_1B_ROPE.workload,
+                            parallelism=DP2,
+                        )
+
+    def test_a_pipeline_only_run_needs_no_all_reduce(self) -> None:
+        """The rule reads ``dp``, not the world size.
+
+        A pipeline synchronizes no gradient. Asking a pp-only run for an
+        all-reduce would fail an honest run, which is the direction a
+        validation rule must never take.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
+            validate_arm(
+                PIPER_1B_ROPE.arm("baseline"),
+                fixture.root,
+                fixture.log,
+                PIPER_1B_ROPE.workload,
+                parallelism=PP2,
+            )
+
+    def test_a_pipeline_collective_cannot_satisfy_the_rule(self) -> None:
+        """SendRecv and Broadcast are what a pipeline emits with no
+        reduction.
+
+        A marker of ``nccl`` alone would pass a dp run that reduced nothing,
+        which is the one thing this rule exists to catch.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = _ArmFixture(root, ranks=())
+            for rank in (0, 1):
+                _write_traces(
+                    root,
+                    rank,
+                    markers=(
+                        "ncclDevKernel_SendRecv",
+                        "ncclDevKernel_Broadcast_RING_LL",
+                    ),
+                )
+            log = _titan_log(DP2)
+            fixture.write({0: log, 1: log})
+            with self.assertRaisesRegex(RuntimeError, "carry no"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=DP2,
+                )
+
+    def test_a_dp_run_with_the_marker_on_every_rank_passes(self) -> None:
+        """And the suffix NCCL chose is not part of the marker.
+
+        The algorithm and protocol depend on the message size and the
+        topology, so pinning ``_RING_LL`` whole would fail an honest run
+        whose buckets chose another.
+        """
+        for kernel in (
+            "ncclDevKernel_AllReduce_Sum_bf16_RING_LL",
+            "ncclDevKernel_AllReduce_Sum_bf16_TREE_LL128",
+        ):
+            with self.subTest(kernel=kernel):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = _ArmFixture(root, ranks=())
+                    for rank in (0, 1):
+                        _write_traces(root, rank, markers=(kernel,))
+                    log = _titan_log(DP2)
+                    fixture.write({0: log, 1: log})
+                    validate_arm(
+                        PIPER_1B_ROPE.arm("baseline"),
+                        fixture.root,
+                        fixture.log,
+                        PIPER_1B_ROPE.workload,
+                        parallelism=DP2,
+                    )
+
     def test_the_megatron_marker_is_the_line_the_driver_prints(self) -> None:
         """The validator and the driver state one line in two places.
 
         MODE_LINE already carries that cost, and the same comment. This test
-        is the link: the driver formats its own constant with the values
-        ``pipeline_settings`` gives it, and the two strings must be equal.
+        is the link: the driver formats its own constants with the values
+        ``pipeline_settings`` gives it, and the strings must be equal.
+
+        The dp-only cell is the one that would have gone wrong quietly: the
+        driver runs ONE microbatch at ``pp`` 1 and ``n_microbatches``
+        describes the split a pipeline would make, so a validator that read
+        the latter would fail every honest dp run.
         """
-        args = SimpleNamespace(batch=4, pp=2, pp_microbatch_size=1)
-        microbatch_rows, microbatches = train.pipeline_settings(args)
-        printed = train.PARALLELISM_LINE.format(
-            dp=1,
-            pp=args.pp,
-            schedule="1F1B",
-            microbatches=microbatches,
-            stages=args.pp,
-        )
-        self.assertEqual(
-            VALIDATION_PROFILES["megatron"].parallelism_markers(
-                PP2, PIPER_1B_ROPE.workload
-            ),
-            (printed,),
-        )
+        for spec, schedule in ((PP2, "1F1B"), (DP2, None)):
+            with self.subTest(spec=spec):
+                args = SimpleNamespace(
+                    batch=4, pp=spec.pp, pp_microbatch_size=1
+                )
+                _, microbatches = train.pipeline_settings(args)
+                printed = [
+                    train.PARALLELISM_LINE.format(
+                        dp=spec.dp,
+                        pp=spec.pp,
+                        schedule=schedule,
+                        microbatches=microbatches,
+                        stages=spec.pp,
+                    )
+                ]
+                if spec.dp > 1:
+                    printed.append(
+                        train.DATA_PARALLEL_LINE.format(
+                            dp=spec.dp, overlap=True, fp32=False
+                        )
+                    )
+                self.assertEqual(
+                    VALIDATION_PROFILES["megatron"].parallelism_markers(
+                        spec, PIPER_1B_ROPE.workload
+                    ),
+                    tuple(printed),
+                )
 
     def test_both_engines_move_the_same_number_of_microbatches(self) -> None:
         """The named hazard of this stage, stated as one assertion.

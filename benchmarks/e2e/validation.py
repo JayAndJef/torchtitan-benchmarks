@@ -24,6 +24,15 @@ they really built, and a run that ignored the ``--parallelism.*`` flags --
 or a driver that read no ``RANK`` -- passes every other rule while training
 something else. The rule is consulted only above one rank, where there is a
 mesh to get wrong.
+
+**Arm rule 13 is the data-parallel axis's own hazard, read from the
+traces.** Two ranks that never reduce their gradients train two models and
+report roughly twice the true throughput, and every other rule passes. The
+rule asks each rank's traces for an all-reduce kernel. It does not stand
+alone: a mesh can carry an all-reduce that reduces no gradient -- TorchTitan
+reduces the loss over its own mesh on every logged step -- so arm rule 12's
+per-engine data-parallel log line is what names the mechanism, and this rule
+is what says a collective really ran on every rank.
 """
 
 from __future__ import annotations
@@ -55,6 +64,44 @@ from benchmarks.traces.schema import Region
 
 
 _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
+
+# Arm rule 13's marker: the device kernel a gradient all-reduce runs. Both
+# engines reduce over NCCL, so one string serves both.
+#
+# **It names the all-reduce and not NCCL in general, deliberately.** A
+# pipeline emits ``ncclDevKernel_SendRecv`` and
+# ``ncclDevKernel_Broadcast_RING_LL`` for its own point-to-point traffic, and
+# neither reduces a gradient, so a bare ``nccl`` would pass a dp run that
+# reduced nothing.
+#
+# **This marker is a necessary condition and not a sufficient one, and that
+# was measured rather than assumed.** A real ``pp 2, dp 1`` trace from this
+# harness carries ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL`` five times per
+# window on both ranks -- one per active step, from the gradient-norm
+# reduction over the pipeline group. Above ``dp`` 1 both engines also reduce
+# the loss over the data-parallel group on every logged step. So an
+# all-reduce kernel proves a collective ran, never which one. What names the
+# mechanism is arm rule 12's per-engine data-parallel log line, which each
+# engine prints only after it has really built the path: TorchTitan after
+# counting its FSDP units, megatron after the DDP wrapper exists. Read the
+# two rules together, and do not strengthen this one by guessing at a count.
+#
+# **The algorithm and protocol suffix is deliberately left off.** NCCL picks
+# those per message size and topology, so the ``_Sum_bf16_RING_LL`` spelling
+# above is one of several a correct run can produce, and pinning it whole
+# would fail an honest run whose buckets chose another. What is fixed is the
+# operation in the name.
+#
+# **UNTESTED against megatron above dp 1, and it can fail an honest run.**
+# mcore issues its bucket reductions inside a ``_coalescing_manager``
+# (``param_and_grad_buffer.py``), and a grouped NCCL launch can surface as
+# ``ncclDevKernel_Generic`` rather than naming the operation. No dp run of
+# either engine has been traced. The failure is the safe direction -- the arm
+# fails rather than publishing -- but read an arm rule 13 failure on the
+# megatron arm as a question about this string before reading it as a missing
+# reduction, and settle it by looking at the arm's own trace. Widening this
+# to a bare ``nccl`` is not the repair: see the paragraph above.
+ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
 
 
 @dataclass(frozen=True)
@@ -95,6 +142,22 @@ class ValidationProfile:
     eager, and a run that silently pipelined cannot be published as one GPU.
     Measured before it was added: of 296 arm logs under ``out/``, exactly one
     matches, and it is a deliberate ``--pp 2`` run.
+
+    ``data_parallel_pattern`` is the same inversion on the other axis, and
+    it guards a worse mistake. A pipeline rank and a single-GPU rank publish
+    the same per-device throughput, so a pipeline published as one GPU
+    misstates the mesh and not the rate. A **data-parallel** rank reads a
+    batch of its own, so a ``dp 2`` run published under the trivial spec
+    reads as roughly twice the true rate, and every other rule passes. Each
+    engine's pattern names two witnesses: the mesh line the engine logs
+    whatever this repo's code does, and the wrapper line this repo prints.
+    Neither matches a ``pp 2, dp 1`` log, which was checked against a real
+    one.
+
+    Measured before it was added, the way ``pipelined_pattern`` was: of the
+    532 arm logs under ``out/`` -- every run this repo has ever done, all of
+    them single-GPU or pipeline-only -- **none** matches either pattern. So
+    the rule refuses nothing that has already happened.
     """
 
     completion_marker: str
@@ -107,6 +170,7 @@ class ValidationProfile:
         [ParallelismSpec, Workload], tuple[str, ...]
     ]
     pipelined_pattern: re.Pattern[str]
+    data_parallel_pattern: re.Pattern[str]
 
 
 def _titan_parallelism_markers(
@@ -124,6 +188,25 @@ def _titan_parallelism_markers(
     the one that catches the hazard this axis carries: two engines that agree
     on the split but disagree on how many microbatches they move through it
     would publish two different schedules under one label.
+
+    **The third is ours, and it is the only one that proves a reduction.**
+    The mesh line above says a mesh was built, not that anything was wrapped
+    in it: TorchTitan logs it from ``ParallelDims`` before ``parallelize_fn``
+    runs, so a run whose ``parallelize_piper1b`` skipped the data-parallel
+    path prints it and reduces nothing. ``parallelize_piper1b`` therefore
+    counts the FSDP units the delegate really built and prints
+    ``DATA_PARALLEL_LINE`` after the count. **This module cannot import that
+    constant**: ``parallelize.py`` imports torch and torchtitan, and this
+    module is parent-side. The string is stated twice and
+    ``tests/test_parallel_validation.py`` pins the two against each other,
+    exactly as it does for the megatron driver's own line.
+
+    A titan *loss* all-reduce is not evidence of a gradient all-reduce, which
+    is why this rule reads a log line rather than only the NCCL trace marker
+    arm rule 13 adds. TorchTitan reduces the loss over its ``loss`` mesh on
+    every logged step whenever ``dp_cp_enabled`` (``trainer.py``), so an
+    ``ncclDevKernel_AllReduce`` appears under dp 2 even with the gradients
+    never reduced.
     """
     replicate, shard = titan_mesh(spec)
     markers = [
@@ -131,6 +214,11 @@ def _titan_parallelism_markers(
         f"dp_replicate={replicate}, dp_shard={shard}, cp=1, tp=1, "
         f"ep={spec.ep}"
     ]
+    if replicate * shard > 1:
+        markers.append(
+            "piper1b data parallel: fully_shard applied "
+            f"(dp_replicate={replicate}, dp_shard={shard})"
+        )
     if spec.pp > 1:
         schedule = PP_SCHEDULES[spec.pp_schedule]
         microbatches = n_microbatches(
@@ -147,24 +235,44 @@ def _titan_parallelism_markers(
 def _megatron_parallelism_markers(
     spec: ParallelismSpec, workload: Workload
 ) -> tuple[str, ...]:
-    """``benchmarks.e2e.megatron.train.PARALLELISM_LINE``. Keep in sync.
+    """``benchmarks.e2e.megatron.train``'s two lines. Keep in sync.
 
-    The driver prints what it resolved: the degrees from the environment and
-    the microbatch count from its own ``pipeline_settings``. The count here
-    is ``n_microbatches``, and the two agree at every ``pp`` above 1, which
-    is the only place this rule is consulted. At ``pp`` 1 they differ on
-    purpose -- the driver runs one pack and ``n_microbatches`` describes a
-    split neither engine performs -- and a megatron arm cannot reach world
-    size above 1 at ``pp`` 1, because that driver has no data-parallel path.
+    The driver prints what it resolved: the degrees from its own arguments,
+    checked against what ``initialize_model_parallel`` gave it, and the
+    microbatch count from its own ``pipeline_settings``.
+
+    **The count is 1 at ``pp`` 1, and ``n_microbatches`` is not.** Neither
+    engine splits a batch without a pipeline, so the driver runs one pack of
+    every row, while ``n_microbatches`` describes the split a pipeline would
+    make. This rule is reachable at ``pp`` 1 now that a data-parallel run
+    exists, so the condition is written out here rather than left to a
+    comment saying it cannot happen. ``pipeline_settings`` is the authority
+    and a test compares the two.
+
+    **The second line is the one that proves a reduction.** The line above
+    states the mesh, and ``initialize_model_parallel`` builds a
+    data-parallel group whether or not anything reduces over it -- so a
+    driver that lost its wrapper would print it and publish roughly twice
+    the true throughput. The driver prints the second line only after the
+    wrapper exists.
     """
-    microbatches = n_microbatches(
-        spec, local_batch_size=workload.local_batch_size
+    microbatches = (
+        n_microbatches(spec, local_batch_size=workload.local_batch_size)
+        if spec.pp > 1
+        else 1
     )
-    return (
+    markers = [
         f"Megatron-LM parallelism: dp={spec.dp} pp={spec.pp} "
         f"schedule={spec.pp_schedule} microbatches={microbatches} "
-        f"stages={spec.pp}",
-    )
+        f"stages={spec.pp}"
+    ]
+    if spec.dp > 1:
+        markers.append(
+            f"Megatron-LM data parallel: DistributedDataParallel over "
+            f"{spec.dp} ranks (overlap_grad_reduce=True, "
+            "grad_reduce_in_fp32=False)"
+        )
+    return tuple(markers)
 
 
 VALIDATION_PROFILES = {
@@ -185,6 +293,18 @@ VALIDATION_PROFILES = {
         # TorchTitan logs this from _build_pipeline_schedule, which
         # runs only when the pipeline degree is above 1.
         pipelined_pattern=re.compile(r"Using pipeline schedule"),
+        # Two independent witnesses of a data-parallel degree, because one
+        # of them is not ours. ``ParallelDims.build_mesh`` logs the resolved
+        # mesh on every rank whatever this repo's code does, so a degree
+        # above 1 shows there even in a run that never reached
+        # ``parallelize_piper1b``; the second alternative is our own line.
+        # A ``pp 2, dp 1`` run logs ``dp_replicate=1, dp_shard=1`` and
+        # matches neither, which was checked against a real one.
+        data_parallel_pattern=re.compile(
+            r"dp_replicate=(?!1\b)\d+"
+            r"|dp_shard=(?!1\b)\d+"
+            r"|piper1b data parallel:"
+        ),
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -206,6 +326,11 @@ VALIDATION_PROFILES = {
         # other than 1 is what this must not see at the trivial spec.
         pipelined_pattern=re.compile(
             r"Megatron-LM parallelism: dp=\d+ pp=(?!1\b)\d+"
+        ),
+        # The same line's other degree, plus the wrapper's own line.
+        data_parallel_pattern=re.compile(
+            r"Megatron-LM parallelism: dp=(?!1\b)\d+"
+            r"|Megatron-LM data parallel:"
         ),
     ),
 }
@@ -237,6 +362,7 @@ def _validate_log(
     model_size: str,
     parallelism_markers: tuple[str, ...] = (),
     spec_pp: int = 1,
+    spec_dp: int = 1,
 ) -> None:
     """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
 
@@ -339,6 +465,19 @@ def _validate_log(
                 f"{arm.name}: the run declares no pipeline, and the log "
                 f"records one: {found.group(0)!r}{where}"
             )
+    # The data-parallel half of the same inversion, and it guards a worse
+    # mistake than the pipeline half. A pipeline rank and a single-GPU rank
+    # publish the same per-device throughput; a data-parallel rank does not,
+    # so a dp 2 run published under the trivial spec would read as roughly
+    # twice the true rate with every other rule satisfied. The positive
+    # markers cannot ask this, because the trivial spec declares none.
+    if spec_dp == 1:
+        found = profile.data_parallel_pattern.search(log)
+        if found is not None:
+            raise RuntimeError(
+                f"{arm.name}: the run declares no data parallelism, and the "
+                f"log records some: {found.group(0)!r}{where}"
+            )
 
 
 def validate_arm(
@@ -406,6 +545,7 @@ def validate_arm(
             model_size=model_size,
             parallelism_markers=parallelism_markers,
             spec_pp=parallelism.pp,
+            spec_dp=parallelism.dp,
         )
 
     # Arm rules 5 and 7 are per rank. Every rank runs the same number of
@@ -441,17 +581,19 @@ def validate_arm(
     #
     # Arm rule 9 is unreachable: parallelism rule 13 refuses cuda-graph for
     # every parallel run, and this rule fires only under cuda-graph. Arm rule
-    # 6 IS reachable, and the question it raises is open rather than
-    # answered. Under PP a stage holds some of the layers, so a marker kernel
-    # can be legitimately absent from a rank and "every rank" would fail an
-    # honest run; "any rank" passes a run where rank 0 silently degraded.
-    # **No multi-rank trace from this harness has ever been read**, so the
-    # reading is left as it is rather than guessed at. What decides it is one
-    # PP2 trace per rank: if the megatron arm's cuDNN attention marker
-    # appears on both stages, "every rank" is the honest rule and costs
-    # nothing; if a stage legitimately lacks it, the rule has to become a
-    # per-arm declaration of which ranks must carry which marker. Do not
-    # weaken it to make a hypothetical run pass.
+    # 6 IS reachable, and its reading stays "any rank" for now. Under PP a
+    # stage holds some of the layers, so a marker kernel can be legitimately
+    # absent from a rank: "every rank" would fail an honest run, and "any
+    # rank" passes a run where one stage silently degraded.
+    #
+    # **One PP2 megatron trace has now been read, and it says "every rank"
+    # would cost that arm nothing.** Both stages of a 16-layer ``pp 2`` run
+    # carry the cuDNN fused-attention kernel, ``_mul_silu_split`` and
+    # ``_permute_kernel``. That is one arm at one shape: a stage that holds
+    # no layer of the kind a marker names would still lack it, so the general
+    # rule needs a per-arm declaration of which ranks carry which marker
+    # rather than a blanket "every rank". Do not weaken this rule to make a
+    # hypothetical run pass, and do not tighten it on one arm's evidence.
     for marker in arm.trace_kernel_markers:
         if not any(_trace_contains(path, marker) for path in traces):
             raise RuntimeError(
@@ -464,6 +606,27 @@ def validate_arm(
             f"{arm.name}: compile mode {compile_mode!r} enables CUDA graphs but "
             f"no cudaGraphLaunch appears in the profiler traces under {arm_dir}"
         )
+    # Arm rule 13. **Every rank**, and that reading is provable here where
+    # arm rule 6's is not: at dp above 1 every rank sits in a data-parallel
+    # group of that size, so every rank reduces. A rank whose traces carry no
+    # all-reduce did not.
+    #
+    # The marker is the SPEC's, never an ``Arm.trace_kernel_markers`` entry.
+    # Data parallelism is a run axis, so a static declaration would fail
+    # every single-GPU run of the same arm -- there is no all-reduce there at
+    # all.
+    if parallelism.dp > 1:
+        for rank in sorted(expected_ranks):
+            if not any(
+                _trace_contains(path, ALL_REDUCE_MARKER)
+                for path in traces_by_rank.get(rank, ())
+            ):
+                raise RuntimeError(
+                    f"{arm.name}: dp {parallelism.dp} was requested and rank "
+                    f"{rank}'s profiler traces under {arm_dir} carry no "
+                    f"{ALL_REDUCE_MARKER!r}; a rank that reduced no gradient "
+                    "reports roughly twice the true throughput"
+                )
     if regions and profile.check_regions:
         try:
             per_rank_pooled_metrics(traces_by_rank, regions)

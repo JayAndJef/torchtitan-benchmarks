@@ -47,9 +47,10 @@ def _args(**overrides):
 
 
 class DriverDefaultTests(unittest.TestCase):
-    def test_the_three_pipeline_options_default_to_one_rank(self) -> None:
+    def test_the_four_mesh_options_default_to_one_rank(self) -> None:
         """An argv built before this axis existed describes the same run."""
         args = _args()
+        self.assertEqual(args.dp, 1)
         self.assertEqual(args.pp, 1)
         self.assertIsNone(args.pp_schedule)
         self.assertEqual(args.pp_microbatch_size, 1)
@@ -88,35 +89,51 @@ class PipelineRefusalTests(unittest.TestCase):
     """
 
     def test_one_rank_at_pp_one_is_accepted(self) -> None:
-        train.refuse_unsupported_pipeline(_args(), 1)
+        train.refuse_unsupported_mesh(_args(), 1)
 
     def test_two_ranks_at_1f1b_are_accepted(self) -> None:
-        train.refuse_unsupported_pipeline(
+        train.refuse_unsupported_mesh(
             _args(pp=2, pp_schedule="1F1B"), 2
         )
 
-    def test_more_ranks_than_stages_are_refused(self) -> None:
-        """There is no data-parallel path here, so the extra rank is silent.
+    def test_two_ranks_at_dp_two_are_accepted(self) -> None:
+        train.refuse_unsupported_mesh(_args(dp=2), 2)
 
-        Two ranks with one stage each would read the same tokens and never
-        reduce their gradients, and every other check would pass.
+    def test_four_ranks_at_dp_two_by_pp_two_are_accepted(self) -> None:
+        train.refuse_unsupported_mesh(
+            _args(dp=2, pp=2, pp_schedule="1F1B"), 4
+        )
+
+    def test_a_rank_the_mesh_does_not_name_is_refused(self) -> None:
+        """Megatron would make it a data-parallel replica nothing wraps.
+
+        It would read the same tokens as its neighbour, never reduce a
+        gradient, and every other check would pass.
         """
-        with self.assertRaisesRegex(ValueError, "no data-parallel path"):
-            train.refuse_unsupported_pipeline(_args(), 2)
+        with self.assertRaisesRegex(ValueError, "does not equal"):
+            train.refuse_unsupported_mesh(_args(), 2)
+        with self.assertRaisesRegex(ValueError, "does not equal"):
+            train.refuse_unsupported_mesh(_args(dp=2), 4)
+
+    def test_a_degree_below_one_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "--dp 0 must be >= 1"):
+            train.refuse_unsupported_mesh(_args(dp=0), 1)
+        with self.assertRaisesRegex(ValueError, "--pp 0 must be >= 1"):
+            train.refuse_unsupported_mesh(_args(pp=0), 1)
 
     def test_fewer_ranks_than_stages_are_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not equal"):
-            train.refuse_unsupported_pipeline(
+            train.refuse_unsupported_mesh(
                 _args(pp=2, pp_schedule="1F1B"), 1
             )
 
     def test_a_schedule_at_pp_one_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "no pipeline to schedule"):
-            train.refuse_unsupported_pipeline(_args(pp_schedule="1F1B"), 1)
+            train.refuse_unsupported_mesh(_args(pp_schedule="1F1B"), 1)
 
     def test_a_microbatch_size_at_pp_one_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "not split"):
-            train.refuse_unsupported_pipeline(_args(pp_microbatch_size=2), 1)
+            train.refuse_unsupported_mesh(_args(pp_microbatch_size=2), 1)
 
     def test_an_interleaved_schedule_is_refused_by_name(self) -> None:
         """Megatron-LM implements it; this driver does not.
@@ -127,13 +144,13 @@ class PipelineRefusalTests(unittest.TestCase):
         list.
         """
         with self.assertRaisesRegex(ValueError, "not implemented by this"):
-            train.refuse_unsupported_pipeline(
+            train.refuse_unsupported_mesh(
                 _args(pp=2, pp_schedule="Interleaved1F1B"), 2
             )
 
     def test_an_unregistered_schedule_is_refused_too(self) -> None:
         with self.assertRaisesRegex(ValueError, "not implemented by this"):
-            train.refuse_unsupported_pipeline(
+            train.refuse_unsupported_mesh(
                 _args(pp=2, pp_schedule="GPipe"), 2
             )
 
@@ -194,12 +211,71 @@ class SingleRankInertnessTests(unittest.TestCase):
         source = self._main_source()
         self.assertIn("if world_size == 1:\n            return loss", source)
 
-    def test_the_norm_reduction_is_guarded(self) -> None:
+    def test_the_norm_reduction_is_guarded_on_the_pipeline_degree(
+        self,
+    ) -> None:
+        """The group is the pipeline's, and the guard names that degree.
+
+        A data-parallel replica holds the same stage as its partner and, once
+        the reduction has run, the same gradients -- so the norm is already
+        the same number on it and a second reduction would square nothing.
+        """
         source = self._main_source()
         head = source.index("def clip_gradients")
         body = source[head : source.index("def trace_handler")]
-        self.assertIn("if world_size > 1:", body)
+        self.assertIn("if args.pp > 1:", body)
         self.assertIn("ReduceOp.SUM", body)
+        self.assertIn("get_pipeline_model_parallel_group()", body)
+
+    def test_the_ddp_wrapper_and_its_step_work_are_guarded(self) -> None:
+        """Every DDP branch is behind ``use_ddp``, which is ``--dp > 1``.
+
+        At dp 1 the model stays bare, no buffer is allocated and no
+        collective is added, which is what every megatron number under out/
+        was measured on.
+        """
+        source = self._main_source()
+        self.assertIn("use_ddp = args.dp > 1", source)
+        for guarded in (
+            "if use_ddp:\n        # Megatron's own gradient reduction",
+            "if use_ddp:\n                # DDP accumulates into its own flat",
+            "if not use_ddp:\n                for parameter in merged:",
+        ):
+            self.assertIn(guarded, source)
+
+    def test_graph_mode_leaves_the_main_grad_buffers_to_ddp(self) -> None:
+        """A second allocation would rebind main_grad away from the buckets.
+
+        DDP points every param.main_grad into one flat buffer per bucket.
+        Allocating private tensors over them would leave the reduction
+        reading buffers nothing writes, and the run would train on zeros
+        without failing. The combination is unreachable while parallelism
+        rule 13 refuses cuda-graph above one rank.
+        """
+        self.assertIn("if graphs and not use_ddp:", self._main_source())
+
+    def test_the_parameter_sum_is_taken_over_one_pipeline(self) -> None:
+        """A world sum would count every parameter dp times.
+
+        The check exists to catch a pipeline that holds the wrong model, and
+        a data-parallel replica holds the same stage as its partner.
+        """
+        source = self._main_source()
+        head = source.index("counted = torch.tensor")
+        self.assertIn(
+            "group=parallel_state.get_pipeline_model_parallel_group()",
+            source[head : head + 400],
+        )
+
+    def test_the_global_token_line_multiplies_by_the_dp_degree(self) -> None:
+        """dp is the axis that multiplies the job's token count; pp is not.
+
+        The ranks of one pipeline share a batch. Each data-parallel rank
+        reads a batch of its own. At dp 1 the line is unchanged.
+        """
+        source = self._main_source()
+        self.assertIn("local_tokens_per_step * args.dp", source)
+        self.assertIn('f"(dp {args.dp} x batch {args.batch}', source)
 
     def test_the_trace_file_carries_the_rank(self) -> None:
         self.assertIn('f"rank{rank}_trace.json.gz"', self._main_source())

@@ -14,18 +14,21 @@ eagerly; --mode cuda-graph wraps it in Megatron's FullCudaGraphWrapper
 `(mode=...)` line the validation profile matches, plus which graph
 implementation actually ran.
 
-Pipeline handling: the driver reads RANK, WORLD_SIZE and LOCAL_RANK from the
+Mesh handling: the driver reads RANK, WORLD_SIZE and LOCAL_RANK from the
 environment, each falling back to the single-rank value, so the same module
 runs under `python -m` and under `torchrun`. At --pp above 1 it builds one
 stage per rank, splits each step's batch into microbatches, and lets
-Megatron's own 1F1B schedule move them. **There is no data-parallel path
-here yet**: the world size has to equal the pipeline degree, and a driver
-that accepted more ranks than stages would give two ranks the same data and
-never reduce their gradients.
+Megatron's own 1F1B schedule move them. At --dp above 1 it reads its own
+slice of the token stream, wraps the model in megatron's own
+`DistributedDataParallel`, and lets `finalize_model_grads` reduce the
+gradients over the data-parallel group. `WORLD_SIZE` has to equal
+`--dp x --pp`: a driver that accepted a rank the mesh does not name would
+give two ranks the same data, never reduce their gradients, and report
+roughly twice the true throughput.
 
-At --pp 1 every branch below takes the value it always took: one pack of
-`--batch` rows, one microbatch, `pre_process` and `post_process` both true,
-and no collective at all.
+At --pp 1 and --dp 1 every branch below takes the value it always took: one
+pack of `--batch` rows, one microbatch, `pre_process` and `post_process`
+both true, no wrapper, and no collective at all.
 
 Everything megatron-related is imported inside main() so the module itself
 imports (for tests and constants) without megatron or TE installed.
@@ -57,6 +60,15 @@ FUSION_LINE = "Megatron fusions: {state}"
 PARALLELISM_LINE = (
     "Megatron-LM parallelism: dp={dp} pp={pp} schedule={schedule} "
     "microbatches={microbatches} stages={stages}"
+)
+# The other half of arm rule 12 on this engine, printed only above dp 1 and
+# only after the wrapper exists. The line above states the mesh megatron
+# resolved; it says nothing about whether a gradient moves, because
+# initialize_model_parallel builds the data-parallel group whether or not
+# anything reduces over it. This one names the wrapper that does.
+DATA_PARALLEL_LINE = (
+    "Megatron-LM data parallel: DistributedDataParallel over {dp} ranks "
+    "(overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32})"
 )
 
 # Megatron's per-layer partial-capture recipe for MoE models: the router and
@@ -102,8 +114,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-size", choices=MODEL_SIZE_CHOICES, default="1b"
     )
-    # The pipeline split. All three default to the single-rank run, so an
-    # argv built before this axis existed still describes the same run.
+    # The mesh. All four default to the single-rank run, so an argv built
+    # before this axis existed still describes the same run.
+    parser.add_argument("--dp", type=int, default=1)
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--pp-schedule", default=None)
     parser.add_argument("--pp-microbatch-size", type=int, default=1)
@@ -178,8 +191,8 @@ def tokens_per_second(
     return round(local_tokens_per_step / (elapsed_seconds * pipeline_degree))
 
 
-def refuse_unsupported_pipeline(args: argparse.Namespace, world_size: int) -> None:
-    """Reject a pipeline request this driver cannot honor, before it builds.
+def refuse_unsupported_mesh(args: argparse.Namespace, world_size: int) -> None:
+    """Reject a mesh this driver cannot honor, before it builds anything.
 
     ``benchmarks/e2e/parallelism.py`` refuses most of these for a run. They
     are restated here because ``python -m benchmarks.e2e.megatron.train`` is
@@ -187,14 +200,22 @@ def refuse_unsupported_pipeline(args: argparse.Namespace, world_size: int) -> No
     here is a wrong number rather than a crash: a driver that ignored ``--pp``
     would train the whole model on every rank and publish it under a
     pipeline label.
+
+    **The world size has to equal ``dp x pp`` exactly.** Megatron derives its
+    own data-parallel degree from the ranks the pipeline degree leaves over
+    (``initialize_model_parallel``), so a rank this driver did not account
+    for becomes a data-parallel replica nothing here wraps -- it would read
+    the same tokens as its neighbour and never reduce a gradient.
     """
+    if args.dp < 1:
+        raise ValueError(f"--dp {args.dp} must be >= 1")
     if args.pp < 1:
         raise ValueError(f"--pp {args.pp} must be >= 1")
-    if world_size != args.pp:
+    if world_size != args.dp * args.pp:
         raise ValueError(
-            f"WORLD_SIZE {world_size} does not equal --pp {args.pp}: this "
-            "driver has no data-parallel path, so every rank is a pipeline "
-            "stage"
+            f"WORLD_SIZE {world_size} does not equal --dp {args.dp} x --pp "
+            f"{args.pp}: every rank of this run is one data-parallel replica "
+            "of one pipeline stage"
         )
     if args.pp == 1:
         if args.pp_schedule is not None:
@@ -255,8 +276,13 @@ def main(argv: list[str] | None = None) -> None:
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    refuse_unsupported_pipeline(args, world_size)
+    refuse_unsupported_mesh(args, world_size)
     microbatch_rows, num_microbatches = pipeline_settings(args)
+    # Megatron ships a DistributedDataParallel and this driver wraps the
+    # model in it only where there is something to reduce. At dp 1 the model
+    # stays bare, which is what every megatron number under out/ was
+    # measured on.
+    use_ddp = args.dp > 1
     # The e2e megatron arm measures megatron at its own best, which is the
     # base profile. A profile axis belongs to kernel-bench, where one arm per
     # profile is the unit; an e2e run has one megatron arm and no such axis.
@@ -270,9 +296,10 @@ def main(argv: list[str] | None = None) -> None:
     print(MODE_LINE.format(mode=args.mode, impl=impl), flush=True)
     print(
         PARALLELISM_LINE.format(
-            # No data-parallel path here, and refuse_unsupported_pipeline has
-            # already refused a world size that is not the pipeline degree.
-            dp=1,
+            # refuse_unsupported_mesh has already refused a world size that
+            # is not dp x pp, and an assert below checks the degree megatron
+            # itself resolved against this one.
+            dp=args.dp,
             pp=args.pp,
             schedule=args.pp_schedule,
             microbatches=num_microbatches,
@@ -324,6 +351,18 @@ def main(argv: list[str] | None = None) -> None:
     parallel_state.initialize_model_parallel(
         pipeline_model_parallel_size=args.pp
     )
+    # Megatron takes no data-parallel degree; it gives the axis every rank
+    # the pipeline degree leaves over. This asserts that its answer is the
+    # one the command line asked for, because everything below -- the token
+    # slice, the DDP group, the global token count -- reads args.dp.
+    dp_rank = parallel_state.get_data_parallel_rank()
+    dp_size = parallel_state.get_data_parallel_world_size()
+    if dp_size != args.dp:
+        raise RuntimeError(
+            f"megatron resolved a data-parallel degree of {dp_size} where "
+            f"--dp asked for {args.dp}; the token slice and the gradient "
+            "reduction would then disagree with the recorded mesh"
+        )
     torch.manual_seed(args.seed)
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
@@ -333,16 +372,29 @@ def main(argv: list[str] | None = None) -> None:
         args.seed, te_rng_tracker=graphs, use_cudagraphable_rng=graphs
     )
 
-    from benchmarks.e2e.megatron.data import materialize_titan_samples, thd_batches
+    from benchmarks.e2e.megatron.data import (
+        materialize_titan_samples,
+        padded_microbatches,
+        thd_batches,
+    )
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
-    # Every rank drains the same stream and keeps the whole batch. Under a
-    # pipeline split the ranks of one pipeline read the SAME tokens -- the
-    # batch is not divided between them, it is passed along them -- so no
-    # per-rank slice belongs here. A data-parallel degree would need one, and
-    # this driver has none.
+    # The slice is keyed by the DATA-PARALLEL rank, never by the global one.
+    # Under a pipeline split the ranks of one pipeline read the SAME tokens
+    # -- the batch is not divided between them, it is passed along them --
+    # and the ranks of one data-parallel group read different tokens. At
+    # dp 1 both arguments take their defaults and the whole stream is
+    # drained exactly as it always was.
+    #
+    # The split is torchtitan's own: HuggingFaceTextDataset calls
+    # split_dataset_by_node(ds, dp_rank, dp_world_size), which is what
+    # torchtitan's loader gives its own ranks. So the two engines stay
+    # bit-identical rank for rank, which is the parity this arm rests on.
     samples = materialize_titan_samples(
-        seq_len=args.seq_len, num_samples=args.steps * args.batch
+        seq_len=args.seq_len,
+        num_samples=args.steps * args.batch,
+        dp_rank=dp_rank,
+        dp_world_size=dp_size,
     )
     batches = thd_batches(samples, batch_size=microbatch_rows)
     # Static shapes across steps (required for whole-iteration graph capture,
@@ -352,22 +404,24 @@ def main(argv: list[str] | None = None) -> None:
     # every microbatch of the whole run, so one length serves them all.
     tokens_per_microbatch = microbatch_rows * args.seq_len
     max_documents = max(batch.cu_seqlens.numel() for batch in batches)
-    microbatch_data = []
-    for batch in batches:
-        pad = max_documents - batch.cu_seqlens.numel()
-        cu_seqlens = torch.cat(
-            [
-                batch.cu_seqlens,
-                torch.full((pad,), tokens_per_microbatch, dtype=torch.int32),
-            ]
-        )
-        microbatch_data.append(
-            {
-                "tokens": batch.tokens,
-                "labels": batch.labels,
-                "cu_seqlens": cu_seqlens,
-            }
-        )
+    if use_ddp:
+        # Each data-parallel rank now holds different documents, so each
+        # would pad to a different length. The maximum has to be the one over
+        # the WHOLE sample set, or the ranks run different static shapes
+        # under one label. The collective is what makes it global; taking it
+        # here costs one small all-reduce at init and no per-step work.
+        #
+        # Skipped at dp 1, where every rank already drained the same stream:
+        # the local maximum is the global one, and the pipeline path that has
+        # run keeps exactly the collectives it ran.
+        widest = torch.tensor([max_documents], dtype=torch.int64, device="cuda")
+        torch.distributed.all_reduce(widest, op=torch.distributed.ReduceOp.MAX)
+        max_documents = int(widest.item())
+    microbatch_data = padded_microbatches(
+        batches,
+        max_documents=max_documents,
+        tokens_per_microbatch=tokens_per_microbatch,
+    )
     # One entry per step, each holding this step's microbatches in order. At
     # --pp 1 every entry holds exactly one, which is what the schedule was
     # handed before microbatches existed.
@@ -376,14 +430,16 @@ def main(argv: list[str] | None = None) -> None:
         for start in range(0, len(microbatch_data), num_microbatches)
     ]
     # The tokens this rank reads per step, and the tokens the whole job
-    # retires per step. They are equal here because the ranks of one pipeline
-    # share a batch; a data-parallel degree would multiply the global figure
-    # and leave the local one alone. Printed so a reader can recover the
-    # job's rate from the per-device rate the step lines carry.
+    # retires per step. The ranks of one pipeline share a batch, so the
+    # pipeline degree does not multiply the global figure; the data-parallel
+    # degree does, because each of those ranks reads a batch of its own.
+    # Printed so a reader can recover the job's rate from the per-device rate
+    # the step lines carry. At dp 1 the two are equal and the line is the one
+    # every megatron directory under out/ already holds.
     local_tokens_per_step = args.batch * args.seq_len
     print(
-        f"tokens_per_step_global: {local_tokens_per_step} "
-        f"(dp 1 x batch {args.batch} x seq_len {args.seq_len})",
+        f"tokens_per_step_global: {local_tokens_per_step * args.dp} "
+        f"(dp {args.dp} x batch {args.batch} x seq_len {args.seq_len})",
         flush=True,
     )
     # The microbatch clause is appended only when there is a split. At --pp 1
@@ -416,10 +472,26 @@ def main(argv: list[str] | None = None) -> None:
         pre_process=parallel_state.is_pipeline_first_stage(),
         post_process=parallel_state.is_pipeline_last_stage(),
     )
-    if graphs:
+    if graphs and not use_ddp:
         # The captured backward accumulates graphed-module weight grads into
         # param.main_grad (megatron.core cuda_graphs), which mcore DDP would
         # normally provide. Bare-model equivalent: persistent bf16 buffers.
+        #
+        # **Skipped when DDP is present, because DDP owns those buffers.**
+        # It allocates one flat grad buffer per bucket and points every
+        # param.main_grad into it; a second allocation here would rebind
+        # every one of them to a private tensor the reduction never reads,
+        # so the gradients would be captured and then thrown away. Nothing
+        # would fail -- the run would train on stale zeros.
+        #
+        # **No harness run reaches the combination today**, because
+        # parallelism rule 13 refuses cuda-graph at any world size above 1
+        # and use_ddp needs dp above 1. That rule governs a run, not this
+        # module: ``torchrun ... -m benchmarks.e2e.megatron.train --dp 2
+        # --mode cuda-graph`` is a supported direct entry point and
+        # ``refuse_unsupported_mesh`` does not refuse it, which is the same
+        # reason that function restates the refusals at all. So the guard is
+        # reachable now, and it is also what the day rule 13 lifts needs.
         for parameter in model.parameters():
             parameter.main_grad = torch.zeros_like(parameter)
     num_params = sum(parameter.numel() for parameter in model.parameters())
@@ -453,15 +525,21 @@ def main(argv: list[str] | None = None) -> None:
         f"megatron built {num_params:,} parameters on stage {stage} of "
         f"{args.pp} but shape {shape.name!r} declares {expected_local:,}"
     )
-    # And the sum over the world is the declared total. This is the half a
+    # And the sum over one PIPELINE is the declared total. This is the half a
     # single rank cannot check: every stage could hold a plausible count and
     # the pipeline still hold the wrong model, or hold one layer twice.
-    if world_size > 1:
+    #
+    # The group is the pipeline group, not the world. A data-parallel replica
+    # holds the same stage as its partner, so a world sum would count every
+    # parameter dp times and refuse a correct run.
+    if args.pp > 1:
         counted = torch.tensor([num_params], dtype=torch.int64, device="cuda")
-        torch.distributed.all_reduce(counted)
+        torch.distributed.all_reduce(
+            counted, group=parallel_state.get_pipeline_model_parallel_group()
+        )
         if int(counted.item()) != shape.param_count:
             raise RuntimeError(
-                f"the {world_size} stages hold {int(counted.item()):,} "
+                f"the {args.pp} stages hold {int(counted.item()):,} "
                 f"parameters between them, and shape {shape.name!r} declares "
                 f"{shape.param_count:,}"
             )
@@ -492,6 +570,59 @@ def main(argv: list[str] | None = None) -> None:
             + " ".join(f"{k}={v}" for k, v in fusions.items())
         )
     )
+
+    if use_ddp:
+        # Megatron's own gradient reduction, and nothing more. A bare
+        # GPTModel has no finish_grad_sync, so finalize_model_grads -- which
+        # every schedule calls when the field is set -- needs this wrapper to
+        # exist. The wrapper allocates one flat grad buffer per bucket,
+        # points every param.main_grad into it, and reduces each bucket over
+        # the data-parallel group as its last gradient lands.
+        #
+        # Two settings are named rather than defaulted, because both reach a
+        # published number. overlap_grad_reduce=True is what makes the
+        # reduction overlap the backward, which is how NVIDIA runs it and
+        # therefore what "megatron at its own best" means here.
+        # grad_reduce_in_fp32=False is megatron's own default and it keeps
+        # this arm's plain-bf16 execution model: with it True the buffers
+        # would be fp32 and this arm would carry fp32 gradient accumulation
+        # that no other arm has.
+        #
+        # **The two engines still differ on the reduction dtype, and the
+        # difference is TorchTitan's.** Megatron reduces in bf16 here.
+        # parallelize_qwen3 builds its MixedPrecisionPolicy from
+        # training.mixed_precision_reduce, which the fork types as
+        # Literal["float32"], so FSDP2 upcasts the collective to fp32 and
+        # casts the result back to bf16. Neither engine keeps an fp32
+        # gradient, and neither setting is reachable from this harness. Say
+        # which side a cross-engine DP number came from.
+        from megatron.core.distributed import (
+            DistributedDataParallel,
+            DistributedDataParallelConfig,
+            finalize_model_grads,
+        )
+
+        ddp_config = DistributedDataParallelConfig(
+            overlap_grad_reduce=True, grad_reduce_in_fp32=False
+        )
+        config = model.config
+        model = DistributedDataParallel(
+            config=config, ddp_config=ddp_config, module=model
+        )
+        # The schedule reads all three off the config it gets from the model.
+        # no_sync_func is what holds the reduction back until the last
+        # microbatch: without it every microbatch's backward would start its
+        # own reduction, and megatron's own bucket bookkeeping forbids that.
+        config.no_sync_func = model.no_sync
+        config.finalize_model_grads_func = finalize_model_grads
+        print(
+            DATA_PARALLEL_LINE.format(
+                dp=dp_size,
+                overlap=ddp_config.overlap_grad_reduce,
+                fp32=ddp_config.grad_reduce_in_fp32,
+            ),
+            flush=True,
+        )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -526,8 +657,17 @@ def main(argv: list[str] | None = None) -> None:
         )
 
         def loss_func(output_tensor):
-            # Mean CE per token, exactly titan's sum / global_valid_tokens
-            # (every token is valid: packing never pads or masks).
+            # Mean CE per token over THIS rank's own tokens. Every token is
+            # valid, because packing never pads and never masks.
+            #
+            # At one rank that is titan's own figure, term for term. Above
+            # one data-parallel rank the two engines reach the same gradient
+            # by different routes, and both are right. Titan divides by the
+            # GLOBAL token count and then SUMS the gradients over the mesh
+            # (``disable_fsdp_gradient_division``). Megatron divides by the
+            # LOCAL count and its DDP scales each rank by ``1/dp`` before the
+            # sum, which is a mean. The two agree because every rank holds
+            # the same token count -- ``batch x seq_len``, with no padding.
             loss = output_tensor.sum() / output_tensor.numel()
             return loss, {"lm loss": loss.detach()}
 
@@ -536,7 +676,7 @@ def main(argv: list[str] | None = None) -> None:
     forward_backward_func = get_forward_backward_func()
     last_stage_rank = (
         parallel_state.get_pipeline_model_parallel_last_rank()
-        if world_size > 1
+        if args.pp > 1
         else rank
     )
 
@@ -554,19 +694,45 @@ def main(argv: list[str] | None = None) -> None:
         # empty list. See batch_loss for why the reduction is a sum.
         return batch_loss([float(loss["lm loss"]) for loss in losses])
 
-    def broadcast_loss(loss: float) -> float:
-        """Move the last stage's loss to every rank, so rank 0 can log it.
+    def reduce_loss(loss: float) -> float:
+        """The loss every rank prints: the pipeline's, averaged over dp.
 
-        The step line rank 0 prints is what ``benchmarks/e2e/results.py``
-        parses, and under a pipeline split rank 0 is the first stage, which
-        never sees a loss. Skipped entirely at world size 1, where the value
-        is already local and the collective would add a synchronize inside
-        the timed step.
+        Two corrections, each for its own axis, and each skipped where its
+        degree is 1. At the trivial spec neither runs, and the value is the
+        local one every megatron directory under ``out/`` already holds.
+
+        **The pipeline correction is a broadcast, over the PIPELINE group.**
+        Only the last stage computes a loss, and the step line
+        ``benchmarks/e2e/results.py`` parses is printed by every rank. The
+        group matters as soon as ``dp`` is above 1: each pipeline has its own
+        last rank, so a broadcast on the default group would have the two
+        pipelines naming different sources for one collective.
+
+        **The data-parallel correction is a mean, over the dp group.**
+        TorchTitan prints ``global_avg_loss``, which is its own ``dist_sum``
+        of ``local_loss_sum / global_valid_tokens`` over the loss mesh -- the
+        mean over the data-parallel ranks, because every rank here holds the
+        same token count. Without this the two engines would print losses
+        that mean different things under one label. The reduction is a SUM
+        divided by the degree rather than ``ReduceOp.AVG``, so the arithmetic
+        is stated rather than left to the backend.
         """
         if world_size == 1:
             return loss
         carrier = torch.tensor([loss], dtype=torch.float64, device="cuda")
-        torch.distributed.broadcast(carrier, src=last_stage_rank)
+        if args.pp > 1:
+            torch.distributed.broadcast(
+                carrier,
+                src=last_stage_rank,
+                group=parallel_state.get_pipeline_model_parallel_group(),
+            )
+        if args.dp > 1:
+            torch.distributed.all_reduce(
+                carrier,
+                op=torch.distributed.ReduceOp.SUM,
+                group=parallel_state.get_data_parallel_group(),
+            )
+            carrier /= args.dp
         return float(carrier.item())
 
     parameters = list(model.parameters())
@@ -577,12 +743,16 @@ def main(argv: list[str] | None = None) -> None:
         total_norm = torch.nn.utils.get_total_norm(
             grads, norm_type=2.0, error_if_nonfinite=False, foreach=True
         )
-        if world_size > 1:
+        if args.pp > 1:
             # A gradient norm is a property of the whole model, and a
             # pipeline stage holds part of it. TorchTitan reduces the same
             # way over its pp mesh (distributed/utils.py: square, all-reduce
             # SUM, root), so without this the two engines would clip against
             # different norms and the logged value would be one stage's.
+            #
+            # There is no data-parallel term. Every rank of a dp group holds
+            # the same stage and, after the reduction, the same gradients, so
+            # the norm is already the same number on each of them.
             total_norm = total_norm**2.0
             torch.distributed.all_reduce(
                 total_norm,
@@ -627,13 +797,23 @@ def main(argv: list[str] | None = None) -> None:
     ) as prof:
         last_time = time.perf_counter()
         for step in range(1, args.steps + 1):
-            loss = broadcast_loss(run_step(step - 1))
+            if use_ddp:
+                # DDP accumulates into its own flat buffers, so they have to
+                # be empty before the backward that fills them. It is also
+                # what zeroes main_grad after the optimizer read it, which is
+                # why the graph-mode zeroing below is skipped under DDP.
+                model.zero_grad_buffer()
+            loss = reduce_loss(run_step(step - 1))
             merged = []
-            if graphs:
-                # Post-capture, graphed modules deliver weight grads via
-                # main_grad and leave .grad unset (eager warmup steps still
-                # use .grad). Point .grad at main_grad for those so clipping
-                # and the optimizer see every gradient.
+            if graphs or use_ddp:
+                # Both paths deliver weight grads via main_grad and leave
+                # .grad unset -- megatron's captured modules do it because
+                # megatron.core cuda_graphs writes there, and DDP's own
+                # backward hook adds .grad into main_grad and then drops it.
+                # (Graph mode's eager warmup steps still use .grad, which is
+                # why the loop tests each parameter rather than the mode.)
+                # Point .grad at main_grad for those so clipping and the
+                # optimizer see every gradient.
                 for parameter in parameters:
                     if parameter.grad is None:
                         parameter.grad = parameter.main_grad
@@ -642,11 +822,15 @@ def main(argv: list[str] | None = None) -> None:
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
-            for parameter in merged:
-                # zero_grad dropped the .grad reference; the captured graph
-                # keeps accumulating into main_grad, which must be zeroed in
-                # place for the next replay.
-                parameter.main_grad.zero_()
+            if not use_ddp:
+                for parameter in merged:
+                    # zero_grad dropped the .grad reference; the captured
+                    # graph keeps accumulating into main_grad, which must be
+                    # zeroed in place for the next replay. Under DDP the next
+                    # step's zero_grad_buffer does this instead, over the
+                    # whole bucket, and zeroing a view of that buffer here
+                    # would race the reduction it has not waited for.
+                    parameter.main_grad.zero_()
 
             now = time.perf_counter()
             tps = tokens_per_second(

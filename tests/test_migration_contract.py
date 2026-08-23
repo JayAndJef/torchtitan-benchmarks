@@ -1101,12 +1101,32 @@ class GoldenCommandTests(unittest.TestCase):
             megatron[megatron.index("--batch") + 1],
         )
 
+    def test_a_data_parallel_megatron_argv_states_the_degree(self) -> None:
+        """The driver needs the degree, and must not derive it.
+
+        Megatron gives its data-parallel axis every rank the pipeline degree
+        leaves over, so a derived degree could never disagree with the mesh
+        -- and the disagreement is what ``refuse_unsupported_mesh`` exists to
+        see. The flag is what a rank the operator did not account for trips
+        over.
+        """
+        for spec, expected in (
+            (ParallelismSpec(dp=2), "2"),
+            (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), "2"),
+        ):
+            with self.subTest(spec=spec):
+                command = self._command(
+                    GOLDEN_MEGATRON_ARM, "normal", "default", "none", spec
+                )
+                self.assertEqual(command[command.index("--dp") + 1], expected)
+
     def test_the_trivial_spec_starts_no_launcher(self) -> None:
         """The megatron argv at one rank is the interpreter, not torchrun."""
         command = self._command(GOLDEN_MEGATRON_ARM, "normal", "default", "none")
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(command[1:3], ["-m", MEGATRON_DRIVER_MODULE])
         self.assertNotIn("torch.distributed.run", command)
+        self.assertNotIn("--dp", command)
         self.assertNotIn("--pp", command)
 
     def test_the_megatron_driver_module_is_importable_as_a_module(self) -> None:
@@ -1574,7 +1594,12 @@ TEST_CENSUS = {
     # carries a parallelism degree at all -- a profile records behaviour and
     # cannot see initialize_model_parallel.
     "test_mcore_profiles": 23,
-    "test_megatron_data": 5,
+    # +6 with the data-parallel slice: that two ranks read different tokens
+    # and that each engine reads the same shard on the same rank, plus the
+    # four that pin one static cu_seqlens length -- per rank, across two
+    # ranks when the maximum is global, that the padding adds no document,
+    # and that a maximum below a pack is refused.
+    "test_megatron_data": 11,
     # The megatron driver's pipeline handling, which needs two GPUs to run
     # and none to check: how a batch splits into microbatches, which
     # pipeline requests the driver refuses (an interleaved schedule by
@@ -1585,7 +1610,14 @@ TEST_CENSUS = {
     # microbatches against the mean this replaced, an empty stage, and the
     # detach aliasing the sum depends on, pinned against torch. +1 that the
     # Materialized log line is the recorded one at the trivial spec.
-    "test_megatron_driver": 22,
+    # +7 with the data-parallel degree: that --dp defaults to 1, that dp 2
+    # and dp 2 x pp 2 are accepted, that a rank the mesh does not name and a
+    # degree below 1 are refused, that every DDP branch is guarded on
+    # --dp > 1, that graph mode leaves the main_grad buffers to DDP, that the
+    # parameter sum is taken over one pipeline, and that the global token
+    # line multiplies by dp. The norm-reduction test now names the pipeline
+    # degree and its group rather than the world size.
+    "test_megatron_driver": 29,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1653,7 +1685,11 @@ TEST_CENSUS = {
     # check became one refusal per axis, so the axes are named separately,
     # the dtype guard stands on its own, and a pipeline rank is let through
     # to the delegate with skip_dp still true.
-    "test_runner": 53,
+    # +4 with the data-parallel path: what skip_data_parallel says of each
+    # mesh, that dp 2 reaches the delegate with skip_dp false and states the
+    # units it got back, that a delegate which wrapped nothing is refused,
+    # and that a single-GPU run still logs no such line.
+    "test_runner": 57,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1713,7 +1749,20 @@ TEST_CENSUS = {
     # prove nothing refuses the run.
     # +2 that a lone non-zero rank keeps its own number and an unprefixed
     # log is still rank 0.
-    "test_parallel_validation": 28,
+    # +3 with the titan data-parallel marker: that the validator's string is
+    # the one parallelize_piper1b prints, that no such marker is asked of a
+    # run which reduces nothing, and that a dp run whose fully_shard did not
+    # happen fails the arm.
+    # +4 with arm rule 13: that a dp run needs an all-reduce on EVERY rank,
+    # that a pipeline-only run needs none, that a pipeline's own SendRecv
+    # and Broadcast cannot satisfy it, and that the NCCL algorithm suffix is
+    # not part of the marker.
+    # +6 with the data-parallel half of arm rule 12's inversion: that a dp
+    # log is refused at the trivial spec and a trivial log is not, that each
+    # engine's pattern names both of its witnesses, that a shard degree
+    # counts as data parallelism, that a real pipeline-only log matches
+    # neither pattern, and that a double-digit degree is not read as one.
+    "test_parallel_validation": 41,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -1722,7 +1771,7 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1441
+TEST_CENSUS_TOTAL = 1471
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

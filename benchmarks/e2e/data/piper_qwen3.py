@@ -14,6 +14,16 @@ silently reusing data would change the workload relative to the lazy loader.
 defaults it to the config's own ``training.steps`` and the benchmark runner
 delivers ``--dataloader.replay-steps`` next to ``--training.steps`` for every
 arm of a scenario whose workload sets ``replay_dataloader``.
+
+**Under a data-parallel degree each rank replays its own shard.** The
+forwarding was always here: ``dp_rank`` and ``dp_world_size`` have reached
+the stock dataset class since this loader was written, and its
+``split_dataset_by_node`` is the split TorchTitan's own loader uses. What
+stood above it was a refusal of ``dp_world_size != 1``, kept while no run
+could ask for one, and only that refusal is gone. The megatron driver
+drains the same class with the same two values, so the engines stay
+bit-identical rank for rank. The materialized count is per rank, and a rank
+still hard-fails at exhaustion.
 """
 
 from __future__ import annotations
@@ -80,11 +90,13 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
-        if dp_world_size != 1:
-            raise ValueError(
-                "PretokenizedReplayDataLoader is single-GPU only "
-                f"(dp_world_size={dp_world_size})"
-            )
+        # Each data-parallel rank materializes its OWN shard of the stream.
+        # ``HuggingFaceTextDataset`` calls ``split_dataset_by_node(ds,
+        # dp_rank, dp_world_size)``, so the two arguments below are what give
+        # the ranks different tokens; the megatron driver drains the same
+        # class with the same two values, which is what keeps the two engines
+        # bit-identical under a data-parallel degree as well. The count is
+        # per rank, so a dp 2 run still replays ``replay_steps`` steps.
         inner = HuggingFaceTextDataset(
             dataset_name=config.dataset,
             dataset_path=config.dataset_path,
