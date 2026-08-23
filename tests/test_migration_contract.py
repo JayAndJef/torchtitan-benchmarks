@@ -1574,7 +1574,12 @@ TEST_CENSUS = {
     # carries a parallelism degree at all -- a profile records behaviour and
     # cannot see initialize_model_parallel.
     "test_mcore_profiles": 23,
-    "test_megatron_data": 5,
+    # +6 with the data-parallel slice: that two ranks read different tokens
+    # and that each engine reads the same shard on the same rank, plus the
+    # four that pin one static cu_seqlens length -- per rank, across two
+    # ranks when the maximum is global, that the padding adds no document,
+    # and that a maximum below a pack is refused.
+    "test_megatron_data": 11,
     # The megatron driver's pipeline handling, which needs two GPUs to run
     # and none to check: how a batch splits into microbatches, which
     # pipeline requests the driver refuses (an interleaved schedule by
@@ -1730,7 +1735,7 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1448
+TEST_CENSUS_TOTAL = 1454
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

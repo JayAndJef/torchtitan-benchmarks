@@ -24,10 +24,28 @@ TOKENIZER_PATH = TITAN_DIR / "tests" / "assets" / "tokenizer"
 
 
 def materialize_titan_samples(
-    *, seq_len: int, num_samples: int
+    *,
+    seq_len: int,
+    num_samples: int,
+    dp_rank: int = 0,
+    dp_world_size: int = 1,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Drain the first num_samples (input, positions, label) triples from
-    torchtitan's c4_test dataset, exactly as the titan arms consume them."""
+    torchtitan's c4_test dataset, exactly as the titan arms consume them.
+
+    ``dp_rank`` and ``dp_world_size`` are the data-parallel slice, and they
+    default to the whole stream, which is what every megatron number under
+    ``out/`` was measured on. They are forwarded to the stock dataset class
+    unchanged: it calls ``split_dataset_by_node(ds, dp_rank, dp_world_size)``
+    on the raw documents, which is the split torchtitan's own loader gives
+    its ranks. So this function reproduces the titan stream rank for rank
+    rather than reimplementing a split, which is what the parity between the
+    two engines rests on.
+
+    ``num_samples`` is PER RANK. A data-parallel rank reads a batch of its
+    own each step, so every rank drains the same count from a different
+    shard.
+    """
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
     from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
 
@@ -37,6 +55,8 @@ def materialize_titan_samples(
         dataset_path=str(C4_TEST_PATH),
         tokenizer=tokenizer,
         seq_len=seq_len,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
         infinite=True,
     )
     iterator = iter(dataset)
@@ -56,6 +76,54 @@ class ThdBatch:
     positions: torch.Tensor  # int64 [1, batch * seq_len], restart per document
     cu_seqlens: torch.Tensor  # int32 [num_documents + 1]
     max_seqlen: int
+
+
+def padded_microbatches(
+    batches: list[ThdBatch],
+    *,
+    max_documents: int,
+    tokens_per_microbatch: int,
+) -> list[dict[str, torch.Tensor]]:
+    """Each batch as the driver feeds it, with ``cu_seqlens`` padded to one
+    length.
+
+    The document count varies per pack, and a varying shape re-records a
+    captured graph every step. Padding with trailing full-offset entries
+    gives every microbatch one shape and adds no segment: an entry equal to
+    the last real offset describes a document of zero length.
+
+    ``max_documents`` is the caller's, and under a data-parallel degree it
+    must be the maximum over **every** rank's packs. Each rank holds
+    different documents, so a per-rank maximum would give the ranks
+    different static shapes under one label. The caller takes the collective;
+    this function only obeys the number it is given, which is what lets a
+    test state the property without a device.
+    """
+    if max_documents < max(
+        (batch.cu_seqlens.numel() for batch in batches), default=0
+    ):
+        raise ValueError(
+            f"max_documents {max_documents} is below a pack's own document "
+            "count; padding cannot remove a document"
+        )
+    microbatches = []
+    for batch in batches:
+        pad = max_documents - batch.cu_seqlens.numel()
+        microbatches.append(
+            {
+                "tokens": batch.tokens,
+                "labels": batch.labels,
+                "cu_seqlens": torch.cat(
+                    [
+                        batch.cu_seqlens,
+                        torch.full(
+                            (pad,), tokens_per_microbatch, dtype=torch.int32
+                        ),
+                    ]
+                ),
+            }
+        )
+    return microbatches
 
 
 def thd_batches(
