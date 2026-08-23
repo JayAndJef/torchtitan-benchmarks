@@ -182,10 +182,19 @@ class PooledMetrics:
         """The profiler step's own wall clock. ``wall - busy`` is the bubble.
 
         Averaged over the steps that carried a host annotation, not over
-        ``profiled_steps``. The two agree on every trace either engine writes;
-        they part only on a trace whose steps are named on the device side
-        alone, and there the honest answer is "no wall was recorded" rather
-        than a total spread over steps that never reported one.
+        ``profiled_steps``. The two agree on every trace either engine writes:
+        a sweep of 367 arm directories under ``out/`` found ``ProfilerStep#``
+        under ``user_annotation`` and ``gpu_user_annotation`` only, never
+        ``cpu_op``, and found the two counts equal in every one.
+
+        They can part in two ways, and the two answers differ. Where **no**
+        step carries a host annotation this returns ``None``, because the
+        honest answer is "no wall was recorded" rather than a total spread
+        over steps that never reported one. Where **some** steps carry one and
+        others do not, the extraction refuses the trace instead: this average
+        and every other per-step figure would then run over different
+        denominators, and ``wall - busy`` would subtract a two-step average
+        from a one-step average and call the difference a bubble.
         """
         if not self.step_wall_count:
             return None
@@ -370,6 +379,13 @@ def trace_window_metrics(
         region_spans[region.name] = [end - start for _, _, start, end in spans]
         region_kernel[region.name] = _kernel_time_within(spans, stream_kernels)
 
+    if 0 < len(step_walls) < len(step_names):
+        raise ValueError(
+            "some profiler steps carry a host annotation and others do not; "
+            "the wall clock would average over a different step count than "
+            "the kernel totals"
+        )
+
     return WindowMetrics(
         region_spans=region_spans,
         region_kernel=region_kernel,
@@ -452,6 +468,12 @@ def pooled_window_metrics(
         raise ValueError(
             "some trace windows carry ProfilerStep events and others do not; "
             "per-step totals would be wrong for this mixture"
+        )
+    if 0 < step_wall_count < sum(step_counts):
+        raise ValueError(
+            "some trace windows name their steps on the host and others only "
+            "on the device; the wall clock would average over a different "
+            "step count than the kernel totals"
         )
     return PooledMetrics(
         region_spans=spans,

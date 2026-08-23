@@ -39,6 +39,7 @@ from benchmarks.traces.extraction import (
     busy_union,
     per_rank_pooled_metrics,
     pooled_window_metrics,
+    trace_window_metrics,
 )
 from benchmarks.traces.schema import TRACE_FILE_GLOB, Region, rank_of_trace
 from tests.test_runner import _SAC_LINE, _SIZE_LINE, _compiled_line
@@ -806,6 +807,87 @@ class LegacyInertnessTests(unittest.TestCase):
                 TRACE_FILE_GLOB.replace("*", r".*"), "rank0_trace.json.gz"
             )
         )
+
+
+def host_step(name: str, duration: float, start: float = 0.0) -> dict:
+    """One profiler step, named on the host. This is the normal case."""
+    return {"ph": "X", "cat": "user_annotation", "name": name,
+            "tid": 1, "ts": start, "dur": duration}
+
+
+def device_step(name: str, duration: float, start: float = 0.0) -> dict:
+    """One profiler step, named on the device side only."""
+    return {"ph": "X", "cat": "gpu_user_annotation", "name": name,
+            "tid": 100, "ts": start, "dur": duration}
+
+
+class PartialStepAnnotationIsRefusedTests(unittest.TestCase):
+    """Some steps named on the host and others not is refused, not averaged.
+
+    ``wall_ms_per_step`` divides by the steps that carried a host annotation.
+    Every other per-step figure divides by ``profiled_steps``. Where the two
+    counts disagree, ``wall - busy`` subtracts one average from another taken
+    over a different denominator, and publishes the difference as a bubble.
+
+    No trace under ``out/`` is in this state, on either engine. The refusal
+    keeps it that way rather than returning a number nobody can read.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_one_window_with_a_host_step_and_a_device_step_is_refused(self) -> None:
+        path = write_trace(
+            self.tmp / "rank0_trace.json.gz",
+            {"fwd": ("forward", [10.0])},
+            [host_step("ProfilerStep#20", 1000.0),
+             device_step("ProfilerStep#21", 1000.0, start=2000.0)],
+        )
+        with self.assertRaises(ValueError) as raised:
+            trace_window_metrics(path, ())
+        self.assertIn("host annotation", str(raised.exception))
+
+    def test_an_all_host_window_pooled_with_an_all_device_window_is_refused(
+        self,
+    ) -> None:
+        """The window check alone cannot see this one. Each window is pure."""
+        host_only = write_trace(
+            self.tmp / "iteration_20/rank0_trace.json.gz",
+            {"fwd": ("forward", [10.0])},
+            [host_step("ProfilerStep#20", 1000.0)],
+        )
+        device_only = write_trace(
+            self.tmp / "iteration_40/rank0_trace.json.gz",
+            {"fwd": ("forward", [10.0])},
+            [device_step("ProfilerStep#40", 1000.0)],
+        )
+        trace_window_metrics(host_only, ())
+        trace_window_metrics(device_only, ())
+        with self.assertRaises(ValueError) as raised:
+            pooled_window_metrics((host_only, device_only), ())
+        self.assertIn("on the device", str(raised.exception))
+
+    def test_every_step_on_the_device_still_reports_no_wall(self) -> None:
+        """The documented carve-out. No mixture, so no refusal."""
+        path = write_trace(
+            self.tmp / "rank0_trace.json.gz",
+            {"fwd": ("forward", [10.0])},
+            [device_step("ProfilerStep#20", 1000.0)],
+        )
+        pooled = pooled_window_metrics((path,), ())
+        self.assertEqual(pooled.profiled_steps, 1)
+        self.assertIsNone(pooled.wall_ms_per_step)
+
+    def test_every_step_on_the_host_is_the_normal_case(self) -> None:
+        path = write_trace(
+            self.tmp / "rank0_trace.json.gz",
+            {"fwd": ("forward", [10.0])},
+            [host_step("ProfilerStep#20", 1000.0)],
+        )
+        pooled = pooled_window_metrics((path,), ())
+        self.assertEqual(pooled.profiled_steps, 1)
+        self.assertAlmostEqual(pooled.wall_ms_per_step, 1.0)
 
 
 if __name__ == "__main__":
