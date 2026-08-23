@@ -215,6 +215,36 @@ class SingleRankInertnessTests(unittest.TestCase):
         ):
             self.assertIn(line, source)
 
+    def test_the_materialized_line_is_the_recorded_one_at_one_rank(
+        self,
+    ) -> None:
+        """A changed log line at the trivial spec is a changed record.
+
+        Every megatron directory under out/ holds this line without a
+        microbatch clause, so the clause is appended only when there is a
+        split. Rendered here rather than pattern-matched, because the claim
+        is about the characters.
+        """
+        source = self._main_source()
+        self.assertIn('if args.pp > 1\n        else ""', source)
+        for pp, microbatches, rows, expected in (
+            (1, 1, 4, "(4x1024, 10 max packed documents)"),
+            (
+                2,
+                4,
+                1,
+                "(4x1024, 4 microbatch(es) of 1 row(s), 10 max packed "
+                "documents)",
+            ),
+        ):
+            split = (
+                f"{microbatches} microbatch(es) of {rows} row(s), "
+                if pp > 1
+                else ""
+            )
+            with self.subTest(pp=pp):
+                self.assertEqual(f"(4x1024, {split}10 max packed documents)", expected)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -308,10 +308,14 @@ def main(argv: list[str] | None = None) -> None:
     # rendezvous the launcher chose and only fills in the single-rank case.
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(_free_port()))
+    # The device first, then the group. NCCL binds a communicator to whatever
+    # device is current, so a rank that joined the group before choosing its
+    # device can bind the wrong one -- which hangs rather than failing. At
+    # world size 1 the order changes nothing: local_rank is 0 either way.
+    torch.cuda.set_device(local_rank)
     torch.distributed.init_process_group(
         backend="nccl", rank=rank, world_size=world_size
     )
-    torch.cuda.set_device(local_rank)
 
     from megatron.core import parallel_state
     from megatron.core.packed_seq_params import PackedSeqParams
@@ -382,10 +386,18 @@ def main(argv: list[str] | None = None) -> None:
         f"(dp 1 x batch {args.batch} x seq_len {args.seq_len})",
         flush=True,
     )
+    # The microbatch clause is appended only when there is a split. At --pp 1
+    # this line is the line every megatron directory under out/ already
+    # holds, character for character, and a changed log line at the trivial
+    # spec is a changed recorded fact.
+    split = (
+        f"{num_microbatches} microbatch(es) of {microbatch_rows} row(s), "
+        if args.pp > 1
+        else ""
+    )
     print(
         f"Materialized {len(step_data)} steps of c4_test batches "
-        f"({args.batch}x{args.seq_len}, {num_microbatches} microbatch(es) of "
-        f"{microbatch_rows} row(s), "
+        f"({args.batch}x{args.seq_len}, {split}"
         f"{max_documents - 1} max packed documents)",
         flush=True,
     )

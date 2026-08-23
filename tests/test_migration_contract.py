@@ -1583,8 +1583,9 @@ TEST_CENSUS = {
     # collective, and the trace file named for the rank that wrote it.
     # +4 that the microbatch loss reduction is a sum: one microbatch, four
     # microbatches against the mean this replaced, an empty stage, and the
-    # detach aliasing the sum depends on, pinned against torch.
-    "test_megatron_driver": 21,
+    # detach aliasing the sum depends on, pinned against torch. +1 that the
+    # Materialized log line is the recorded one at the trivial spec.
+    "test_megatron_driver": 22,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1717,7 +1718,7 @@ TEST_CENSUS = {
     # per-rank rows and its spread warning.
     "test_throughput": 24,
 }
-TEST_CENSUS_TOTAL = 1430
+TEST_CENSUS_TOTAL = 1431
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
