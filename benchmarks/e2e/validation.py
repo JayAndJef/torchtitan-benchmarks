@@ -132,6 +132,17 @@ class ValidationProfile:
     eager, and a run that silently pipelined cannot be published as one GPU.
     Measured before it was added: of 296 arm logs under ``out/``, exactly one
     matches, and it is a deliberate ``--pp 2`` run.
+
+    ``data_parallel_pattern`` is the same inversion on the other axis, and
+    it guards a worse mistake. A pipeline rank and a single-GPU rank publish
+    the same per-device throughput, so a pipeline published as one GPU
+    misstates the mesh and not the rate. A **data-parallel** rank reads a
+    batch of its own, so a ``dp 2`` run published under the trivial spec
+    reads as roughly twice the true rate, and every other rule passes. Each
+    engine's pattern names two witnesses: the mesh line the engine logs
+    whatever this repo's code does, and the wrapper line this repo prints.
+    Neither matches a ``pp 2, dp 1`` log, which was checked against a real
+    one.
     """
 
     completion_marker: str
@@ -144,6 +155,7 @@ class ValidationProfile:
         [ParallelismSpec, Workload], tuple[str, ...]
     ]
     pipelined_pattern: re.Pattern[str]
+    data_parallel_pattern: re.Pattern[str]
 
 
 def _titan_parallelism_markers(
@@ -266,6 +278,18 @@ VALIDATION_PROFILES = {
         # TorchTitan logs this from _build_pipeline_schedule, which
         # runs only when the pipeline degree is above 1.
         pipelined_pattern=re.compile(r"Using pipeline schedule"),
+        # Two independent witnesses of a data-parallel degree, because one
+        # of them is not ours. ``ParallelDims.build_mesh`` logs the resolved
+        # mesh on every rank whatever this repo's code does, so a degree
+        # above 1 shows there even in a run that never reached
+        # ``parallelize_piper1b``; the second alternative is our own line.
+        # A ``pp 2, dp 1`` run logs ``dp_replicate=1, dp_shard=1`` and
+        # matches neither, which was checked against a real one.
+        data_parallel_pattern=re.compile(
+            r"dp_replicate=(?!1\b)\d+"
+            r"|dp_shard=(?!1\b)\d+"
+            r"|piper1b data parallel:"
+        ),
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -287,6 +311,11 @@ VALIDATION_PROFILES = {
         # other than 1 is what this must not see at the trivial spec.
         pipelined_pattern=re.compile(
             r"Megatron-LM parallelism: dp=\d+ pp=(?!1\b)\d+"
+        ),
+        # The same line's other degree, plus the wrapper's own line.
+        data_parallel_pattern=re.compile(
+            r"Megatron-LM parallelism: dp=(?!1\b)\d+"
+            r"|Megatron-LM data parallel:"
         ),
     ),
 }
@@ -318,6 +347,7 @@ def _validate_log(
     model_size: str,
     parallelism_markers: tuple[str, ...] = (),
     spec_pp: int = 1,
+    spec_dp: int = 1,
 ) -> None:
     """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
 
@@ -420,6 +450,19 @@ def _validate_log(
                 f"{arm.name}: the run declares no pipeline, and the log "
                 f"records one: {found.group(0)!r}{where}"
             )
+    # The data-parallel half of the same inversion, and it guards a worse
+    # mistake than the pipeline half. A pipeline rank and a single-GPU rank
+    # publish the same per-device throughput; a data-parallel rank does not,
+    # so a dp 2 run published under the trivial spec would read as roughly
+    # twice the true rate with every other rule satisfied. The positive
+    # markers cannot ask this, because the trivial spec declares none.
+    if spec_dp == 1:
+        found = profile.data_parallel_pattern.search(log)
+        if found is not None:
+            raise RuntimeError(
+                f"{arm.name}: the run declares no data parallelism, and the "
+                f"log records some: {found.group(0)!r}{where}"
+            )
 
 
 def validate_arm(
@@ -487,6 +530,7 @@ def validate_arm(
             model_size=model_size,
             parallelism_markers=parallelism_markers,
             spec_pp=parallelism.pp,
+            spec_dp=parallelism.dp,
         )
 
     # Arm rules 5 and 7 are per rank. Every rank runs the same number of

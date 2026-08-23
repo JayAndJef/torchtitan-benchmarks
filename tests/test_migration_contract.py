@@ -1757,7 +1757,12 @@ TEST_CENSUS = {
     # that a pipeline-only run needs none, that a pipeline's own SendRecv
     # and Broadcast cannot satisfy it, and that the NCCL algorithm suffix is
     # not part of the marker.
-    "test_parallel_validation": 35,
+    # +6 with the data-parallel half of arm rule 12's inversion: that a dp
+    # log is refused at the trivial spec and a trivial log is not, that each
+    # engine's pattern names both of its witnesses, that a shard degree
+    # counts as data parallelism, that a real pipeline-only log matches
+    # neither pattern, and that a double-digit degree is not read as one.
+    "test_parallel_validation": 41,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -1766,7 +1771,7 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1465
+TEST_CENSUS_TOTAL = 1471
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

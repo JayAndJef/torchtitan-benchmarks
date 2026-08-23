@@ -433,6 +433,129 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
         self.assertIsNotNone(pattern.search(_titan_log(PP2)))
 
 
+class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
+    """The same inversion on the data-parallel axis, where it matters more.
+
+    A pipeline rank and a single-GPU rank publish the same per-device
+    throughput, so a pipeline published as one GPU misstates the mesh and
+    not the rate. A data-parallel rank reads a batch of its own, so a
+    ``dp 2`` run published under the trivial spec reads as roughly twice the
+    true rate -- and every other rule passes, because the positive markers
+    ask nothing when nothing was requested.
+    """
+
+    def test_a_titan_data_parallel_log_is_refused_at_the_trivial_spec(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0,))
+            fixture.log.write_text(_titan_log(DP2) + "\n")
+            with self.assertRaisesRegex(
+                RuntimeError, "declares no data parallelism"
+            ):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=TRIVIAL_SPEC,
+                )
+
+    def test_a_titan_trivial_log_still_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0,))
+            fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
+            validate_arm(
+                PIPER_1B_ROPE.arm("baseline"),
+                fixture.root,
+                fixture.log,
+                PIPER_1B_ROPE.workload,
+                parallelism=TRIVIAL_SPEC,
+            )
+
+    def test_each_pattern_names_two_witnesses(self) -> None:
+        """The engine's own mesh line, and this repo's wrapper line.
+
+        The mesh line is logged whatever this repo's code does, so a degree
+        above 1 shows there even in a run that never reached the wrapper.
+        Either alone must fail the arm.
+        """
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNotNone(
+            titan.search(
+                "Building device mesh with parallelism: pp=1, "
+                "dp_replicate=2, dp_shard=1, cp=1, tp=1, ep=1"
+            )
+        )
+        self.assertIsNotNone(
+            titan.search(
+                "piper1b data parallel: fully_shard applied "
+                "(dp_replicate=2, dp_shard=1); 17 FSDP units"
+            )
+        )
+        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        self.assertIsNotNone(
+            megatron.search(
+                "Megatron-LM parallelism: dp=2 pp=1 schedule=None "
+                "microbatches=1 stages=1"
+            )
+        )
+        self.assertIsNotNone(
+            megatron.search(
+                "Megatron-LM data parallel: DistributedDataParallel over 2 "
+                "ranks (overlap_grad_reduce=True, grad_reduce_in_fp32=False)"
+            )
+        )
+
+    def test_a_shard_degree_is_data_parallelism_too(self) -> None:
+        """ZeRO-3 is what an omitted shard-degree flag produces.
+
+        ``parallelize_piper1b`` refuses it in the training process. This
+        pattern is what stops such a log being published as single-GPU if
+        the refusal is ever lifted.
+        """
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNotNone(
+            titan.search(
+                "Building device mesh with parallelism: pp=1, "
+                "dp_replicate=1, dp_shard=2, cp=1, tp=1, ep=1"
+            )
+        )
+
+    def test_a_pipeline_only_log_is_not_data_parallel(self) -> None:
+        """Read off the real ``pp 2, dp 1`` logs this harness has written.
+
+        Both engines print their degrees on one line, so a pattern that
+        matched the line rather than the degree would fail every honest
+        pipeline run.
+        """
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNone(
+            titan.search(
+                "Building device mesh with parallelism: pp=2, "
+                "dp_replicate=1, dp_shard=1, cp=1, tp=1, ep=1"
+            )
+        )
+        self.assertIsNone(titan.search(_titan_log(PP2)))
+        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        self.assertIsNone(
+            megatron.search(
+                "Megatron-LM parallelism: dp=1 pp=2 schedule=1F1B "
+                "microbatches=4 stages=2"
+            )
+        )
+
+    def test_a_double_digit_degree_is_not_read_as_one(self) -> None:
+        """``dp=1`` must not match ``dp=12``, and the reverse."""
+        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        self.assertIsNotNone(
+            megatron.search("Megatron-LM parallelism: dp=12 pp=1 schedule=None")
+        )
+        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        self.assertIsNotNone(titan.search("dp_replicate=10, dp_shard=1,"))
+        self.assertIsNone(titan.search("dp_replicate=1, dp_shard=1,"))
+
+
 class ArmRuleTwelveTests(unittest.TestCase):
     """Both engines must log the mesh they really built.
 
