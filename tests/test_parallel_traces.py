@@ -809,6 +809,14 @@ class LegacyInertnessTests(unittest.TestCase):
         )
 
 
+def launch_events(count: int, start: float = 700_000.0) -> list:
+    """``count`` kernel launches, in the two categories the extraction reads."""
+    return [
+        {"ph": "X", "cat": "cuda_runtime", "name": "cudaLaunchKernel",
+         "pid": 0, "tid": 1, "ts": start + index, "dur": 1.0}
+        for index in range(count)
+    ]
+
 def host_step(name: str, duration: float, start: float = 0.0) -> dict:
     """One profiler step, named on the host. This is the normal case."""
     return {"ph": "X", "cat": "user_annotation", "name": name,
@@ -819,6 +827,57 @@ def device_step(name: str, duration: float, start: float = 0.0) -> dict:
     """One profiler step, named on the device side only."""
     return {"ph": "X", "cat": "gpu_user_annotation", "name": name,
             "tid": 100, "ts": start, "dur": duration}
+
+
+class LaunchCountsSkipSteplessRanksTests(unittest.TestCase):
+    """``tools/collect_matrix.py`` must not divide a stepless rank by one.
+
+    A rank whose windows carry no ``ProfilerStep`` has no per-step figure. If
+    the reduction gives it a denominator of 1, it reports the whole window's
+    launches as one step's worth. That is the largest value in the set, so it
+    wins the maximum and becomes the arm's published figure -- a rank the
+    profiler never measured, publishing a number no rank paid.
+
+    The numbers here separate the two answers. Rank 0 is stepless and runs
+    500 launches. Rank 1 runs the same 500 launches over 5 steps, so it pays
+    100 per step. The correct answer is 100.0 and the defect answers 500.0.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        arm = self.tmp / "baseline"
+        write_trace(
+            arm / "profiling/traces/iteration_20/rank0_trace.json.gz",
+            {"fwd": ("forward", [10.0])},
+            launch_events(500),
+        )
+        write_trace(
+            arm / "profiling/traces/iteration_20/rank1_trace.json.gz",
+            {"fwd": ("forward", [10.0])},
+            [host_step(f"ProfilerStep#{20 + index}", 1000.0, start=index * 2000.0)
+             for index in range(5)] + launch_events(500),
+        )
+
+    def test_the_stepless_rank_is_left_out_of_the_maximum(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+        from collect_matrix import launch_counts
+
+        counts = launch_counts(self.tmp, ["baseline"])
+        self.assertAlmostEqual(counts["baseline"], 100.0)
+
+    def test_the_stepless_rank_would_win_if_it_were_divided_by_one(self) -> None:
+        """The defect this pins, stated as arithmetic rather than as a claim."""
+        by_rank = trace_files_by_rank(self.tmp / "baseline")
+        pooled = per_rank_pooled_metrics(by_rank, ())
+        self.assertEqual(pooled[0].profiled_steps, 0)
+        self.assertEqual(pooled[0].launch_count, 500)
+        self.assertEqual(pooled[1].profiled_steps, 5)
+        divided_by_one = max(
+            rank.launch_count / max(rank.profiled_steps, 1)
+            for rank in pooled.values()
+        )
+        self.assertAlmostEqual(divided_by_one, 500.0)
 
 
 class PartialStepAnnotationIsRefusedTests(unittest.TestCase):
