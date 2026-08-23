@@ -51,7 +51,11 @@ from torchtitan.components.loss import (
     CrossEntropyLoss,
     LossWithLMHead,
 )
-from benchmarks.models.piper_qwen3.parallelize import parallelize_piper1b
+from benchmarks.models.piper_qwen3.parallelize import (
+    DATA_PARALLEL_LINE,
+    parallelize_piper1b,
+    skip_data_parallel,
+)
 from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B, PIPER_SHAPES
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
@@ -303,14 +307,14 @@ class ParallelizeTests(unittest.TestCase):
                 ParallelDims(
                     dp_replicate=1, dp_shard=2, cp=1, tp=1, pp=1, ep=1, world_size=2
                 ),
-                "no gradient reduction",
+                "shard degree above 1 shards the parameters",
             ),
             (
-                "dp_replicate",
+                "hsdp",
                 ParallelDims(
-                    dp_replicate=2, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=2
+                    dp_replicate=2, dp_shard=2, cp=1, tp=1, pp=1, ep=1, world_size=4
                 ),
-                "no gradient reduction",
+                "shard degree above 1 shards the parameters",
             ),
         ):
             with self.subTest(axis=name):
@@ -354,6 +358,134 @@ class ParallelizeTests(unittest.TestCase):
             )
         self.assertIs(result, sentinel)
         self.assertIs(delegate.call_args.kwargs["skip_dp"], True)
+
+    _DP2 = ParallelDims(
+        dp_replicate=2, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=2
+    )
+
+    def test_skip_data_parallel_reads_the_delivered_mesh(self) -> None:
+        """The subprocess-side twin of ``parallelism.skip_dp``.
+
+        Both say "no data-parallel machinery is needed" exactly when the
+        degree is 1, so a single-GPU run and a pipeline-only run keep the
+        plain-bf16 model this repo has always measured.
+        """
+        for name, dims, expected in (
+            (
+                "single gpu",
+                ParallelDims(
+                    dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
+                ),
+                True,
+            ),
+            (
+                "pipeline only",
+                ParallelDims(
+                    dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=2, ep=1, world_size=2
+                ),
+                True,
+            ),
+            ("dp 2", self._DP2, False),
+        ):
+            with self.subTest(mesh=name):
+                self.assertIs(skip_data_parallel(dims), expected)
+
+    def test_parallelize_runs_the_data_parallel_path_at_replicate_2(self) -> None:
+        """dp 2 asks the delegate for FSDP and states what came back.
+
+        ``skip_dp`` False is what makes ``parallelize_qwen3`` reach
+        ``apply_fsdp_to_decoder``; without it the two ranks read different
+        data, reduce no gradient, and report roughly twice the true speed.
+
+        ``FSDPModule.__new__`` returns an instance of the class it was
+        injected into, so a subclass of it is not one and a real wrapped
+        module cannot be built without a process group. The name this module
+        binds is patched instead: the branch under test is the count, and
+        production keeps torch's own class.
+        """
+        import torch.nn as nn
+
+        class _Wrapped(nn.Module):
+            pass
+
+        model = nn.Sequential(_Wrapped(), _Wrapped(), nn.Linear(2, 2))
+        with mock.patch(
+            "benchmarks.models.piper_qwen3.parallelize.FSDPModule", _Wrapped
+        ):
+            with mock.patch(
+                "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+                return_value=model,
+            ) as delegate:
+                with self.assertLogs(level="INFO") as logs:
+                    result = parallelize_piper1b(
+                        parallel_dims=self._DP2,
+                        training=TrainingConfig(dtype="bfloat16"),
+                        **self._PARALLELIZE_COMMON,
+                    )
+        self.assertIs(result, model)
+        self.assertIs(delegate.call_args.kwargs["skip_dp"], False)
+        printed = "\n".join(logs.output)
+        self.assertIn(
+            DATA_PARALLEL_LINE.format(replicate=2, shard=1), printed
+        )
+        self.assertIn("2 FSDP units", printed)
+
+    def test_parallelize_refuses_a_dp_run_the_delegate_left_unwrapped(
+        self,
+    ) -> None:
+        """The count is a guard, not a log line.
+
+        A future edit that lost ``skip_dp`` would leave every module bare and
+        every other check would pass. Nothing wrapped means nothing reduces.
+        """
+        import torch.nn as nn
+
+        class _Wrapped(nn.Module):
+            pass
+
+        with mock.patch(
+            "benchmarks.models.piper_qwen3.parallelize.FSDPModule", _Wrapped
+        ):
+            with mock.patch(
+                "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+                return_value=nn.Linear(2, 2),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "never reduce their gradients"
+                ):
+                    parallelize_piper1b(
+                        parallel_dims=self._DP2,
+                        training=TrainingConfig(dtype="bfloat16"),
+                        **self._PARALLELIZE_COMMON,
+                    )
+
+    def test_a_single_gpu_run_logs_no_data_parallel_line(self) -> None:
+        """The trivial spec's log text is a recorded fact; it must not move.
+
+        ``--resume`` and every published directory read these lines, and a
+        line that appeared at one rank would be a new recorded fact for a run
+        whose treatment did not change.
+        """
+        import logging
+        import torch.nn as nn
+
+        single_gpu = ParallelDims(
+            dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
+        )
+        with mock.patch(
+            "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+            return_value=nn.Linear(2, 2),
+        ):
+            with self.assertLogs(level="INFO") as logs:
+                logging.getLogger().info("probe")
+                parallelize_piper1b(
+                    parallel_dims=single_gpu,
+                    training=TrainingConfig(dtype="bfloat16"),
+                    **self._PARALLELIZE_COMMON,
+                )
+        self.assertEqual(
+            [line for line in logs.output if "data parallel" in line], []
+        )
 
 
 class CommandTests(unittest.TestCase):

@@ -46,6 +46,7 @@ from tests.test_runner import (
 
 
 PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
+DP2 = ParallelismSpec(dp=2)
 
 
 def _prefixed(rank: int, text: str) -> str:
@@ -508,6 +509,67 @@ class ArmRuleTwelveTests(unittest.TestCase):
                 "Using pipeline schedule 1F1B with 4 microbatches and 2 stages",
             ),
         )
+
+    def test_the_titan_dp_marker_is_the_line_parallelize_prints(self) -> None:
+        """The one titan marker that proves a gradient reduction.
+
+        TorchTitan logs its mesh line from ``ParallelDims``, before
+        ``parallelize_fn`` runs, so that line survives a run that skipped the
+        data-parallel path entirely. ``parallelize_piper1b`` counts the FSDP
+        units the delegate really built and prints its own line after the
+        count. ``validation.py`` cannot import that constant -- it would pull
+        torch into the parent -- so the string is stated twice and this test
+        is the link.
+        """
+        from benchmarks.models.piper_qwen3.parallelize import (
+            DATA_PARALLEL_LINE,
+        )
+
+        markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
+            DP2, PIPER_1B_ROPE.workload
+        )
+        self.assertIn(
+            DATA_PARALLEL_LINE.format(replicate=2, shard=1), markers
+        )
+
+    def test_no_dp_marker_where_no_reduction_happens(self) -> None:
+        """A pipeline rank reduces no gradient, so it prints no such line.
+
+        Asking for the line there would fail an honest run, which is the
+        direction a validation rule must never take.
+        """
+        for spec in (TRIVIAL_SPEC, PP2):
+            with self.subTest(spec=spec):
+                markers = VALIDATION_PROFILES[
+                    "torchtitan"
+                ].parallelism_markers(spec, PIPER_1B_ROPE.workload)
+                self.assertEqual(
+                    [m for m in markers if "data parallel" in m], []
+                )
+
+    def test_a_dp_run_that_skipped_fully_shard_fails_the_arm(self) -> None:
+        """The named hazard of this stage, stated as one assertion.
+
+        The mesh line is present and every other rule passes. Without the
+        third marker the arm would publish roughly twice the true speed.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            whole = _titan_log(DP2)
+            unwrapped = "\n".join(
+                line
+                for line in whole.splitlines()
+                if "data parallel" not in line
+            )
+            fixture.write({0: unwrapped, 1: unwrapped})
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=DP2,
+                )
 
     def test_the_megatron_marker_is_the_line_the_driver_prints(self) -> None:
         """The validator and the driver state one line in two places.

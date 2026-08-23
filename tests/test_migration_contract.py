@@ -1653,7 +1653,11 @@ TEST_CENSUS = {
     # check became one refusal per axis, so the axes are named separately,
     # the dtype guard stands on its own, and a pipeline rank is let through
     # to the delegate with skip_dp still true.
-    "test_runner": 53,
+    # +4 with the data-parallel path: what skip_data_parallel says of each
+    # mesh, that dp 2 reaches the delegate with skip_dp false and states the
+    # units it got back, that a delegate which wrapped nothing is refused,
+    # and that a single-GPU run still logs no such line.
+    "test_runner": 57,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1713,7 +1717,11 @@ TEST_CENSUS = {
     # prove nothing refuses the run.
     # +2 that a lone non-zero rank keeps its own number and an unprefixed
     # log is still rank 0.
-    "test_parallel_validation": 28,
+    # +3 with the titan data-parallel marker: that the validator's string is
+    # the one parallelize_piper1b prints, that no such marker is asked of a
+    # run which reduces nothing, and that a dp run whose fully_shard did not
+    # happen fails the arm.
+    "test_parallel_validation": 31,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -1722,7 +1730,7 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1441
+TEST_CENSUS_TOTAL = 1448
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

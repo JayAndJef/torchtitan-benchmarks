@@ -124,6 +124,25 @@ def _titan_parallelism_markers(
     the one that catches the hazard this axis carries: two engines that agree
     on the split but disagree on how many microbatches they move through it
     would publish two different schedules under one label.
+
+    **The third is ours, and it is the only one that proves a reduction.**
+    The mesh line above says a mesh was built, not that anything was wrapped
+    in it: TorchTitan logs it from ``ParallelDims`` before ``parallelize_fn``
+    runs, so a run whose ``parallelize_piper1b`` skipped the data-parallel
+    path prints it and reduces nothing. ``parallelize_piper1b`` therefore
+    counts the FSDP units the delegate really built and prints
+    ``DATA_PARALLEL_LINE`` after the count. **This module cannot import that
+    constant**: ``parallelize.py`` imports torch and torchtitan, and this
+    module is parent-side. The string is stated twice and
+    ``tests/test_parallel_validation.py`` pins the two against each other,
+    exactly as it does for the megatron driver's own line.
+
+    A titan *loss* all-reduce is not evidence of a gradient all-reduce, which
+    is why this rule reads a log line rather than only the NCCL trace marker
+    arm rule 13 adds. TorchTitan reduces the loss over its ``loss`` mesh on
+    every logged step whenever ``dp_cp_enabled`` (``trainer.py``), so an
+    ``ncclDevKernel_AllReduce`` appears under dp 2 even with the gradients
+    never reduced.
     """
     replicate, shard = titan_mesh(spec)
     markers = [
@@ -131,6 +150,11 @@ def _titan_parallelism_markers(
         f"dp_replicate={replicate}, dp_shard={shard}, cp=1, tp=1, "
         f"ep={spec.ep}"
     ]
+    if replicate * shard > 1:
+        markers.append(
+            "piper1b data parallel: fully_shard applied "
+            f"(dp_replicate={replicate}, dp_shard={shard})"
+        )
     if spec.pp > 1:
         schedule = PP_SCHEDULES[spec.pp_schedule]
         microbatches = n_microbatches(
