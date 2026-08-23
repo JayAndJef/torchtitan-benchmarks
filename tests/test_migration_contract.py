@@ -1711,14 +1711,18 @@ TEST_CENSUS = {
     # that the driver's own line is the one the validator expects, that both
     # engines derive the same microbatch count, and that a profile which can
     # prove nothing refuses the run.
-    "test_parallel_validation": 22,
+    # +2 that a lone non-zero rank keeps its own number and an unprefixed
+    # log is still rank 0.
+    "test_parallel_validation": 24,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
     # per-rank rows and its spread warning.
-    "test_throughput": 24,
+    # +4 that the tokens/s ratio names the two ranks it divided, matching
+    # the caption on baseline_kernel_ratio.
+    "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1431
+TEST_CENSUS_TOTAL = 1437
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

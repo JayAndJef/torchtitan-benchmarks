@@ -829,6 +829,16 @@ stages, "every rank" is honest and free; if a stage legitimately lacks it,
 the rule has to become a per-arm declaration of which ranks carry which
 marker. Do not weaken it to make a hypothetical run pass.
 
+**What that costs today is concrete, and it is a coverage hole rather than
+a wrong number.** "Any rank" means one stage satisfies the marker for the
+whole arm. So at `--pp 2` a silent TransformerEngine fallback to unfused
+attention on the stage that is not checked passes a guard this file lists
+under "the ones that catch silent wrongness", and the same holds for the
+FA3 and FA4 markers. **A pipelined arm therefore has strictly less
+fallback coverage than the same arm at one rank.** Before publishing any
+`--pp 2` number that rests on a marker, read both ranks' traces by hand and
+say that you did.
+
 **Under `--pp 2` a run declares no regions, so rule 7 guards nothing and
 rules 8 to 12 do.** `piper_block_regions` identifies a block graph by its
 invocations per window, `n_layers * profiler_active`, and that count *is*
@@ -916,12 +926,17 @@ or the ranks are not running one job.
 
 **The loss and grad-norm trajectories come from one rank, not from every
 rank concatenated.** TorchTitan computes the loss on the last pipeline stage
-and every rank still prints a step line, so a first-stage rank's line
-carries its own local value; `loss_visible_rank` is TorchTitan's own
-`_get_metrics_rank` arithmetic, `(world_size // pp) * (pp - 1)`, and the
-megatron driver satisfies it by broadcasting the last stage's loss. It is
-right for the two schedules this repo runs and **not** for `ZBVZeroBubble`,
-which parallelism rule 5 refuses for any run holding a megatron arm.
+and every rank still prints a step line. A rank without that stage does not
+print a smaller loss -- it prints a **sentinel**: `trainer.py` sets `loss =
+torch.tensor([-1.0])` there, and at `dp 1` that reaches the step line
+unreduced, so rank 0 of a pp2 run logs `loss: -1.00000`. Pooling it would
+not add noise; it would add a constant that is not a loss.
+`loss_visible_rank` is TorchTitan's own `_get_metrics_rank` arithmetic,
+`(world_size // pp) * (pp - 1)`, and the megatron driver satisfies it by a
+different route: it broadcasts the last stage's loss, so every rank prints
+the real one. It is right for the two schedules this repo runs and **not**
+for `ZBVZeroBubble`, which returns the loss on rank 0 and which parallelism
+rule 5 refuses for any run holding a megatron arm.
 
 **Every trace figure is read per rank, and the published one is the
 MAXIMUM over ranks. It is never the mean.** One rank is one process on one

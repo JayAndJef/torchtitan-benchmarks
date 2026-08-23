@@ -254,8 +254,13 @@ def _megatron_launcher(spec: ParallelismSpec) -> list[str]:
       the device count, and parallelism rule 1 is what makes the two agree.
     * ``--rdzv-backend``/``--rdzv-endpoint`` let the kernel pick the port,
       so two runs on one host cannot collide.
-    * ``--local-ranks-filter`` names every rank. torchrun's default is rank
-      0 alone, and a kernel that degraded on rank 1 would then be invisible.
+    * ``--local-ranks-filter`` names every rank. **torchrun's own default is
+      every rank**, not rank 0 -- the empty default resolves to no filter at
+      all. Rank 0 alone is ``run_train.sh``'s ``LOG_RANK`` default, which is
+      a TorchTitan fact and reaches only the titan arms. The flag is passed
+      here so the megatron launcher states the set rather than inheriting a
+      default from either side; a kernel that degraded on rank 1 must not be
+      invisible.
     * ``--role rank`` with ``--tee 3`` is what puts a rank prefix on every
       line. ``TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE`` (set by
       ``benchmarks/execution/environment.py``) decides its shape, and
