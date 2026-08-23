@@ -779,11 +779,69 @@ are not comparable; `--resume` refuses to mix them.
     this rule a run whose `--config` mapping or `--model-size` silently fell
     back to another shape would pass every other rule and be published under
     the wrong size. This is the only structural guard the huge shape has in
-    place of rule 7.
+    place of rule 7. Under a pipeline split each engine additionally prints
+    its own stage's count on a **separate** line and asserts it against
+    `PiperShape.stage_param_count`, and the driver sums the counted
+    parameters across the world and asserts the total. Rule 11 itself still
+    matches the whole-model line, which every rank prints.
+12. The engine's `parallelism` line is absent or names another mesh. Both
+    engines log what they really built -- TorchTitan's `Building device mesh
+    with parallelism: pp=..., dp_replicate=..., dp_shard=..., cp=1, tp=1,
+    ep=...` plus, above `pp` 1, its `Using pipeline schedule <name> with <N>
+    microbatches and <S> stages`; the megatron driver its own `Megatron-LM
+    parallelism: dp=... pp=... schedule=... microbatches=... stages=...`.
+    **This is the rule that catches the hazard of this axis**: a run that
+    ignored the `--parallelism.*` flags, or a driver that read no `RANK`,
+    passes every other rule while training something else, and two engines
+    that agree on the split but disagree on the microbatch count would
+    publish two different schedules under one label. The markers are a
+    per-profile callable of the spec and the workload, because every value
+    in them comes from those two. An **empty** tuple means the engine proves
+    nothing about this spec, and `validate_arm` then refuses the run -- the
+    same shape as `compiled_marker` under `--compile-mode none`. The rule is
+    consulted only above one rank, where there is a mesh to get wrong.
+
+**The log rules run once per rank.** One `<arm>.log` holds every rank's
+output, so a rule read against the whole file asks "did *some* rank do
+this". Rule 4 is the sharpest case: a kernel that silently degraded on rank
+1 alone leaves rank 0's log clean. `benchmarks/artifacts/layout.py`'s
+`logs_by_rank` splits the file on the `[rank<n>]:` prefix and returns a
+single-rank log **whole**, so a one-GPU arm is checked against exactly the
+text it was checked against before. Rules 1, 2, 3, 4, 8, 10, 11 and 12 run
+per rank; rules 5 and 7 run per rank's traces.
+
+**A rank that wrote nothing is in neither split, so no rule would fire for
+it.** Two coverage checks close that, and both are guarded on world size
+above 1: the log rank set and the trace rank set must each equal
+`range(world_size)`. A rank with no trace is a rank no per-step figure
+measures, and evaluation would then publish a maximum over the survivors.
+
+**Rules 6 and 9 read every rank's traces as one set, and that is
+deliberate.** Rule 9 is unreachable under a mesh, because parallelism rule
+13 refuses cuda-graph above world size 1. **Rule 6 is reachable and its
+reading is an open question**: under PP a stage holds some of the layers, so
+a marker kernel can be legitimately absent from a rank -- "every rank" would
+fail an honest run, and "any rank" passes a run where rank 0 silently
+degraded. **No multi-rank trace from this harness has been read**, so the
+reading is left as it is rather than guessed at. What decides it is one PP2
+trace per rank: if the megatron arm's cuDNN attention marker appears on both
+stages, "every rank" is honest and free; if a stage legitimately lacks it,
+the rule has to become a per-arm declaration of which ranks carry which
+marker. Do not weaken it to make a hypothetical run pass.
+
+**Under `--pp 2` a run declares no regions, so rule 7 guards nothing and
+rules 8 to 12 do.** `piper_block_regions` identifies a block graph by its
+invocations per window, `n_layers * profiler_active`, and that count *is*
+the identity. A rank of a two-stage pipeline holds half the layers and runs
+each once per microbatch, so it reaches a different count -- and not the
+same count on every rank under an interleaved schedule. Deriving a per-rank
+count would be rule 7 rewritten rather than applied. This is the same
+honest reason the 1-layer shapes, `piper1b_megatron` and `--compile-mode
+none` declare none.
 
 Engine differences live in the `ValidationProfile` registry
 (`VALIDATION_PROFILES`), selected by `Arm.validation`; rules 2/3/5/6/9/11
-are shared. Rules 4, 7, 8, 9, 10, and 11 are the ones that catch silent
+are shared. Rules 4, 7, 8, 9, 10, 11 and 12 are the ones that catch silent
 wrongness. Never work around them by relaxing the check.
 
 ### Resume
@@ -2396,8 +2454,32 @@ Faithfulness guarantees, all verified:
   `"te"` = megatron's fastest available loss path, `"native"` = megatron as
   NVIDIA ships it. The driver logs `cross_entropy_fusion_impl=` on the
   `Megatron fusions:` line.
-- **No distributed machinery**: single-rank process group + megatron init
-  only; no Megatron DDP wrapper, no MegatronOptimizer.
+- **Minimal distributed machinery**: a process group and megatron's own
+  `initialize_model_parallel`, and nothing else -- no Megatron DDP wrapper,
+  no MegatronOptimizer. At one rank that is exactly what it always was: the
+  driver falls back to rank 0 of a world of 1 when torchrun set no
+  variables, and every published megatron number is from such a run.
+
+  Above one rank the driver reads `RANK`, `WORLD_SIZE` and `LOCAL_RANK`,
+  binds the device by local rank, passes `pipeline_model_parallel_size` to
+  `initialize_model_parallel`, and builds only its own stage
+  (`pre_process`/`post_process` reach `GPTModel`, and megatron's own
+  `get_num_layers_to_build` decides the layer count). It runs
+  `forward_backward_pipelining_without_interleaving`, which is **`1F1B` and
+  nothing else** -- an interleaved schedule needs a model-chunk list, a
+  data-iterator list and a virtual pipeline degree, none of which is built,
+  so the driver raises rather than running a schedule under the wrong name.
+  **It has no data-parallel path**, so it refuses `WORLD_SIZE != --pp`: every
+  rank is a pipeline stage.
+
+  The loss lives on the last stage. The driver broadcasts it to every rank
+  so each prints the real one, which is what makes `loss_visible_rank`'s
+  answer true of both engines. Gradient clipping all-reduces the squared
+  norm over the pipeline group. Each rank writes its own
+  `rank<n>_trace.json.gz`.
+
+  **None of this has run.** No two-rank megatron run has executed, and the
+  GPU gate is a separate task.
 
 Environment notes: TE's native tuned RMSNorm kernels fail to launch on this
 box's cuda-compat stack, so `configure_te_environment` routes norms through
@@ -2436,7 +2518,7 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The suite is CPU-only and runs 1226 tests in about 45 seconds at this rev.
+The suite is CPU-only and runs 1512 tests in about 45 seconds at this rev.
 Re-derive that count rather than quoting it; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
@@ -2596,7 +2678,7 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
 - After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about 45 seconds at 1226 tests.
+  and takes about 45 seconds at 1512 tests.
 - **Do not let "declared" become "measured".** Much of the kernel registry has
   never executed: 8 of the 16 cross-engine scenarios have never had an arm
   built, the single-engine `lm_head` has not run, 29 of the 71 declared arms
