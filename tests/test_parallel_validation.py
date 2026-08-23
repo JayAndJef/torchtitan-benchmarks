@@ -575,24 +575,41 @@ class ArmRuleTwelveTests(unittest.TestCase):
         """The validator and the driver state one line in two places.
 
         MODE_LINE already carries that cost, and the same comment. This test
-        is the link: the driver formats its own constant with the values
-        ``pipeline_settings`` gives it, and the two strings must be equal.
+        is the link: the driver formats its own constants with the values
+        ``pipeline_settings`` gives it, and the strings must be equal.
+
+        The dp-only cell is the one that would have gone wrong quietly: the
+        driver runs ONE microbatch at ``pp`` 1 and ``n_microbatches``
+        describes the split a pipeline would make, so a validator that read
+        the latter would fail every honest dp run.
         """
-        args = SimpleNamespace(batch=4, pp=2, pp_microbatch_size=1)
-        microbatch_rows, microbatches = train.pipeline_settings(args)
-        printed = train.PARALLELISM_LINE.format(
-            dp=1,
-            pp=args.pp,
-            schedule="1F1B",
-            microbatches=microbatches,
-            stages=args.pp,
-        )
-        self.assertEqual(
-            VALIDATION_PROFILES["megatron"].parallelism_markers(
-                PP2, PIPER_1B_ROPE.workload
-            ),
-            (printed,),
-        )
+        for spec, schedule in ((PP2, "1F1B"), (DP2, None)):
+            with self.subTest(spec=spec):
+                args = SimpleNamespace(
+                    batch=4, pp=spec.pp, pp_microbatch_size=1
+                )
+                _, microbatches = train.pipeline_settings(args)
+                printed = [
+                    train.PARALLELISM_LINE.format(
+                        dp=spec.dp,
+                        pp=spec.pp,
+                        schedule=schedule,
+                        microbatches=microbatches,
+                        stages=spec.pp,
+                    )
+                ]
+                if spec.dp > 1:
+                    printed.append(
+                        train.DATA_PARALLEL_LINE.format(
+                            dp=spec.dp, overlap=True, fp32=False
+                        )
+                    )
+                self.assertEqual(
+                    VALIDATION_PROFILES["megatron"].parallelism_markers(
+                        spec, PIPER_1B_ROPE.workload
+                    ),
+                    tuple(printed),
+                )
 
     def test_both_engines_move_the_same_number_of_microbatches(self) -> None:
         """The named hazard of this stage, stated as one assertion.

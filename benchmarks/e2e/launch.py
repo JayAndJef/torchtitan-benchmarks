@@ -366,6 +366,15 @@ def _megatron_command(
         "--model-size",
         model_size,
     ]
+    if parallelism.dp > 1:
+        # Omitted at dp 1, where the driver's default is the same value and
+        # the argv is the argv every megatron directory under out/ records.
+        # The driver needs the degree explicitly rather than deriving it from
+        # WORLD_SIZE: megatron gives the data-parallel axis every rank the
+        # pipeline degree leaves over, so a derived degree could never
+        # disagree with the mesh and the disagreement is what a check must be
+        # able to see.
+        args.extend(("--dp", str(parallelism.dp)))
     if parallelism.pp > 1:
         # Omitted at pp 1, where the driver refuses them: a schedule name and
         # a microbatch size there would name a split that does not happen.

@@ -1101,12 +1101,32 @@ class GoldenCommandTests(unittest.TestCase):
             megatron[megatron.index("--batch") + 1],
         )
 
+    def test_a_data_parallel_megatron_argv_states_the_degree(self) -> None:
+        """The driver needs the degree, and must not derive it.
+
+        Megatron gives its data-parallel axis every rank the pipeline degree
+        leaves over, so a derived degree could never disagree with the mesh
+        -- and the disagreement is what ``refuse_unsupported_mesh`` exists to
+        see. The flag is what a rank the operator did not account for trips
+        over.
+        """
+        for spec, expected in (
+            (ParallelismSpec(dp=2), "2"),
+            (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), "2"),
+        ):
+            with self.subTest(spec=spec):
+                command = self._command(
+                    GOLDEN_MEGATRON_ARM, "normal", "default", "none", spec
+                )
+                self.assertEqual(command[command.index("--dp") + 1], expected)
+
     def test_the_trivial_spec_starts_no_launcher(self) -> None:
         """The megatron argv at one rank is the interpreter, not torchrun."""
         command = self._command(GOLDEN_MEGATRON_ARM, "normal", "default", "none")
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(command[1:3], ["-m", MEGATRON_DRIVER_MODULE])
         self.assertNotIn("torch.distributed.run", command)
+        self.assertNotIn("--dp", command)
         self.assertNotIn("--pp", command)
 
     def test_the_megatron_driver_module_is_importable_as_a_module(self) -> None:
@@ -1590,7 +1610,14 @@ TEST_CENSUS = {
     # microbatches against the mean this replaced, an empty stage, and the
     # detach aliasing the sum depends on, pinned against torch. +1 that the
     # Materialized log line is the recorded one at the trivial spec.
-    "test_megatron_driver": 22,
+    # +7 with the data-parallel degree: that --dp defaults to 1, that dp 2
+    # and dp 2 x pp 2 are accepted, that a rank the mesh does not name and a
+    # degree below 1 are refused, that every DDP branch is guarded on
+    # --dp > 1, that graph mode leaves the main_grad buffers to DDP, that the
+    # parameter sum is taken over one pipeline, and that the global token
+    # line multiplies by dp. The norm-reduction test now names the pipeline
+    # degree and its group rather than the world size.
+    "test_megatron_driver": 29,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1735,7 +1762,7 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1454
+TEST_CENSUS_TOTAL = 1461
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

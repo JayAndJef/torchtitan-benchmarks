@@ -171,24 +171,44 @@ def _titan_parallelism_markers(
 def _megatron_parallelism_markers(
     spec: ParallelismSpec, workload: Workload
 ) -> tuple[str, ...]:
-    """``benchmarks.e2e.megatron.train.PARALLELISM_LINE``. Keep in sync.
+    """``benchmarks.e2e.megatron.train``'s two lines. Keep in sync.
 
-    The driver prints what it resolved: the degrees from the environment and
-    the microbatch count from its own ``pipeline_settings``. The count here
-    is ``n_microbatches``, and the two agree at every ``pp`` above 1, which
-    is the only place this rule is consulted. At ``pp`` 1 they differ on
-    purpose -- the driver runs one pack and ``n_microbatches`` describes a
-    split neither engine performs -- and a megatron arm cannot reach world
-    size above 1 at ``pp`` 1, because that driver has no data-parallel path.
+    The driver prints what it resolved: the degrees from its own arguments,
+    checked against what ``initialize_model_parallel`` gave it, and the
+    microbatch count from its own ``pipeline_settings``.
+
+    **The count is 1 at ``pp`` 1, and ``n_microbatches`` is not.** Neither
+    engine splits a batch without a pipeline, so the driver runs one pack of
+    every row, while ``n_microbatches`` describes the split a pipeline would
+    make. This rule is reachable at ``pp`` 1 now that a data-parallel run
+    exists, so the condition is written out here rather than left to a
+    comment saying it cannot happen. ``pipeline_settings`` is the authority
+    and a test compares the two.
+
+    **The second line is the one that proves a reduction.** The line above
+    states the mesh, and ``initialize_model_parallel`` builds a
+    data-parallel group whether or not anything reduces over it -- so a
+    driver that lost its wrapper would print it and publish roughly twice
+    the true throughput. The driver prints the second line only after the
+    wrapper exists.
     """
-    microbatches = n_microbatches(
-        spec, local_batch_size=workload.local_batch_size
+    microbatches = (
+        n_microbatches(spec, local_batch_size=workload.local_batch_size)
+        if spec.pp > 1
+        else 1
     )
-    return (
+    markers = [
         f"Megatron-LM parallelism: dp={spec.dp} pp={spec.pp} "
         f"schedule={spec.pp_schedule} microbatches={microbatches} "
-        f"stages={spec.pp}",
-    )
+        f"stages={spec.pp}"
+    ]
+    if spec.dp > 1:
+        markers.append(
+            f"Megatron-LM data parallel: DistributedDataParallel over "
+            f"{spec.dp} ranks (overlap_grad_reduce=True, "
+            "grad_reduce_in_fp32=False)"
+        )
+    return tuple(markers)
 
 
 VALIDATION_PROFILES = {
