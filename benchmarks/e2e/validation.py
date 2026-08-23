@@ -82,6 +82,19 @@ class ValidationProfile:
     workload. An empty tuple means this engine logs nothing that proves this
     spec, and ``validate_arm`` then refuses the run rather than publishing a
     mesh nothing checked -- the same shape as ``compiled_marker`` above.
+
+    ``pipelined_pattern`` is the other half of arm rule 12, and it reads the
+    other way. ``parallelism_markers`` proves the engine built the mesh that
+    was asked for. It says nothing when nothing was asked for, so a log from
+    a real pipeline passed validation against the trivial spec: the run would
+    have been published as single-GPU. This pattern matches only a log that
+    built a pipeline, and at ``pp`` 1 its presence fails the arm.
+
+    This is the inversion ``--compile-mode none`` already uses on
+    ``compiled_marker``: a run that silently compiled cannot be published as
+    eager, and a run that silently pipelined cannot be published as one GPU.
+    Measured before it was added: of 296 arm logs under ``out/``, exactly one
+    matches, and it is a deliberate ``--pp 2`` run.
     """
 
     completion_marker: str
@@ -93,6 +106,7 @@ class ValidationProfile:
     parallelism_markers: Callable[
         [ParallelismSpec, Workload], tuple[str, ...]
     ]
+    pipelined_pattern: re.Pattern[str]
 
 
 def _titan_parallelism_markers(
@@ -168,6 +182,9 @@ VALIDATION_PROFILES = {
         check_ac_line=True,
         check_regions=True,
         parallelism_markers=_titan_parallelism_markers,
+        # TorchTitan logs this from _build_pipeline_schedule, which
+        # runs only when the pipeline degree is above 1.
+        pipelined_pattern=re.compile(r"Using pipeline schedule"),
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -185,6 +202,11 @@ VALIDATION_PROFILES = {
         check_ac_line=False,
         check_regions=False,
         parallelism_markers=_megatron_parallelism_markers,
+        # The driver prints its own degrees. Any pipeline degree
+        # other than 1 is what this must not see at the trivial spec.
+        pipelined_pattern=re.compile(
+            r"Megatron-LM parallelism: dp=\d+ pp=(?!1\b)\d+"
+        ),
     ),
 }
 
@@ -214,6 +236,7 @@ def _validate_log(
     ac_mode: str,
     model_size: str,
     parallelism_markers: tuple[str, ...] = (),
+    spec_pp: int = 1,
 ) -> None:
     """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
 
@@ -306,6 +329,16 @@ def _validate_log(
                 f"{arm.name}: the requested parallelism did not apply; the "
                 f"engine never logged {marker!r}{where}"
             )
+    # The other half of arm rule 12. A positive marker cannot speak for a
+    # spec that asked for nothing, so the trivial spec asks the question the
+    # other way round: this log must not show a pipeline nobody requested.
+    if spec_pp == 1:
+        found = profile.pipelined_pattern.search(log)
+        if found is not None:
+            raise RuntimeError(
+                f"{arm.name}: the run declares no pipeline, and the log "
+                f"records one: {found.group(0)!r}{where}"
+            )
 
 
 def validate_arm(
@@ -372,6 +405,7 @@ def validate_arm(
             ac_mode=ac_mode,
             model_size=model_size,
             parallelism_markers=parallelism_markers,
+            spec_pp=parallelism.pp,
         )
 
     # Arm rules 5 and 7 are per rank. Every rank runs the same number of

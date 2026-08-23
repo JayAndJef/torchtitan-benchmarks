@@ -1713,7 +1713,7 @@ TEST_CENSUS = {
     # prove nothing refuses the run.
     # +2 that a lone non-zero rank keeps its own number and an unprefixed
     # log is still rank 0.
-    "test_parallel_validation": 24,
+    "test_parallel_validation": 28,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -1722,7 +1722,7 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1437
+TEST_CENSUS_TOTAL = 1441
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -347,7 +347,10 @@ class RankCoverageTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
-            fixture.log.write_text(_TITAN_TAIL + "\n")
+            # The log a trivial run really writes. ``_TITAN_TAIL`` is the pp 2
+            # log, and a trivial run cannot produce it: arm rule 12 refuses a
+            # pipeline nobody requested.
+            fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
             validate_arm(
                 PIPER_1B_ROPE.arm("baseline"),
                 fixture.root,
@@ -355,6 +358,63 @@ class RankCoverageTests(unittest.TestCase):
                 PIPER_1B_ROPE.workload,
                 parallelism=TRIVIAL_SPEC,
             )
+
+
+
+class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
+    """The half of arm rule 12 that reads backwards.
+
+    ``parallelism_markers`` proves the engine built the mesh that was asked
+    for. It asks nothing when nothing was asked for, so a log from a real
+    pipeline passed validation against the trivial spec and the run would
+    have been published as single-GPU. This is the same inversion
+    ``--compile-mode none`` applies to the compile marker.
+
+    Both engines are checked, because both had the hole. Measured on real
+    output before the rule was written: of 296 arm logs under ``out/``,
+    exactly one matches either pattern, and it is a deliberate ``--pp 2``
+    run.
+    """
+
+    def test_a_titan_pipeline_log_is_refused_at_the_trivial_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0,))
+            fixture.log.write_text(_titan_log(PP2) + "\n")
+            with self.assertRaisesRegex(RuntimeError, "declares no pipeline"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=TRIVIAL_SPEC,
+                )
+
+    def test_a_titan_trivial_log_still_validates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0,))
+            fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
+            validate_arm(
+                PIPER_1B_ROPE.arm("baseline"),
+                fixture.root,
+                fixture.log,
+                PIPER_1B_ROPE.workload,
+                parallelism=TRIVIAL_SPEC,
+            )
+
+    def test_the_megatron_pattern_reads_the_degree_not_the_line(self) -> None:
+        """``pp=1`` is not a pipeline. Any other degree is."""
+        pattern = VALIDATION_PROFILES["megatron"].pipelined_pattern
+        trivial = "Megatron-LM parallelism: dp=1 pp=1 schedule=None"
+        pipelined = "Megatron-LM parallelism: dp=1 pp=2 schedule=1F1B"
+        deeper = "Megatron-LM parallelism: dp=1 pp=4 schedule=1F1B"
+        self.assertIsNone(pattern.search(trivial))
+        self.assertIsNotNone(pattern.search(pipelined))
+        self.assertIsNotNone(pattern.search(deeper))
+
+    def test_the_titan_pattern_does_not_match_a_one_gpu_mesh_line(self) -> None:
+        pattern = VALIDATION_PROFILES["torchtitan"].pipelined_pattern
+        self.assertIsNone(pattern.search(_titan_log(TRIVIAL_SPEC)))
+        self.assertIsNotNone(pattern.search(_titan_log(PP2)))
 
 
 class ArmRuleTwelveTests(unittest.TestCase):
