@@ -182,6 +182,62 @@ class BlankPartsSignatureTests(unittest.TestCase):
                 )
 
 
+class PipelineSplitSignatureTests(unittest.TestCase):
+    """The pipeline arguments default to the whole model on one rank.
+
+    Twelve kernel builders and ``tools/megatron_parity_check.py`` build one
+    process and pass none of the three. A default that split anything would
+    change what every one of them measures.
+    """
+
+    def test_every_pipeline_argument_defaults_to_one_whole_model(self) -> None:
+        parameters = inspect.signature(megatron_model.build_model).parameters
+        for name, expected in (
+            ("pipeline_model_parallel_size", 1),
+            ("pre_process", True),
+            ("post_process", True),
+        ):
+            with self.subTest(parameter=name):
+                self.assertEqual(parameters[name].default, expected)
+                self.assertEqual(
+                    parameters[name].kind, inspect.Parameter.KEYWORD_ONLY
+                )
+
+    def test_only_the_shape_and_the_profile_are_required(self) -> None:
+        """A new parameter must arrive with a default, or every caller breaks.
+
+        ``shape`` and ``profile`` are the two deliberate exceptions: an
+        omitted one would build the default geometry or the base behaviour
+        under another label, which is a wrong number rather than a missing
+        one.
+        """
+        required = [
+            name
+            for name, parameter in inspect.signature(
+                megatron_model.build_model
+            ).parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        self.assertEqual(required, ["seq_len", "shape", "profile"])
+
+    def test_the_degree_reaches_the_config_and_the_ends_reach_the_model(
+        self,
+    ) -> None:
+        """Read off the source, because building a GPTModel needs a device.
+
+        The three arguments have three different destinations:
+        ``pipeline_model_parallel_size`` goes to the config, where
+        ``get_num_layers_to_build`` divides the layer count by it, and the
+        two ends go to ``GPTModel`` itself.
+        """
+        body = _code_of(megatron_model.build_model)
+        self.assertIn(
+            "pipeline_model_parallel_size=pipeline_model_parallel_size", body
+        )
+        self.assertIn("pre_process=pre_process", body)
+        self.assertIn("post_process=post_process", body)
+
+
 class HostInitializationTests(unittest.TestCase):
     """``blank_parts`` and ``use_cpu_initialization`` may not be combined.
 

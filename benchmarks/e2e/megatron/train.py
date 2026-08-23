@@ -14,6 +14,19 @@ eagerly; --mode cuda-graph wraps it in Megatron's FullCudaGraphWrapper
 `(mode=...)` line the validation profile matches, plus which graph
 implementation actually ran.
 
+Pipeline handling: the driver reads RANK, WORLD_SIZE and LOCAL_RANK from the
+environment, each falling back to the single-rank value, so the same module
+runs under `python -m` and under `torchrun`. At --pp above 1 it builds one
+stage per rank, splits each step's batch into microbatches, and lets
+Megatron's own 1F1B schedule move them. **There is no data-parallel path
+here yet**: the world size has to equal the pipeline degree, and a driver
+that accepted more ranks than stages would give two ranks the same data and
+never reduce their gradients.
+
+At --pp 1 every branch below takes the value it always took: one pack of
+`--batch` rows, one microbatch, `pre_process` and `post_process` both true,
+and no collective at all.
+
 Everything megatron-related is imported inside main() so the module itself
 imports (for tests and constants) without megatron or TE installed.
 """
@@ -54,6 +67,15 @@ CUDA_GRAPH_IMPL = "local"
 CUDA_GRAPH_MODULES = ("moe_router", "moe_preprocess")
 TRAINING_COMPLETED = "Training completed"
 
+# The one pipeline schedule this driver implements. Megatron-LM implements
+# Interleaved1F1B as well, and benchmarks/e2e/parallelism.py registers it --
+# but an interleaved run needs a list of model chunks, a list of data
+# iterators and a virtual pipeline degree, none of which this driver builds.
+# It is refused here by name rather than declared unsupported in the
+# registry: the failure then lands on the module that owns the missing work,
+# which is the pattern the kernel spans already use.
+SUPPORTED_PP_SCHEDULE = "1F1B"
+
 H100_CLASS_BF16_PEAK_FLOPS = 989e12
 
 
@@ -72,8 +94,79 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-size", choices=MODEL_SIZE_CHOICES, default="1b"
     )
+    # The pipeline split. All three default to the single-rank run, so an
+    # argv built before this axis existed still describes the same run.
+    parser.add_argument("--pp", type=int, default=1)
+    parser.add_argument("--pp-schedule", default=None)
+    parser.add_argument("--pp-microbatch-size", type=int, default=1)
     parser.add_argument("arm_dir", type=Path)
     return parser.parse_args(argv)
+
+
+def pipeline_settings(args: argparse.Namespace) -> tuple[int, int]:
+    """``(rows per microbatch, microbatches per step)`` for this run.
+
+    At ``--pp 1`` this is ``(--batch, 1)``: one pack of the whole batch and
+    no split, which is what this driver has always done and what every
+    published megatron number was measured on. Neither engine microbatches
+    without a pipeline.
+
+    At ``--pp`` above 1 the batch splits into ``--pp-microbatch-size`` rows
+    per microbatch, which is TorchTitan's
+    ``pipeline_parallel_microbatch_size`` under its own name. The two engines
+    then move the same number of microbatches through the same schedule.
+
+    The split is a repack, not a reshape of the computation: attention never
+    crosses a row boundary in either arrangement, because ``thd_batches``
+    marks every row's documents in ``cu_seqlens`` and TorchTitan's mask is
+    block-diagonal per document. A microbatch is fewer rows in one pack.
+    """
+    if args.pp == 1:
+        return args.batch, 1
+    if args.batch % args.pp_microbatch_size:
+        raise ValueError(
+            f"batch {args.batch} does not divide into microbatches of "
+            f"{args.pp_microbatch_size} rows"
+        )
+    return args.pp_microbatch_size, args.batch // args.pp_microbatch_size
+
+
+def refuse_unsupported_pipeline(args: argparse.Namespace, world_size: int) -> None:
+    """Reject a pipeline request this driver cannot honor, before it builds.
+
+    ``benchmarks/e2e/parallelism.py`` refuses most of these for a run. They
+    are restated here because ``python -m benchmarks.e2e.megatron.train`` is
+    a supported entry point that holds no spec, and because a wrong answer
+    here is a wrong number rather than a crash: a driver that ignored ``--pp``
+    would train the whole model on every rank and publish it under a
+    pipeline label.
+    """
+    if args.pp < 1:
+        raise ValueError(f"--pp {args.pp} must be >= 1")
+    if world_size != args.pp:
+        raise ValueError(
+            f"WORLD_SIZE {world_size} does not equal --pp {args.pp}: this "
+            "driver has no data-parallel path, so every rank is a pipeline "
+            "stage"
+        )
+    if args.pp == 1:
+        if args.pp_schedule is not None:
+            raise ValueError(
+                f"--pp-schedule {args.pp_schedule!r} was given at --pp 1, "
+                "where there is no pipeline to schedule"
+            )
+        if args.pp_microbatch_size != 1:
+            raise ValueError(
+                f"--pp-microbatch-size {args.pp_microbatch_size} was given at "
+                "--pp 1, where the batch is not split"
+            )
+    elif args.pp_schedule != SUPPORTED_PP_SCHEDULE:
+        raise ValueError(
+            f"--pp-schedule {args.pp_schedule!r} is not implemented by this "
+            f"driver, which runs {SUPPORTED_PP_SCHEDULE!r} only; an "
+            "interleaved schedule needs a model-chunk list, a data-iterator "
+            "list and a virtual pipeline degree, and none of them is built"
+        )
 
 
 def lr_lambda_for(steps: int, warmup_steps: int = 2):
@@ -110,6 +203,13 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parse_args(argv)
     shape = shape_by_name(args.model_size)
+    # torchrun sets all three; a bare `python -m` sets none, and the
+    # fallbacks are then exactly the values this driver used to hardcode.
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    refuse_unsupported_pipeline(args, world_size)
+    microbatch_rows, num_microbatches = pipeline_settings(args)
     # The e2e megatron arm measures megatron at its own best, which is the
     # base profile. A profile axis belongs to kernel-bench, where one arm per
     # profile is the unit; an e2e run has one megatron arm and no such axis.
@@ -143,16 +243,22 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"Transformer Engine {transformer_engine.__version__}", flush=True)
 
+    # Both are already set under torchrun, so setdefault leaves the
+    # rendezvous the launcher chose and only fills in the single-rank case.
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", str(_free_port()))
-    torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
-    torch.cuda.set_device(0)
+    torch.distributed.init_process_group(
+        backend="nccl", rank=rank, world_size=world_size
+    )
+    torch.cuda.set_device(local_rank)
 
     from megatron.core import parallel_state
     from megatron.core.packed_seq_params import PackedSeqParams
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 
-    parallel_state.initialize_model_parallel()
+    parallel_state.initialize_model_parallel(
+        pipeline_model_parallel_size=args.pp
+    )
     torch.manual_seed(args.seed)
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
@@ -165,44 +271,66 @@ def main(argv: list[str] | None = None) -> None:
     from benchmarks.e2e.megatron.data import materialize_titan_samples, thd_batches
     from benchmarks.models.piper_qwen3.megatron_model import build_model
 
+    # Every rank drains the same stream and keeps the whole batch. Under a
+    # pipeline split the ranks of one pipeline read the SAME tokens -- the
+    # batch is not divided between them, it is passed along them -- so no
+    # per-rank slice belongs here. A data-parallel degree would need one, and
+    # this driver has none.
     samples = materialize_titan_samples(
         seq_len=args.seq_len, num_samples=args.steps * args.batch
     )
-    batches = thd_batches(samples, batch_size=args.batch)
+    batches = thd_batches(samples, batch_size=microbatch_rows)
     # Static shapes across steps (required for whole-iteration graph capture,
     # kept identical in default mode for cross-mode parity): pad cu_seqlens
     # to one common length with zero-length trailing segments, and use the
-    # constant seq_len as max_seqlen everywhere.
-    total_tokens = args.batch * args.seq_len
+    # constant seq_len as max_seqlen everywhere. The maximum is taken over
+    # every microbatch of the whole run, so one length serves them all.
+    tokens_per_microbatch = microbatch_rows * args.seq_len
     max_documents = max(batch.cu_seqlens.numel() for batch in batches)
-    step_data = []
+    microbatch_data = []
     for batch in batches:
         pad = max_documents - batch.cu_seqlens.numel()
         cu_seqlens = torch.cat(
             [
                 batch.cu_seqlens,
-                torch.full((pad,), total_tokens, dtype=torch.int32),
+                torch.full((pad,), tokens_per_microbatch, dtype=torch.int32),
             ]
         )
-        step_data.append(
+        microbatch_data.append(
             {
                 "tokens": batch.tokens,
                 "labels": batch.labels,
                 "cu_seqlens": cu_seqlens,
             }
         )
+    # One entry per step, each holding this step's microbatches in order. At
+    # --pp 1 every entry holds exactly one, which is what the schedule was
+    # handed before microbatches existed.
+    step_data = [
+        microbatch_data[start : start + num_microbatches]
+        for start in range(0, len(microbatch_data), num_microbatches)
+    ]
     print(
         f"Materialized {len(step_data)} steps of c4_test batches "
-        f"({args.batch}x{args.seq_len}, {max_documents - 1} max packed documents)",
+        f"({args.batch}x{args.seq_len}, {num_microbatches} microbatch(es) of "
+        f"{microbatch_rows} row(s), "
+        f"{max_documents - 1} max packed documents)",
         flush=True,
     )
 
+    # This rank's own stage. Megatron divides config.num_layers by the degree
+    # in get_num_layers_to_build, so the derived block spec already holds
+    # this stage's layers alone; pre_process and post_process decide which
+    # end modules come with them.
     model = build_model(
         seq_len=args.seq_len,
         shape=shape,
         profile=profile,
         cuda_graph_impl=CUDA_GRAPH_IMPL if graphs else None,
         cuda_graph_modules=CUDA_GRAPH_MODULES if graphs else (),
+        pipeline_model_parallel_size=args.pp,
+        pre_process=parallel_state.is_pipeline_first_stage(),
+        post_process=parallel_state.is_pipeline_last_stage(),
     )
     if graphs:
         # The captured backward accumulates graphed-module weight grads into
@@ -211,20 +339,48 @@ def main(argv: list[str] | None = None) -> None:
         for parameter in model.parameters():
             parameter.main_grad = torch.zeros_like(parameter)
     num_params = sum(parameter.numel() for parameter in model.parameters())
-    # The "size: N total parameters" substring is validate_arm's rule-11
-    # marker (both engines print it); keep the wording.
+    stage = parallel_state.get_pipeline_model_parallel_rank()
+    expected_local = shape.stage_param_count(
+        pipeline_degree=args.pp, stage_index=stage
+    )
+    # The "size: N total parameters" substring is validate_arm's arm rule 11
+    # marker (both engines print it); keep the wording. It names the WHOLE
+    # model on every rank, exactly as TorchTitan's own line does -- titan
+    # prints that count before its pipeline split, so the two engines make
+    # the same claim in the same words.
     print(
         f"Model qwen3 piper_1B/{shape.name} (megatron) "
-        f"size: {num_params:,} total parameters"
+        f"size: {shape.param_count:,} total parameters"
+    )
+    # The local half, on its own line and deliberately without the words
+    # "total parameters": arm rule 11 greps for the declared total, and a
+    # stage count that happened to equal another shape's total must not be
+    # able to satisfy it.
+    print(
+        f"Model qwen3 piper_1B/{shape.name} (megatron) local size: "
+        f"{num_params:,} parameters (stage {stage} of {args.pp})",
+        flush=True,
     )
     # A hard failure inside the process, not just a log-grep failure: a
     # megatron shape that silently disagreed with
     # benchmarks.models.piper_qwen3.shape would
     # otherwise be published as a comparison of two different models.
-    assert num_params == shape.param_count, (
-        f"megatron built {num_params:,} parameters but shape {shape.name!r} "
-        f"declares {shape.param_count:,}"
+    assert num_params == expected_local, (
+        f"megatron built {num_params:,} parameters on stage {stage} of "
+        f"{args.pp} but shape {shape.name!r} declares {expected_local:,}"
     )
+    # And the sum over the world is the declared total. This is the half a
+    # single rank cannot check: every stage could hold a plausible count and
+    # the pipeline still hold the wrong model, or hold one layer twice.
+    if world_size > 1:
+        counted = torch.tensor([num_params], dtype=torch.int64, device="cuda")
+        torch.distributed.all_reduce(counted)
+        if int(counted.item()) != shape.param_count:
+            raise RuntimeError(
+                f"the {world_size} stages hold {int(counted.item()):,} "
+                f"parameters between them, and shape {shape.name!r} declares "
+                f"{shape.param_count:,}"
+            )
 
     # Megatron's real defaults live in its argparse layer, which building
     # TransformerConfig directly bypasses; running the dataclass defaults once
@@ -294,18 +450,44 @@ def main(argv: list[str] | None = None) -> None:
         return token_losses, loss_func
 
     forward_backward_func = get_forward_backward_func()
+    last_stage_rank = (
+        parallel_state.get_pipeline_model_parallel_last_rank()
+        if world_size > 1
+        else rank
+    )
 
     def run_step(step_index: int) -> float:
         losses = forward_backward_func(
             forward_step_func=forward_step,
-            data_iterator=iter([step_data[step_index]]),
+            data_iterator=iter(step_data[step_index]),
             model=model,
-            num_microbatches=1,
-            seq_length=total_tokens,
+            num_microbatches=num_microbatches,
+            seq_length=tokens_per_microbatch,
             micro_batch_size=1,
             forward_only=False,
         )
-        return float(losses[0]["lm loss"])
+        # Only the last stage computes a loss; every other stage gets an
+        # empty list. Megatron divides each microbatch's gradient by the
+        # microbatch count itself, so the mean over the list is the batch's
+        # own loss, and at one microbatch it is that microbatch's value.
+        if losses:
+            return sum(float(loss["lm loss"]) for loss in losses) / len(losses)
+        return 0.0
+
+    def broadcast_loss(loss: float) -> float:
+        """Move the last stage's loss to every rank, so rank 0 can log it.
+
+        The step line rank 0 prints is what ``benchmarks/e2e/results.py``
+        parses, and under a pipeline split rank 0 is the first stage, which
+        never sees a loss. Skipped entirely at world size 1, where the value
+        is already local and the collective would add a synchronize inside
+        the timed step.
+        """
+        if world_size == 1:
+            return loss
+        carrier = torch.tensor([loss], dtype=torch.float64, device="cuda")
+        torch.distributed.broadcast(carrier, src=last_stage_rank)
+        return float(carrier.item())
 
     parameters = list(model.parameters())
 
@@ -315,6 +497,19 @@ def main(argv: list[str] | None = None) -> None:
         total_norm = torch.nn.utils.get_total_norm(
             grads, norm_type=2.0, error_if_nonfinite=False, foreach=True
         )
+        if world_size > 1:
+            # A gradient norm is a property of the whole model, and a
+            # pipeline stage holds part of it. TorchTitan reduces the same
+            # way over its pp mesh (distributed/utils.py: square, all-reduce
+            # SUM, root), so without this the two engines would clip against
+            # different norms and the logged value would be one stage's.
+            total_norm = total_norm**2.0
+            torch.distributed.all_reduce(
+                total_norm,
+                op=torch.distributed.ReduceOp.SUM,
+                group=parallel_state.get_pipeline_model_parallel_group(),
+            )
+            total_norm = total_norm ** (1.0 / 2.0)
         torch.nn.utils.clip_grads_with_norm_(
             parameters, max_norm=1.0, total_norm=total_norm, foreach=True
         )
@@ -324,15 +519,18 @@ def main(argv: list[str] | None = None) -> None:
         trace_dir = (
             args.arm_dir / "profiling" / "traces" / f"iteration_{prof.step_num}"
         )
+        # Every rank writes into one directory, under its own name, which is
+        # the layout TorchTitan already writes and the one
+        # trace_files_by_rank reads.
         trace_dir.mkdir(parents=True, exist_ok=True)
-        prof.export_chrome_trace(str(trace_dir / "rank0_trace.json.gz"))
+        prof.export_chrome_trace(str(trace_dir / f"rank{rank}_trace.json.gz"))
         print(f"Dumping profiler traces at step {prof.step_num}", flush=True)
 
     args.arm_dir.mkdir(parents=True, exist_ok=True)
     gc.disable()
     gc.collect()
 
-    device_total = torch.cuda.get_device_properties(0).total_memory
+    device_total = torch.cuda.get_device_properties(local_rank).total_memory
     wait = args.profile_freq - args.profiler_warmup - args.profiler_active
     schedule = torch.profiler.schedule(
         wait=wait, warmup=args.profiler_warmup, active=args.profiler_active
@@ -349,7 +547,7 @@ def main(argv: list[str] | None = None) -> None:
     ) as prof:
         last_time = time.perf_counter()
         for step in range(1, args.steps + 1):
-            loss = run_step(step - 1)
+            loss = broadcast_loss(run_step(step - 1))
             merged = []
             if graphs:
                 # Post-capture, graphed modules deliver weight grads via

@@ -116,6 +116,50 @@ class BaseProfileExtractionTests(unittest.TestCase):
             },
         )
 
+    def test_a_pipeline_degree_of_one_writes_no_key(self) -> None:
+        """The default payload is the payload this function always returned.
+
+        A degree of 1 is megatron's own default, so writing it would add a
+        key to every single-GPU config for no change in behaviour, and the
+        frozen literal above would stop describing what a run builds.
+        """
+        self.assertEqual(
+            transformer_config_kwargs(
+                shape=PIPER_1B, profile=BASE, pipeline_model_parallel_size=1
+            ),
+            BASE_KWARGS_AT_NORMAL,
+        )
+
+    def test_a_pipeline_degree_reaches_the_config_and_nothing_else_moves(
+        self,
+    ) -> None:
+        """A degree is topology, and it moves exactly one field.
+
+        Megatron's ``get_num_layers_to_build`` divides ``config.num_layers``
+        by this field, so it is what makes the derived block spec hold one
+        stage's layers. A profile cannot carry it: a profile records
+        behaviour, and it cannot see ``initialize_model_parallel``.
+        """
+        self.assertEqual(
+            transformer_config_kwargs(
+                shape=PIPER_1B, profile=BASE, pipeline_model_parallel_size=2
+            ),
+            {**BASE_KWARGS_AT_NORMAL, "pipeline_model_parallel_size": 2},
+        )
+
+    def test_no_profile_declares_a_parallelism_degree(self) -> None:
+        """A profile records behaviour, never topology.
+
+        Megatron reads a degree off the config here and off
+        ``parallel_state`` in the schedule, and checks the two against each
+        other nowhere -- so a degree hidden in a profile could build one
+        partition while the run communicated another.
+        """
+        for name, profile in MCORE_PROFILES.items():
+            with self.subTest(profile=name):
+                for field in profile.config_overrides:
+                    self.assertNotIn("parallel_size", field)
+
     def test_no_graph_modules_means_no_graph_modules_key(self) -> None:
         """An empty tuple must not reach megatron as an empty list.
 

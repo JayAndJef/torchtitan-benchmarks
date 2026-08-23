@@ -1472,8 +1472,19 @@ TEST_CENSUS = {
     # megatron_model.build_model to resolve. The third -- that an unknown
     # backend name is refused like an unknown activation -- is one more
     # assertion inside the existing refusal test, so it adds no row.
-    "test_mcore_profiles": 20,
+    # +3 with the pipeline degree: that a degree of 1 writes no key, that a
+    # degree above 1 moves exactly one config field, and that no profile
+    # carries a parallelism degree at all -- a profile records behaviour and
+    # cannot see initialize_model_parallel.
+    "test_mcore_profiles": 23,
     "test_megatron_data": 5,
+    # The megatron driver's pipeline handling, which needs two GPUs to run
+    # and none to check: how a batch splits into microbatches, which
+    # pipeline requests the driver refuses (an interleaved schedule by
+    # name, a world size that is not the pipeline degree), and that every
+    # branch it grew takes the single-rank value at --pp 1 -- no repack, no
+    # collective, and the trace file named for the rank that wrote it.
+    "test_megatron_driver": 17,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1556,7 +1567,11 @@ TEST_CENSUS = {
     # how build_model wires it and check its raise path, 2 that refuse
     # blank_parts on the host initialization path, and 5 that pin which
     # kernel builder blanks which part.
-    "test_megatron_model": 26,
+    # +3 with the pipeline split: that all three of its arguments default to
+    # one whole model on one rank, that only the shape and the profile are
+    # required, and that the degree reaches the config while the two ends
+    # reach GPTModel.
+    "test_megatron_model": 29,
     # The parallelism run axis, landed before anything imports it. Every one
     # of the fourteen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
@@ -1570,7 +1585,7 @@ TEST_CENSUS = {
     # ways, and the two refusals _resolve_run now makes.
     "test_parallelism_plumbing": 42,
 }
-TEST_CENSUS_TOTAL = 1345
+TEST_CENSUS_TOTAL = 1368
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

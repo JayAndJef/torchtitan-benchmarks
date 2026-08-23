@@ -216,9 +216,30 @@ def build_model(
     cuda_graph_modules: tuple[str, ...] = (),
     use_cpu_initialization: bool = False,
     blank_parts: tuple[str, ...] = (),
+    # The pipeline split. Every one of these three defaults to the whole
+    # model on one rank, which is the model every caller but the e2e driver
+    # wants: the twelve kernel builders and tools/megatron_parity_check.py
+    # build one process and pass none of them.
+    pipeline_model_parallel_size: int = 1,
+    pre_process: bool = True,
+    post_process: bool = True,
 ):
     """Build the bare GPTModel in bf16 (on the current CUDA device unless
     use_cpu_initialization, which tests and the parity tool use).
+
+    ``pipeline_model_parallel_size`` reaches ``TransformerConfig``, where
+    megatron's ``get_num_layers_to_build`` divides ``config.num_layers`` by
+    it -- so the derived block spec already holds this rank's layers alone.
+    ``pre_process`` and ``post_process`` decide the two ends: the embedding
+    table on the first stage, the final norm and the output head on the last.
+    The caller resolves all three; this builder consults no global state, so
+    a test can ask for any stage of any pipeline without one.
+
+    **The caller must pass a degree that agrees with
+    ``initialize_model_parallel``.** Megatron reads the degree off the config
+    here and off ``parallel_state`` in the schedule, and it checks the two
+    against each other nowhere. A disagreement builds one partition and
+    communicates another.
 
     ``blank_parts`` names transformer-layer parts this caller does not use.
     Each named part becomes megatron's own ``IdentityOp``, which allocates
@@ -290,6 +311,7 @@ def build_model(
         cuda_graph_impl=cuda_graph_impl,
         cuda_graph_modules=cuda_graph_modules,
         use_cpu_initialization=use_cpu_initialization,
+        pipeline_model_parallel_size=pipeline_model_parallel_size,
     )
     for name in ACTIVATION_FUNC_FIELDS:
         if name in kwargs:
@@ -331,8 +353,8 @@ def build_model(
         transformer_layer_spec=spec,
         vocab_size=shape.vocab_size,
         max_sequence_length=seq_len,
-        pre_process=True,
-        post_process=True,
+        pre_process=pre_process,
+        post_process=post_process,
         share_embeddings_and_output_weights=False,
         position_embedding_type="rope",
         rotary_base=int(shape.rope_theta),
