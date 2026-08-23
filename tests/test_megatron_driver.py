@@ -138,6 +138,48 @@ class PipelineRefusalTests(unittest.TestCase):
             )
 
 
+class BatchLossIsASumTests(unittest.TestCase):
+    """Megatron scales the recorded loss, not only the gradient.
+
+    ``forward_step_calc_loss`` runs ``output_tensor /= num_microbatches`` in
+    place, and the value it records is ``loss.detach()``, which shares
+    storage with that tensor. So the schedule hands back ``L_i / M`` and the
+    batch's loss is their SUM. A mean would report ``batch_loss / M``.
+    """
+
+    def test_one_microbatch_is_that_microbatch(self) -> None:
+        # The published configuration. A sum and a mean agree at M 1, which
+        # is why no recorded number moves.
+        self.assertEqual(train.batch_loss([7.5]), 7.5)
+
+    def test_four_microbatches_recover_the_batch_loss(self) -> None:
+        # Four microbatches whose own losses are 1, 2, 3, 4: the batch's
+        # loss is 2.5, and the schedule already divided each by 4.
+        recorded = [1 / 4, 2 / 4, 3 / 4, 4 / 4]
+        self.assertAlmostEqual(train.batch_loss(recorded), 2.5)
+        # The mean this replaced would have reported a quarter of that.
+        self.assertAlmostEqual(sum(recorded) / len(recorded), 2.5 / 4)
+
+    def test_a_stage_with_no_loss_reports_zero(self) -> None:
+        # Every stage but the last gets an empty list.
+        self.assertEqual(train.batch_loss([]), 0)
+
+    def test_detach_shares_storage_with_the_scaled_tensor(self) -> None:
+        """The aliasing the reduction depends on, pinned against torch.
+
+        If a future torch made ``detach`` copy, the schedule would hand back
+        an unscaled ``L_i`` and the sum would become wrong -- so this asserts
+        the property rather than trusting it.
+        """
+        import torch
+
+        loss = torch.tensor([2.0]).sum() / 1
+        recorded = loss.detach()
+        loss *= 1  # cp_group_size, 1 here
+        loss /= 4  # num_microbatches
+        self.assertEqual(float(recorded), 0.5)
+
+
 class SingleRankInertnessTests(unittest.TestCase):
     """Read off the source: every new collective is guarded on the world size.
 

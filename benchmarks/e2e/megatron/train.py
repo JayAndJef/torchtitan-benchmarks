@@ -139,6 +139,26 @@ def pipeline_settings(args: argparse.Namespace) -> tuple[int, int]:
     return args.pp_microbatch_size, args.batch // args.pp_microbatch_size
 
 
+def batch_loss(microbatch_losses: list[float]) -> float:
+    """The batch's own loss, from what the schedule recorded per microbatch.
+
+    **It is a SUM, and a mean would be wrong.** Megatron scales the recorded
+    value itself, not only the gradient. ``forward_step_calc_loss`` takes the
+    legacy two-tuple branch for this driver's ``loss_func`` and runs
+    ``output_tensor /= num_microbatches`` **in place**
+    (``pipeline_parallel/schedules.py``), and the value it records is
+    ``loss.detach()``, which shares storage with that tensor. So each entry
+    here is already ``L_i / M``, and their sum is the mean of the ``L_i``.
+
+    Dividing again would report ``batch_loss / M`` -- 4x low at the pp 2 cell
+    this driver targets, and correct nowhere except ``M`` 1.
+
+    At one microbatch the sum is that microbatch's own value, which is what
+    every megatron number under ``out/`` was published with.
+    """
+    return sum(microbatch_losses)
+
+
 def tokens_per_second(
     local_tokens_per_step: int, elapsed_seconds: float, pipeline_degree: int
 ) -> int:
@@ -519,12 +539,8 @@ def main(argv: list[str] | None = None) -> None:
             forward_only=False,
         )
         # Only the last stage computes a loss; every other stage gets an
-        # empty list. Megatron divides each microbatch's gradient by the
-        # microbatch count itself, so the mean over the list is the batch's
-        # own loss, and at one microbatch it is that microbatch's value.
-        if losses:
-            return sum(float(loss["lm loss"]) for loss in losses) / len(losses)
-        return 0.0
+        # empty list. See batch_loss for why the reduction is a sum.
+        return batch_loss([float(loss["lm loss"]) for loss in losses])
 
     def broadcast_loss(loss: float) -> float:
         """Move the last stage's loss to every rank, so rank 0 can log it.
