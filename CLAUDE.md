@@ -75,6 +75,23 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
   prepends it to `LD_LIBRARY_PATH`. Manual sessions: `source ./cuda_compat.sh`.
   The cu130 wheels cover `sm_75` through `sm_120`: Ampere and Hopper both work
   unchanged.
+- **`HF_HOME` can point at a directory another user owns, and a run then dies
+  before it trains one step.** The datasets library takes a builder lock inside
+  the cache before it reads a row, so the arm fails with a
+  `PermissionError` on `<hash>_builder.lock`. On this box `HF_HOME` is
+  `/m-coriander/coriander/hf`, owned by another user. Both entry points now
+  export `HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HOME/.cache/hf-datasets}"`
+  and create it: `tools/run_matrix.sh` always did, and `run_bench.sh` does
+  since 2026-08-23. An explicit `HF_DATASETS_CACHE` still wins.
+
+  **The failure is intermittent by nature, so do not read a passing run as
+  proof the cache is writable.** It fires only when the config resolves to a
+  cache entry that does not exist yet. A run that reuses an entry another user
+  already built reads it happily and never takes a write lock. So a config
+  change, a dataset bump or a new tokenizer can surface this on a box where
+  every previous run worked. A manual session that calls
+  `python -m benchmarks.cli` directly bypasses both wrappers and must export
+  the variable itself.
 
 ## Repository map
 
