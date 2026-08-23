@@ -1,0 +1,136 @@
+{
+  "schema_version": 8,
+  "scenario": "piper1b_qkv",
+  "description": "Separate Q/K/V projections versus fused QKV on piper-1B.",
+  "hardware": "nvidia-h200",
+  "hardware_metadata": {
+    "requested_gpu": "7",
+    "nvidia_smi": "7, NVIDIA H200, GPU-9032fd52-bd9f-22c0-eea2-37c118ce21aa, 570.211.01",
+    "torch_version": "2.14.0.dev20260729+cu130",
+    "torchtitan_git_rev": "a0b70a9cf93a5f0ca58ca6107d3d66eb17937d5a",
+    "benchmarks_git_rev": "de8bc295f56a72bb2118a275820dd98238c8fa2b",
+    "megatron_git_rev": "59b72fa57f2059e858cb4bb5c094e62cc590754f",
+    "te_version": "2.17.1",
+    "cpu_pinning": "numactl --cpunodebind=1 --membind=1"
+  },
+  "workload": {
+    "module": "piper1b",
+    "config": "qwen3_piper_1b_unfused_qkv",
+    "seq_len": 1024,
+    "steps": 40,
+    "local_batch_size": 4,
+    "profile_freq": 20,
+    "profiler_warmup": 5,
+    "profiler_active": 5,
+    "min_trace_windows": 2,
+    "seed": 42
+  },
+  "regions": [
+    {
+      "name": "backward_block",
+      "phase": "backward",
+      "invocations_per_window": 80
+    },
+    {
+      "name": "forward_block",
+      "phase": "forward",
+      "invocations_per_window": 80
+    }
+  ],
+  "arms": [
+    {
+      "name": "baseline",
+      "description": "TorchTitan QKVLinear: separate Q and KV GEMMs (qwen3_piper_1b_unfused_qkv config)",
+      "config": null,
+      "override_imports": [],
+      "expected_override_count": 0,
+      "trace_kernel_markers": [],
+      "requires_gcc_toolset": false,
+      "launcher": "torchtitan",
+      "validation": "torchtitan"
+    },
+    {
+      "name": "fused_qkv",
+      "description": "TorchTitan FusedQKVLinear: one wqkv GEMM plus split (qwen3_piper_1b config)",
+      "config": "qwen3_piper_1b",
+      "override_imports": [],
+      "expected_override_count": 0,
+      "trace_kernel_markers": [],
+      "requires_gcc_toolset": false,
+      "launcher": "torchtitan",
+      "validation": "torchtitan"
+    }
+  ],
+  "selected_arms": [
+    "baseline",
+    "fused_qkv"
+  ],
+  "commands": {
+    "baseline": [
+      "numactl",
+      "--cpunodebind=1",
+      "--membind=1",
+      "./run_train.sh",
+      "--module",
+      "piper1b",
+      "--config",
+      "qwen3_piper_1b_unfused_qkv",
+      "--training.seq-len",
+      "1024",
+      "--training.steps",
+      "40",
+      "--training.local-batch-size",
+      "4",
+      "--compile.enable",
+      "--profiler.enable_profiling",
+      "--profiler.profile_freq",
+      "20",
+      "--profiler.profiler_active",
+      "5",
+      "--profiler.profiler_warmup",
+      "5",
+      "--compile.mode",
+      "reduce-overhead",
+      "--debug.seed",
+      "42",
+      "--dump-folder",
+      "/m-coriander/coriander/jayden/torchtitan-benchmarks/out/20260807T175156Z/piper1b_qkv/nvidia-h200/baseline",
+      "activation-checkpoint:none"
+    ],
+    "fused_qkv": [
+      "numactl",
+      "--cpunodebind=1",
+      "--membind=1",
+      "./run_train.sh",
+      "--module",
+      "piper1b",
+      "--config",
+      "qwen3_piper_1b",
+      "--training.seq-len",
+      "1024",
+      "--training.steps",
+      "40",
+      "--training.local-batch-size",
+      "4",
+      "--compile.enable",
+      "--profiler.enable_profiling",
+      "--profiler.profile_freq",
+      "20",
+      "--profiler.profiler_active",
+      "5",
+      "--profiler.profiler_warmup",
+      "5",
+      "--compile.mode",
+      "reduce-overhead",
+      "--debug.seed",
+      "42",
+      "--dump-folder",
+      "/m-coriander/coriander/jayden/torchtitan-benchmarks/out/20260807T175156Z/piper1b_qkv/nvidia-h200/fused_qkv",
+      "activation-checkpoint:none"
+    ]
+  },
+  "extra_torchtitan_args": [],
+  "compile_mode": "cuda-graph",
+  "ac_mode": "none",
+  "execution_model": "single-gpu-plain-bf16-no-fsdp"
+}

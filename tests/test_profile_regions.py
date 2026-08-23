@@ -311,6 +311,10 @@ def pooled_fixture(spans: dict, kernel: dict) -> PooledMetrics:
         profiled_steps=0,
         launch_total_us=0.0,
         launch_count=0,
+        collective_us=0.0,
+        busy_kernel_us=0.0,
+        step_wall_us=0.0,
+        step_wall_count=0,
     )
 
 
@@ -491,7 +495,7 @@ class ComparisonTests(unittest.TestCase):
             machine = json.loads(results_path.read_text())
             report = render_evaluation(result)
 
-        self.assertEqual(machine["schema_version"], 3)
+        self.assertEqual(machine["schema_version"], 4)
         self.assertEqual(
             machine["training"]["optimized"]["stable_tokens_per_second"], 1200
         )

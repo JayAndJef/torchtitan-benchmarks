@@ -4,6 +4,22 @@ Everything an evaluated output directory turns into: the log-derived
 throughput and trajectory series, the trace-derived GPU-time and
 compiled-region summaries, the machine-readable ``results.json`` payload, and
 the human-readable report the CLI prints.
+
+**How a run with more than one rank becomes one published number.** Each rank
+is pooled on its own (``per_rank_pooled_metrics``), and the arm's step cost is
+the **maximum** over ranks, never the mean. A parallel schedule locks the
+ranks together at every step boundary, so the step is as long as the busiest
+rank; a mean would report a step nobody ran, and it would move whenever an
+idle rank got idler. The sum over ranks is recorded beside it, because that is
+the total device work the mesh did, and the per-rank vector is recorded too,
+because a slow rank is the thing a reader most needs to see.
+
+The published figures other than the step cost -- regions, launch latency, the
+collective split, the busy basis -- are the **busiest rank's own** figures,
+not a per-field maximum. Mixing fields across ranks produces incoherent rows:
+``other_kernel_ms_per_step`` is ``kernel - regions``, and taking each side
+from a different rank can make it negative. ``published_rank`` names the rank
+every such field came from, and ``per_rank`` carries the rest.
 """
 
 from __future__ import annotations
@@ -17,7 +33,7 @@ from typing import Any
 
 from scipy import stats as scipy_stats
 
-from benchmarks.artifacts.layout import atomic_write_json, trace_files
+from benchmarks.artifacts.layout import atomic_write_json, trace_files_by_rank
 from benchmarks.artifacts.manifests import load_run
 from benchmarks.artifacts.summaries import (
     SampleSummary,
@@ -25,7 +41,7 @@ from benchmarks.artifacts.summaries import (
     describe,
     summarize,
 )
-from benchmarks.traces.extraction import PooledMetrics, pooled_window_metrics
+from benchmarks.traces.extraction import PooledMetrics, per_rank_pooled_metrics
 from benchmarks.traces.schema import Region
 
 
@@ -63,14 +79,50 @@ class RegionSummary:
 
 
 @dataclass(frozen=True)
+class RankGpuTime:
+    """One rank's per-step GPU time, before any reduction across ranks."""
+
+    rank: int
+    kernel_ms_per_step: float | None
+    compute_ms_per_step: float | None
+    collective_ms_per_step: float | None
+    busy_kernel_ms_per_step: float | None
+    wall_ms_per_step: float | None
+    region_kernel_ms_per_step: float | None
+    launch_latency_us: float | None
+    windows: int
+
+
+@dataclass(frozen=True)
 class GpuTimeSummary:
-    """Per-step GPU kernel time: the host-speed-immune cost of one arm."""
+    """Per-step GPU kernel time: the host-speed-immune cost of one arm.
+
+    ``kernel_ms_per_step`` is the maximum over the arm's ranks, and every
+    other scalar here is the figure that same rank reported. See this
+    module's docstring for why the reduction is a maximum and not a mean.
+
+    ``baseline_kernel_ratio`` therefore divides this arm's busiest rank by the
+    baseline's busiest rank, and the two need not be the same rank index. That
+    is the right comparison when the ranks hold equal work, and it compares
+    two different model partitions when they do not -- so read it as a ratio
+    of step costs, which is what a schedule that locks the ranks together
+    makes it.
+    """
 
     kernel_ms_per_step: float | None
     region_kernel_ms_per_step: float | None
     other_kernel_ms_per_step: float | None
     baseline_kernel_ratio: float | None
     launch_latency_us: float | None
+    compute_ms_per_step: float | None
+    collective_ms_per_step: float | None
+    busy_kernel_ms_per_step: float | None
+    wall_ms_per_step: float | None
+    rank_reduction: str
+    published_rank: int
+    ranks: tuple[int, ...]
+    kernel_ms_per_step_summed_over_ranks: float | None
+    per_rank: tuple[RankGpuTime, ...]
 
 
 @dataclass(frozen=True)
@@ -101,7 +153,7 @@ class EvaluationResult:
 
     def to_dict(self) -> dict[str, Any]:
         value = {
-            "schema_version": 3,
+            "schema_version": 4,
             "output_dir": self.output_dir,
             "scenario": self.scenario,
             "hardware": self.hardware,
@@ -133,12 +185,18 @@ class EvaluationResult:
 
 
 def _json_safe(value: Any) -> Any:
-    """Replace non-finite floats with null so results are strict JSON."""
+    """Replace non-finite floats with null so results are strict JSON.
+
+    Tuples become lists on the way through. ``asdict`` keeps a dataclass
+    field's container type, so ``ranks`` and ``per_rank`` arrive here as
+    tuples; leaving them that way would make ``to_dict()`` disagree with the
+    file it writes, and a test comparing the two would have to know which.
+    """
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, dict):
         return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
 
@@ -153,6 +211,10 @@ def region_comparison(
     ``span_*`` columns cover the annotation spans (host-confounded);
     ``kernel_*`` columns cover the summed kernel time inside them. The
     significance diagnostics describe the span distributions only.
+
+    Both sides are one rank's invocations -- each arm's published rank -- for
+    the same reason the scalars are: pooling two ranks' invocations into one
+    distribution describes no rank's work.
     """
     rows: list[dict[str, float | int | str]] = []
     for region in regions:
@@ -260,6 +322,60 @@ def stable_tps(
     ]
 
 
+def busiest_rank(per_rank: dict[int, PooledMetrics]) -> int:
+    """The rank whose step costs the most GPU kernel time; ties go to the lowest.
+
+    This is the rank the arm's published figures come from. It is a maximum,
+    never a mean: the schedule holds the ranks in step, so the step is as long
+    as its slowest participant.
+
+    A rank whose windows carry no ``ProfilerStep`` annotation reports ``None``
+    rather than a per-step cost, and a maximum cannot rank ``None`` against a
+    number. Treating it as zero would silently drop that rank from the
+    maximum, which is the failure this whole reduction exists to prevent -- so
+    a mixture is refused, exactly as ``pooled_window_metrics`` refuses the
+    same mixture between the windows of one rank. All-``None`` is not a
+    mixture: it is a run nothing profiled, and it keeps today's answer.
+    """
+    measured = [
+        rank
+        for rank, pooled in per_rank.items()
+        if pooled.kernel_ms_per_step is not None
+    ]
+    if measured and len(measured) != len(per_rank):
+        stepless = sorted(set(per_rank) - set(measured))
+        raise ValueError(
+            f"ranks {stepless} carry no ProfilerStep events and ranks "
+            f"{sorted(measured)} do; a maximum over that mixture would "
+            "exclude the ranks it cannot measure, and one of them may be the "
+            "busiest"
+        )
+    return min(
+        per_rank,
+        key=lambda rank: (-(per_rank[rank].kernel_ms_per_step or 0.0), rank),
+    )
+
+
+def _rank_gpu_time(rank: int, pooled: PooledMetrics) -> RankGpuTime:
+    return RankGpuTime(
+        rank=rank,
+        kernel_ms_per_step=pooled.kernel_ms_per_step,
+        compute_ms_per_step=pooled.compute_ms_per_step,
+        collective_ms_per_step=pooled.collective_ms_per_step,
+        busy_kernel_ms_per_step=pooled.busy_kernel_ms_per_step,
+        wall_ms_per_step=pooled.wall_ms_per_step,
+        region_kernel_ms_per_step=pooled.region_kernel_ms_per_step,
+        launch_latency_us=pooled.launch_latency_us,
+        windows=pooled.windows,
+    )
+
+
+def _summed_over_ranks(per_rank: dict[int, PooledMetrics]) -> float | None:
+    """Total device work across the mesh, or ``None`` if any rank has none."""
+    values = [pooled.kernel_ms_per_step for pooled in per_rank.values()]
+    return None if any(value is None for value in values) else sum(values)
+
+
 def evaluate_run(
     out_dir: Path, arms_override: list[str] | tuple[str, ...] | None = None
 ) -> EvaluationResult:
@@ -269,17 +385,24 @@ def evaluate_run(
     if "baseline" not in arms:
         raise ValueError("comparison needs the baseline arm")
 
+    per_rank: dict[str, dict[int, PooledMetrics]] = {}
+    published_rank: dict[str, int] = {}
     pooled: dict[str, PooledMetrics] = {}
     trace_windows: dict[str, int] = {}
     for arm in arms:
-        paths = trace_files(out_dir / arm)
-        if not paths:
+        by_rank = trace_files_by_rank(out_dir / arm)
+        if not by_rank:
             raise ValueError(f"no profiler traces under {out_dir / arm}")
         try:
-            pooled[arm] = pooled_window_metrics(paths, declared_regions)
+            per_rank[arm] = per_rank_pooled_metrics(by_rank, declared_regions)
         except ValueError as error:
             raise ValueError(f"{arm}: {error}") from error
-        trace_windows[arm] = len(paths)
+        try:
+            published_rank[arm] = busiest_rank(per_rank[arm])
+        except ValueError as error:
+            raise ValueError(f"{arm}: {error}") from error
+        pooled[arm] = per_rank[arm][published_rank[arm]]
+        trace_windows[arm] = pooled[arm].windows
 
     regions = {
         arm: {
@@ -310,6 +433,18 @@ def evaluate_run(
                 else None
             ),
             launch_latency_us=pooled[arm].launch_latency_us,
+            compute_ms_per_step=pooled[arm].compute_ms_per_step,
+            collective_ms_per_step=pooled[arm].collective_ms_per_step,
+            busy_kernel_ms_per_step=pooled[arm].busy_kernel_ms_per_step,
+            wall_ms_per_step=pooled[arm].wall_ms_per_step,
+            rank_reduction="max_over_ranks",
+            published_rank=published_rank[arm],
+            ranks=tuple(sorted(per_rank[arm])),
+            kernel_ms_per_step_summed_over_ranks=_summed_over_ranks(per_rank[arm]),
+            per_rank=tuple(
+                _rank_gpu_time(rank, per_rank[arm][rank])
+                for rank in sorted(per_rank[arm])
+            ),
         )
     comparisons = {
         arm: region_comparison(pooled["baseline"], pooled[arm], declared_regions)
@@ -398,6 +533,59 @@ def _render_trajectory(values: list[tuple[int, float]], nonfinite_label: str) ->
     return rendered
 
 
+def _render_rank_split(result: EvaluationResult) -> list[str]:
+    """Per-rank rows and the compute/collective split, when either applies.
+
+    Printed only when the run has more than one rank or ran a collective.
+    Every run recorded before this existed had one rank and no collective, so
+    a single-GPU report is unchanged, character for character.
+    """
+    interesting = [
+        arm
+        for arm in result.arms
+        if len(result.gpu_time[arm].ranks) > 1
+        or (result.gpu_time[arm].collective_ms_per_step or 0.0) > 0.0
+    ]
+    if not interesting:
+        return []
+    lines = [
+        "",
+        "per-rank gpu time (published figure is the MAX over ranks, never the "
+        "mean):",
+        "  "
+        + f"{'arm':22s} {'rank':>4s} {'kernel ms':>10s} {'compute ms':>11s} "
+        + f"{'nccl ms':>8s} {'busy ms':>8s} {'wall ms':>8s} {'launch us':>10s}",
+    ]
+    for arm in result.arms:
+        gpu = result.gpu_time[arm]
+        for rank in gpu.per_rank:
+            marker = "*" if rank.rank == gpu.published_rank else " "
+            lines.append(
+                f"  {arm:22s} {rank.rank:>3d}{marker} "
+                f"{_value(rank.kernel_ms_per_step, 10, 2)} "
+                f"{_value(rank.compute_ms_per_step, 11, 2)} "
+                f"{_value(rank.collective_ms_per_step, 8, 2)} "
+                f"{_value(rank.busy_kernel_ms_per_step, 8, 2)} "
+                f"{_value(rank.wall_ms_per_step, 8, 2)} "
+                f"{_value(rank.launch_latency_us, 10, 2)}"
+            )
+        lines.append(
+            f"  {arm:22s} sum  "
+            f"{_value(gpu.kernel_ms_per_step_summed_over_ranks, 10, 2)}"
+        )
+    lines.extend(
+        [
+            "* = the published rank. 'compute' excludes the collectives, "
+            "because a blocking",
+            "collective's duration includes waiting for a peer; 'busy' is the "
+            "interval union,",
+            "which the summed column double-counts across streams; "
+            "wall - busy is the bubble.",
+        ]
+    )
+    return lines
+
+
 def render_evaluation(result: EvaluationResult) -> str:
     """Render the complete stable-throughput and compiled-region report."""
     lines = [
@@ -449,6 +637,8 @@ def render_evaluation(result: EvaluationResult) -> str:
             f"{_value(backward.kernel.mean_us if backward else None, 14)} "
             f"{_value(gpu.launch_latency_us, 10, 2)}"
         )
+
+    lines.extend(_render_rank_split(result))
 
     for arm in result.arms:
         if arm == "baseline":

@@ -55,19 +55,38 @@ def cells(root: Path, size_filter: str | None):
 
 
 def launch_counts(cell_dir: Path, arms: list[str]) -> dict[str, float]:
-    from benchmarks.artifacts.layout import trace_files
-    from benchmarks.traces.extraction import pooled_window_metrics
+    """Launches per step, per arm: the maximum over the arm's ranks.
+
+    The maximum for the same reason ``results.json`` publishes a maximum --
+    the ranks run in step, so the busiest one sets the cost. A mean over ranks
+    would be a number no rank paid.
+
+    A rank whose windows carry no ``ProfilerStep`` annotation has no per-step
+    figure and is left out of the maximum. Dividing its launch count by 1
+    instead would give it the whole window's launches as a "per step" value,
+    which is the largest number in the set and would therefore win the
+    maximum outright -- turning a rank the profiler never measured into the
+    arm's published figure.
+    """
+    from benchmarks.artifacts.layout import trace_files_by_rank
+    from benchmarks.traces.extraction import per_rank_pooled_metrics
 
     counts: dict[str, float] = {}
     for arm in arms:
-        paths = trace_files(cell_dir / arm)
-        if not paths:
+        by_rank = trace_files_by_rank(cell_dir / arm)
+        if not by_rank:
             continue
         try:
-            pooled = pooled_window_metrics(paths, ())
+            pooled = per_rank_pooled_metrics(by_rank, ())
         except ValueError:
             continue
-        counts[arm] = pooled.launch_count / max(pooled.profiled_steps, 1)
+        per_step = [
+            rank.launch_count / rank.profiled_steps
+            for rank in pooled.values()
+            if rank.profiled_steps
+        ]
+        if per_step:
+            counts[arm] = max(per_step)
     return counts
 
 

@@ -545,7 +545,7 @@ class AllowlistTests(unittest.TestCase):
 
 
 class LegacyFixtureIntegrityTests(unittest.TestCase):
-    """Pin the four fixtures' bytes.
+    """Pin the fixtures' bytes.
 
     Belt and braces for the allowlist above. The allowlist stops the audit
     from *ordering* an edit; these digests turn an edit that happens anyway
@@ -554,6 +554,14 @@ class LegacyFixtureIntegrityTests(unittest.TestCase):
 
     If this goes red: do not regenerate the digests. Restore the files with
     ``git checkout -- tests/fixtures/legacy/``.
+
+    Six of the eight files are verbatim copies of what a run wrote. The two
+    ``e2e_results3`` traces are the exception and are labelled below: they are
+    a lossless projection of a run's traces, kept small enough to check in.
+    ``tests/test_parallel_traces.py`` states the projection rule and proves it
+    lossless against the verbatim ``results.json`` beside them, so they are as
+    unre-derivable as the rest -- the full traces they came from live only in
+    a gitignored ``out/``.
     """
 
     DIGESTS = {
@@ -568,6 +576,29 @@ class LegacyFixtureIntegrityTests(unittest.TestCase):
         ),
         "tests/fixtures/legacy/kernel_schema1/results.json": (
             "5f6fa7082f78b22bc21748aefa692ba8ed189fa74a583c33418adfe141ac4e8c"
+        ),
+        # Verbatim: the manifest and results.json of
+        # out/20260807T175156Z/piper1b_qkv/nvidia-h200, at manifest schema 8
+        # and results schema 3 -- the results schema this commit replaces.
+        "tests/fixtures/legacy/e2e_results3/manifest.json": (
+            "ae4decd1617b1baf99e68ae744d59fdb8e981e1d5633d0fdbef60dda9a973eda"
+        ),
+        "tests/fixtures/legacy/e2e_results3/results.json": (
+            "c83803823a609ea9e2883d79fa2c30b5eb8d7147f765d6d1712031558c65ab18"
+        ),
+        # Projected, not verbatim: that run's two baseline trace windows with
+        # every event no extraction branch reads removed.
+        (
+            "tests/fixtures/legacy/e2e_results3/baseline/profiling/traces/"
+            "iteration_20/rank0_trace.json.gz"
+        ): (
+            "8b7d393a3fbd8a5ecdcb411e5b67c7f911ce1feecbd81ae7ec3dbf8c66538e77"
+        ),
+        (
+            "tests/fixtures/legacy/e2e_results3/baseline/profiling/traces/"
+            "iteration_40/rank0_trace.json.gz"
+        ): (
+            "d3f2b6f60a90bdba8b57d076b1b62fe9aa4f92a7026de96014afdda9e2c7427b"
         ),
     }
 
