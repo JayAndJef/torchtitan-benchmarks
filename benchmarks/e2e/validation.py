@@ -153,6 +153,11 @@ class ValidationProfile:
     whatever this repo's code does, and the wrapper line this repo prints.
     Neither matches a ``pp 2, dp 1`` log, which was checked against a real
     one.
+
+    Measured before it was added, the way ``pipelined_pattern`` was: of the
+    532 arm logs under ``out/`` -- every run this repo has ever done, all of
+    them single-GPU or pipeline-only -- **none** matches either pattern. So
+    the rule refuses nothing that has already happened.
     """
 
     completion_marker: str
