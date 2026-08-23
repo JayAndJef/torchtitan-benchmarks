@@ -1753,7 +1753,11 @@ TEST_CENSUS = {
     # the one parallelize_piper1b prints, that no such marker is asked of a
     # run which reduces nothing, and that a dp run whose fully_shard did not
     # happen fails the arm.
-    "test_parallel_validation": 31,
+    # +4 with arm rule 13: that a dp run needs an all-reduce on EVERY rank,
+    # that a pipeline-only run needs none, that a pipeline's own SendRecv
+    # and Broadcast cannot satisfy it, and that the NCCL algorithm suffix is
+    # not part of the marker.
+    "test_parallel_validation": 35,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -1762,7 +1766,7 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     "test_throughput": 28,
 }
-TEST_CENSUS_TOTAL = 1461
+TEST_CENSUS_TOTAL = 1465
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -33,7 +33,11 @@ from benchmarks.e2e.parallelism import (
     n_microbatches,
 )
 from benchmarks.e2e.registry import PIPER_1B_ROPE, PIPER_1B_SWIGLU
-from benchmarks.e2e.validation import VALIDATION_PROFILES, validate_arm
+from benchmarks.e2e.validation import (
+    ALL_REDUCE_MARKER,
+    VALIDATION_PROFILES,
+    validate_arm,
+)
 from benchmarks.execution.environment import LOG_RANK_TEMPLATE
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.environment import runtime_environment
@@ -153,6 +157,29 @@ class RankLoggingEnvironmentTests(unittest.TestCase):
         )
 
 
+def _write_traces(
+    root: Path, rank: int, *, windows=(20, 40), markers=()
+) -> None:
+    """One rank's profiler windows, carrying the named kernels and no more.
+
+    Per rank rather than per fixture, so a test can give two ranks different
+    kernels -- which is what arm rule 13's "every rank" reading needs.
+    """
+    for iteration in windows:
+        trace = (
+            root
+            / "profiling"
+            / "traces"
+            / f"iteration_{iteration}"
+            / f"rank{rank}_trace.json.gz"
+        )
+        trace.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(trace, "wt") as handle:
+            handle.write("cudaLaunchKernel\n")
+            for marker in markers:
+                handle.write(marker + "\n")
+
+
 class _ArmFixture:
     """A validated two-rank arm directory, so a test can spoil one rank."""
 
@@ -161,19 +188,7 @@ class _ArmFixture:
     ) -> None:
         self.root = root
         for rank in ranks:
-            for iteration in windows:
-                trace = (
-                    root
-                    / "profiling"
-                    / "traces"
-                    / f"iteration_{iteration}"
-                    / f"rank{rank}_trace.json.gz"
-                )
-                trace.parent.mkdir(parents=True, exist_ok=True)
-                with gzip.open(trace, "wt") as handle:
-                    handle.write("cudaLaunchKernel\n")
-                    for marker in markers:
-                        handle.write(marker + "\n")
+            _write_traces(root, rank, windows=windows, markers=markers)
         self.log = root / "baseline.log"
 
     def write(self, per_rank: dict[int, str]) -> None:
@@ -570,6 +585,114 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     PIPER_1B_ROPE.workload,
                     parallelism=DP2,
                 )
+
+    def test_every_rank_must_carry_an_all_reduce_under_dp(self) -> None:
+        """Arm rule 13, and its reading is EVERY rank rather than any.
+
+        At dp above 1 every rank sits in a data-parallel group of that size,
+        so every rank reduces. That is what makes "every rank" provable here
+        where arm rule 6's reading is still open.
+        """
+        for missing in (0, 1):
+            with self.subTest(rank_without_the_marker=missing):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = _ArmFixture(root, ranks=())
+                    for rank in (0, 1):
+                        _write_traces(
+                            root,
+                            rank,
+                            markers=()
+                            if rank == missing
+                            else (ALL_REDUCE_MARKER,),
+                        )
+                    log = _titan_log(DP2)
+                    fixture.write({0: log, 1: log})
+                    with self.assertRaisesRegex(
+                        RuntimeError, f"rank {missing}'s profiler traces"
+                    ):
+                        validate_arm(
+                            PIPER_1B_ROPE.arm("baseline"),
+                            fixture.root,
+                            fixture.log,
+                            PIPER_1B_ROPE.workload,
+                            parallelism=DP2,
+                        )
+
+    def test_a_pipeline_only_run_needs_no_all_reduce(self) -> None:
+        """The rule reads ``dp``, not the world size.
+
+        A pipeline synchronizes no gradient. Asking a pp-only run for an
+        all-reduce would fail an honest run, which is the direction a
+        validation rule must never take.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary))
+            fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
+            validate_arm(
+                PIPER_1B_ROPE.arm("baseline"),
+                fixture.root,
+                fixture.log,
+                PIPER_1B_ROPE.workload,
+                parallelism=PP2,
+            )
+
+    def test_a_pipeline_collective_cannot_satisfy_the_rule(self) -> None:
+        """SendRecv and Broadcast are what a pipeline emits with no
+        reduction.
+
+        A marker of ``nccl`` alone would pass a dp run that reduced nothing,
+        which is the one thing this rule exists to catch.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = _ArmFixture(root, ranks=())
+            for rank in (0, 1):
+                _write_traces(
+                    root,
+                    rank,
+                    markers=(
+                        "ncclDevKernel_SendRecv",
+                        "ncclDevKernel_Broadcast_RING_LL",
+                    ),
+                )
+            log = _titan_log(DP2)
+            fixture.write({0: log, 1: log})
+            with self.assertRaisesRegex(RuntimeError, "carry no"):
+                validate_arm(
+                    PIPER_1B_ROPE.arm("baseline"),
+                    fixture.root,
+                    fixture.log,
+                    PIPER_1B_ROPE.workload,
+                    parallelism=DP2,
+                )
+
+    def test_a_dp_run_with_the_marker_on_every_rank_passes(self) -> None:
+        """And the suffix NCCL chose is not part of the marker.
+
+        The algorithm and protocol depend on the message size and the
+        topology, so pinning ``_RING_LL`` whole would fail an honest run
+        whose buckets chose another.
+        """
+        for kernel in (
+            "ncclDevKernel_AllReduce_Sum_bf16_RING_LL",
+            "ncclDevKernel_AllReduce_Sum_bf16_TREE_LL128",
+        ):
+            with self.subTest(kernel=kernel):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = _ArmFixture(root, ranks=())
+                    for rank in (0, 1):
+                        _write_traces(root, rank, markers=(kernel,))
+                    log = _titan_log(DP2)
+                    fixture.write({0: log, 1: log})
+                    validate_arm(
+                        PIPER_1B_ROPE.arm("baseline"),
+                        fixture.root,
+                        fixture.log,
+                        PIPER_1B_ROPE.workload,
+                        parallelism=DP2,
+                    )
 
     def test_the_megatron_marker_is_the_line_the_driver_prints(self) -> None:
         """The validator and the driver state one line in two places.

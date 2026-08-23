@@ -24,6 +24,15 @@ they really built, and a run that ignored the ``--parallelism.*`` flags --
 or a driver that read no ``RANK`` -- passes every other rule while training
 something else. The rule is consulted only above one rank, where there is a
 mesh to get wrong.
+
+**Arm rule 13 is the data-parallel axis's own hazard, read from the
+traces.** Two ranks that never reduce their gradients train two models and
+report roughly twice the true throughput, and every other rule passes. The
+rule asks each rank's traces for an all-reduce kernel. It does not stand
+alone: a mesh can carry an all-reduce that reduces no gradient -- TorchTitan
+reduces the loss over its own mesh on every logged step -- so arm rule 12's
+per-engine data-parallel log line is what names the mechanism, and this rule
+is what says a collective really ran on every rank.
 """
 
 from __future__ import annotations
@@ -55,6 +64,22 @@ from benchmarks.traces.schema import Region
 
 
 _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
+
+# Arm rule 13's marker: the device kernel a gradient all-reduce runs. Both
+# engines reduce over NCCL, so one string serves both.
+#
+# **It names the all-reduce and not NCCL in general, deliberately.** A
+# pipeline emits ``ncclDevKernel_SendRecv`` and
+# ``ncclDevKernel_Broadcast_RING_LL`` with no gradient reduction anywhere, so
+# a bare ``nccl`` would pass a dp run that reduced nothing -- which is the
+# one thing this rule exists to catch.
+#
+# **The algorithm and protocol suffix is deliberately left off.** NCCL picks
+# those per message size and topology, so the first two-rank run's
+# ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL`` is one of several spellings a
+# correct run can produce, and pinning it whole would fail an honest run
+# whose buckets chose another. What is fixed is the operation in the name.
+ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
 
 
 @dataclass(frozen=True)
@@ -508,6 +533,27 @@ def validate_arm(
             f"{arm.name}: compile mode {compile_mode!r} enables CUDA graphs but "
             f"no cudaGraphLaunch appears in the profiler traces under {arm_dir}"
         )
+    # Arm rule 13. **Every rank**, and that reading is provable here where
+    # arm rule 6's is not: at dp above 1 every rank sits in a data-parallel
+    # group of that size, so every rank reduces. A rank whose traces carry no
+    # all-reduce did not.
+    #
+    # The marker is the SPEC's, never an ``Arm.trace_kernel_markers`` entry.
+    # Data parallelism is a run axis, so a static declaration would fail
+    # every single-GPU run of the same arm -- there is no all-reduce there at
+    # all.
+    if parallelism.dp > 1:
+        for rank in sorted(expected_ranks):
+            if not any(
+                _trace_contains(path, ALL_REDUCE_MARKER)
+                for path in traces_by_rank.get(rank, ())
+            ):
+                raise RuntimeError(
+                    f"{arm.name}: dp {parallelism.dp} was requested and rank "
+                    f"{rank}'s profiler traces under {arm_dir} carry no "
+                    f"{ALL_REDUCE_MARKER!r}; a rank that reduced no gradient "
+                    "reports roughly twice the true throughput"
+                )
     if regions and profile.check_regions:
         try:
             per_rank_pooled_metrics(traces_by_rank, regions)
