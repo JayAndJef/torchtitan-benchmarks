@@ -653,7 +653,7 @@ class ResumeParallelismTests(unittest.TestCase):
 
 
 class ResolveRunTests(unittest.TestCase):
-    """``_resolve_run`` refuses every mesh, and records the trivial one."""
+    """``_resolve_run`` resolves the mesh, and derives the regions from it."""
 
     def _resolve(self, **kwargs):
         with mock.patch(
@@ -683,18 +683,57 @@ class ResolveRunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             self._resolve(gpu="0", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"))
 
-    def test_a_legal_mesh_is_declared_and_refused(self) -> None:
-        """The plumbing lands one stage ahead of the engines that use it."""
-        with self.assertRaisesRegex(ValueError, "declared and not implemented"):
-            self._resolve(
-                gpu="0,1", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B")
-            )
+    def test_a_legal_mesh_resolves(self) -> None:
+        spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
+        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[10], spec)
+
+    def test_a_single_gpu_run_still_declares_its_block_regions(self) -> None:
+        scenario = self._resolve(gpu="0")[1]
+        self.assertEqual(
+            sorted(region.name for region in scenario.regions),
+            ["backward_block", "forward_block"],
+        )
+        self.assertEqual(
+            [region.invocations_per_window for region in scenario.regions],
+            [80, 80],
+        )
+
+    def test_a_pipelined_run_declares_no_regions(self) -> None:
+        """No rank holds every block, so the declared count is unreachable.
+
+        ``piper_block_regions`` asks for ``n_layers * profiler_active``
+        invocations per window, and that count IS the region's identity. A
+        rank of a two-stage pipeline holds half the layers and runs each of
+        them once per microbatch, so it never reaches 80. Deriving a
+        per-rank count instead would be rule 7 rewritten rather than applied,
+        and nobody has read a pipelined trace to see what is unique in one.
+        """
+        scenario = self._resolve(
+            gpu="0,1", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B")
+        )[1]
+        self.assertEqual(scenario.regions, ())
+
+    def test_the_scenario_that_declares_none_is_unaffected(self) -> None:
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", dict(_METADATA)),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            scenario = _resolve_run(
+                RunRequest(
+                    gpu="0", scenario_name="piper1b_megatron", ac_mode="none"
+                ),
+                {"PATH": os.environ["PATH"]},
+            )[1]
+        self.assertEqual(scenario.regions, ())
 
     def test_a_malformed_device_list_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "comma-separated GPU indices"):
             self._resolve(gpu="gpu0")
 
-    def test_the_refusal_lands_before_any_host_probe(self) -> None:
+    def test_an_illegal_mesh_is_refused_before_any_host_probe(self) -> None:
         def never(*args, **kwargs):
             raise AssertionError("a host probe ran for a refused mesh")
 

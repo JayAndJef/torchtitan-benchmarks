@@ -203,14 +203,33 @@ typed. `kernel-bench` refuses more than one device.
 first visible device while the manifest recorded `"0,1"`. That is a wrong
 recorded fact rather than a missing one, and it now fails.
 
-**Every run is still single-GPU.** Two refusals stand between an operator
-and a second rank, and they give different messages. A bare `run 0,1` dies
-at parallelism rule 1, which compares `dp * pp` against the device count:
-"parallelism world size 1 (dp 1 x pp 1) does not match the 2 device(s)
-requested". A `run 0,1 --pp 2 --pp-schedule 1F1B` passes every rule and then
-dies at `_resolve_run`'s own refusal, because neither engine starts a second
-rank yet and such a run would train the whole model in one process under a
-parallel label. Both land before any host probe.
+**`run 0,1 --pp 2 --pp-schedule 1F1B --compile-mode default --ac none`
+starts two ranks, on both engines.** `_resolve_run`'s blanket refusal of
+every world size above 1 is gone. What refuses an unimplemented mesh is the
+fourteen rules of `benchmarks/e2e/parallelism.py` plus the engines
+themselves, and each failure lands on the module that owns the missing work:
+`parallelize_piper1b` refuses a tensor, context or data-parallel degree per
+axis, and the megatron driver refuses a schedule it does not implement (it
+runs `1F1B` alone). A bare `run 0,1` still dies at parallelism rule 1, which
+compares `dp * pp` against the device count: "parallelism world size 1 (dp 1
+x pp 1) does not match the 2 device(s) requested". That lands before any
+host probe.
+
+**No two-rank run has ever executed.** Every claim in this section is what
+the code does, read from the code. Nothing here has been measured, no
+multi-rank trace from this harness has been read, and the GPU gate is a
+separate task.
+
+**How each engine starts its ranks differs, and only one of them is the
+harness's own work.** The titan arms run `./run_train.sh`, which already
+calls `torchrun --nproc_per_node=${NGPU} --local-ranks-filter ${LOG_RANK}
+--role rank --tee 3`; `benchmarks/execution/environment.py` sets `NGPU` to
+the spec's world size and, **above one rank only**, sets `LOG_RANK` to every
+rank and `TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE` to `[rank${rank}]:`. The
+megatron driver has no such wrapper, so `benchmarks/e2e/launch.py` builds
+the launcher itself: `python -m torch.distributed.run` with the same flags.
+**At one rank it builds neither**, so the megatron argv stays
+`python -m benchmarks.e2e.megatron.train ...`, token for token.
 
 - `run` executes and validates only. `run-all` also evaluates and writes
   `results.json`.

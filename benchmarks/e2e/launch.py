@@ -238,6 +238,54 @@ def command_for_arm(
     return args
 
 
+def _megatron_launcher(spec: ParallelismSpec) -> list[str]:
+    """What starts the megatron driver's processes.
+
+    **At the trivial spec this is ``[sys.executable, "-m"]``**, so the argv
+    is the argv this repo has always built and every recorded command line
+    is reproduced token for token.
+
+    Above one rank it is ``torch.distributed.run`` -- torchrun under its
+    module name, run by this same interpreter, so the CLI and the training
+    processes keep sharing one environment. The flags are the ones
+    TorchTitan's own ``run_train.sh`` passes, for one reason each:
+
+    * ``--nproc-per-node`` starts the ranks. It reads the spec rather than
+      the device count, and parallelism rule 1 is what makes the two agree.
+    * ``--rdzv-backend``/``--rdzv-endpoint`` let the kernel pick the port,
+      so two runs on one host cannot collide.
+    * ``--local-ranks-filter`` names every rank. torchrun's default is rank
+      0 alone, and a kernel that degraded on rank 1 would then be invisible.
+    * ``--role rank`` with ``--tee 3`` is what puts a rank prefix on every
+      line. ``TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE`` (set by
+      ``benchmarks/execution/environment.py``) decides its shape, and
+      ``benchmarks/artifacts/layout.py``'s ``logs_by_rank`` reads it back.
+
+    The titan arms need no equivalent: ``run_train.sh`` already calls
+    torchrun with these flags and reads ``NGPU`` and ``LOG_RANK`` from the
+    environment.
+    """
+    if spec.world_size == 1:
+        return [sys.executable, "-m"]
+    return [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        f"--nproc-per-node={spec.world_size}",
+        "--rdzv-backend",
+        "c10d",
+        "--rdzv-endpoint",
+        "localhost:0",
+        "--local-ranks-filter",
+        ",".join(str(rank) for rank in range(spec.world_size)),
+        "--role",
+        "rank",
+        "--tee",
+        "3",
+        "-m",
+    ]
+
+
 def _megatron_command(
     workload: Workload,
     arm: Arm,
@@ -255,20 +303,20 @@ def _megatron_command(
     profiler schedule, and the compile mode (mapped to Megatron's native
     CUDA-graph mechanism by the driver).
 
-    **The driver is single-rank, so a non-trivial spec raises here.** It
-    reads no ``RANK`` and no ``WORLD_SIZE``, it passes no
-    ``pipeline_model_parallel_size`` to ``initialize_model_parallel``, and it
-    splits no batch into microbatches. Building a single-rank command line
-    for a pipelined run would launch one process that trains the whole model
-    and publish it under a ``pp`` label. The refusal is the
-    declaration-without-a-builder pattern this repo already uses: the failure
-    lands on the module that owns the missing work.
+    **At the trivial spec the argv is unchanged**: ``_megatron_launcher``
+    returns the plain interpreter, and the three pipeline flags are omitted
+    rather than passed at their defaults. The driver refuses
+    ``--pp-schedule`` and ``--pp-microbatch-size`` at ``--pp 1`` for that
+    reason -- a value there names a split that does not happen.
+
+    Above one rank the driver reads ``RANK``, ``WORLD_SIZE`` and
+    ``LOCAL_RANK`` from torchrun, passes ``pipeline_model_parallel_size`` to
+    ``initialize_model_parallel``, builds only its own stage's layers, and
+    splits the batch into microbatches. It implements ``1F1B`` alone and
+    raises on any other schedule, so a schedule megatron-core supports but
+    this driver does not fails where the missing work lives rather than at a
+    validator claiming the library cannot do it.
     """
-    if parallelism != TRIVIAL_SPEC:
-        raise ValueError(
-            f"{arm.name}: the megatron driver runs one rank; it cannot honor "
-            f"dp {parallelism.dp} x pp {parallelism.pp} (ep {parallelism.ep})"
-        )
     if extra_args:
         raise ValueError(
             f"{arm.name}: TorchTitan passthrough arguments cannot apply to a "
@@ -291,9 +339,8 @@ def _megatron_command(
         raise ValueError(
             f"{arm.name}: megatron arms require a seeded workload"
         )
-    return [
-        sys.executable,
-        "-m",
+    args = [
+        *_megatron_launcher(parallelism),
         "benchmarks.e2e.megatron.train",
         "--seq-len",
         str(workload.seq_len),
@@ -313,5 +360,19 @@ def _megatron_command(
         compile_mode,
         "--model-size",
         model_size,
-        str(arm_dir),
     ]
+    if parallelism.pp > 1:
+        # Omitted at pp 1, where the driver refuses them: a schedule name and
+        # a microbatch size there would name a split that does not happen.
+        args.extend(
+            (
+                "--pp",
+                str(parallelism.pp),
+                "--pp-schedule",
+                str(parallelism.pp_schedule),
+                "--pp-microbatch-size",
+                str(parallelism.pp_microbatch_size),
+            )
+        )
+    args.append(str(arm_dir))
+    return args

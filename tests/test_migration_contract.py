@@ -756,6 +756,63 @@ def _golden_megatron_tail(size: str) -> list[str]:
     ]
 
 
+# The megatron twin of the titan pp2 golden, at the same spec.
+#
+# **It freezes the launcher, which is the half a flag list cannot state.**
+# The titan arms reach torchrun through ``run_train.sh``, which reads NGPU
+# and LOG_RANK from the environment; nothing wraps the megatron driver, so
+# the harness builds the launcher itself. Every flag below has a consumer:
+# ``--local-ranks-filter`` names every rank rather than torchrun's default of
+# rank 0 alone, and ``--role rank --tee 3`` is what puts the prefix that
+# ``benchmarks/artifacts/layout.py``'s ``logs_by_rank`` reads back on each
+# line. Drop one and a rank's output, or its rank label, is gone.
+#
+# sys.executable leads this argv too, so the literal starts at the first -m.
+def _golden_megatron_pp2_tail(size: str) -> list[str]:
+    return [
+        "-m",
+        "torch.distributed.run",
+        "--nproc-per-node=2",
+        "--rdzv-backend",
+        "c10d",
+        "--rdzv-endpoint",
+        "localhost:0",
+        "--local-ranks-filter",
+        "0,1",
+        "--role",
+        "rank",
+        "--tee",
+        "3",
+        "-m",
+        MEGATRON_DRIVER_MODULE,
+        "--seq-len",
+        "1024",
+        "--steps",
+        "40",
+        "--batch",
+        "4",
+        "--seed",
+        "42",
+        "--profile-freq",
+        "20",
+        "--profiler-warmup",
+        "5",
+        "--profiler-active",
+        "5",
+        "--mode",
+        "default",
+        "--model-size",
+        size,
+        "--pp",
+        "2",
+        "--pp-schedule",
+        "1F1B",
+        "--pp-microbatch-size",
+        "1",
+        "/tmp/arm-dir",
+    ]
+
+
 class GoldenCommandTests(unittest.TestCase):
     def _command(
         self, pinned, size, compile_mode, ac_mode, parallelism=None
@@ -997,20 +1054,60 @@ class GoldenCommandTests(unittest.TestCase):
                 ParallelismSpec(pp=2),
             )
 
-    def test_the_megatron_command_refuses_a_non_trivial_spec(self) -> None:
-        """The driver is single-rank, so it says so rather than launching.
+    def test_megatron_argv_at_pp2(self) -> None:
+        command = self._command(
+            GOLDEN_MEGATRON_ARM,
+            "normal",
+            "default",
+            "none",
+            GOLDEN_TITAN_PP2_SPEC,
+        )
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1:], _golden_megatron_pp2_tail("normal"))
 
-        A single-rank argv built for a pipelined run would train the whole
-        model in one process and be published under a pp label.
+    def test_both_engines_are_told_the_same_pipeline(self) -> None:
+        """One spec, two spellings, and they must not drift apart.
+
+        The stage hazard of this axis is a split or a microbatch count that
+        differs between the engines: both runs would pass every other check
+        and the cross-engine row would compare two different jobs.
         """
-        with self.assertRaisesRegex(ValueError, "one rank"):
-            self._command(
-                GOLDEN_MEGATRON_ARM,
-                "normal",
-                "default",
-                "none",
-                GOLDEN_TITAN_PP2_SPEC,
-            )
+        titan = self._command(
+            GOLDEN_TITAN_ARM, "normal", "default", "none", GOLDEN_TITAN_PP2_SPEC
+        )
+        megatron = self._command(
+            GOLDEN_MEGATRON_ARM,
+            "normal",
+            "default",
+            "none",
+            GOLDEN_TITAN_PP2_SPEC,
+        )
+        for titan_flag, megatron_flag in (
+            ("--parallelism.pipeline-parallel-degree", "--pp"),
+            ("--parallelism.pipeline-parallel-schedule", "--pp-schedule"),
+            (
+                "--parallelism.pipeline-parallel-microbatch-size",
+                "--pp-microbatch-size",
+            ),
+        ):
+            with self.subTest(flag=titan_flag):
+                self.assertEqual(
+                    titan[titan.index(titan_flag) + 1],
+                    megatron[megatron.index(megatron_flag) + 1],
+                )
+        # And the batch each engine splits is the same batch.
+        self.assertEqual(
+            titan[titan.index("--training.local-batch-size") + 1],
+            megatron[megatron.index("--batch") + 1],
+        )
+
+    def test_the_trivial_spec_starts_no_launcher(self) -> None:
+        """The megatron argv at one rank is the interpreter, not torchrun."""
+        command = self._command(GOLDEN_MEGATRON_ARM, "normal", "default", "none")
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[1:3], ["-m", MEGATRON_DRIVER_MODULE])
+        self.assertNotIn("torch.distributed.run", command)
+        self.assertNotIn("--pp", command)
 
     def test_the_megatron_driver_module_is_importable_as_a_module(self) -> None:
         # python -m needs the module to exist under the runner's PYTHONPATH;
@@ -1591,7 +1688,12 @@ TEST_CENSUS = {
     # trivial string unchanged, a pipelined one, agreement with the module
     # that composes it, and that the derived field is not resume-gated while
     # the spec it derives from is.
-    "test_parallelism_plumbing": 47,
+    # +3 with the two-GPU run: that a legal mesh now resolves rather than
+    # raising, that a single-GPU run still declares its two block regions at
+    # 80 invocations, that a pipelined run declares none, and that the
+    # scenario which already declared none is unaffected. One of the four
+    # replaces the refusal test.
+    "test_parallelism_plumbing": 50,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -1612,7 +1714,7 @@ TEST_CENSUS = {
     # per-rank rows and its spread warning.
     "test_throughput": 24,
 }
-TEST_CENSUS_TOTAL = 1423
+TEST_CENSUS_TOTAL = 1426
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
