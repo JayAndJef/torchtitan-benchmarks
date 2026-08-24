@@ -904,12 +904,19 @@ fallback coverage than the same arm at one rank.** Before publishing any
 `--pp 2` number that rests on a marker, read both ranks' traces by hand and
 say that you did.
 
-**Arm rule 7 at `--dp 2, --pp 1` has never been exercised.** A run without
-a pipeline still declares its regions, so the 80-invocations-per-window
-identity has to survive `fully_shard` wrapping compiled blocks and turning
-their parameters into DTensors. If Inductor repartitions, the arm fails --
-the safe direction, and nobody has read such a trace. Do not relax the rule
-to make the first one pass; find out what the trace says first.
+**Arm rule 7 holds at `--dp 2, --pp 1`, measured.** A run without a pipeline
+still declares its regions, so the 80-invocations-per-window identity has to
+survive `fully_shard` wrapping compiled blocks and turning their parameters
+into DTensors. On 2026-08-24 an operator ran `piper1b_rope/baseline` at
+`--dp 2 --ac none --compile-mode default`; it declared `forward_block` and
+`backward_block` at 80 each and passed. So the wrap does not make Inductor
+repartition the block graph, and the region identity is unchanged.
+
+**That is one arm, of one scenario, at one shape.** The other four
+region-declaring scenarios are unmeasured under a data-parallel degree, and
+so is every arm that carries an override. Should one fail, the failure is
+the safe direction: do not relax the rule to make it pass, read its trace
+first.
 
 **Under `--pp 2` a run declares no regions, so rule 7 guards nothing and
 rules 8 to 12 do.** `piper_block_regions` identifies a block graph by its
