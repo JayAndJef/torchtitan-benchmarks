@@ -407,10 +407,12 @@ PIPER_1B_MEGATRON = Scenario(
         Arm(
             name="baseline",
             description=(
-                "Megatron-LM + TE: bare GPTModel, THD packed attention, no "
-                "recompute. --ac never affects this arm; under cuda-graph "
-                "mode it uses Megatron's per-layer partial capture, which "
-                "covers far less of the step than titan's whole-block graphs"
+                "Megatron-LM + TE tuned BASE profile: native selective helper "
+                "compilation and fusions, including fastest-available TE fused "
+                "CE (not accepted by stock pretrain_gpt.py); bare GPTModel, "
+                "THD packed attention, no recompute. --ac never affects this "
+                "arm; cuda-graph uses Megatron's thinner per-layer partial "
+                "capture"
             ),
             launcher="megatron",
             validation="megatron",

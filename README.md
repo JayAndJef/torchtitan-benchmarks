@@ -105,6 +105,10 @@ diverge.
 # Run one arm only.
 ./run_bench.sh run <gpu-index> --scenario piper1b_qkv --arm fused_qkv
 
+# Run an ordered arm subset; repeat --arm once per selected arm.
+./run_bench.sh run <gpu-index> --scenario piper1b_megatron \
+    --arm baseline --arm titan_stock --ac none --compile-mode default
+
 # Run at the huge model shape (1 layer, dim 12288;
 # see benchmarks/models/piper_qwen3/shape.py).
 # Results are only comparable within one --model-size.

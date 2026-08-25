@@ -259,10 +259,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
         self.assertEqual(request.gpu, "2")
-        self.assertEqual(request.arm_name, "baseline")
+        self.assertEqual(request.arm_names, ("baseline",))
         self.assertEqual(
             request.extra_args,
             ("--debug.seed", "42", "--debug.deterministic"),
+        )
+        self.assertIn("Evaluate with:", result.output)
+
+    def test_run_collects_repeated_arms_in_command_line_order(self) -> None:
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(
+                PIPER_1B_ROPE.arm("helion"),
+                PIPER_1B_ROPE.arm("baseline"),
+            ),
+        )
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(
+                cli,
+                [
+                    "run",
+                    "2",
+                    "--scenario",
+                    "piper1b_rope",
+                    "--arm",
+                    "helion",
+                    "--arm",
+                    "baseline",
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            execute.call_args.args[0].arm_names, ("helion", "baseline")
         )
 
     def test_run_all_executes_then_evaluates_same_output(self) -> None:
@@ -278,7 +308,7 @@ class CliTests(unittest.TestCase):
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
-        self.assertIsNone(request.arm_name)
+        self.assertEqual(request.arm_names, ())
         evaluate.assert_called_once_with(out_dir, (), None)
 
     def test_all_scenarios_runs_each_scenario_under_one_timestamp(self) -> None:

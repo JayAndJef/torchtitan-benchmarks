@@ -1300,7 +1300,8 @@ TEST_CENSUS = {
     # the cli.add_command wiring exists to prevent, added when the CLI split
     # into main/e2e/kernel/rendering. +1 with the uncompiled compile mode:
     # the sweep skips a scenario that declines it, as it already does for ac.
-    "test_cli": 19,
+    # +1 for repeatable e2e --arm preserving command-line order.
+    "test_cli": 20,
     # 19 pre-fix, +2 for the two halves of the correctness verdict: a failed
     # gate fragment beside a clean exit code, and a timing worker that dies
     # after it writes. +2 more for the arm that measured nothing, as a
@@ -1689,7 +1690,10 @@ TEST_CENSUS = {
     # mesh, that dp 2 reaches the delegate with skip_dp false and states the
     # units it got back, that a delegate which wrapped nothing is refused,
     # and that a single-GPU run still logs no such line.
-    "test_runner": 57,
+    # +7 with repeatable e2e --arm: zero/one/many selection, duplicate and
+    # unknown refusals, the engine-aware compile table, and ordered
+    # execution/manifest/state/resume provenance.
+    "test_runner": 64,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -1769,9 +1773,11 @@ TEST_CENSUS = {
     # per-rank rows and its spread warning.
     # +4 that the tokens/s ratio names the two ranks it divided, matching
     # the caption on baseline_kernel_ratio.
-    "test_throughput": 28,
+    # +2 for baseline-free singleton absolutes and the retained refusal of a
+    # baseline-free multi-arm comparison.
+    "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1471
+TEST_CENSUS_TOTAL = 1481
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

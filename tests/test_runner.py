@@ -29,7 +29,7 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.results import stable_tps, training_metrics
-from benchmarks.e2e.runner import RunRequest, execute_run
+from benchmarks.e2e.runner import RunRequest, _resolve_run, execute_run, select_arms
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from dataclasses import replace
@@ -251,6 +251,137 @@ class ScenarioTests(unittest.TestCase):
                 [(r.name, r.phase, r.invocations_per_window) for r in scenario.regions],
                 [("backward_block", "backward", 80), ("forward_block", "forward", 80)],
             )
+
+
+class SelectedArmTests(unittest.TestCase):
+    """Repeated ``--arm`` is an ordered subset, never a second scenario."""
+
+    def setUp(self) -> None:
+        self.scenario = scenario_by_name("piper1b_megatron")
+        self.metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+            "megatron_git_rev": "megatron-rev",
+        }
+
+    def test_no_names_selects_the_complete_roster(self) -> None:
+        self.assertEqual(select_arms(self.scenario, ()), self.scenario.arms)
+
+    def test_one_name_selects_one_arm(self) -> None:
+        selected = select_arms(self.scenario, ("titan_stock",))
+        self.assertEqual([arm.name for arm in selected], ["titan_stock"])
+
+    def test_several_names_preserve_request_order(self) -> None:
+        selected = select_arms(
+            self.scenario, ("titan_stock", "baseline")
+        )
+        self.assertEqual(
+            [arm.name for arm in selected], ["titan_stock", "baseline"]
+        )
+
+    def test_a_duplicate_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"--arm repeats 'baseline'"):
+            select_arms(self.scenario, ("baseline", "baseline"))
+
+    def test_unknown_names_are_refused_together(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, r"has no arm\(s\) 'missing', 'also_missing'"
+        ):
+            select_arms(self.scenario, ("missing", "also_missing"))
+
+    def _resolve(self, names: tuple[str, ...], compile_mode: str):
+        request = RunRequest(
+            gpu="0",
+            scenario_name=self.scenario.name,
+            arm_names=names,
+            out_dir=Path("/tmp/selected-arm-test"),
+            compile_mode=compile_mode,
+            ac_mode="none",
+        )
+        return _resolve_run(request, {"PATH": os.environ["PATH"]})
+
+    def test_compile_mode_acceptance_depends_on_the_selected_engines(self) -> None:
+        cases = (
+            (("baseline", "titan_stock"), "default", True),
+            (("titan_stock",), "none", True),
+            (("baseline",), "none", False),
+            (("baseline", "titan_stock"), "none", False),
+            ((), "none", False),
+        )
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ) as hardware, mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            for names, compile_mode, allowed in cases:
+                with self.subTest(names=names, compile_mode=compile_mode):
+                    hardware.reset_mock()
+                    if allowed:
+                        resolved = self._resolve(names, compile_mode)
+                        self.assertEqual(
+                            [arm.name for arm in resolved[2]], list(names)
+                        )
+                        hardware.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(
+                            ValueError, "does not support compile mode 'none'"
+                        ):
+                            self._resolve(names, compile_mode)
+                        hardware.assert_not_called()
+
+    def test_order_reaches_execution_manifest_state_and_resume_gate(self) -> None:
+        launched: list[str] = []
+
+        def fake_process(command, **kwargs):
+            launched.append(Path(kwargs["stdout"].name).stem)
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ), mock.patch("benchmarks.e2e.runner.validate_arm"):
+            out_dir = Path(temporary) / "run"
+            execute_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name="piper1b_qkv",
+                    arm_names=("fused_qkv", "baseline"),
+                    out_dir=out_dir,
+                ),
+                process_runner=fake_process,
+                environment={"PATH": os.environ["PATH"]},
+            )
+            manifest = json.loads((out_dir / "manifest.json").read_text())
+            state = json.loads((out_dir / "run_state.json").read_text())
+            self.assertEqual(launched, ["fused_qkv", "baseline"])
+            self.assertEqual(
+                manifest["selected_arms"], ["fused_qkv", "baseline"]
+            )
+            self.assertEqual(
+                list(manifest["commands"]), ["fused_qkv", "baseline"]
+            )
+            self.assertEqual(
+                list(state["arms"]), ["fused_qkv", "baseline"]
+            )
+
+            with self.assertRaisesRegex(ValueError, "selected_arms"):
+                execute_run(
+                    RunRequest(
+                        gpu="0",
+                        arm_names=("baseline", "fused_qkv"),
+                        resume_dir=out_dir,
+                    ),
+                    process_runner=fake_process,
+                    environment={"PATH": os.environ["PATH"]},
+                )
 
 
 class ParallelizeTests(unittest.TestCase):
@@ -744,9 +875,14 @@ class MegatronScenarioTests(unittest.TestCase):
         self.assertEqual(baseline.launcher, "megatron")
         self.assertEqual(baseline.validation, "megatron")
         self.assertIn("--ac never affects this arm", baseline.description)
+        self.assertIn("tuned BASE profile", baseline.description)
+        self.assertIn("fastest-available TE fused CE", baseline.description)
+        self.assertIn(
+            "not accepted by stock pretrain_gpt.py", baseline.description
+        )
         self.assertEqual(scenario.supported_ac_modes, ("none",))
-        # The uncompiled mode names a titan treatment Megatron never has, so
-        # the scenario declines it rather than record it for every arm.
+        # The complete roster declines the titan-only uncompiled treatment;
+        # an explicit all-titan subset is the narrow runner-level exception.
         self.assertEqual(
             scenario.supported_compile_modes, ("default", "cuda-graph")
         )
@@ -959,7 +1095,7 @@ class UncompiledRunTests(unittest.TestCase):
                 RunRequest(
                     gpu="0",
                     scenario_name="piper1b_rope",
-                    arm_name="baseline",
+                    arm_names=("baseline",),
                     out_dir=out_dir,
                     compile_mode="none",
                 ),
@@ -988,7 +1124,7 @@ class UncompiledRunTests(unittest.TestCase):
                 execute_run(
                     RunRequest(
                         gpu="0",
-                        arm_name="baseline",
+                        arm_names=("baseline",),
                         resume_dir=out_dir,
                         compile_mode="default",
                     ),
@@ -1425,7 +1561,7 @@ class ResumeTests(unittest.TestCase):
             request = RunRequest(
                 gpu="0",
                 scenario_name="piper1b_rope",
-                arm_name="baseline",
+                arm_names=("baseline",),
                 out_dir=out_dir,
                 seq_len=512,
                 steps=60,
@@ -1441,7 +1577,7 @@ class ResumeTests(unittest.TestCase):
             resumed = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_name="baseline",
+                arm_names=("baseline",),
                 resume_dir=out_dir,
             )
             process = mock.Mock(side_effect=fake_process)
@@ -1485,7 +1621,7 @@ class ResumeTests(unittest.TestCase):
             incompatible = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_name="baseline",
+                arm_names=("baseline",),
                 resume_dir=out_dir,
                 steps=80,
             )
@@ -1499,7 +1635,7 @@ class ResumeTests(unittest.TestCase):
             conflicting_args = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_name="baseline",
+                arm_names=("baseline",),
                 resume_dir=out_dir,
                 extra_args=("--debug.seed", "7"),
             )
@@ -1513,7 +1649,7 @@ class ResumeTests(unittest.TestCase):
             conflicting_mode = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_name="baseline",
+                arm_names=("baseline",),
                 resume_dir=out_dir,
                 compile_mode="cuda-graph",
             )
@@ -1527,7 +1663,7 @@ class ResumeTests(unittest.TestCase):
             conflicting_ac = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_name="baseline",
+                arm_names=("baseline",),
                 resume_dir=out_dir,
                 ac_mode="none",
             )
@@ -1568,7 +1704,7 @@ class ResumeTests(unittest.TestCase):
                 RunRequest(
                     gpu="0",
                     scenario_name="piper1b_rope",
-                    arm_name="baseline",
+                    arm_names=("baseline",),
                     out_dir=out_dir,
                     compile_mode=mode,
                 ),
@@ -1584,7 +1720,7 @@ class ResumeTests(unittest.TestCase):
                 RunRequest(
                     gpu="0",
                     scenario_name=None,
-                    arm_name="baseline",
+                    arm_names=("baseline",),
                     resume_dir=out_dir,
                 ),
                 process_runner=retry_process,

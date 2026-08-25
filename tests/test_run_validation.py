@@ -54,7 +54,7 @@ class RunCompletionTests(unittest.TestCase):
             request = RunRequest(
                 gpu="0",
                 scenario_name="piper1b_rope",
-                arm_name="baseline",
+                arm_names=("baseline",),
                 out_dir=out_dir,
             )
             with self.assertRaisesRegex(RuntimeError, "structural validation"):

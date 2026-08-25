@@ -258,7 +258,7 @@ def _request(
     gpu: str,
     torchtitan_args: tuple[str, ...],
     *,
-    arm_name: str | None = None,
+    arm_names: tuple[str, ...] = (),
     resume_dir: Path | None = None,
     **options: Any,
 ) -> RunRequest:
@@ -268,7 +268,7 @@ def _request(
     return RunRequest(
         gpu=gpu,
         scenario_name=scenario_name,
-        arm_name=arm_name,
+        arm_names=arm_names,
         resume_dir=resume_dir,
         parallelism=parallelism,
         extra_args=(
@@ -297,19 +297,25 @@ def _evaluate(out_dir: Path, arms: tuple[str, ...], results_path: Path | None) -
 
 @click.command("run", context_settings=PASSTHROUGH_CONTEXT)
 @click.argument("gpu")
-@click.option("--arm", "arm_name", help="Run one arm instead of every arm.")
+@click.option(
+    "--arm",
+    "arm_names",
+    multiple=True,
+    help="Arm subset; repeat per arm. Omit to run every arm.",
+)
 @_execution_options
 @click.argument("torchtitan_args", nargs=-1, type=click.UNPROCESSED)
 def run_command(
     gpu: str,
-    arm_name: str | None,
+    arm_names: tuple[str, ...],
     torchtitan_args: tuple[str, ...],
     **options: Any,
 ) -> None:
     """Run and validate selected arms; pass TorchTitan arguments after --."""
-    result = _execute(_request(gpu, torchtitan_args, arm_name=arm_name, **options))
+    result = _execute(_request(gpu, torchtitan_args, arm_names=arm_names, **options))
     click.echo(f"\nAll selected arms validated: {result.out_dir}")
-    if "baseline" in (arm.name for arm in result.selected_arms):
+    selected_names = tuple(arm.name for arm in result.selected_arms)
+    if "baseline" in selected_names or len(selected_names) == 1:
         click.echo(f"Evaluate with: run_bench.sh evaluate {result.out_dir}")
 
 

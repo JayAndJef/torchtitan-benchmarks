@@ -533,8 +533,12 @@ def evaluate_run(
     """Evaluate profiler regions and end-to-end metrics for selected arms."""
     out_dir = out_dir.resolve()
     manifest, arms, declared_regions, warnings = load_run(out_dir, arms_override)
-    if "baseline" not in arms:
-        raise ValueError("comparison needs the baseline arm")
+    baseline = "baseline" if "baseline" in arms else None
+    if baseline is None and len(arms) != 1:
+        raise ValueError(
+            "comparison needs the baseline arm; only a one-arm run can "
+            "publish absolute metrics without it"
+        )
 
     per_rank: dict[str, dict[int, PooledMetrics]] = {}
     published_rank: dict[str, int] = {}
@@ -565,7 +569,9 @@ def evaluate_run(
         }
         for arm in arms
     }
-    baseline_kernel_ms = pooled["baseline"].kernel_ms_per_step
+    baseline_kernel_ms = (
+        pooled[baseline].kernel_ms_per_step if baseline is not None else None
+    )
     gpu_time = {}
     for arm in arms:
         kernel_ms = pooled[arm].kernel_ms_per_step
@@ -580,7 +586,9 @@ def evaluate_run(
             ),
             baseline_kernel_ratio=(
                 kernel_ms / baseline_kernel_ms
-                if kernel_ms is not None and baseline_kernel_ms
+                if baseline is not None
+                and kernel_ms is not None
+                and baseline_kernel_ms
                 else None
             ),
             launch_latency_us=pooled[arm].launch_latency_us,
@@ -609,22 +617,26 @@ def evaluate_run(
     # figure, and it would move the ratio a single-GPU run has always
     # published the moment a run has two ranks.
     for arm in arms:
-        if arm == "baseline":
+        if baseline is None or arm == baseline:
             continue
-        if gpu_time[arm].published_rank != gpu_time["baseline"].published_rank:
+        if gpu_time[arm].published_rank != gpu_time[baseline].published_rank:
             warnings.append(
                 f"{arm}: the 'vs base' ratio divides rank "
                 f"{gpu_time[arm].published_rank} by baseline rank "
-                f"{gpu_time['baseline'].published_rank}; each side is its own "
+                f"{gpu_time[baseline].published_rank}; each side is its own "
                 "busiest rank, so under a pipeline split the two hold "
                 "different partitions of the model. Read it as a ratio of "
                 "step costs, never as one component against itself"
             )
-    comparisons = {
-        arm: region_comparison(pooled["baseline"], pooled[arm], declared_regions)
-        for arm in arms
-        if arm != "baseline"
-    }
+    comparisons = (
+        {
+            arm: region_comparison(pooled[baseline], pooled[arm], declared_regions)
+            for arm in arms
+            if arm != baseline
+        }
+        if baseline is not None
+        else {}
+    )
     latencies = {
         arm: summary.launch_latency_us
         for arm, summary in gpu_time.items()
@@ -666,8 +678,10 @@ def evaluate_run(
     published_throughput_rank = {
         arm: _slowest_rank(by_rank) for arm, by_rank in throughput.items()
     }
-    baseline_median = throughput["baseline"].get(
-        published_throughput_rank["baseline"]
+    baseline_median = (
+        throughput[baseline].get(published_throughput_rank[baseline])
+        if baseline is not None
+        else None
     )
     training = {}
     for arm in arms:
@@ -683,7 +697,8 @@ def evaluate_run(
         )
         ratio = (
             median_tps / baseline_median
-            if median_tps is not None
+            if baseline is not None
+            and median_tps is not None
             and baseline_median is not None
             and baseline_median != 0
             else None
@@ -721,16 +736,16 @@ def evaluate_run(
     # each side of the ratio names its own slowest rank, and under a pipeline
     # split those two rank indices hold different partitions of the model.
     for arm in arms:
-        if arm == "baseline":
+        if baseline is None or arm == baseline:
             continue
         if (
             training[arm].published_rank
-            != training["baseline"].published_rank
+            != training[baseline].published_rank
         ):
             warnings.append(
                 f"{arm}: the tokens/s 'ratio' divides rank "
                 f"{training[arm].published_rank} by baseline rank "
-                f"{training['baseline'].published_rank}; each side is its "
+                f"{training[baseline].published_rank}; each side is its "
                 "own slowest rank, so under a pipeline split the two hold "
                 "different partitions of the model"
             )
@@ -927,9 +942,7 @@ def render_evaluation(result: EvaluationResult) -> str:
     lines.extend(_render_rank_throughput(result))
     lines.extend(_render_rank_split(result))
 
-    for arm in result.arms:
-        if arm == "baseline":
-            continue
+    for arm in result.comparisons:
         lines.extend(
             [
                 "",
@@ -956,15 +969,16 @@ def render_evaluation(result: EvaluationResult) -> str:
                 f"{row['span_cohens_d']:6.2f}"
             )
 
-    lines.extend(
-        [
-            "",
-            "Significance limitation: pooled compiled-region invocations share",
-            "training steps and layer structure. Welch/MWU p-values and Cohen's d",
-            "describe span distributions; they are not inference from",
-            "independent benchmark repetitions.",
-        ]
-    )
+    if result.comparisons:
+        lines.extend(
+            [
+                "",
+                "Significance limitation: pooled compiled-region invocations share",
+                "training steps and layer structure. Welch/MWU p-values and Cohen's d",
+                "describe span distributions; they are not inference from",
+                "independent benchmark repetitions.",
+            ]
+        )
 
     lines.extend(["", "loss trajectories (sanity check, not a measurement):"])
     for arm in result.arms:

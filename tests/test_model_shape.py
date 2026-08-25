@@ -1116,7 +1116,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             out_dir = Path(temporary) / "run"
             self._run(
                 scenario_name="piper1b_attention",
-                arm_name="baseline",
+                arm_names=("baseline",),
                 out_dir=out_dir,
                 ac_mode="none",
                 model_size="huge",
@@ -1147,7 +1147,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                     RunRequest(
                         gpu="0",
                         scenario_name="piper1b_rope",
-                        arm_name="baseline",
+                        arm_names=("baseline",),
                         out_dir=out_dir,
                     ),
                     process_runner=_fake_process(_size_line(PIPER_1B)),
@@ -1167,7 +1167,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             out_dir = Path(temporary) / "run"
             self._run(
                 scenario_name="piper1b_attention",
-                arm_name="baseline",
+                arm_names=("baseline",),
                 out_dir=out_dir,
                 ac_mode="none",
                 model_size="huge",
@@ -1176,7 +1176,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "model_size"):
                 self._run(
                     scenario_name=None,
-                    arm_name="baseline",
+                    arm_names=("baseline",),
                     resume_dir=out_dir,
                     ac_mode="none",
                     model_size="normal",
@@ -1185,7 +1185,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             # Omitting --model-size on a resume inherits the recorded value.
             self._run(
                 scenario_name=None,
-                arm_name="baseline",
+                arm_names=("baseline",),
                 resume_dir=out_dir,
                 ac_mode="none",
             )

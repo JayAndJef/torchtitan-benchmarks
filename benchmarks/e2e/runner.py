@@ -75,7 +75,9 @@ class RunRequest:
     # scenario under whatever label the operator assumed, which is a wrong
     # result rather than a missing one. ``_resolve_run`` refuses it otherwise.
     scenario_name: str | None = None
-    arm_name: str | None = None
+    # Empty means every scenario arm. A non-empty tuple is an ordered subset,
+    # matching repeated ``run --arm NAME`` options exactly.
+    arm_names: tuple[str, ...] = ()
     hardware: str = "auto"
     out_dir: Path | None = None
     resume_dir: Path | None = None
@@ -114,6 +116,31 @@ class RunResult:
     scenario: Scenario
     selected_arms: tuple[Arm, ...]
     resumed: bool
+
+
+def select_arms(scenario: Scenario, names: tuple[str, ...]) -> tuple[Arm, ...]:
+    """Resolve an ordered arm subset, rejecting ambiguous requests early."""
+    if not names:
+        return scenario.arms
+
+    duplicates = tuple(
+        name for index, name in enumerate(names) if name in names[:index]
+    )
+    if duplicates:
+        raise ValueError(
+            "--arm repeats "
+            + ", ".join(repr(name) for name in dict.fromkeys(duplicates))
+        )
+
+    available = {arm.name: arm for arm in scenario.arms}
+    unknown = tuple(name for name in names if name not in available)
+    if unknown:
+        raise ValueError(
+            f"scenario {scenario.name!r} has no arm(s) "
+            + ", ".join(repr(name) for name in unknown)
+            + f". Available: {', '.join(available)}"
+        )
+    return tuple(available[name] for name in names)
 
 
 def workload_with_overrides(
@@ -252,7 +279,22 @@ def _resolve_run(
         )
     shape = PIPER_SHAPES[model_size]
     scenario = replace(scenario, workload=workload)
-    if compile_mode not in scenario.supported_compile_modes:
+    arms = select_arms(scenario, request.arm_names)
+    # A scenario's supported modes describe a run of its complete roster. An
+    # explicit subset may narrow away the engine that cannot honor a mode. The
+    # only such treatment today is ``none``: it removes TorchTitan's whole-
+    # block compile and has no truthful meaning for Megatron. Keep the subset
+    # exception as narrow as the treatment itself, so a future scenario mode
+    # does not become legal merely because ``--arm`` was present.
+    selected_titan_only_none = (
+        bool(request.arm_names)
+        and compile_mode in UNCOMPILED_COMPILE_MODES
+        and all(arm.launcher == "torchtitan" for arm in arms)
+    )
+    if (
+        compile_mode not in scenario.supported_compile_modes
+        and not selected_titan_only_none
+    ):
         raise ValueError(
             f"scenario {scenario.name!r} does not support compile mode "
             f"{compile_mode!r} (supported: "
@@ -263,7 +305,6 @@ def _resolve_run(
             f"scenario {scenario.name!r} does not support ac mode {ac_mode!r} "
             f"(supported: {', '.join(scenario.supported_ac_modes)})"
         )
-    arms = (scenario.arm(request.arm_name),) if request.arm_name else scenario.arms
 
     # The fourth global axis, resolved and checked before any host probe.
     # ``engines`` is the launcher set of the arms this run will really start,

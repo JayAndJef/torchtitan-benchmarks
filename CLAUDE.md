@@ -199,7 +199,7 @@ test. Every one of the four files carries a digest in
 
 ```bash
 ./run_bench.sh scenarios                    # list scenarios and arms
-./run_bench.sh run <gpu> --scenario NAME [OPTIONS] [-- TORCHTITAN_ARGS]
+./run_bench.sh run <gpu> --scenario NAME [--arm NAME]... [OPTIONS] [-- TORCHTITAN_ARGS]
 ./run_bench.sh run-all <gpu> --scenario NAME [OPTIONS] [-- TORCHTITAN_ARGS]
 ./run_bench.sh evaluate <out_dir> [--arm NAME]... [--results PATH]
 ```
@@ -264,9 +264,10 @@ the launcher itself: `python -m torch.distributed.run` with the same flags.
 - Both need a `--scenario`. There is no default, and an omitted one fails the
   run. `run-all` is the one exception, and only when `--all-scenarios` or
   `--resume` supplies the name instead.
-- `run` accepts `--arm NAME` to execute a single arm; it is **not**
-  repeatable, unlike `kernel-bench --arm` and `evaluate --arm`. `run-all`
-  does not accept it; it always runs every arm in the scenario.
+- `run` accepts repeatable `--arm NAME` options to execute an ordered subset;
+  omitting them executes every arm. Duplicate and unknown names fail before a
+  host probe or output-directory creation. `run-all` does not accept the
+  selector; it always runs every arm in the scenario.
 
 - `run-all` accepts `--resume <out_dir>`; `--resume` and `--out` are mutually
   exclusive.
@@ -330,7 +331,7 @@ engine-neutral. It has three values, and `default` remains the default:
 |---|---|---|
 | `default` | per-block `torch.compile`, mode default | TE modules uncompiled and uncaptured (its `@jit_fuser` regions still compile) |
 | `cuda-graph` | per-block `torch.compile(mode="reduce-overhead")` | Megatron's local per-layer partial graphs |
-| `none` | no `torch.compile` at all: no per-block compile, no compiled loss | **unsupported; the scenario declines the mode** |
+| `none` | no `torch.compile` at all: no per-block compile, no compiled loss | **unsupported whenever the arm is selected** |
 
 **`none` answers "what does per-block compile buy end to end?", and nothing
 else did.** Every titan number this repo published before it is compiled per
@@ -346,9 +347,13 @@ honest reason the 1-layer shapes and `piper1b_megatron` declare none. So rule
 way**: `validate_arm` requires the compile log line to be *absent*, so a run
 that silently compiled cannot be published as eager.
 
-**`piper1b_megatron` declines `none`**, through the new
-`Scenario.supported_compile_modes` field, exactly as it declines `--ac sac`.
-The mode names a titan treatment -- whole-block `torch.compile` -- and
+**The complete `piper1b_megatron` roster declines `none`**, through
+`Scenario.supported_compile_modes`, exactly as it declines `--ac sac`. An
+explicit `run --arm ...` subset may use `none` only when every selected arm is
+TorchTitan; this is how one output directory measures `baseline` plus
+`titan_stock` at `default` and another measures only `titan_stock` at `none`
+without mislabelling Megatron. Selecting any Megatron arm keeps the hard
+error. The mode names a titan treatment -- whole-block `torch.compile` -- and
 Megatron never has one, so there is nothing to turn off. Turning megatron's
 own fusion off instead was measured on 2026-08-22 and rejected:
 `@jit_fuser` binds `torch.compile` at decoration time and `import
@@ -2697,7 +2702,7 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The last full run at this rev discovered 1558 tests and skipped 11. Re-derive
+The last full run at this rev discovered 1568 tests and skipped 15. Re-derive
 those counts rather than quoting them; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add

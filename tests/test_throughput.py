@@ -230,6 +230,50 @@ class SingleRankIsUnchangedTests(unittest.TestCase):
         self.assertEqual(result.warnings, ())
 
 
+class BaselineFreeSingletonTests(unittest.TestCase):
+    """An eager TorchTitan-only run publishes absolutes, not fake ratios."""
+
+    def test_singleton_evaluation_omits_every_baseline_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {"titan_stock": _step_lines(tps=1100)},
+                {"world_size": 1, "pp": 1},
+            )
+            result = evaluate_run(out_dir)
+            report = render_evaluation(result)
+
+        self.assertEqual(result.arms, ("titan_stock",))
+        self.assertEqual(
+            result.training["titan_stock"].stable_tokens_per_second, 1100
+        )
+        self.assertIsNone(result.training["titan_stock"].baseline_ratio)
+        self.assertIsNone(result.gpu_time["titan_stock"].baseline_kernel_ratio)
+        self.assertEqual(result.comparisons, {})
+        self.assertNotIn("compiled-region distributions", report)
+        self.assertNotIn("Significance limitation", report)
+        machine = result.to_dict()
+        self.assertIsNone(machine["training"]["titan_stock"]["baseline_ratio"])
+        self.assertIsNone(
+            machine["gpu_time"]["titan_stock"]["baseline_kernel_ratio"]
+        )
+
+    def test_several_baseline_free_arms_still_need_a_comparison_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {
+                    "titan_stock": _step_lines(tps=1100),
+                    "titan_other": _step_lines(tps=1200),
+                },
+                {"world_size": 1, "pp": 1},
+            )
+            with self.assertRaisesRegex(ValueError, "only a one-arm run"):
+                evaluate_run(out_dir)
+
+
 class TwoRanksPublishTheSlowestTests(unittest.TestCase):
     """A schedule holds the ranks in step, so the mesh runs at the slowest."""
 
