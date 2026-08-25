@@ -306,8 +306,9 @@ def _resolve_run(
         # ``(n_layers / pp) * n_microbatches * profiler_active``, which is a
         # different number and is not the same number on every rank under an
         # interleaved schedule. Deriving a per-rank count instead would be
-        # rule 7 rewritten rather than rule 7 applied, and nobody has read a
-        # pipelined trace to check what is unique in one.
+        # rule 7 rewritten rather than rule 7 applied. Real pipelined traces
+        # exist, but no trace analysis has established a unique per-rank
+        # invocation identity that could replace this declaration safely.
         regions_apply = (
             shape.supports_block_regions
             and compile_mode not in UNCOMPILED_COMPILE_MODES

@@ -1,9 +1,11 @@
 """CPU-only tests for the parallelism run axis.
 
-``benchmarks/e2e/parallelism.py`` lands before anything imports it, so this
-file is the whole check on it: every one of the fourteen validator rules is
-exercised in both directions, the four derivations are pinned, and the
-schedule registry is checked against the PyTorch classes it names.
+``benchmarks/e2e/parallelism.py`` owns the axis itself, while the CLI and
+runner thread it through the harness. This file checks the module-level
+contract: every one of the fourteen validator rules is exercised in both
+directions, the four derivations are pinned, and the schedule registry is
+checked against the PyTorch classes it names. Plumbing and runtime validation
+have their own test modules.
 
 Two hazards drive the shape of the file. A rule that **admits an illegal
 mesh** publishes a number under a topology the run did not have. A rule that

@@ -5,10 +5,11 @@ One ``ParallelismSpec`` describes a whole run, exactly as ``--model-size``,
 shares it, so the world size, the pipeline schedule and the microbatch count
 are properties of the run rather than of an arm.
 
-**Nothing imports this module yet.** It lands inert on purpose: the CLI, the
-runner, the launcher and the manifest are wired to it in a later commit. A
-reviewer can therefore check every rule below on a CPU, before any of it can
-change a number. The compile-mode axis landed the same way.
+The CLI, runner, launcher, manifest writer, validation, and evaluation paths
+all import this module. The spec is resolved and validated in the parent
+before any host probe, then the same object builds both engines' command lines
+and the manifest record. The rules remain torch-free and directly testable on
+a CPU.
 
 This is e2e-only. ``benchmarks/models/piper_qwen3/shape.py`` sits under
 ``models/`` because two engines build from it; a parallelism degree has one
@@ -66,8 +67,10 @@ supported. Adding one means adding it to ``world_size``, to
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` outright, and
 rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
-measurement: only ``1F1B`` at ``pp <= 2`` is targeted by this pass, and no
-multi-rank run has happened at all.
+measurement: only ``1F1B`` at ``pp <= 2`` is targeted by this pass. Real
+``pp2``, ``dp2``, and ``dp2 x pp2`` correctness runs have passed on both
+engines; no parallel timing is citable because those cells ran on a loaded
+host and were not repeated on an idle one.
 """
 
 from __future__ import annotations
@@ -661,10 +664,11 @@ def validate_parallelism(
             "--pp-microbatch-size"
         )
 
-    # 13. No parallel run has ever been captured. The DP case has a recorded
-    #     reason -- FSDP2 frees and reallocates the unsharded parameters each
-    #     step, which moves their addresses and forces a re-capture every
-    #     step -- and the failure mode is slow rather than broken, so
+    # 13. No parallel CUDA-graph run has ever been captured. The DP case has
+    #     a recorded reason -- FSDP2 frees and reallocates the unsharded
+    #     parameters each step, which moves their addresses and forces a
+    #     re-capture every step -- and the failure mode is slow rather than
+    #     broken, so
     #     validation rule 9 would still pass and the report would publish a
     #     slow number under a cuda-graph label. PP has no such record and is
     #     refused with it: one rule reads more clearly than two, and a

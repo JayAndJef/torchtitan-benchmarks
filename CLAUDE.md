@@ -232,18 +232,21 @@ compares `dp * pp` against the device count: "parallelism world size 1 (dp 1
 x pp 1) does not match the 2 device(s) requested". That lands before any
 host probe.
 
-**Two `--pp 2` runs have executed, one arm each, and no data-parallel run
-has.** On 2026-08-23 at rev `d793b9e` an operator ran `piper1b_megatron` at
-`--pp 2 --pp-schedule 1F1B` twice: `baseline` (the megatron engine) and
-`titan_stock`. Both arms completed and both passed `validate_arm`, so every
-rule below held on a real two-rank run of each engine. Their traces are the
-only multi-rank traces this repo has, and they are what the NCCL split and
-arm rule 6's evidence rest on.
+**Seven individual-arm multi-rank runs have executed and passed
+`validate_arm`.** On 2026-08-23 `piper1b_megatron` ran `baseline` (megatron)
+and `titan_stock` at each of `pp2`, `dp2`, and `dp2 x pp2`; on 2026-08-24
+`piper1b_rope/baseline` ran at `dp2` on TorchTitan. The `pp2` traces are the
+evidence behind the NCCL classifier and arm rule 6 discussion below. The
+data-parallel runs additionally printed the same `grad_norm` on ranks that
+read different slices, which is stronger evidence of gradient reduction
+than a trace marker alone.
 
-**What that does not cover**: no `--dp` run of either engine, no `run-all`
-at a mesh, no evaluation, and only one arm per engine. Every claim about
-the data-parallel axis is still what the code does, read from the code. The
-GPU gate for it is a separate task.
+**What that does not cover**: no `run-all` or `--resume` at a mesh, no
+evaluation across several parallel arms, and no repeated cell on an idle
+host. The runs are correctness gates, not citable timings. Arm rule 7 has
+run under `fully_shard` for one arm of one region-declaring scenario; the
+other four such scenarios and every override arm remain unmeasured under a
+data-parallel degree.
 
 **How each engine starts its ranks differs, and only one of them is the
 harness's own work.** The titan arms run `./run_train.sh`, which already
@@ -853,8 +856,9 @@ are not comparable; `--resume` refuses to mix them.
     built it. Cite the two together, and do not read rule 13 alone as proof
     that gradients were reduced.
 
-    **The marker is untested against megatron above `dp` 1, and it can fail
-    an honest run.** mcore reduces its buckets inside a
+    **The marker passed real megatron runs at `dp2` and at `dp2 x pp2` for
+    the normal shape. It remains untested at other shapes and bucketings,
+    and it can fail an honest run.** mcore reduces its buckets inside a
     `_coalescing_manager`, and a grouped NCCL launch can surface as
     `ncclDevKernel_Generic` rather than naming the operation. That is the
     safe failure direction, but read a rule 13 failure on the megatron arm
@@ -1052,9 +1056,10 @@ answering the question once a run has more than one rank:
   carries 35 collective device kernels in its window, of 21,885 and 21,581
   kernel-category events, every one named `ncclDevKernel_*` and every one
   categorised as a kernel. The three names there are `..._SendRecv`,
-  `..._Broadcast_RING_LL` and `..._AllReduce_Sum_bf16_RING_LL`. **No
-  data-parallel run has been read**, so a fourth name could appear there;
-  re-check the constant before citing a data-parallel split.
+  `..._Broadcast_RING_LL` and `..._AllReduce_Sum_bf16_RING_LL`. **That exact
+  name census was performed on the pipeline trace, not on the data-parallel
+  traces.** A data-parallel trace could carry an additional name, so re-check
+  the constant before citing a data-parallel split.
 - `busy_kernel_ms_per_step`. The interval-union basis. Summing double-counts
   whatever overlaps, which already overstates megatron's five streams
   against titan's one by about 6.5%, and a collective adds a stream of its
@@ -2647,10 +2652,13 @@ Faithfulness guarantees, all verified:
   over the world it would report `dp x param_count`. Each rank writes its
   own `rank<n>_trace.json.gz`.
 
-  **`--pp 2` has run and `--dp 2` has not.** The pipeline half was gated on
-  2026-08-23 (`baseline` at `--pp 2 --pp-schedule 1F1B`, completed and
-  validated). No megatron run has ever had a data-parallel degree, and that
-  GPU gate is a separate task.
+  **`--pp 2`, `--dp 2`, and their four-rank composition have run.** On
+  2026-08-23 the `baseline` arm completed and passed `validate_arm` at
+  `--pp 2 --pp-schedule 1F1B`, at `--dp 2`, and at
+  `--dp 2 --pp 2 --pp-schedule 1F1B`. In both data-parallel cells every rank
+  passed arm rule 13, and ranks reading different data slices printed the
+  same `grad_norm`. These are correctness results only: the host was loaded,
+  no cell was repeated on an idle box, and no timing number is citable.
 
 Environment notes: TE's native tuned RMSNorm kernels fail to launch on this
 box's cuda-compat stack, so `configure_te_environment` routes norms through
@@ -2689,8 +2697,8 @@ clipping each step.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The suite is CPU-only and runs 1552 tests in about 48 seconds at this rev.
-Re-derive that count rather than quoting it; `tests/test_migration_contract.py`
+The last full run at this rev discovered 1558 tests and skipped 11. Re-derive
+those counts rather than quoting them; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
 deltas. The census does not cover every module -- `test_import_boundaries`,
@@ -2866,8 +2874,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
   older directory can and cannot still be used for.
 - Put investigation notes and hardware-specific results in `reports/`, which is
   gitignored. Keep them out of `README.md` and this file.
-- After changing anything in `benchmarks/`, run the test suite. It is CPU-only
-  and takes about 48 seconds at 1552 tests.
+- After changing anything in `benchmarks/`, run the full test suite. GPU-gated
+  tests skip themselves when their prerequisites are unavailable; re-derive
+  the test and skip counts from the run.
 - **Do not let "declared" become "measured".** Much of the kernel registry has
   never executed: 8 of the 16 cross-engine scenarios have never had an arm
   built, the single-engine `lm_head` has not run, 29 of the 71 declared arms

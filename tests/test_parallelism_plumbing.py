@@ -705,8 +705,9 @@ class ResolveRunTests(unittest.TestCase):
         invocations per window, and that count IS the region's identity. A
         rank of a two-stage pipeline holds half the layers and runs each of
         them once per microbatch, so it never reaches 80. Deriving a
-        per-rank count instead would be rule 7 rewritten rather than applied,
-        and nobody has read a pipelined trace to see what is unique in one.
+        per-rank count instead would be rule 7 rewritten rather than applied.
+        Real pipelined traces exist, but no trace analysis has established a
+        unique per-rank invocation identity that could replace this rule.
         """
         scenario = self._resolve(
             gpu="0,1", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B")
