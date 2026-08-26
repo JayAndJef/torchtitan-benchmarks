@@ -2887,6 +2887,18 @@ instead, and each answers a way stock Megatron does not fit the harness:
   shim was called anything but once, and a run that wrote fewer windows than
   the workload declares, so a shim that did not install fails both guards.
 
+  **`--steps` must be a whole number of profiler cycles for this arm, and
+  `stock_megatron_flags` refuses anything else.** Megatron steps the
+  profiler at the top of every pass and stops it at the bottom of one, so
+  an iteration after the stop transits a dead Kineto session. Ending the
+  profiler early only delays that; ending it at `--train-iters` trades it
+  for a truncated window, which `assert_windows_written` does not catch
+  because it refuses a short count and not a short window. A whole number
+  of cycles makes `--profile-step-end` equal `--train-iters`, so no
+  iteration follows the stop. With the 40-step floor and `profile_freq` 20,
+  the accepted values are 40, 60, 80 and so on. **The refusal is
+  parent-side**, so a bad `--steps` fails before a GPU is claimed.
+
   **The schedule carries `skip_first=1`, and that is a comparability
   property rather than a detail.** The two engines step the profiler at
   opposite ends of the loop body -- Megatron first, TorchTitan after
