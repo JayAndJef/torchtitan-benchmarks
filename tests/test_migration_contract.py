@@ -1738,6 +1738,24 @@ TEST_CENSUS = {
     # line multiplies by dp. The norm-reduction test now names the pipeline
     # degree and its group rather than the world size.
     "test_megatron_driver": 29,
+    # The stock Megatron-LM driver package, checked on the CPU: the flag
+    # list it builds, the flags it deliberately omits by name, the
+    # microbatch geometry it packs, the eight keys of one microbatch dict,
+    # the cu_seqlens padding, the exhaustion refusal, the run refusals (a
+    # mode other than default, a schedule other than 1F1B, a virtual
+    # pipeline degree), the typing shim, the profiler shim, the step-line
+    # shim, the pipeline loss broadcast and the data-parallel wrapper
+    # marker. Every marker string it declares is pinned here too, because
+    # the driver module is the log-line contract and imports no megatron.
+    "test_megatron_stock_driver": 68,
+    # The wiring of the same scenario: the whole stock argv frozen at the
+    # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
+    # token on it, the two less-layers flags on its titan arm, the mode and
+    # ac modes the scenario declines, the titan-only subset that may still
+    # run uncompiled, and the character-for-character diff between the
+    # driver's own printed lines and the megatron_stock validation
+    # profile's markers.
+    "test_megatron_stock_launch": 53,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1910,7 +1928,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1508
+TEST_CENSUS_TOTAL = 1629
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
