@@ -364,6 +364,11 @@ def install_step_log_shim(
     because the arm is otherwise unmeasurable. It prints one extra line per
     rank per step and changes nothing Megatron computes.
 
+    The loss is broadcast from the last pipeline stage, so every rank
+    prints the real number rather than an absent field. ``training_log``
+    runs on every rank once per iteration, so the collective is safe: every
+    member of the pipeline group reaches it the same number of times.
+
     **Step 1 carries the setup.** The clock starts when this function runs,
     which is before ``pretrain()`` builds the model, so step 1's rate and
     its peak memory include the build. ``results.py``'s ``stable_tps``
@@ -436,7 +441,7 @@ def install_step_log_shim(
         print(
             step_log_line(
                 step=iteration,
-                loss=loss_value(loss_dict),
+                loss=broadcast_pipeline_loss(loss_value(loss_dict)),
                 grad_norm=None if grad_norm is None else float(grad_norm),
                 memory_bytes=reserved,
                 device_total_bytes=state["total"],
@@ -454,6 +459,49 @@ def install_step_log_shim(
         megatron_training.training_log = original
 
     return uninstall
+
+
+def broadcast_pipeline_loss(loss: "Any") -> "Any":
+    """The last pipeline stage's loss, on every rank.
+
+    Only the last stage computes one, and stock Megatron leaves the other
+    stages with an empty ``loss_dict``. A rank with no loss would print no
+    loss field, and ``loss_visible_rank`` -- TorchTitan's own arithmetic,
+    ``(world_size // pp) * (pp - 1)`` -- does not always name a last-stage
+    rank of Megatron's own layout. Broadcasting removes the question: every
+    rank prints the same real number, exactly as the tuned driver does.
+
+    The value the last stage holds is already the mean over the
+    data-parallel group, because ``train_step`` all-reduces it there. So
+    this broadcast alone makes the printed loss mean what TorchTitan's
+    ``global_avg_loss`` means.
+
+    Returns ``None`` when no rank held a loss, which is not a state a
+    training step reaches.
+    """
+    import torch
+
+    if not torch.distributed.is_initialized():
+        return loss
+
+    from megatron.core import mpu
+
+    group = mpu.get_pipeline_model_parallel_group()
+    if torch.distributed.get_world_size(group=group) == 1:
+        return loss
+    # The last stage is the source. Its global rank is the last entry of
+    # this rank's own pipeline group, which every rank of that group agrees
+    # on, so no rank has to guess.
+    ranks = torch.distributed.get_process_group_ranks(group)
+    source = ranks[-1]
+    device = torch.cuda.current_device()
+    payload = torch.tensor(
+        [0.0 if loss is None else float(loss), 0.0 if loss is None else 1.0],
+        dtype=torch.float32,
+        device=device,
+    )
+    torch.distributed.broadcast(payload, source, group=group)
+    return float(payload[0]) if float(payload[1]) > 0 else None
 
 
 def main(argv: list[str] | None = None) -> int:

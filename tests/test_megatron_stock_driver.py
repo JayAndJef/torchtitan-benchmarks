@@ -1077,6 +1077,36 @@ class StepLineTest(unittest.TestCase):
         self.assertIsNone(train.loss_value({"skipped iterations": 0}))
 
 
+class LossBroadcastTest(unittest.TestCase):
+    """The loss every rank prints, and the path it comes through.
+
+    Only the last pipeline stage computes a loss. A rank without one would
+    print no loss field, and ``benchmarks/e2e/results.py`` reads the
+    trajectory from whichever rank it selects. So the driver broadcasts.
+    """
+
+    def test_the_loss_is_unchanged_without_a_process_group(self) -> None:
+        """One rank is the whole pipeline, so there is nobody to ask."""
+        self.assertEqual(train.broadcast_pipeline_loss(1.25), 1.25)
+        self.assertIsNone(train.broadcast_pipeline_loss(None))
+
+    def test_the_step_line_takes_its_loss_from_the_broadcast(self) -> None:
+        """The shim must not print this rank's own empty ``loss_dict``.
+
+        A rank that is not the last stage holds no loss. Printing
+        ``loss_value(loss_dict)`` directly gives that rank a line with no
+        loss field, which ``LOSS_METRIC`` does not match.
+        """
+        inner = [
+            const
+            for const in train.install_step_log_shim.__code__.co_consts
+            if isinstance(const, types.CodeType)
+            and const.co_name == "replacement"
+        ]
+        self.assertEqual(len(inner), 1)
+        self.assertIn("broadcast_pipeline_loss", inner[0].co_names)
+
+
 class HarnessArgumentTest(unittest.TestCase):
     """The harness group parses the flags ``flags.py`` emits."""
 
