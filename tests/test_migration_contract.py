@@ -121,6 +121,8 @@ E2E_INVENTORY = {
         "titan_lm_head",
         "titan_swiglu_lm_head",
     ),
+    # The stock Megatron-LM scenario. Two arms, one per engine.
+    "piper_megatron_stock": ("baseline", "titan_stock"),
 }
 
 KERNEL_INVENTORY = {
@@ -533,8 +535,19 @@ class KernelBuilderPathTests(unittest.TestCase):
 # 4. Registry keys dispatch.
 # --------------------------------------------------------------------------
 
-LAUNCHERS = ("torchtitan", "megatron")
-VALIDATION_KEYS = ("torchtitan", "megatron")
+LAUNCHERS = ("torchtitan", "megatron", "megatron_stock")
+VALIDATION_KEYS = ("torchtitan", "megatron", "megatron_stock")
+
+# The launchers whose scenario supports only ``--ac none``. Two calls below
+# pick an ac mode from it, so that a builder does not refuse the mode and
+# hide what the call meant to exercise.
+#
+# **Named one by one, and not matched as a ``megatron`` prefix.** Neither
+# call asserts anything about the mode it picks, so a prefix would not fail;
+# it would silently give a future ``megatron_*`` launcher the ``none`` path
+# and stop exercising ``sac`` for it. An explicit set makes a new launcher
+# an edit here, which is where the decision belongs.
+AC_NONE_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
 
 
 class RegistryDispatchTests(unittest.TestCase):
@@ -554,9 +567,12 @@ class RegistryDispatchTests(unittest.TestCase):
                         Path("/tmp/arm-dir"),
                         (),
                         "default",
-                        # The megatron launcher refuses any other ac mode, and
-                        # the scenario carrying it supports only "none".
-                        "none" if arm.launcher == "megatron" else "sac",
+                        # Both megatron launchers refuse any other ac mode,
+                        # and the scenarios carrying them support only
+                        # "none".
+                        "none"
+                        if arm.launcher in AC_NONE_LAUNCHERS
+                        else "sac",
                     )
                     self.assertTrue(command)
                     self.assertIsInstance(command, list)
@@ -965,7 +981,7 @@ class GoldenCommandTests(unittest.TestCase):
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
                 with self.subTest(scenario=scenario.name, arm=arm.name):
-                    megatron = arm.launcher == "megatron"
+                    megatron = arm.launcher in AC_NONE_LAUNCHERS
                     positional = (
                         scenario.workload,
                         arm,
@@ -1834,7 +1850,12 @@ TEST_CENSUS = {
     # from both sides, and the specs whose verdict moved -- world size 5,
     # which nothing refuses now, and pp 3, which rule 7 refuses in the cap's
     # place.
-    "test_parallelism": 107,
+    # +5 for the launcher classification MEGATRON_LAUNCHERS needs: every
+    # registry launcher is classified, the set names no launcher the
+    # registry dropped, it excludes the titan launcher, each member trips
+    # rule 5 on its own, and a launcher outside the set keeps a PyTorch-only
+    # schedule.
+    "test_parallelism": 112,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the five CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -1889,7 +1910,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1503
+TEST_CENSUS_TOTAL = 1508
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

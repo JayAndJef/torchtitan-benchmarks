@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.e2e.parallelism import (
     MAX_PP,
     MAX_WORLD_SIZE,
+    MEGATRON_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
@@ -42,7 +43,12 @@ from benchmarks.e2e.parallelism import (
     titan_mesh,
     validate_parallelism,
 )
-from benchmarks.e2e.registry import COMPILE_MODES, EXECUTION_MODEL, Workload
+from benchmarks.e2e.registry import (
+    COMPILE_MODES,
+    EXECUTION_MODEL,
+    SCENARIOS,
+    Workload,
+)
 from benchmarks.models.piper_qwen3.shape import (
     PIPER_SHAPES,
     PiperShape,
@@ -664,6 +670,81 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
                         compile_mode="none",
                         engines=("torchtitan", "megatron"),
                     )
+
+
+class MegatronLauncherSetTest(unittest.TestCase):
+    """Rule 5 asks "does this run drive Megatron-LM", and this set answers it.
+
+    The rule tested one launcher name by equality until a second Megatron-LM
+    launcher arrived. The second one then walked past the rule, and a refusal
+    inside a command builder covered the hole instead. These tests make the
+    classification a declaration rather than a spelling.
+    """
+
+    def test_every_registry_launcher_is_classified(self):
+        """The guard the declared set needs.
+
+        A launcher that is neither ``torchtitan`` nor a member of
+        ``MEGATRON_LAUNCHERS`` has never been classified, so nobody has
+        decided whether rule 5 applies to it. Fail here, where the decision
+        is one edit, rather than inside a training subprocess.
+        """
+        launchers = {
+            arm.launcher
+            for scenario in SCENARIOS.values()
+            for arm in scenario.arms
+        }
+        unclassified = launchers - MEGATRON_LAUNCHERS - {"torchtitan"}
+        self.assertEqual(
+            unclassified,
+            set(),
+            "add each launcher to MEGATRON_LAUNCHERS, or to the titan side, "
+            "before rule 5 has to read it",
+        )
+
+    def test_the_set_holds_only_launchers_the_registry_declares(self):
+        """The other direction. A name nobody uses is a name that went
+        stale, and rule 5 would then read a set that describes no arm."""
+        launchers = {
+            arm.launcher
+            for scenario in SCENARIOS.values()
+            for arm in scenario.arms
+        }
+        self.assertEqual(MEGATRON_LAUNCHERS - launchers, set())
+
+    def test_the_set_does_not_hold_the_titan_launcher(self):
+        self.assertNotIn("torchtitan", MEGATRON_LAUNCHERS)
+
+    def test_rule_five_reads_every_member_of_the_set(self):
+        """Each Megatron-LM launcher alone must trip rule 5.
+
+        A membership test that read only the first name would pass with any
+        one launcher present, so ask each of them on its own.
+        """
+        for launcher in sorted(MEGATRON_LAUNCHERS):
+            with self.subTest(launcher=launcher):
+                with self.assertRaisesRegex(
+                    ValueError, r"not implemented by Megatron-LM"
+                ):
+                    check(
+                        ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
+                        batch=8,
+                        compile_mode="none",
+                        engines=("torchtitan", launcher),
+                    )
+
+    def test_a_launcher_outside_the_set_keeps_a_pytorch_only_schedule(self):
+        """The rule must not become "anything that is not torchtitan".
+
+        A third engine would then inherit Megatron's restriction and lose a
+        legal cell for a reason that is not about it.
+        """
+        check(
+            ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
+            batch=8,
+            compile_mode="none",
+            engines=("torchtitan", "some-other-engine"),
+        )
 
 
 class Rule06UncompiledScheduleTest(unittest.TestCase):

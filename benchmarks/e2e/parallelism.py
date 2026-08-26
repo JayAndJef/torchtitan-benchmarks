@@ -150,6 +150,23 @@ MAX_WORLD_SIZE = 8
 MAX_PP = 4
 
 
+# The ``Arm.launcher`` values that drive Megatron-LM. Rule 5 reads this set,
+# because ``PipelineSchedule.megatron_supported`` is a fact about the library
+# and more than one launcher runs it.
+#
+# **Declared one by one. Not a ``megatron`` prefix, and not "every launcher
+# that is not torchtitan".** A prefix fails OPEN: a launcher that names the
+# library another way -- ``mcore``, ``nemo`` -- would walk past rule 5, and
+# the run would reach a schedule Megatron cannot run with no cross-engine
+# opponent for it. The complement fails the other way: it would apply
+# Megatron's restriction to an engine that is not Megatron, and refuse a
+# legal titan-only cell. A declared set is wrong in neither direction, and a
+# new launcher is then an edit here rather than a silent classification.
+# ``tests/test_parallelism.py`` refuses a registry launcher this set and
+# ``torchtitan`` do not name between them.
+MEGATRON_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
+
+
 @dataclass(frozen=True)
 class PipelineSchedule:
     """One pipeline schedule, and what a run may do with it.
@@ -441,16 +458,28 @@ def describe(
     omitted it could not distinguish replication from ZeRO-3 after the fact.
 
     ``n_microbatches`` is arithmetic over two fields in the same record, and
-    at ``pp == 1`` it describes no split that happens: neither engine
-    microbatches without a pipeline. Read it beside ``pp``.
+    what it describes at ``pp == 1`` depends on the engine. Read it beside
+    ``pp``, and beside the arm roster.
 
-    That makes it disagree with the megatron log line arm rule 12 validates,
-    by construction: the driver's ``pipeline_settings`` returns one
-    microbatch at ``pp`` 1 and the rule demands ``microbatches=1`` there,
-    while this record says ``local_batch_size // pp_microbatch_size``. **The
-    log is the run and this is the arithmetic.** A ``dp`` degree above 1 is
-    the first spec that makes the disagreement reachable with more than one
-    rank, so a reader of such a manifest meets it for the first time there.
+    **An earlier revision said it describes no split at ``pp`` 1. That is no
+    longer true.** The stock Megatron-LM driver takes
+    ``--micro-batch-size`` at every degree, so at ``pp`` 1 it runs
+    ``local_batch_size // pp_microbatch_size`` passes of that size and this
+    field counts them. TorchTitan still runs one pass over the whole local
+    batch there, because it reads
+    ``pipeline_parallel_microbatch_size`` only inside
+    ``_build_pipeline_schedule``. So at ``pp`` 1 one number describes a real
+    split for one engine and no split for the other. Spec rule 3 holds
+    ``pp_microbatch_size`` at 1 there, which makes the two agree today; the
+    field would part them the moment that rule changed.
+
+    It also disagrees with the megatron log line arm rule 12 validates, by
+    construction: the driver's ``pipeline_settings`` returns one microbatch
+    at ``pp`` 1 and the rule demands ``microbatches=1`` there, while this
+    record says ``local_batch_size // pp_microbatch_size``. **The log is the
+    run and this is the arithmetic.** A ``dp`` degree above 1 is the first
+    spec that makes the disagreement reachable with more than one rank, so a
+    reader of such a manifest meets it for the first time there.
     """
     replicate, shard = titan_mesh(spec)
     return {
@@ -584,9 +613,16 @@ def validate_parallelism(
     #    so a run holding a megatron arm cannot use it. The check reads the
     #    launchers rather than the scenario name: a titan-only run may use a
     #    PyTorch-only schedule.
+    #
+    #    It reads MEGATRON_LAUNCHERS rather than the one name "megatron".
+    #    A second Megatron-LM launcher, "megatron_stock", walked past this
+    #    rule while the test was an equality against one string, and a
+    #    refusal inside a command builder covered it instead. A command
+    #    builder is not a spec rule: it runs after the manifest records the
+    #    mesh, and it cannot refuse a mesh nobody builds a command for.
     if (
         schedule is not None
-        and "megatron" in engines
+        and engines & MEGATRON_LAUNCHERS
         and not schedule.megatron_supported
     ):
         raise ValueError(
