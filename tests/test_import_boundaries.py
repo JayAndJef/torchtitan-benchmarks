@@ -154,6 +154,14 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.titan_model",
     "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron.data",
+    "benchmarks.e2e.megatron_stock.data",
+    "benchmarks.e2e.megatron_stock.profiling",
+    # The counting GPT builder. Megatron's own
+    # ``ModelConfig.get_builder_cls`` imports it by dotted path,
+    # inside the training process and after ``bootstrap.prepare()``
+    # has put Megatron-LM on ``sys.path``, so a module-scope megatron
+    # import is correct here.
+    "benchmarks.e2e.megatron_stock.model_builder",
     "benchmarks.kernel.operations.attention_core",
     "benchmarks.kernel.operations.attn_out_proj",
     "benchmarks.kernel.operations.attn_residual",
@@ -197,6 +205,11 @@ WORKER_SIDE_MODULES = (
 # the property worth locking.
 WORKER_SIDE_DEFERRED_MODULES = (
     "benchmarks.e2e.megatron.train",
+    "benchmarks.e2e.megatron_stock.train",
+    # The typing shim and the Megatron path setup. It runs in the
+    # worker, it imports no ML stack, and it *cannot*: it is what
+    # makes megatron importable at all on this interpreter.
+    "benchmarks.e2e.megatron_stock.bootstrap",
     "benchmarks.models.piper_qwen3.megatron_model",
 )
 
