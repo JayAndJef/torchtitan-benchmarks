@@ -26,6 +26,19 @@ Three rules govern the iterator, and each answers a way a run can be wrong:
 3. **Exhaustion raises.** A wrap would train a second epoch under the first
    epoch's label, and no validation rule would see it.
 
+**One microbatch is one packed sequence, never a batch of rows.** The
+iterator concatenates ``rows_per_sample`` titan rows into a single
+``(1, rows * seq_len)`` sample, which is what the tuned driver's
+``thd_batches`` already does. ``benchmarks/e2e/megatron_stock/flags.py``'s
+``microbatch_geometry`` gives the reason: Megatron flattens a ``(m, S)``
+microbatch to ``(1, m*S)`` and then allocates its pipeline receive buffer
+as ``(S, m, H)``, so a batched microbatch reaches the next stage permuted.
+At ``m`` 1 there is nothing to flatten and every shape agrees.
+
+The attention is unchanged by the packing. ``cu_seqlens`` marks every
+document, and every titan row starts at position 0, so a row boundary is a
+document boundary and the mask stays block-diagonal exactly where it was.
+
 The dict keys and dtypes are Megatron's, not ours.
 ``megatron/core/utils.py``'s ``_merge_cu_seqlens_across_micro_batch`` reads
 a ``(micro_batch_size, padded_length)`` ``cu_seqlens`` whose rows start at
@@ -59,14 +72,16 @@ MICROBATCH_KEYS: tuple[str, ...] = (
 
 
 def document_offsets(positions: torch.Tensor, seq_len: int) -> torch.Tensor:
-    """One sample's document boundaries, as Megatron reads them.
+    """One packed sample's document boundaries, as Megatron reads them.
 
     ``positions`` restarts at 0 at every document, and TorchTitan re-bases a
     chunk-leading fragment the same way, so ``positions == 0`` enumerates
-    exactly the packed-document starts its flex-attention mask uses.
+    exactly the packed-document starts its flex-attention mask uses. A titan
+    row boundary is one of them, because every row starts at position 0.
 
     The result is ``[0, d1, ..., seq_len]`` in int32, with no padding. It
-    always starts at 0 and always ends at ``seq_len``.
+    always starts at 0 and always ends at ``seq_len``, where ``seq_len`` is
+    the **packed** length.
     """
     if positions.numel() != seq_len:
         raise ValueError(
@@ -87,46 +102,41 @@ def document_offsets(positions: torch.Tensor, seq_len: int) -> torch.Tensor:
 def _microbatch(
     rows: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     *,
-    seq_len: int,
+    packed_len: int,
     padded_documents: int,
 ) -> dict[str, torch.Tensor | None]:
-    """One microbatch dict, on the CPU.
+    """One microbatch dict, on the CPU: one packed row of ``packed_len``.
 
     ``get_batch`` moves every tensor to the device itself, so nothing here
     touches CUDA. That is what lets a test read a microbatch on a host with
     no GPU.
     """
-    tokens = torch.stack([row[0] for row in rows]).to(torch.int64)
-    positions = torch.stack([row[1] for row in rows]).to(torch.int64)
-    labels = torch.stack([row[2] for row in rows]).to(torch.int64)
-    offsets, longest = [], []
-    for row in rows:
-        cu_seqlens = document_offsets(row[1], seq_len)
-        pad = padded_documents - cu_seqlens.numel()
-        if pad < 0:
-            raise ValueError(
-                f"a pack holds {cu_seqlens.numel()} cu_seqlens entries, "
-                f"above the run's padded width of {padded_documents}; "
-                "padding cannot remove a document"
-            )
-        longest.append(int((cu_seqlens[1:] - cu_seqlens[:-1]).max()))
-        offsets.append(
-            torch.cat(
-                [
-                    cu_seqlens,
-                    torch.full((pad,), seq_len, dtype=torch.int32),
-                ]
-            )
+    tokens = torch.cat([row[0] for row in rows]).to(torch.int64)
+    positions = torch.cat([row[1] for row in rows]).to(torch.int64)
+    labels = torch.cat([row[2] for row in rows]).to(torch.int64)
+    cu_seqlens = document_offsets(positions, packed_len)
+    pad = padded_documents - cu_seqlens.numel()
+    if pad < 0:
+        raise ValueError(
+            f"a pack holds {cu_seqlens.numel()} cu_seqlens entries, above "
+            f"the run's padded width of {padded_documents}; padding cannot "
+            "remove a document"
         )
+    longest = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
+    padded = torch.cat(
+        [cu_seqlens, torch.full((pad,), packed_len, dtype=torch.int32)]
+    )
     return {
-        "tokens": tokens,
-        "labels": labels,
+        "tokens": tokens.unsqueeze(0),
+        "labels": labels.unsqueeze(0),
         # Every token of the c4_test stream is a real token, so every one of
         # them counts toward the loss. TorchTitan does the same.
-        "loss_mask": torch.ones_like(tokens, dtype=torch.float32),
-        "position_ids": positions,
-        "cu_seqlens": torch.stack(offsets),
-        "max_seqlen": torch.tensor(longest, dtype=torch.int32),
+        "loss_mask": torch.ones(
+            (1, packed_len), dtype=torch.float32
+        ),
+        "position_ids": positions.unsqueeze(0),
+        "cu_seqlens": padded.unsqueeze(0),
+        "max_seqlen": torch.tensor([longest], dtype=torch.int32),
         # Megatron builds no mask tensor under
         # --no-create-attention-mask-in-dataloader, and it needs no padded
         # cu_seqlens without context parallelism.
@@ -150,18 +160,23 @@ class StockReplayIterator:
         self,
         samples: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
         *,
-        micro_batch_size: int,
+        rows_per_sample: int,
         seq_len: int,
     ) -> None:
-        if micro_batch_size < 1:
+        if rows_per_sample < 1:
             raise ValueError(
-                f"micro batch size {micro_batch_size} must be >= 1"
+                f"rows per sample {rows_per_sample} must be >= 1"
             )
-        if len(samples) % micro_batch_size:
+        if len(samples) % rows_per_sample:
             raise ValueError(
-                f"{len(samples)} samples do not divide into microbatches of "
-                f"{micro_batch_size}"
+                f"{len(samples)} samples do not divide into packs of "
+                f"{rows_per_sample} row(s)"
             )
+        self._packed_len = rows_per_sample * seq_len
+        groups = [
+            samples[start : start + rows_per_sample]
+            for start in range(0, len(samples), rows_per_sample)
+        ]
         # One padded width for the whole run, taken over this rank's own
         # packs. Every rank holds different documents, so this number is a
         # per-rank number -- and it may be, because Megatron strips the
@@ -169,15 +184,18 @@ class StockReplayIterator:
         # tuned driver takes a global maximum instead, because a captured
         # CUDA graph needs one static shape across the mesh.
         self._padded_documents = max(
-            document_offsets(row[1], seq_len).numel() for row in samples
+            document_offsets(
+                torch.cat([row[1] for row in group]), self._packed_len
+            ).numel()
+            for group in groups
         )
         self._microbatches = [
             _microbatch(
-                samples[start : start + micro_batch_size],
-                seq_len=seq_len,
+                group,
+                packed_len=self._packed_len,
                 padded_documents=self._padded_documents,
             )
-            for start in range(0, len(samples), micro_batch_size)
+            for group in groups
         ]
         self._served = 0
 
@@ -185,6 +203,11 @@ class StockReplayIterator:
     def padded_documents(self) -> int:
         """The ``cu_seqlens`` width every microbatch of this rank carries."""
         return self._padded_documents
+
+    @property
+    def packed_len(self) -> int:
+        """Tokens in one microbatch: ``rows_per_sample * seq_len``."""
+        return self._packed_len
 
     @property
     def microbatch_count(self) -> int:
@@ -211,16 +234,17 @@ def build_iterator(
     seq_len: int,
     steps: int,
     local_batch_size: int,
-    micro_batch_size: int,
+    rows_per_sample: int,
     dp_rank: int,
     dp_world_size: int,
 ) -> StockReplayIterator:
     """This rank's whole stream.
 
+    ``seq_len`` is one titan row, not the packed sample.
     ``local_batch_size`` is one data-parallel rank's own batch, so the
-    sample count is ``steps * local_batch_size`` per rank. Megatron splits
-    that batch into ``local_batch_size // micro_batch_size`` microbatches
-    per step, and every stage of one pipeline reads all of them.
+    sample count is ``steps * local_batch_size`` per rank. Each step then
+    serves ``local_batch_size // rows_per_sample`` microbatches, and every
+    stage of one pipeline reads all of them.
     """
     samples = materialize_titan_samples(
         seq_len=seq_len,
@@ -229,7 +253,7 @@ def build_iterator(
         dp_world_size=dp_world_size,
     )
     return StockReplayIterator(
-        samples, micro_batch_size=micro_batch_size, seq_len=seq_len
+        samples, rows_per_sample=rows_per_sample, seq_len=seq_len
     )
 
 
@@ -251,10 +275,12 @@ def train_valid_test_datasets_provider(
     args = get_args()
     return (
         build_iterator(
-            seq_len=args.seq_length,
+            # The titan row length, not --seq-length: that one is the
+            # packed sample, which is rows_per_sample rows long.
+            seq_len=args.bench_seq_len,
             steps=args.train_iters,
             local_batch_size=args.bench_local_batch_size,
-            micro_batch_size=args.micro_batch_size,
+            rows_per_sample=args.bench_rows_per_sample,
             dp_rank=mpu.get_data_parallel_rank(),
             dp_world_size=mpu.get_data_parallel_world_size(),
         ),

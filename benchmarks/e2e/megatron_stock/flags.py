@@ -91,6 +91,8 @@ BENCH_PROFILER_WARMUP = "--bench-profiler-warmup"
 BENCH_PROFILER_ACTIVE = "--bench-profiler-active"
 BENCH_MODE = "--bench-mode"
 BENCH_PP_SCHEDULE = "--bench-pp-schedule"
+BENCH_SEQ_LEN = "--bench-seq-len"
+BENCH_ROWS_PER_SAMPLE = "--bench-rows-per-sample"
 
 BENCH_FLAGS: tuple[str, ...] = (
     BENCH_ARM_DIR,
@@ -101,6 +103,8 @@ BENCH_FLAGS: tuple[str, ...] = (
     BENCH_PROFILER_ACTIVE,
     BENCH_MODE,
     BENCH_PP_SCHEDULE,
+    BENCH_SEQ_LEN,
+    BENCH_ROWS_PER_SAMPLE,
 )
 
 # Flags this suite declines, each for a reason section 7 of the plan states.
@@ -124,7 +128,51 @@ OMITTED_FLAGS: tuple[str, ...] = (
 )
 
 
-def _geometry_flags(shape: PiperShape, workload: Workload) -> list[str]:
+def microbatch_geometry(
+    workload: Workload, spec: ParallelismSpec
+) -> tuple[int, int, int]:
+    """``(rows per sample, microbatches per step, megatron seq_length)``.
+
+    **One Megatron sample is one packed sequence, never a batch of rows.**
+    Megatron flattens a ``(m, S)`` microbatch into ``(1, m*S)`` whenever
+    ``cu_seqlens`` is present (``megatron/core/utils.py``'s
+    ``flatten_batch_for_packed_sequences``), so the activation the first
+    stage sends is ``(m*S, 1, H)``. The pipeline allocates its receive
+    buffer from ``get_tensor_shapes``, which returns ``(S, m, H)`` and
+    validates nothing. The two hold the same number of elements, so the
+    transfer succeeds and the next stage reads a **permuted** activation.
+    Measured on this rev with ``m`` 4: ``(64, 1, 8)`` sent into a
+    ``(16, 4, 8)`` buffer.
+
+    So the harness packs the rows itself, exactly as the tuned megatron
+    driver does, and tells Megatron the sample is one row of ``rows * S``
+    tokens. Every shape then agrees, and the attention is unchanged:
+    ``cu_seqlens`` already marks every document, and a row boundary is a
+    document boundary.
+
+    The row count follows the other engine at both meshes. Under a pipeline
+    the microbatch size is the split TorchTitan is given. Without one
+    neither engine splits, so the whole batch is one pack -- which is what
+    ``benchmarks/e2e/megatron/train.py``'s ``pipeline_settings`` returns and
+    what every published megatron number was measured on.
+    """
+    if spec.pp > 1:
+        rows_per_sample = spec.pp_microbatch_size
+    else:
+        rows_per_sample = workload.local_batch_size
+    if workload.local_batch_size % rows_per_sample:
+        raise ValueError(
+            f"local batch size {workload.local_batch_size} does not divide "
+            f"into microbatches of {rows_per_sample} row(s): Megatron needs "
+            "an exact global-batch-size to micro-batch-size ratio"
+        )
+    microbatches = workload.local_batch_size // rows_per_sample
+    return rows_per_sample, microbatches, rows_per_sample * workload.seq_len
+
+
+def _geometry_flags(
+    shape: PiperShape, *, megatron_seq_length: int
+) -> list[str]:
     """The model geometry, every value read from ``shape``.
 
     ``--rotary-base`` is ``type=int`` in Megatron's parser, so ``1e6`` is
@@ -158,9 +206,13 @@ def _geometry_flags(shape: PiperShape, workload: Workload) -> list[str]:
         "--moe-layer-freq",
         "1",
         "--seq-length",
-        str(workload.seq_len),
+        str(megatron_seq_length),
+        # Megatron asserts max_position_embeddings >= seq_length, and the
+        # packed sample is longer than one titan row. The rope table is
+        # indexed by position, so a longer one does not move the entries a
+        # shorter one held; every document still starts at position 0.
         "--max-position-embeddings",
-        str(shape.max_seq_len),
+        str(max(shape.max_seq_len, megatron_seq_length)),
         "--position-embedding-type",
         "rope",
         "--use-rotary-position-embeddings",
@@ -237,15 +289,16 @@ def _moe_flags() -> list[str]:
 
 
 def _optimizer_flags(
-    workload: Workload, spec: ParallelismSpec, *, global_batch_size: int
+    workload: Workload, *, global_batch_size: int
 ) -> list[str]:
     """The optimizer and the schedule, matched to TorchTitan.
 
-    ``--micro-batch-size`` is the pipeline microbatch size and
-    ``--global-batch-size`` is ``local_batch_size * dp``. Megatron then
-    computes ``global / (micro * dp)`` microbatches per step, which equals
-    ``local_batch_size // pp_microbatch_size`` -- the same count
-    ``benchmarks/e2e/parallelism.py`` gives the TorchTitan arm.
+    ``--micro-batch-size`` is **always 1**: one Megatron sample is one
+    packed sequence of ``rows * seq_len`` tokens, for the reason
+    ``microbatch_geometry`` gives. ``--global-batch-size`` is therefore
+    ``microbatches * dp``, and Megatron computes ``global / (micro * dp)``
+    microbatches per step, which is the count ``microbatch_geometry``
+    returns and the count TorchTitan runs.
 
     **Whether Megatron decays over the 38 post-warmup steps, as TorchTitan
     does, or over all 40, is unverified.** Read ``OptimizerParamScheduler``
@@ -254,7 +307,7 @@ def _optimizer_flags(
     """
     return [
         "--micro-batch-size",
-        str(spec.pp_microbatch_size),
+        "1",
         "--global-batch-size",
         str(global_batch_size),
         "--train-iters",
@@ -370,8 +423,17 @@ def _bench_flags(
     arm_dir: str,
     model_size: str,
     compile_mode: str,
+    rows_per_sample: int,
 ) -> list[str]:
     """The harness group, which ``train.py`` adds to Megatron's own parser.
+
+    ``--bench-seq-len`` is one **titan row**, where ``--seq-length`` is the
+    packed sample. The driver needs the row length for the token count, the
+    flops denominator and the data builder, and it cannot recover it from
+    ``--seq-length`` alone.
+
+    ``--bench-rows-per-sample`` states the packing, so the driver can assert
+    ``rows * bench_seq_len == seq_length`` rather than divide and hope.
 
     ``--bench-pp-schedule`` is omitted at ``pp`` 1, where the driver refuses
     it: a schedule name there would name a split that does not happen.
@@ -391,6 +453,10 @@ def _bench_flags(
         str(workload.profiler_active),
         BENCH_MODE,
         compile_mode,
+        BENCH_SEQ_LEN,
+        str(workload.seq_len),
+        BENCH_ROWS_PER_SAMPLE,
+        str(rows_per_sample),
     ]
     if spec.pp > 1:
         flags.extend((BENCH_PP_SCHEDULE, str(spec.pp_schedule)))
@@ -443,19 +509,15 @@ def stock_megatron_flags(
             f"pipeline schedule {spec.pp_schedule!r} is not implemented by "
             f"the stock driver; it runs {SUPPORTED_PP_SCHEDULE!r} alone"
         )
-    if workload.local_batch_size % spec.pp_microbatch_size:
-        raise ValueError(
-            f"local batch size {workload.local_batch_size} does not divide "
-            f"into microbatches of {spec.pp_microbatch_size}: Megatron needs "
-            "an exact global-batch-size to micro-batch-size ratio"
-        )
-    global_batch_size = workload.local_batch_size * spec.dp
+    rows_per_sample, microbatches, megatron_seq_length = (
+        microbatch_geometry(workload, spec)
+    )
     return [
-        *_geometry_flags(shape, workload),
+        *_geometry_flags(shape, megatron_seq_length=megatron_seq_length),
         *_engine_flags(),
         *_moe_flags(),
         *_optimizer_flags(
-            workload, spec, global_batch_size=global_batch_size
+            workload, global_batch_size=microbatches * spec.dp
         ),
         *_mesh_flags(spec),
         *_data_flags(shape, workload),
@@ -465,5 +527,6 @@ def stock_megatron_flags(
             arm_dir=arm_dir,
             model_size=model_size,
             compile_mode=compile_mode,
+            rows_per_sample=rows_per_sample,
         ),
     ]

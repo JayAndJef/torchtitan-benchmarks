@@ -55,6 +55,8 @@ from benchmarks.e2e.megatron_stock.flags import (
     BENCH_PROFILE_FREQ,
     BENCH_PROFILER_ACTIVE,
     BENCH_PROFILER_WARMUP,
+    BENCH_ROWS_PER_SAMPLE,
+    BENCH_SEQ_LEN,
     SUPPORTED_MODE,
     SUPPORTED_PP_SCHEDULE,
 )
@@ -170,6 +172,8 @@ def add_bench_args(parser: Any) -> Any:
     group.add_argument(BENCH_PROFILER_ACTIVE, type=int, required=True)
     group.add_argument(BENCH_MODE, type=str, required=True)
     group.add_argument(BENCH_PP_SCHEDULE, type=str, default=None)
+    group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
+    group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
     return parser
 
 
@@ -205,6 +209,24 @@ def refuse_unsupported_run(args: Any) -> None:
             "the stock driver builds one model chunk per rank, so a virtual "
             f"pipeline degree of {args.virtual_pipeline_model_parallel_size} "
             "is refused; the parameter check compares a whole stage"
+        )
+    # One Megatron sample is one packed sequence. flags.py's
+    # microbatch_geometry gives the reason: at a micro batch size above 1
+    # the pipeline receive buffer is (S, m, H) where the activation is
+    # (m*S, 1, H), so the next stage reads a permuted tensor and nothing
+    # raises. Assert the packing rather than divide and hope.
+    if args.micro_batch_size != 1:
+        raise ValueError(
+            f"--micro-batch-size {args.micro_batch_size} would send the next "
+            "pipeline stage a permuted activation; the stock arm packs its "
+            "rows itself and always runs a micro batch size of 1"
+        )
+    packed = args.bench_rows_per_sample * args.bench_seq_len
+    if packed != args.seq_length:
+        raise ValueError(
+            f"{args.bench_rows_per_sample} row(s) of {args.bench_seq_len} "
+            f"tokens is {packed}, not the --seq-length {args.seq_length} "
+            "Megatron will size its pipeline buffers from"
         )
 
 
@@ -494,9 +516,13 @@ def main(argv: list[str] | None = None) -> int:
         profiler_active=args.bench_profiler_active,
     )
     install_step_log_shim(
-        local_tokens_per_step=args.bench_local_batch_size * args.seq_length,
+        # The titan row length, not --seq-length: that one is the packed
+        # sample, and this rank reads local_batch_size rows per step.
+        local_tokens_per_step=(
+            args.bench_local_batch_size * args.bench_seq_len
+        ),
         pipeline_degree=args.pipeline_model_parallel_size,
-        num_flops_per_token=shape.num_flops_per_token(args.seq_length),
+        num_flops_per_token=shape.num_flops_per_token(args.bench_seq_len),
     )
 
     model_cfg = gpt_config_from_args(

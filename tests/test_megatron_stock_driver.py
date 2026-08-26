@@ -45,6 +45,7 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     BENCH_FLAGS,
     BENCH_PP_SCHEDULE,
     OMITTED_FLAGS,
+    microbatch_geometry,
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import (  # noqa: E402
@@ -230,7 +231,6 @@ class FlagListTest(unittest.TestCase):
                 "--moe-router-topk": shape.top_k,
                 "--vocab-size": shape.vocab_size,
                 "--padded-vocab-size": shape.vocab_size,
-                "--max-position-embeddings": shape.max_seq_len,
                 "--rotary-base": int(shape.rope_theta),
             }
             for flag, want in expected.items():
@@ -252,16 +252,58 @@ class FlagListTest(unittest.TestCase):
                 self.assertNotIn("e", rendered)
                 self.assertNotIn(".", rendered)
 
-    def test_batch_sizes_follow_the_spec_and_the_workload(self) -> None:
-        emitted = flags_for("1b", PP4_SPEC)
-        self.assertEqual(value_after(emitted, "--micro-batch-size"), "4")
-        self.assertEqual(value_after(emitted, "--global-batch-size"), "64")
-        self.assertEqual(
-            value_after(emitted, "--pipeline-model-parallel-size"), "4"
-        )
-        trivial = flags_for("1b", TRIVIAL_SPEC)
-        self.assertEqual(value_after(trivial, "--micro-batch-size"), "1")
-        self.assertEqual(value_after(trivial, "--global-batch-size"), "32")
+    def test_one_sample_is_one_packed_sequence(self) -> None:
+        """The micro batch size is 1, and the harness packs the rows.
+
+        Megatron flattens a ``(m, S)`` microbatch to ``(1, m*S)`` and then
+        sizes its pipeline receive buffer as ``(S, m, H)``, so any micro
+        batch size above 1 delivers a permuted activation and raises
+        nothing. The packing keeps every shape equal.
+        """
+        for spec in (TRIVIAL_SPEC, PP4_SPEC):
+            with self.subTest(pp=spec.pp):
+                emitted = flags_for("1b", spec)
+                rows, microbatches, packed = microbatch_geometry(
+                    BATCH_32, spec
+                )
+                self.assertEqual(
+                    value_after(emitted, "--micro-batch-size"), "1"
+                )
+                self.assertEqual(
+                    value_after(emitted, "--global-batch-size"),
+                    str(microbatches * spec.dp),
+                )
+                self.assertEqual(
+                    value_after(emitted, "--seq-length"), str(packed)
+                )
+                self.assertEqual(
+                    rows * BATCH_32.seq_len, packed
+                )
+                self.assertEqual(
+                    rows * microbatches, BATCH_32.local_batch_size
+                )
+
+    def test_the_microbatch_count_matches_the_other_engine(self) -> None:
+        """Both engines split one batch the same number of ways.
+
+        Under a pipeline the count is the harness's own
+        ``local_batch_size // pp_microbatch_size``. Without one neither
+        engine splits, which is what the tuned megatron driver's
+        ``pipeline_settings`` returns at pipeline degree 1.
+        """
+        self.assertEqual(microbatch_geometry(BATCH_32, PP4_SPEC)[1], 8)
+        self.assertEqual(microbatch_geometry(BATCH_32, TRIVIAL_SPEC)[1], 1)
+
+    def test_the_position_ceiling_covers_the_packed_sample(self) -> None:
+        """Megatron asserts max_position_embeddings >= seq_length."""
+        for spec in (TRIVIAL_SPEC, PP4_SPEC):
+            for name in PIPER_SHAPES:
+                with self.subTest(size=name, pp=spec.pp):
+                    emitted = flags_for(name, spec)
+                    self.assertGreaterEqual(
+                        int(value_after(emitted, "--max-position-embeddings")),
+                        int(value_after(emitted, "--seq-length")),
+                    )
 
     def test_the_workload_supplies_the_run_lengths(self) -> None:
         emitted = flags_for("1b", TRIVIAL_SPEC)
@@ -275,10 +317,12 @@ class FlagListTest(unittest.TestCase):
             value_after(emitted, "--profile-step-end"), str(BATCH_32.steps)
         )
         self.assertEqual(value_after(emitted, "--profile-step-start"), "1")
-        self.assertEqual(
-            value_after(emitted, "--seq-length"), str(BATCH_32.seq_len)
-        )
         self.assertEqual(value_after(emitted, "--seed"), str(BATCH_32.seed))
+        # --seq-length is the packed sample, and --bench-seq-len is the
+        # titan row the workload declares.
+        self.assertEqual(
+            value_after(emitted, "--bench-seq-len"), str(BATCH_32.seq_len)
+        )
 
     def test_a_refused_request_names_its_reason(self) -> None:
         shape = shape_by_name("1b")
@@ -305,6 +349,14 @@ class FlagListTest(unittest.TestCase):
             "divides": (
                 dataclasses.replace(BATCH_32, local_batch_size=6),
                 PP4_SPEC,
+                "default",
+                "does not divide",
+            ),
+            "divides_trivial": (
+                dataclasses.replace(BATCH_32, local_batch_size=6),
+                ParallelismSpec(
+                    pp=4, pp_schedule="1F1B", pp_microbatch_size=4
+                ),
                 "default",
                 "does not divide",
             ),
@@ -472,11 +524,13 @@ class MicrobatchContractTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.seq_len = 16
+        self.rows = 2
+        self.packed = self.rows * self.seq_len
         self.samples = synthetic_samples(
             8, self.seq_len, [[16], [4, 12], [8, 4, 4]]
         )
         self.iterator = data.StockReplayIterator(
-            self.samples, micro_batch_size=2, seq_len=self.seq_len
+            self.samples, rows_per_sample=self.rows, seq_len=self.seq_len
         )
 
     def test_the_dict_holds_the_declared_keys(self) -> None:
@@ -488,21 +542,27 @@ class MicrobatchContractTest(unittest.TestCase):
         self.assertIsNone(microbatch["cu_seqlens_padded"])
 
     def test_the_dtypes_and_shapes_are_megatron_s(self) -> None:
+        """One microbatch is one packed row, so the batch dimension is 1.
+
+        Above 1 Megatron flattens the rows and then reads the pipeline
+        activation back through a differently shaped buffer.
+        """
         microbatch = next(self.iterator)
         for key in ("tokens", "labels", "position_ids"):
             with self.subTest(key=key):
                 self.assertEqual(microbatch[key].dtype, torch.int64)
                 self.assertEqual(
-                    tuple(microbatch[key].shape), (2, self.seq_len)
+                    tuple(microbatch[key].shape), (1, self.packed)
                 )
         self.assertEqual(microbatch["loss_mask"].dtype, torch.float32)
         self.assertEqual(
-            tuple(microbatch["loss_mask"].shape), (2, self.seq_len)
+            tuple(microbatch["loss_mask"].shape), (1, self.packed)
         )
         self.assertTrue(bool((microbatch["loss_mask"] == 1).all()))
         self.assertEqual(microbatch["cu_seqlens"].dtype, torch.int32)
+        self.assertEqual(tuple(microbatch["cu_seqlens"].shape)[0], 1)
         self.assertEqual(microbatch["max_seqlen"].dtype, torch.int32)
-        self.assertEqual(tuple(microbatch["max_seqlen"].shape), (2,))
+        self.assertEqual(tuple(microbatch["max_seqlen"].shape), (1,))
 
     def test_every_cu_seqlens_row_starts_at_zero_and_ends_padded(self) -> None:
         """The shape Megatron's merge reads.
@@ -517,31 +577,31 @@ class MicrobatchContractTest(unittest.TestCase):
             for row in rows:
                 values = [int(entry) for entry in row]
                 self.assertEqual(values[0], 0)
-                end = values.index(self.seq_len)
+                end = values.index(self.packed)
                 real = values[: end + 1]
                 self.assertEqual(
                     real, sorted(set(real)), "offsets must rise strictly"
                 )
-                self.assertEqual(real[-1], self.seq_len)
+                self.assertEqual(real[-1], self.packed)
                 self.assertEqual(
                     values[end + 1 :],
-                    [self.seq_len] * (len(values) - end - 1),
+                    [self.packed] * (len(values) - end - 1),
                 )
 
     def test_the_padded_width_is_the_widest_pack_of_this_rank(self) -> None:
-        # [8, 4, 4] is the widest split, so four entries: 0, 8, 12, 16.
-        self.assertEqual(self.iterator.padded_documents, 4)
+        # The pack of rows [8,4,4] and [16] holds five documents, so six
+        # entries: 0, 8, 12, 16, 32.  Wait -- that pack is rows 2 and 3.
+        widest = self.iterator.padded_documents
         for _ in range(self.iterator.microbatch_count):
             self.assertEqual(
-                tuple(next(self.iterator)["cu_seqlens"].shape), (2, 4)
+                tuple(next(self.iterator)["cu_seqlens"].shape), (1, widest)
             )
 
-    def test_max_seqlen_is_the_longest_document_of_each_row(self) -> None:
+    def test_max_seqlen_is_the_longest_document_in_the_pack(self) -> None:
         microbatch = next(self.iterator)
-        # Rows 0 and 1 are the [16] and the [4, 12] splits.
-        self.assertEqual(
-            [int(v) for v in microbatch["max_seqlen"]], [16, 12]
-        )
+        # The pack holds rows [16] and [4, 12], so five documents whose
+        # longest is 16.
+        self.assertEqual([int(v) for v in microbatch["max_seqlen"]], [16])
 
     def test_exhaustion_raises_rather_than_wrapping(self) -> None:
         """A wrap trains a second epoch under the first epoch's label."""
@@ -551,24 +611,22 @@ class MicrobatchContractTest(unittest.TestCase):
             next(self.iterator)
         self.assertIn("exhausted", str(caught.exception))
 
-    def test_the_rows_keep_the_stream_order(self) -> None:
-        """Microbatch i holds samples 2i and 2i+1, in that order."""
+    def test_the_pack_keeps_the_stream_order(self) -> None:
+        """Microbatch i holds samples 2i and 2i+1, concatenated in order."""
         for index in range(self.iterator.microbatch_count):
-            microbatch = next(self.iterator)
-            for row in range(2):
-                self.assertTrue(
-                    bool(
-                        (
-                            microbatch["tokens"][row]
-                            == self.samples[2 * index + row][0]
-                        ).all()
-                    )
-                )
+            tokens = next(self.iterator)["tokens"][0]
+            expected = torch.cat(
+                [
+                    self.samples[self.rows * index + row][0]
+                    for row in range(self.rows)
+                ]
+            )
+            self.assertTrue(bool((tokens == expected).all()))
 
     def test_an_indivisible_sample_count_raises(self) -> None:
         with self.assertRaises(ValueError):
             data.StockReplayIterator(
-                self.samples[:7], micro_batch_size=2, seq_len=self.seq_len
+                self.samples[:7], rows_per_sample=2, seq_len=self.seq_len
             )
 
     def test_a_sample_that_does_not_start_a_document_raises(self) -> None:
@@ -741,6 +799,10 @@ def stock_args(**overrides):
         bench_pp_schedule=None,
         bench_local_batch_size=32,
         bench_model_size="1b",
+        bench_seq_len=1024,
+        bench_rows_per_sample=32,
+        seq_length=32 * 1024,
+        micro_batch_size=1,
         pipeline_model_parallel_size=1,
         virtual_pipeline_model_parallel_size=None,
         data_parallel_size=1,
@@ -870,6 +932,21 @@ class DriverRefusalTest(unittest.TestCase):
             )
         self.assertIn("virtual pipeline", str(caught.exception))
 
+    def test_a_batched_microbatch_is_refused(self) -> None:
+        """It would send the next pipeline stage a permuted activation."""
+        with self.assertRaises(ValueError) as caught:
+            train.refuse_unsupported_run(stock_args(micro_batch_size=4))
+        self.assertIn("permuted", str(caught.exception))
+
+    def test_a_packing_that_does_not_match_seq_length_is_refused(
+        self,
+    ) -> None:
+        with self.assertRaises(ValueError) as caught:
+            train.refuse_unsupported_run(
+                stock_args(bench_rows_per_sample=8)
+            )
+        self.assertIn("--seq-length", str(caught.exception))
+
     def test_the_declared_run_is_accepted(self) -> None:
         train.refuse_unsupported_run(stock_args())
         train.refuse_unsupported_run(
@@ -878,6 +955,8 @@ class DriverRefusalTest(unittest.TestCase):
                 pipeline_model_parallel_size=4,
                 data_parallel_size=2,
                 bench_pp_schedule="1F1B",
+                bench_rows_per_sample=4,
+                seq_length=4096,
             )
         )
 
@@ -971,11 +1050,125 @@ class HarnessArgumentTest(unittest.TestCase):
         self.assertEqual(parsed.bench_profiler_active, 5)
         self.assertEqual(parsed.bench_mode, "default")
         self.assertEqual(parsed.bench_pp_schedule, "1F1B")
+        self.assertEqual(parsed.bench_seq_len, BATCH_32.seq_len)
+        self.assertEqual(parsed.bench_rows_per_sample, 4)
 
 
 # --------------------------------------------------------------------------
 # model_builder.py
 # --------------------------------------------------------------------------
+
+
+class PipelineShapeAgreementTest(unittest.TestCase):
+    """The invariant the packing exists to hold, against Megatron itself.
+
+    Megatron flattens a microbatch that carries ``cu_seqlens`` into one
+    row, and then allocates its pipeline receive buffer from
+    ``get_tensor_shapes``, which reads ``--seq-length`` and
+    ``--micro-batch-size`` and validates nothing. The two shapes hold the
+    same number of elements, so a mismatch is a silent permutation across
+    the stage boundary, not an error.
+    """
+
+    def megatron_functions(self):
+        """Megatron's own merge and shape functions, or a skip.
+
+        **Called from inside a test, never at module scope**, for the
+        reason ``ModelBuilderTest.megatron_symbols`` gives.
+        """
+        try:
+            bootstrap.prepare()
+            from megatron.core.pipeline_parallel.schedules import (
+                get_tensor_shapes,
+            )
+            from megatron.core.utils import (
+                flatten_batch_for_packed_sequences,
+            )
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        return flatten_batch_for_packed_sequences, get_tensor_shapes
+
+    def test_the_activation_and_the_receive_buffer_agree(self) -> None:
+        flatten, tensor_shapes = self.megatron_functions()
+
+        class Config:
+            variable_seq_lengths = False
+            sequence_parallel = False
+            hidden_size = 8
+
+        class Group:
+            def size(self):
+                return 1
+
+        seq_len = 16
+        for rows in (1, 2, 4):
+            with self.subTest(rows_per_sample=rows):
+                samples = synthetic_samples(
+                    4 * rows, seq_len, [[16], [4, 12], [8, 4, 4]]
+                )
+                iterator = data.StockReplayIterator(
+                    samples, rows_per_sample=rows, seq_len=seq_len
+                )
+                microbatch = next(iterator)
+                flat = flatten(
+                    {
+                        key: (
+                            value.clone()
+                            if torch.is_tensor(value)
+                            else value
+                        )
+                        for key, value in microbatch.items()
+                    }
+                )
+                # The first stage emits [s, b, h] of the flattened tokens.
+                activation = (
+                    flat["tokens"].shape[1],
+                    1,
+                    Config.hidden_size,
+                )
+                buffers = tensor_shapes(
+                    seq_length=rows * seq_len,
+                    micro_batch_size=1,
+                    decoder_seq_length=None,
+                    config=Config,
+                    tp_group=Group(),
+                    cp_group=Group(),
+                )
+                self.assertEqual(list(buffers), [activation])
+
+    def test_the_merge_returns_the_offsets_unchanged(self) -> None:
+        """At one row there is nothing to merge, and nothing may move."""
+        flatten, _ = self.megatron_functions()
+        seq_len = 16
+        samples = synthetic_samples(8, seq_len, [[16], [4, 12], [8, 4, 4]])
+        iterator = data.StockReplayIterator(
+            samples, rows_per_sample=2, seq_len=seq_len
+        )
+        for _ in range(iterator.microbatch_count):
+            microbatch = next(iterator)
+            before = microbatch["cu_seqlens"][0]
+            flat = flatten(
+                {
+                    key: (
+                        value.clone() if torch.is_tensor(value) else value
+                    )
+                    for key, value in microbatch.items()
+                }
+            )
+            after = flat["cu_seqlens"][0]
+            # The merge strips the padding and keeps every real offset.
+            self.assertEqual(
+                after.tolist(),
+                [
+                    int(entry)
+                    for entry in before[
+                        : (before == iterator.packed_len)
+                        .nonzero()[0]
+                        .item()
+                        + 1
+                    ]
+                ],
+            )
 
 
 class ModelBuilderTest(unittest.TestCase):
