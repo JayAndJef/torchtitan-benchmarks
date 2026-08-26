@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
 from benchmarks.e2e.registry import SCENARIOS, scenario_by_name
+from benchmarks.e2e.runner import workload_with_overrides
 from benchmarks.e2e.validation import VALIDATION_PROFILES
 from benchmarks.execution.paths import BENCH_DIR, TITAN_DIR
 from benchmarks.kernel.registry import KERNEL_SCENARIOS
@@ -120,6 +121,8 @@ E2E_INVENTORY = {
         "titan_lm_head",
         "titan_swiglu_lm_head",
     ),
+    # The stock Megatron-LM scenario. Two arms, one per engine.
+    "piper_megatron_stock": ("baseline", "titan_stock"),
 }
 
 KERNEL_INVENTORY = {
@@ -532,8 +535,19 @@ class KernelBuilderPathTests(unittest.TestCase):
 # 4. Registry keys dispatch.
 # --------------------------------------------------------------------------
 
-LAUNCHERS = ("torchtitan", "megatron")
-VALIDATION_KEYS = ("torchtitan", "megatron")
+LAUNCHERS = ("torchtitan", "megatron", "megatron_stock")
+VALIDATION_KEYS = ("torchtitan", "megatron", "megatron_stock")
+
+# The launchers whose scenario supports only ``--ac none``. Two calls below
+# pick an ac mode from it, so that a builder does not refuse the mode and
+# hide what the call meant to exercise.
+#
+# **Named one by one, and not matched as a ``megatron`` prefix.** Neither
+# call asserts anything about the mode it picks, so a prefix would not fail;
+# it would silently give a future ``megatron_*`` launcher the ``none`` path
+# and stop exercising ``sac`` for it. An explicit set makes a new launcher
+# an edit here, which is where the decision belongs.
+AC_NONE_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
 
 
 class RegistryDispatchTests(unittest.TestCase):
@@ -553,9 +567,12 @@ class RegistryDispatchTests(unittest.TestCase):
                         Path("/tmp/arm-dir"),
                         (),
                         "default",
-                        # The megatron launcher refuses any other ac mode, and
-                        # the scenario carrying it supports only "none".
-                        "none" if arm.launcher == "megatron" else "sac",
+                        # Both megatron launchers refuse any other ac mode,
+                        # and the scenarios carrying them support only
+                        # "none".
+                        "none"
+                        if arm.launcher in AC_NONE_LAUNCHERS
+                        else "sac",
                     )
                     self.assertTrue(command)
                     self.assertIsInstance(command, list)
@@ -676,6 +693,64 @@ def _golden_titan_pp2_command(size: str) -> list[str]:
         "5",
         "--parallelism.pipeline-parallel-degree",
         "2",
+        "--parallelism.pipeline-parallel-schedule",
+        "1F1B",
+        "--parallelism.pipeline-parallel-microbatch-size",
+        "1",
+        "--parallelism.pipeline-parallel-first-stage-less-layers",
+        "0",
+        "--parallelism.pipeline-parallel-last-stage-less-layers",
+        "0",
+        "--dataloader.replay-steps",
+        "40",
+        "--debug.seed",
+        "42",
+        "--dump-folder",
+        "/tmp/arm-dir",
+        "activation-checkpoint:none",
+    ]
+
+
+# The same arm at pp 4, which the caps admit since MAX_PP rose to 4.
+#
+# **The pp 2 golden above cannot pin what this one pins.** At 2 stages both
+# weight conventions give [8, 8], so a lost ``less-layers 0`` flag changes no
+# split there and the golden would still catch it only as a missing token. At
+# 4 stages the two conventions disagree -- weight 0 splits 16 layers
+# [4, 4, 4, 4] and weight 1 splits [4, 5, 4, 3] -- so this is the degree at
+# which the flags decide the model each rank builds. Rule 7 of
+# benchmarks/e2e/parallelism.py assumes the weight-0 arithmetic at every
+# degree it admits, and this golden is the test its comment promises.
+#
+# Batch 8 rather than 4: spec rule 12 asks pp 4 for 8 microbatches.
+GOLDEN_TITAN_PP4_SPEC = ParallelismSpec(pp=4, pp_schedule="1F1B")
+
+
+def _golden_titan_pp4_command(size: str) -> list[str]:
+    return [
+        "./run_train.sh",
+        "--module",
+        TITAN_CONFIG_MODULE,
+        "--config",
+        "qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+        "--config-arg",
+        f"size={size}",
+        "--training.seq-len",
+        "1024",
+        "--training.steps",
+        "40",
+        "--training.local-batch-size",
+        "8",
+        "--compile.enable",
+        "--profiler.enable_profiling",
+        "--profiler.profile_freq",
+        "20",
+        "--profiler.profiler_active",
+        "5",
+        "--profiler.profiler_warmup",
+        "5",
+        "--parallelism.pipeline-parallel-degree",
+        "4",
         "--parallelism.pipeline-parallel-schedule",
         "1F1B",
         "--parallelism.pipeline-parallel-microbatch-size",
@@ -815,14 +890,36 @@ def _golden_megatron_pp2_tail(size: str) -> list[str]:
 
 class GoldenCommandTests(unittest.TestCase):
     def _command(
-        self, pinned, size, compile_mode, ac_mode, parallelism=None
+        self, pinned, size, compile_mode, ac_mode, parallelism=None, batch=None
     ) -> list[str]:
         scenario = scenario_by_name(pinned[0])
         # Omitted rather than passed when no spec is named, so these calls
         # keep exercising the default the pre-parallelism callers get.
         extra = {} if parallelism is None else {"parallelism": parallelism}
+        # The batch travels through the harness's own override path, so a
+        # golden taken at a non-default batch freezes the argv a real
+        # ``--batch N`` command produces rather than a hand-built one.
+        # All three sizes are named, and that is the point.
+        # ``workload_with_overrides`` reads ``os.environ`` for any size the
+        # caller leaves out, and ``SEQ``, ``STEPS`` and ``BATCH`` are
+        # supported e2e environment equivalents. An operator with one
+        # exported would fail this CPU contract test, and the failure would
+        # name the parallelism flags rather than the shell. An explicit
+        # argument wins over the environment, so naming all three closes it.
+        # ``environment={}`` alone does not: an empty mapping is falsy, and
+        # the function falls back to ``os.environ`` on a falsy value.
+        workload = (
+            scenario.workload
+            if batch is None
+            else workload_with_overrides(
+                scenario,
+                seq_len=scenario.workload.seq_len,
+                steps=scenario.workload.steps,
+                batch=batch,
+            )
+        )
         return command_for_arm(
-            scenario.workload,
+            workload,
             scenario.arm(pinned[1]),
             Path("/tmp/arm-dir"),
             (),
@@ -884,7 +981,7 @@ class GoldenCommandTests(unittest.TestCase):
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
                 with self.subTest(scenario=scenario.name, arm=arm.name):
-                    megatron = arm.launcher == "megatron"
+                    megatron = arm.launcher in AC_NONE_LAUNCHERS
                     positional = (
                         scenario.workload,
                         arm,
@@ -919,6 +1016,28 @@ class GoldenCommandTests(unittest.TestCase):
                         GOLDEN_TITAN_PP2_SPEC,
                     ),
                     _golden_titan_pp2_command(size),
+                )
+
+    def test_titan_pp4_argv_freezes_the_two_less_layers_flags(self) -> None:
+        """The degree at which the two flags decide the split.
+
+        At 2 stages both weight conventions give [8, 8]. At 4 they give
+        [4, 4, 4, 4] and [4, 5, 4, 3], and Megatron always splits evenly. So
+        a dropped flag here is a different model per rank, and rule 7 of
+        benchmarks/e2e/parallelism.py would pass it.
+        """
+        for size in ("normal", "huge"):
+            with self.subTest(size=size):
+                self.assertEqual(
+                    self._command(
+                        GOLDEN_TITAN_ARM,
+                        size,
+                        "default",
+                        "none",
+                        GOLDEN_TITAN_PP4_SPEC,
+                        batch=8,
+                    ),
+                    _golden_titan_pp4_command(size),
                 )
 
     def test_the_only_difference_between_pp1_and_pp2_is_the_parallelism_block(
@@ -1722,7 +1841,21 @@ TEST_CENSUS = {
     # preconditions on the arguments it borrows, the spec's own positivity
     # guard, the four derivations, and the schedule registry checked against
     # the PyTorch classes it names.
-    "test_parallelism": 85,
+    # +22 when the caps rose to world size 8 and pp 4. Each half of rule 2
+    # now matches its own message, because both halves raise a ValueError
+    # and a spec that fired one of them before can pass now. The additions
+    # are: the two caps pinned as literals, each cap's boundary from both
+    # sides, the dp 2 x pp 4 cell at both shapes and both batch settings,
+    # rule 7 at four and at eight stages, rule 12's floor of 8 microbatches
+    # from both sides, and the specs whose verdict moved -- world size 5,
+    # which nothing refuses now, and pp 3, which rule 7 refuses in the cap's
+    # place.
+    # +5 for the launcher classification MEGATRON_LAUNCHERS needs: every
+    # registry launcher is classified, the set names no launcher the
+    # registry dropped, it excludes the titan launcher, each member trips
+    # rule 5 on its own, and a launcher outside the set keeps a PyTorch-only
+    # schedule.
+    "test_parallelism": 112,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the five CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -1777,7 +1910,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1481
+TEST_CENSUS_TOTAL = 1508
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

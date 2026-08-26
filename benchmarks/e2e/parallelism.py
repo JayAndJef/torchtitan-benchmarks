@@ -67,10 +67,12 @@ supported. Adding one means adding it to ``world_size``, to
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` outright, and
 rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
-measurement: only ``1F1B`` at ``pp <= 2`` is targeted by this pass. Real
+measurement: only ``1F1B`` is targeted, and only up to ``pp 4``. Real
 ``pp2``, ``dp2``, and ``dp2 x pp2`` correctness runs have passed on both
-engines; no parallel timing is citable because those cells ran on a loaded
-host and were not repeated on an idle one.
+engines. **No run has used ``pp 4``, and no run has used world size 8.** The
+caps admit both; that is a declaration and not evidence. No parallel timing
+is citable, because the cells that ran were on a loaded host and nobody
+repeated them on an idle one.
 """
 
 from __future__ import annotations
@@ -90,24 +92,79 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # The GPU budget for this pass, and the pipeline depth it targets. Named so
 # that lifting either is one edit here rather than a hunt through the rules.
 #
-# pp is capped at 2 because nothing plans to run pp=4. **The cap is not what
-# makes the two engines split the same way** -- an earlier version of this
-# comment claimed that, and it is false. What makes them agree is the pair of
-# flags the harness sends, and rule 7 assumes them; see rule 7 below.
+# The budget is 8 because this host holds 8 devices. The depth is 4 because
+# the stock-Megatron suite runs ``--dp 2 --pp 4`` on those 8 devices. Neither
+# number is a property of an engine. Both are a declaration of what somebody
+# plans to run.
+#
+# **An earlier revision capped pp at 2 and gave a false reason.** It said the
+# two engines count layers the same way only at pp <= 2. They agree at every
+# degree, because ``benchmarks/e2e/launch.py`` always sends
+# ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
+# ``last`` twin. Those two flags make rule 7's arithmetic the right test. See
+# rule 7 below.
 #
 # The two conventions, measured rather than assumed: TorchTitan counts the
 # embedding and the output head as stages, through
 # ``pipeline_parallel_first/last_stage_less_layers``, which both default to
 # **1**. Megatron does not (``account_for_embedding/loss_in_pipeline_split``
-# default False) and divides ``config.num_layers`` alone. Running TorchTitan's
-# own splitter at 16 layers: at 2 stages both conventions give [8, 8], and at
-# 4 stages weight 0 gives [4, 4, 4, 4] where the default weight 1 gives
-# **[4, 5, 4, 3]**. Megatron gives [4, 4, 4, 4] at 4 stages and does not
-# raise. So the disagreement is TorchTitan's uneven split, not a Megatron
-# refusal, and four stages are reachable at pp=2 -- either interleaved
-# schedule asks for them.
-MAX_WORLD_SIZE = 4
-MAX_PP = 2
+# default False) and divides ``config.num_layers`` alone. TorchTitan's own
+# splitter, run at weight 0 and at the default weight 1:
+#
+#     16 layers, 2 stages: [8, 8] either way.
+#     16 layers, 4 stages: [4, 4, 4, 4] against **[4, 5, 4, 3]**.
+#     16 layers, 8 stages: eight 2s against **[2, 3, 2, 2, 2, 2, 2, 1]**.
+#     24 layers, 4 stages: [6, 6, 6, 6] against **[6, 7, 6, 5]**.
+#     24 layers, 8 stages: eight 3s against **[3, 4, 3, 3, 3, 3, 3, 2]**.
+#
+# Megatron gives the weight 0 split in each row and does not raise. So the
+# disagreement is TorchTitan's uneven split under its own default, and the
+# harness removes it at every degree.
+#
+# Eight stages are reachable at pp 4, and four at pp 2, because **four of
+# the five registered schedules ask for two stages per rank**:
+# ``Interleaved1F1B``, ``InterleavedZeroBubble``, ``ZBVZeroBubble`` and
+# ``DualPipeV``. Rule 7 reads ``pp * stages_per_rank`` for that reason. An
+# earlier revision of this comment said "either interleaved schedule", which
+# names two of the four.
+#
+# **The cap lift widens one recorded gap, and this comment records the
+# widening.** ``benchmarks/e2e/results.py``'s ``loss_visible_rank`` returns
+# ``(world_size // pp) * (pp - 1)``. That is right for the two schedules this
+# repo runs and wrong for the two V-shaped ones. TorchTitan's
+# ``_get_pp_rank_to_stage_indices_mapping`` gives rank 0 the pair
+# ``(0, num_stages - 1)`` under ``ZBVZeroBubble`` and ``DualPipeV``, so
+# **rank 0 holds the last stage and the loss**. TorchTitan's own
+# ``_get_metrics_rank`` special-cases ``ZBVZeroBubble`` and returns 0; it
+# does not special-case ``DualPipeV``, and this repo special-cases neither.
+# Rule 5 refuses a V-shaped schedule only beside a megatron arm, so a
+# titan-only run may still ask for one. Rule 6 narrows the exposure and does
+# not close it: both V-shaped schedules set ``requires_uncompiled``, so such
+# a run also has to ask for ``--compile-mode none``.
+#
+# The gap already existed at ``dp 1`` and ``dp 2`` with ``pp 2``. The lift
+# adds six ``(dp, pp)`` pairs: (1, 3), (1, 4), (2, 3), (2, 4), (3, 2) and
+# (4, 2). No run has ever used a V-shaped schedule. Read this before you run
+# one, and repair ``loss_visible_rank`` rather than the cap.
+MAX_WORLD_SIZE = 8
+MAX_PP = 4
+
+
+# The ``Arm.launcher`` values that drive Megatron-LM. Rule 5 reads this set,
+# because ``PipelineSchedule.megatron_supported`` is a fact about the library
+# and more than one launcher runs it.
+#
+# **Declared one by one. Not a ``megatron`` prefix, and not "every launcher
+# that is not torchtitan".** A prefix fails OPEN: a launcher that names the
+# library another way -- ``mcore``, ``nemo`` -- would walk past rule 5, and
+# the run would reach a schedule Megatron cannot run with no cross-engine
+# opponent for it. The complement fails the other way: it would apply
+# Megatron's restriction to an engine that is not Megatron, and refuse a
+# legal titan-only cell. A declared set is wrong in neither direction, and a
+# new launcher is then an edit here rather than a silent classification.
+# ``tests/test_parallelism.py`` refuses a registry launcher this set and
+# ``torchtitan`` do not name between them.
+MEGATRON_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
 
 
 @dataclass(frozen=True)
@@ -401,16 +458,28 @@ def describe(
     omitted it could not distinguish replication from ZeRO-3 after the fact.
 
     ``n_microbatches`` is arithmetic over two fields in the same record, and
-    at ``pp == 1`` it describes no split that happens: neither engine
-    microbatches without a pipeline. Read it beside ``pp``.
+    what it describes at ``pp == 1`` depends on the engine. Read it beside
+    ``pp``, and beside the arm roster.
 
-    That makes it disagree with the megatron log line arm rule 12 validates,
-    by construction: the driver's ``pipeline_settings`` returns one
-    microbatch at ``pp`` 1 and the rule demands ``microbatches=1`` there,
-    while this record says ``local_batch_size // pp_microbatch_size``. **The
-    log is the run and this is the arithmetic.** A ``dp`` degree above 1 is
-    the first spec that makes the disagreement reachable with more than one
-    rank, so a reader of such a manifest meets it for the first time there.
+    **An earlier revision said it describes no split at ``pp`` 1. That is no
+    longer true.** The stock Megatron-LM driver takes
+    ``--micro-batch-size`` at every degree, so at ``pp`` 1 it runs
+    ``local_batch_size // pp_microbatch_size`` passes of that size and this
+    field counts them. TorchTitan still runs one pass over the whole local
+    batch there, because it reads
+    ``pipeline_parallel_microbatch_size`` only inside
+    ``_build_pipeline_schedule``. So at ``pp`` 1 one number describes a real
+    split for one engine and no split for the other. Spec rule 3 holds
+    ``pp_microbatch_size`` at 1 there, which makes the two agree today; the
+    field would part them the moment that rule changed.
+
+    It also disagrees with the megatron log line arm rule 12 validates, by
+    construction: the driver's ``pipeline_settings`` returns one microbatch
+    at ``pp`` 1 and the rule demands ``microbatches=1`` there, while this
+    record says ``local_batch_size // pp_microbatch_size``. **The log is the
+    run and this is the arithmetic.** A ``dp`` degree above 1 is the first
+    spec that makes the disagreement reachable with more than one rank, so a
+    reader of such a manifest meets it for the first time there.
     """
     replicate, shard = titan_mesh(spec)
     return {
@@ -500,8 +569,8 @@ def validate_parallelism(
     if spec.pp > MAX_PP:
         raise ValueError(
             f"pipeline degree {spec.pp} exceeds the supported maximum "
-            f"{MAX_PP}; the two engines' layer-counting conventions agree "
-            "only at pp <= 2"
+            f"{MAX_PP}; no run plans a deeper pipeline, and nobody has "
+            "checked one"
         )
 
     # 3. A schedule names a pipeline. Without one it would be recorded in the
@@ -544,9 +613,16 @@ def validate_parallelism(
     #    so a run holding a megatron arm cannot use it. The check reads the
     #    launchers rather than the scenario name: a titan-only run may use a
     #    PyTorch-only schedule.
+    #
+    #    It reads MEGATRON_LAUNCHERS rather than the one name "megatron".
+    #    A second Megatron-LM launcher, "megatron_stock", walked past this
+    #    rule while the test was an equality against one string, and a
+    #    refusal inside a command builder covered it instead. A command
+    #    builder is not a spec rule: it runs after the manifest records the
+    #    mesh, and it cannot refuse a mesh nobody builds a command for.
     if (
         schedule is not None
-        and "megatron" in engines
+        and engines & MEGATRON_LAUNCHERS
         and not schedule.megatron_supported
     ):
         raise ValueError(
@@ -580,9 +656,11 @@ def validate_parallelism(
     #    divisor ``n_layers + 2`` rather than ``n_layers``: at 16 layers over
     #    4 stages weight 1 splits [4, 5, 4, 3] where Megatron splits
     #    [4, 4, 4, 4], and this rule would pass both. Four stages are
-    #    reachable at pp 2, because either interleaved schedule asks for two
-    #    per rank. Delivering those flags is the command-line commit's job;
-    #    this rule assumes it, and a test there must pin them.
+    #    reachable at pp 2 and eight at pp 4, because four of the five
+    #    registered schedules ask for two stages per rank. ``launch.py``
+    #    sends both flags at every ``pp > 1``; this rule assumes that, and
+    #    ``tests/test_migration_contract.py`` freezes the argv at pp 2 and
+    #    at pp 4.
     #
     #    Megatron needs no flag: it divides ``config.num_layers`` and asserts
     #    the remainder itself.

@@ -16,6 +16,7 @@ away.
 """
 
 import ast
+import dataclasses
 import inspect
 import json
 import os
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.e2e.parallelism import (
     MAX_PP,
     MAX_WORLD_SIZE,
+    MEGATRON_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
@@ -41,7 +43,12 @@ from benchmarks.e2e.parallelism import (
     titan_mesh,
     validate_parallelism,
 )
-from benchmarks.e2e.registry import COMPILE_MODES, EXECUTION_MODEL, Workload
+from benchmarks.e2e.registry import (
+    COMPILE_MODES,
+    EXECUTION_MODEL,
+    SCENARIOS,
+    Workload,
+)
 from benchmarks.models.piper_qwen3.shape import (
     PIPER_SHAPES,
     PiperShape,
@@ -52,6 +59,7 @@ from benchmarks.models.piper_qwen3.shape import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SHAPE_1B = shape_by_name("1b")  # 16 layers, 4 experts
+SHAPE_9B = shape_by_name("9b")  # 24 layers, 4 experts
 SHAPE_HUGE = shape_by_name("huge")  # 1 layer
 
 
@@ -91,6 +99,14 @@ def check(
 
 
 PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
+
+# The cell the stock-Megatron suite runs: two data-parallel replicas of a
+# four-stage pipeline, on eight devices. Rule 12 asks it for 8 microbatches,
+# and the two batch settings below are the two ways to reach exactly 8.
+DP2_PP4 = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B")
+DP2_PP4_MICRO4 = ParallelismSpec(
+    dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4
+)
 
 
 # --------------------------------------------------------------------------
@@ -143,7 +159,13 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(ParallelismSpec(pp_microbatch_size=2).pp_microbatch_size, 2)
 
     def test_the_spec_is_frozen(self):
-        with self.assertRaises(Exception):
+        """``FrozenInstanceError``, not any ``Exception``.
+
+        A bare ``Exception`` also passes on the ``AttributeError`` a renamed
+        field raises, so it would stay green on a spec that was no longer
+        frozen at all.
+        """
+        with self.assertRaises(dataclasses.FrozenInstanceError):
             TRIVIAL_SPEC.dp = 2  # type: ignore[misc]
 
 
@@ -262,29 +284,35 @@ class ScheduleNamesMatchPyTorchTest(unittest.TestCase):
 
 
 class TitanMeshTest(unittest.TestCase):
-    def test_every_legal_dp_ep_pair_up_to_world_size_four(self):
+    def test_every_legal_dp_ep_pair_up_to_the_budgeted_world_size(self):
         """``(dp_replicate, dp_shard)`` at each pair the budget allows.
 
         ``ep > 1`` borrows the shard axis, so the replicate degree is what
         is left of ``dp``. Rule 14 refuses these specs today; the mesh
         arithmetic is what the expert-parallel stage will inherit, so it is
         pinned now.
+
+        The budget is 8, so ``dp 8`` is a legal width and the pairs below
+        cover it.
         """
         expected = {
             (1, 1): (1, 1),
             (2, 1): (2, 1),
             (3, 1): (3, 1),
             (4, 1): (4, 1),
+            (8, 1): (8, 1),
             (2, 2): (1, 2),
             (4, 2): (2, 2),
             (4, 4): (1, 4),
+            (8, 2): (4, 2),
+            (8, 4): (2, 4),
         }
         for (dp, ep), mesh in expected.items():
             with self.subTest(dp=dp, ep=ep):
                 self.assertEqual(titan_mesh(ParallelismSpec(dp=dp, ep=ep)), mesh)
 
     def test_the_mesh_product_is_the_data_parallel_width(self):
-        for dp, ep in ((1, 1), (2, 1), (2, 2), (4, 2), (4, 4)):
+        for dp, ep in ((1, 1), (2, 1), (2, 2), (4, 2), (4, 4), (8, 2), (8, 4)):
             with self.subTest(dp=dp, ep=ep):
                 replicate, shard = titan_mesh(ParallelismSpec(dp=dp, ep=ep))
                 self.assertEqual(replicate * shard, dp)
@@ -339,6 +367,19 @@ class ExecutionModelTest(unittest.TestCase):
         self.assertEqual(
             execution_model(ParallelismSpec(dp=2, ep=2)),
             "2-gpu-plain-bf16-dp2-ep2",
+        )
+
+    def test_the_eight_gpu_cell_names_its_two_axes(self):
+        """The manifest string for the stock-Megatron cell."""
+        self.assertEqual(
+            execution_model(DP2_PP4), "8-gpu-plain-bf16-dp2-pp4-1F1B"
+        )
+        self.assertEqual(
+            execution_model(ParallelismSpec(pp=4, pp_schedule="1F1B")),
+            "4-gpu-plain-bf16-no-fsdp-pp4-1F1B",
+        )
+        self.assertEqual(
+            execution_model(ParallelismSpec(dp=8)), "8-gpu-plain-bf16-dp8"
         )
 
     def test_the_parallel_parts_name_degrees_and_not_mechanisms(self):
@@ -444,19 +485,98 @@ class Rule01WorldSizeMatchesDevicesTest(unittest.TestCase):
 
 
 class Rule02BudgetTest(unittest.TestCase):
+    """Rule 2 has two halves, and both raise a ``ValueError``.
+
+    A test that asserts the raise alone cannot say which half ran, so every
+    test here matches the message of the half it means to fire. That matters
+    because the caps moved: a ``pp 4`` spec fired the pp half before, and it
+    passes now. A loose test would still be green and would prove nothing.
+    """
+
+    def test_the_declared_caps_are_the_ones_this_pass_targets(self):
+        """Pinned as literals, because the messages below name them.
+
+        Eight devices is what this host holds. Four stages is what the
+        stock-Megatron suite runs. Lifting either is a deliberate act, and
+        it edits this test.
+        """
+        self.assertEqual(MAX_WORLD_SIZE, 8)
+        self.assertEqual(MAX_PP, 4)
+
     def test_the_largest_budgeted_mesh_passes(self):
+        """Both ways to fill eight devices.
+
+        ``dp 2 x pp 4`` needs 8 microbatches for rule 12, so it takes batch
+        8 rather than the default 4. The pure data-parallel mesh has no
+        pipeline and rule 12 does not read it.
+        """
         check(ParallelismSpec(dp=MAX_WORLD_SIZE))
-        check(ParallelismSpec(dp=2, pp=MAX_PP, pp_schedule="1F1B"))
+        check(DP2_PP4, batch=8)
 
     def test_a_world_size_above_the_budget_is_refused(self):
-        with self.assertRaisesRegex(ValueError, "budget"):
+        """``dp 16`` satisfies rule 1, because ``check`` gives it 16
+        devices, so the budget is what refuses it. The message says so."""
+        with self.assertRaisesRegex(
+            ValueError, r"world size 16 exceeds the 8-GPU budget"
+        ):
             check(ParallelismSpec(dp=MAX_WORLD_SIZE * 2))
 
-    def test_a_pipeline_deeper_than_two_is_refused(self):
-        """World size 4 satisfies rule 1 and the budget, so this isolates
-        the pp half of rule 2."""
-        with self.assertRaisesRegex(ValueError, "pipeline degree"):
-            check(ParallelismSpec(pp=4, pp_schedule="1F1B"))
+    def test_the_boundary_of_the_world_size_cap_from_both_sides(self):
+        """Eight devices pass and nine do not.
+
+        ``dp 9`` has no pipeline, so no other rule reads it. Rule 1 passes
+        because ``check`` gives it 9 devices.
+        """
+        check(ParallelismSpec(dp=MAX_WORLD_SIZE))
+        with self.assertRaisesRegex(
+            ValueError, r"world size 9 exceeds the 8-GPU budget"
+        ):
+            check(ParallelismSpec(dp=MAX_WORLD_SIZE + 1))
+
+    def test_a_pipeline_deeper_than_the_maximum_is_refused(self):
+        """``pp 8`` is world size 8, which the budget allows, so this fires
+        the pp half alone.
+
+        Before the caps rose this test used ``pp 4``, which the pp half then
+        refused. ``pp 4`` is now legal, so the spec had to move as well as
+        the message.
+        """
+        with self.assertRaisesRegex(
+            ValueError, r"pipeline degree 8 exceeds the supported maximum 4"
+        ):
+            check(ParallelismSpec(pp=MAX_PP * 2, pp_schedule="1F1B"))
+
+    def test_the_boundary_of_the_pipeline_cap_from_both_sides(self):
+        """``pp 4`` passes and ``pp 5`` does not.
+
+        ``pp 5`` is world size 5, under the budget, and 16 layers do not
+        divide into 5 stages -- so rule 7 would also refuse it. The message
+        is what says rule 2 fired first.
+        """
+        check(ParallelismSpec(pp=MAX_PP, pp_schedule="1F1B"), batch=8)
+        with self.assertRaisesRegex(
+            ValueError, r"pipeline degree 5 exceeds the supported maximum 4"
+        ):
+            check(ParallelismSpec(pp=MAX_PP + 1, pp_schedule="1F1B"), batch=10)
+
+    def test_the_pipeline_message_no_longer_claims_an_engine_reason(self):
+        """The old message said the two engines count layers the same way
+        only at ``pp <= 2``. That was false: ``launch.py`` sends
+        ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
+        twin at every ``pp > 1``, which makes the two conventions agree at
+        every degree. The cap is a plan, not an engine limit.
+
+        The positive match comes first, and it has to. ``pp 8`` at batch 4
+        also fails rule 11, whose message contains neither phrase -- so two
+        ``assertNotIn`` checks alone would pass with rule 2's pp half
+        deleted.
+        """
+        with self.assertRaisesRegex(
+            ValueError, r"pipeline degree 8 exceeds the supported maximum 4"
+        ) as raised:
+            check(ParallelismSpec(pp=MAX_PP * 2, pp_schedule="1F1B"))
+        self.assertNotIn("layer-counting", str(raised.exception))
+        self.assertNotIn("pp <= 2", str(raised.exception))
 
 
 class Rule03ScheduleAccompaniesAPipelineTest(unittest.TestCase):
@@ -552,6 +672,81 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
                     )
 
 
+class MegatronLauncherSetTest(unittest.TestCase):
+    """Rule 5 asks "does this run drive Megatron-LM", and this set answers it.
+
+    The rule tested one launcher name by equality until a second Megatron-LM
+    launcher arrived. The second one then walked past the rule, and a refusal
+    inside a command builder covered the hole instead. These tests make the
+    classification a declaration rather than a spelling.
+    """
+
+    def test_every_registry_launcher_is_classified(self):
+        """The guard the declared set needs.
+
+        A launcher that is neither ``torchtitan`` nor a member of
+        ``MEGATRON_LAUNCHERS`` has never been classified, so nobody has
+        decided whether rule 5 applies to it. Fail here, where the decision
+        is one edit, rather than inside a training subprocess.
+        """
+        launchers = {
+            arm.launcher
+            for scenario in SCENARIOS.values()
+            for arm in scenario.arms
+        }
+        unclassified = launchers - MEGATRON_LAUNCHERS - {"torchtitan"}
+        self.assertEqual(
+            unclassified,
+            set(),
+            "add each launcher to MEGATRON_LAUNCHERS, or to the titan side, "
+            "before rule 5 has to read it",
+        )
+
+    def test_the_set_holds_only_launchers_the_registry_declares(self):
+        """The other direction. A name nobody uses is a name that went
+        stale, and rule 5 would then read a set that describes no arm."""
+        launchers = {
+            arm.launcher
+            for scenario in SCENARIOS.values()
+            for arm in scenario.arms
+        }
+        self.assertEqual(MEGATRON_LAUNCHERS - launchers, set())
+
+    def test_the_set_does_not_hold_the_titan_launcher(self):
+        self.assertNotIn("torchtitan", MEGATRON_LAUNCHERS)
+
+    def test_rule_five_reads_every_member_of_the_set(self):
+        """Each Megatron-LM launcher alone must trip rule 5.
+
+        A membership test that read only the first name would pass with any
+        one launcher present, so ask each of them on its own.
+        """
+        for launcher in sorted(MEGATRON_LAUNCHERS):
+            with self.subTest(launcher=launcher):
+                with self.assertRaisesRegex(
+                    ValueError, r"not implemented by Megatron-LM"
+                ):
+                    check(
+                        ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
+                        batch=8,
+                        compile_mode="none",
+                        engines=("torchtitan", launcher),
+                    )
+
+    def test_a_launcher_outside_the_set_keeps_a_pytorch_only_schedule(self):
+        """The rule must not become "anything that is not torchtitan".
+
+        A third engine would then inherit Megatron's restriction and lose a
+        legal cell for a reason that is not about it.
+        """
+        check(
+            ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
+            batch=8,
+            compile_mode="none",
+            engines=("torchtitan", "some-other-engine"),
+        )
+
+
 class Rule06UncompiledScheduleTest(unittest.TestCase):
     def test_an_uncompiled_mode_carries_a_zero_bubble_schedule(self):
         check(
@@ -594,6 +789,47 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
     def test_a_one_layer_shape_is_refused_at_pp_two(self):
         with self.assertRaisesRegex(ValueError, "does not divide evenly"):
             check(PP2, shape=SHAPE_HUGE)
+
+    def test_the_two_suite_shapes_divide_into_four_stages(self):
+        """16 and 24 layers over ``pp 4`` with 1F1B, which is 4 stages.
+
+        Both are the shapes the stock-Megatron suite runs. TorchTitan's own
+        splitter gives [4, 4, 4, 4] and [6, 6, 6, 6] at weight 0, which is
+        the split Megatron gives, so the rule and the engines agree.
+        """
+        for shape in (SHAPE_1B, SHAPE_9B):
+            with self.subTest(model_size=shape.name):
+                check(DP2_PP4, shape=shape, batch=8, device_count=8)
+
+    def test_a_one_layer_shape_is_refused_at_pp_four(self):
+        """The refusal has to name four stages, not two. Rule 2 admits
+        ``pp 4`` now, so rule 7 is what stops a 1-layer shape there."""
+        with self.assertRaisesRegex(
+            ValueError, r"does not divide evenly into 4 pipeline stages"
+        ):
+            check(
+                ParallelismSpec(pp=4, pp_schedule="1F1B"),
+                shape=SHAPE_HUGE,
+                batch=8,
+            )
+
+    def test_eight_interleaved_stages_at_pp_four(self):
+        """``pp 4`` with a two-stage schedule asks for 8 stages.
+
+        16 and 24 layers both divide by 8. A 4-layer shape does not, and
+        rule 7 refuses it at any batch, because rule 7 runs before rules 10
+        to 12. Batch 16 is what the two passing shapes need: eight stages
+        ask rule 12 for 16 microbatches.
+        """
+        interleaved = ParallelismSpec(pp=4, pp_schedule="Interleaved1F1B")
+        for shape in (SHAPE_1B, SHAPE_9B):
+            with self.subTest(model_size=shape.name):
+                check(interleaved, shape=shape, batch=16)
+        four_layers = PiperShape.derived(name="probe", dim=128, n_layers=4)
+        with self.assertRaisesRegex(
+            ValueError, r"does not divide evenly into 8 pipeline stages"
+        ):
+            check(interleaved, shape=four_layers, batch=16)
 
     def test_a_layer_count_that_misses_the_interleaved_stage_count(self):
         """Two layers cover ``pp * stages_per_rank`` = 2 but not 4."""
@@ -671,6 +907,22 @@ class Rule11MicrobatchesDivideByPipelineDegreeTest(unittest.TestCase):
     def test_the_rule_is_vacuous_without_a_pipeline(self):
         check(TRIVIAL_SPEC, batch=3)
 
+    def test_seven_microbatches_at_pp_four_is_refused_by_this_rule(self):
+        """**Seven is below rule 12's floor of eight and rule 11 fires
+        first.**
+
+        Rule 11 runs before rule 12, so a count that fails both is reported
+        as an uneven split across the pipeline degree. Read the message
+        before you conclude that a batch was too small: the repair differs.
+        Seven microbatches needs a batch that divides by 4; four
+        microbatches needs a larger batch.
+        """
+        with self.assertRaisesRegex(
+            ValueError,
+            r"7 microbatches do not divide evenly across pipeline degree 4",
+        ):
+            check(DP2_PP4, batch=7, device_count=8)
+
 
 class Rule12MicrobatchesCoverTheWarmupTest(unittest.TestCase):
     def test_the_milestone_cell_passes(self):
@@ -690,6 +942,44 @@ class Rule12MicrobatchesCoverTheWarmupTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is below the"):
             check(interleaved, batch=4)
         check(interleaved, batch=8)
+
+    def test_the_pp_four_cell_passes_at_exactly_eight_microbatches(self):
+        """Both batch settings the stock-Megatron suite may use.
+
+        ``pp 4`` with 1F1B is 4 stages, so rule 12 asks for 8 microbatches.
+        Batch 32 with microbatch 4 gives 8, and batch 8 with microbatch 1
+        gives 8. Both sit exactly on the floor.
+        """
+        self.assertEqual(
+            n_microbatches(DP2_PP4_MICRO4, local_batch_size=32), 8
+        )
+        self.assertEqual(n_microbatches(DP2_PP4, local_batch_size=8), 8)
+        check(DP2_PP4_MICRO4, batch=32, device_count=8)
+        check(DP2_PP4, batch=8, device_count=8)
+
+    def test_the_pp_four_cell_is_refused_below_eight_microbatches(self):
+        """The floor from the other side, at both batch settings.
+
+        Four microbatches divides by ``pp 4``, so rule 11 passes and rule 12
+        is what refuses it. The message names the 8 the cell needs.
+        """
+        for spec, batch in ((DP2_PP4, 4), (DP2_PP4_MICRO4, 16)):
+            with self.subTest(microbatch=spec.pp_microbatch_size, batch=batch):
+                self.assertEqual(
+                    n_microbatches(spec, local_batch_size=batch), 4
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"4 microbatches is below the 8 that pp 4 x 1 stage",
+                ):
+                    check(spec, batch=batch, device_count=8)
+
+    def test_the_default_batch_does_not_reach_pp_four(self):
+        """The ``Workload`` default is batch 4, so a bare ``--pp 4`` fails
+        rule 12 even now that rule 2 admits the degree. An operator has to
+        raise the batch on purpose."""
+        with self.assertRaisesRegex(ValueError, r"is below the 8 that pp 4"):
+            check(ParallelismSpec(pp=4, pp_schedule="1F1B"), batch=4)
 
     def test_a_single_gpu_run_at_batch_one_is_not_refused(self):
         """The guard that keeps rule 12 a pipeline rule.
@@ -735,6 +1025,127 @@ class Rule14ExpertParallelismIsRefusedTest(unittest.TestCase):
             with self.subTest(spec=spec):
                 with self.assertRaisesRegex(ValueError, "not supported yet"):
                     check(spec)
+
+
+class TheEightGpuCellTest(unittest.TestCase):
+    """The whole ``dp 2 x pp 4`` cell, rule by rule rather than by half.
+
+    Rule 2 is what used to refuse this mesh. Every other rule has to admit
+    it for its own reason, and this class asks each of them at eight
+    devices, at both shapes the suite runs, and at both batch settings.
+    """
+
+    def test_the_cell_passes_at_eight_devices_for_both_engines(self):
+        for shape in (SHAPE_1B, SHAPE_9B):
+            for engines in (("torchtitan",), ("torchtitan", "megatron")):
+                for spec, batch in ((DP2_PP4, 8), (DP2_PP4_MICRO4, 32)):
+                    with self.subTest(
+                        model_size=shape.name,
+                        engines=engines,
+                        batch=batch,
+                    ):
+                        check(
+                            spec,
+                            shape=shape,
+                            batch=batch,
+                            engines=engines,
+                            device_count=8,
+                        )
+
+    def test_the_cell_still_has_to_fill_the_devices(self):
+        """Rule 1 is unchanged. Eight ranks need eight devices."""
+        for device_count in (4, 7, 9):
+            with self.subTest(device_count=device_count):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"world size 8 \(dp 2 x pp 4\) does not match the "
+                    rf"{device_count} device",
+                ):
+                    check(DP2_PP4, batch=8, device_count=device_count)
+
+    def test_the_cell_is_refused_under_cuda_graph(self):
+        """Rule 13 reads the world size, so it grows with the mesh."""
+        with self.assertRaisesRegex(
+            ValueError, r"refused at world size 8"
+        ):
+            check(
+                DP2_PP4, batch=8, device_count=8, compile_mode="cuda-graph"
+            )
+
+    def test_the_cell_keeps_the_other_two_compile_modes(self):
+        for mode in ("default", "none"):
+            with self.subTest(compile_mode=mode):
+                check(DP2_PP4, batch=8, device_count=8, compile_mode=mode)
+
+    def test_the_cell_records_eight_ranks_and_eight_microbatches(self):
+        self.assertEqual(DP2_PP4.world_size, 8)
+        self.assertEqual(
+            describe(DP2_PP4_MICRO4, local_batch_size=32),
+            {
+                "dp": 2,
+                "pp": 4,
+                "ep": 1,
+                "pp_schedule": "1F1B",
+                "pp_microbatch_size": 4,
+                "world_size": 8,
+                "dp_replicate": 2,
+                "dp_shard": 1,
+                "n_microbatches": 8,
+            },
+        )
+
+    def test_the_cell_asks_torchtitan_to_replicate_rather_than_shard(self):
+        """``dp_shard`` 1 replicates. The harness must send it, because
+        TorchTitan resolves an omitted shard degree to every remaining
+        rank, which at eight ranks is ZeRO-3 under a replication label."""
+        self.assertEqual(titan_mesh(DP2_PP4), (2, 1))
+        self.assertFalse(skip_dp(DP2_PP4))
+
+
+class CapsThatMovedTest(unittest.TestCase):
+    """Specs whose verdict changed when the caps rose, named one by one.
+
+    A cap refuses a whole class of spec, so lifting one can hand a spec to
+    a later rule, to no rule at all, or leave it refused by a rule that was
+    never reached. All three happen here. A test that only asserted "this
+    raises" would stay green through every one of them and say nothing.
+    """
+
+    def test_a_five_rank_data_parallel_mesh_is_now_accepted(self):
+        """World size 5 was above the old 4-GPU budget. Nothing else reads
+        it, so it now passes outright."""
+        check(ParallelismSpec(dp=5))
+        check(ParallelismSpec(dp=6))
+        check(ParallelismSpec(dp=7))
+        check(ParallelismSpec(dp=8))
+
+    def test_pipeline_degree_three_is_now_refused_by_rule_seven(self):
+        """**The verdict is the same and the reason is not.**
+
+        ``pp 3`` used to fail the cap. The cap admits it now, and 16 layers
+        do not divide into 3 stages, so rule 7 refuses it instead. Read the
+        message: the repair is a shape with 24 layers, not a smaller
+        degree.
+        """
+        with self.assertRaisesRegex(
+            ValueError,
+            r"'1b' has 16 layers, which does not divide evenly into 3",
+        ):
+            check(ParallelismSpec(pp=3, pp_schedule="1F1B"), batch=6)
+
+    def test_pipeline_degree_three_passes_on_a_shape_that_divides(self):
+        """24 layers divide into 3 stages, so nothing refuses the spec.
+        Rule 12 asks for 6 microbatches and rule 11 asks that 6 divide by
+        3."""
+        check(
+            ParallelismSpec(pp=3, pp_schedule="1F1B"),
+            shape=SHAPE_9B,
+            batch=6,
+        )
+
+    def test_pipeline_degree_four_is_no_longer_refused_by_the_cap(self):
+        """The change this commit exists to make."""
+        check(ParallelismSpec(pp=4, pp_schedule="1F1B"), batch=8)
 
 
 class PreconditionsOnTheBorrowedArgumentsTest(unittest.TestCase):
