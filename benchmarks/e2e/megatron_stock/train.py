@@ -26,13 +26,16 @@ process instead:
 parameters, fp32 optimizer moments and an fp32 gradient reduction, which is
 about 18 bytes of state per parameter against TorchTitan's 8. The arm keeps
 the stock defaults, because Piper ran them and a stock user gets them. The
-mode line prints the four fields so every log records the difference, and
+mode line prints those fields so every log records the difference, and
 the manifest's ``execution_model`` -- which is composed from the harness
 spec and says ``plain-bf16`` -- describes the TorchTitan arm and not this
 one.
 
-This module imports no torch and no megatron at module scope: ``python -m
-benchmarks.e2e.megatron_stock.train --help`` must not pay for the ML stack.
+**Importing this module costs no torch and no megatron.** Every heavy
+import sits inside ``main``. That keeps the module readable from the
+parent, and it is what lets a test read the marker strings on a host with
+no Megatron-LM checkout. It does **not** make ``--help`` cheap: the parser
+is Megatron's own, so a help run pays for the ML stack like any other.
 """
 
 from __future__ import annotations
@@ -41,12 +44,6 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Callable
-
-# The allocator setting the TorchTitan arms get from run_train.sh and the
-# tuned megatron driver sets for itself. It must be set before torch
-# initializes CUDA. Both engines of this scenario then run one allocator
-# policy, which is the comparability property that matters here.
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 from benchmarks.e2e.megatron_stock import bootstrap
 from benchmarks.e2e.megatron_stock.flags import (
@@ -446,6 +443,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv is not None:
         sys.argv = [sys.argv[0], *argv]
+
+    # The allocator setting the TorchTitan arms get from run_train.sh, and
+    # the tuned megatron driver sets for itself. It must be set before torch
+    # initializes CUDA, and torch is not imported yet. Both engines of this
+    # scenario then run one allocator policy, which is the comparability
+    # property that matters here.
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
     bootstrap.prepare()
 

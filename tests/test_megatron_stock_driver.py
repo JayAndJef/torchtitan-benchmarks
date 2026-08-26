@@ -35,7 +35,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch  # noqa: E402
 
-from benchmarks.e2e.megatron_stock import bootstrap, data, profiling, train  # noqa: E402
+from benchmarks.e2e.megatron_stock import (  # noqa: E402
+    bootstrap,
+    data,
+    profiling,
+    train,
+)
 from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     BENCH_FLAGS,
     BENCH_PP_SCHEDULE,
@@ -709,7 +714,9 @@ class MarkerStringTest(unittest.TestCase):
     def test_the_parallelism_templates_match_the_plan(self) -> None:
         self.assertEqual(train.PARALLELISM_LINE, PLAN_PARALLELISM_LINE)
         self.assertEqual(train.DATA_PARALLEL_LINE, PLAN_DATA_PARALLEL_LINE)
-        self.assertEqual(train.MODE_LINE[: len(PLAN_MODE_PREFIX)], PLAN_MODE_PREFIX)
+        self.assertEqual(
+            train.MODE_LINE[: len(PLAN_MODE_PREFIX)], PLAN_MODE_PREFIX
+        )
         self.assertEqual(train.TRAINING_COMPLETED, "Training completed")
 
     def test_the_parameter_templates_match_the_plan(self) -> None:
@@ -729,7 +736,9 @@ class MarkerStringTest(unittest.TestCase):
 
     def test_no_mesh_line_at_world_size_one(self) -> None:
         """Arm rule 12 is consulted only above one rank."""
-        self.assertEqual(train.parallelism_lines(stock_args(), microbatches=1), [])
+        self.assertEqual(
+            train.parallelism_lines(stock_args(), microbatches=1), []
+        )
 
     def test_a_pipeline_prints_one_line(self) -> None:
         lines = train.parallelism_lines(
