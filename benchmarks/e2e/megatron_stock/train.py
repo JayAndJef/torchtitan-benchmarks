@@ -89,11 +89,16 @@ PARALLELISM_LINE = (
 
 # The data-parallel half of arm rule 12, printed above dp 1.
 #
-# **It is weaker evidence than the tuned arm's line.** It is derived from
-# the arguments, before pretrain() wraps the model, so it declares the mesh
-# rather than observing the wrap. Arm rule 13 carries the mechanism proof:
-# every rank's traces must hold ncclDevKernel_AllReduce. Cite the two
-# together, and never this line alone.
+# **It observes the wrapper, and does not declare the mesh.**
+# install_data_parallel_marker reads the DistributedDataParallel object
+# Megatron really built, and its real ddp_config, after
+# setup_model_and_optimizer returns. A run whose wrapper went missing
+# raises there rather than printing the line.
+#
+# Arm rule 13 cannot cover for a declared line, which is why this one is an
+# observation: stock Megatron all-reduces the loss over its data-parallel
+# group on every last-stage rank every step (training.py's train_step), so
+# ncclDevKernel_AllReduce appears whether or not a gradient was reduced.
 DATA_PARALLEL_LINE = (
     "Megatron-LM stock data parallel: DistributedDataParallel over {dp} "
     "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32})"
@@ -461,6 +466,62 @@ def install_step_log_shim(
     return uninstall
 
 
+def install_data_parallel_marker(*, data_parallel_size: int) -> None:
+    """Print the data-parallel line from the wrapper Megatron really built.
+
+    Below two data-parallel ranks there is nothing to observe and nothing
+    is printed: arm rule 12's data-parallel marker applies above ``dp`` 1.
+
+    Above it, this wraps ``setup_model_and_optimizer`` and reads the model
+    it returns. **It raises when no chunk carries a
+    ``DistributedDataParallel`` wrapper.** Two ranks that never reduce their
+    gradients train two models and report about twice the true throughput,
+    and every other rule passes -- including arm rule 13, because stock
+    Megatron all-reduces the loss over the same group every step.
+
+    ``overlap_grad_reduce`` and ``grad_reduce_in_fp32`` come from the
+    wrapper's own ``ddp_config``, not from the arguments.
+    """
+    if data_parallel_size <= 1:
+        return
+
+    import megatron.training.training as megatron_training
+    from megatron.core.distributed import DistributedDataParallel
+
+    original = megatron_training.setup_model_and_optimizer
+
+    def replacement(*args: Any, **keywords: Any) -> Any:
+        result = original(*args, **keywords)
+        model = result[0]
+        chunks = model if isinstance(model, list) else [model]
+        wrapped = [
+            chunk
+            for chunk in chunks
+            if isinstance(chunk, DistributedDataParallel)
+        ]
+        if not wrapped:
+            raise RuntimeError(
+                f"the data-parallel degree is {data_parallel_size} and no "
+                "model chunk carries a DistributedDataParallel wrapper, so "
+                "no gradient is reduced; the ranks would train separate "
+                "models and report about "
+                f"{data_parallel_size}x the true throughput"
+            )
+        config = wrapped[0].ddp_config
+        print(
+            DATA_PARALLEL_LINE.format(
+                dp=data_parallel_size,
+                overlap=config.overlap_grad_reduce,
+                fp32=config.grad_reduce_in_fp32,
+            ),
+            flush=True,
+        )
+        megatron_training.setup_model_and_optimizer = original
+        return result
+
+    megatron_training.setup_model_and_optimizer = replacement
+
+
 def broadcast_pipeline_loss(loss: "Any") -> "Any":
     """The last pipeline stage's loss, on every rank.
 
@@ -574,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         pipeline_degree=args.pipeline_model_parallel_size,
         num_flops_per_token=shape.num_flops_per_token(args.bench_seq_len),
     )
+    install_data_parallel_marker(data_parallel_size=args.data_parallel_size)
 
     model_cfg = gpt_config_from_args(
         args, model_config_cls=BenchGPTModelConfig

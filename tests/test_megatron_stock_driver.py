@@ -23,7 +23,9 @@ way that file can produce a wrong number:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import io
 import sys
 import types
 import unittest
@@ -1105,6 +1107,96 @@ class LossBroadcastTest(unittest.TestCase):
         ]
         self.assertEqual(len(inner), 1)
         self.assertIn("broadcast_pipeline_loss", inner[0].co_names)
+
+
+class DataParallelMarkerTest(unittest.TestCase):
+    """Arm rule 12's data-parallel half, against the real wrapper.
+
+    Arm rule 13 cannot carry this axis alone. Stock Megatron all-reduces
+    the loss over its data-parallel group on every step, so the NCCL
+    marker appears whether or not a gradient was reduced.
+    """
+
+    def megatron_symbols(self):
+        """Megatron's own module and class, or a skip."""
+        try:
+            bootstrap.prepare()
+            import megatron.training.training as megatron_training
+            from megatron.core.distributed import DistributedDataParallel
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        return megatron_training, DistributedDataParallel
+
+    def test_the_marker_is_silent_at_one_data_parallel_rank(self) -> None:
+        """Below dp 2 there is no wrapper, and rule 12 asks for no line."""
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            train.install_data_parallel_marker(data_parallel_size=1)
+        self.assertEqual(stream.getvalue(), "")
+
+    def test_a_missing_wrapper_raises(self) -> None:
+        """The hazard: two ranks that reduce nothing train two models.
+
+        They report about twice the true throughput, and every other
+        validation rule passes.
+        """
+        megatron_training, _ = self.megatron_symbols()
+        original = megatron_training.setup_model_and_optimizer
+        megatron_training.setup_model_and_optimizer = (
+            lambda *args, **keywords: ([torch.nn.Linear(2, 2)], None, None)
+        )
+        try:
+            train.install_data_parallel_marker(data_parallel_size=2)
+            with self.assertRaises(RuntimeError) as caught:
+                megatron_training.setup_model_and_optimizer()
+        finally:
+            megatron_training.setup_model_and_optimizer = original
+        self.assertIn("no gradient is reduced", str(caught.exception))
+
+    def test_the_line_reads_the_wrapper_and_not_the_arguments(self) -> None:
+        """The values come from the live ``ddp_config``."""
+        megatron_training, ddp_cls = self.megatron_symbols()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = SimpleNamespace(
+            overlap_grad_reduce=False, grad_reduce_in_fp32=True
+        )
+        original = megatron_training.setup_model_and_optimizer
+        megatron_training.setup_model_and_optimizer = (
+            lambda *args, **keywords: ([chunk], None, None)
+        )
+        stream = io.StringIO()
+        try:
+            train.install_data_parallel_marker(data_parallel_size=2)
+            with contextlib.redirect_stdout(stream):
+                megatron_training.setup_model_and_optimizer()
+        finally:
+            megatron_training.setup_model_and_optimizer = original
+        self.assertEqual(
+            stream.getvalue().strip(),
+            train.DATA_PARALLEL_LINE.format(
+                dp=2, overlap=False, fp32=True
+            ),
+        )
+
+    def test_the_shim_puts_megatron_back(self) -> None:
+        """One wrap, then the module holds Megatron's own function again."""
+        megatron_training, ddp_cls = self.megatron_symbols()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = SimpleNamespace(
+            overlap_grad_reduce=True, grad_reduce_in_fp32=False
+        )
+        stub = lambda *args, **keywords: ([chunk], None, None)  # noqa: E731
+        original = megatron_training.setup_model_and_optimizer
+        megatron_training.setup_model_and_optimizer = stub
+        try:
+            train.install_data_parallel_marker(data_parallel_size=2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                megatron_training.setup_model_and_optimizer()
+            self.assertIs(
+                megatron_training.setup_model_and_optimizer, stub
+            )
+        finally:
+            megatron_training.setup_model_and_optimizer = original
 
 
 class HarnessArgumentTest(unittest.TestCase):
