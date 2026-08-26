@@ -280,9 +280,11 @@ def train_valid_test_datasets_provider(
     # below uses the second. A disagreement would put the wrong shard on
     # this rank while the log named the right mesh, and every rule would
     # pass. The tuned driver makes the same check
-    # (``benchmarks/e2e/megatron/train.py``); this is where the stock
-    # driver can, because ``pretrain()`` owns ``initialize_model_parallel``
-    # and the provider is the first of our code to run after it.
+    # (``benchmarks/e2e/megatron/train.py``). This is where the stock
+    # driver can, because ``pretrain()`` owns ``initialize_model_parallel``.
+    # It is not the first of our code to run after that call -- the model
+    # provider and install_data_parallel_marker's wrapper run first -- but
+    # it is before any token is read, which is the property that matters.
     resolved = mpu.get_data_parallel_world_size()
     if resolved != args.data_parallel_size:
         raise RuntimeError(

@@ -307,15 +307,17 @@ class FlagListTest(unittest.TestCase):
                         int(value_after(emitted, "--seq-length")),
                     )
 
-    def test_the_profiler_ends_on_a_cycle_boundary(self) -> None:
-        """A stop inside an active window writes a third, short trace.
+    def test_the_profiler_stops_on_the_last_step(self) -> None:
+        """No iteration may follow ``prof.stop()``.
 
-        ``post_training_step_callbacks`` calls ``prof.stop()`` at
-        ``--profile-step-end``. torch's action map holds
-        ``(RECORD, None)`` and ``(RECORD_AND_SAVE, None)``, and both write a
-        window. Ending on a cycle boundary puts the stop on an idle step.
+        ``post_training_step_callbacks`` stops the profiler at
+        ``--profile-step-end``, and the top of Megatron's loop keeps calling
+        ``prof.step()`` regardless. Every iteration after the stop therefore
+        transits a dead Kineto session. A whole number of cycles makes
+        ``--profile-step-end`` equal ``--train-iters``, so there is no such
+        iteration.
         """
-        for steps in (40, 55, 59, 99):
+        for steps in (40, 60, 80):
             with self.subTest(steps=steps):
                 workload = dataclasses.replace(
                     BATCH_32, steps=steps, local_batch_size=32
@@ -323,7 +325,29 @@ class FlagListTest(unittest.TestCase):
                 emitted = flags_for("1b", PP4_SPEC, workload)
                 end = int(value_after(emitted, "--profile-step-end"))
                 self.assertEqual(end % workload.profile_freq, 0)
-                self.assertLessEqual(end, steps)
+                self.assertEqual(end, steps)
+                self.assertEqual(
+                    end, int(value_after(emitted, "--train-iters"))
+                )
+
+    def test_a_partial_profiler_cycle_is_refused(self) -> None:
+        """The refusal that makes the test above an invariant.
+
+        Flooring the end to the last whole cycle does not help: it only
+        delays the first dead-session transit, measured at step 50 for a
+        50-step run. Ending at ``--train-iters`` instead writes a truncated
+        window, which ``assert_windows_written`` does not catch because it
+        refuses a count below the requirement rather than a short window.
+        """
+        for steps in (41, 45, 50, 55, 59, 99):
+            with self.subTest(steps=steps):
+                workload = dataclasses.replace(
+                    BATCH_32, steps=steps, local_batch_size=32
+                )
+                with self.assertRaisesRegex(
+                    ValueError, r"whole number of profiler cycles"
+                ):
+                    flags_for("1b", PP4_SPEC, workload)
 
     def test_the_workload_supplies_the_run_lengths(self) -> None:
         emitted = flags_for("1b", TRIVIAL_SPEC)
@@ -921,24 +945,42 @@ class ProfilerAlignmentTest(unittest.TestCase):
         )
 
     def _walk(self, schedule, steps, *, steps_first, stop_at=None):
-        """Replay a training loop. Returns the per-step action and the windows.
+        """Replay a training loop to its END. Returns actions, windows, deaths.
 
         ``steps_first`` True is Megatron: ``prof.step()`` runs before the
         training step. False is TorchTitan: it runs after.
+
+        **The loop runs to ``steps``, never to ``stop_at``.** Megatron's
+        ``prof.stop()`` is guarded on ``iteration == --profile-step-end``
+        and its ``prof.step()`` is not, so the loop keeps stepping a stopped
+        profiler. A model that stopped iterating at ``stop_at`` would report
+        a clean run over exactly the workloads where the real one is not,
+        which is how the first version of this test passed while the arm
+        would have crashed.
+
+        ``deaths`` counts transits taken after the stop that are not the
+        ``(NONE, NONE)`` no-op. Any of them touches a dead Kineto session.
         """
         action = torch.profiler.ProfilerAction
         writes = self._writes()
         step_num, current = 0, schedule(0)
-        per_step, windows, recorded = {}, [], 0
+        per_step, windows, recorded, deaths = {}, [], 0, 0
+        stopped = False
         for step in range(1, steps + 1):
             if steps_first:
                 step_num += 1
                 previous, current = current, schedule(step_num)
-                if (previous, current) in writes:
+                if stopped:
+                    if (previous, current) != (action.NONE, action.NONE):
+                        deaths += 1
+                elif (previous, current) in writes:
                     windows.append(recorded)
                     recorded = 0
             per_step[step] = current
-            if current in (action.RECORD, action.RECORD_AND_SAVE):
+            if not stopped and current in (
+                action.RECORD,
+                action.RECORD_AND_SAVE,
+            ):
                 recorded += 1
             if not steps_first:
                 step_num += 1
@@ -946,11 +988,12 @@ class ProfilerAlignmentTest(unittest.TestCase):
                 if (previous, current) in writes:
                     windows.append(recorded)
                     recorded = 0
-            if step == stop_at:
+            if step == stop_at and not stopped:
                 if (current, None) in writes:
                     windows.append(recorded)
-                break
-        return per_step, windows
+                    recorded = 0
+                stopped = True
+        return per_step, windows, deaths
 
     def _titan(self, steps):
         return self._walk(
@@ -958,11 +1001,13 @@ class ProfilerAlignmentTest(unittest.TestCase):
         )
 
     def _stock(self, steps, *, skip_first):
+        # flags.py refuses a partial cycle, so --profile-step-end is
+        # --train-iters and the stop lands on the last iteration.
         return self._walk(
             self._schedule(skip_first=skip_first),
             steps,
             steps_first=True,
-            stop_at=(steps // self.FREQ) * self.FREQ,
+            stop_at=steps,
         )
 
     def test_the_shim_declares_the_offset(self) -> None:
@@ -970,8 +1015,8 @@ class ProfilerAlignmentTest(unittest.TestCase):
         self.assertEqual(profiling.PROFILER_STEP_OFFSET, 1)
 
     def test_the_two_engines_share_every_step_s_profiler_action(self) -> None:
-        titan, _ = self._titan(40)
-        stock, _ = self._stock(40, skip_first=profiling.PROFILER_STEP_OFFSET)
+        titan, _, _ = self._titan(40)
+        stock, _, _ = self._stock(40, skip_first=profiling.PROFILER_STEP_OFFSET)
         for step in range(1, 41):
             with self.subTest(step=step):
                 self.assertEqual(stock[step], titan[step])
@@ -982,8 +1027,8 @@ class ProfilerAlignmentTest(unittest.TestCase):
         ``stable_tps`` keeps steps 2 to 10 of every 20-step cycle. Step 10
         is where the two engines part without the offset.
         """
-        titan, _ = self._titan(40)
-        unshifted, _ = self._stock(40, skip_first=0)
+        titan, _, _ = self._titan(40)
+        unshifted, _, _ = self._stock(40, skip_first=0)
         sampled = [s for s in range(1, 41) if 2 <= ((s - 1) % 20) + 1 <= 10]
         disagreeing = [s for s in sampled if unshifted[s] != titan[s]]
         self.assertEqual(disagreeing, [10, 30])
@@ -994,8 +1039,8 @@ class ProfilerAlignmentTest(unittest.TestCase):
 
     def test_no_sampled_step_carries_a_transition(self) -> None:
         """With the offset, every sampled step is NONE on both engines."""
-        titan, _ = self._titan(40)
-        stock, _ = self._stock(40, skip_first=profiling.PROFILER_STEP_OFFSET)
+        titan, _, _ = self._titan(40)
+        stock, _, _ = self._stock(40, skip_first=profiling.PROFILER_STEP_OFFSET)
         for step in range(1, 41):
             if not 2 <= ((step - 1) % 20) + 1 <= 10:
                 continue
@@ -1004,30 +1049,70 @@ class ProfilerAlignmentTest(unittest.TestCase):
                 self.assertEqual(titan[step], torch.profiler.ProfilerAction.NONE)
 
     def test_every_window_still_holds_a_full_active_phase(self) -> None:
-        """The offset must not truncate a window or lose one.
+        """The offset must not truncate a window, lose one, or outlive one.
 
         ``assert_windows_written`` refuses a run below the declared count,
         so a lost window fails loudly. A **short** window would not: it
         would be pooled with the full ones and would move every per-step
-        figure. Both are checked here, at every step count the 40-step floor
-        and the profiler cycle allow.
+        figure. A transit after ``prof.stop()`` touches a dead Kineto
+        session. All three are checked, at every step count ``flags.py``
+        accepts.
         """
-        for steps in (40, 50, 60, 80):
+        for steps in (40, 60, 80, 100, 200):
             with self.subTest(steps=steps):
-                _, windows = self._stock(
+                _, windows, deaths = self._stock(
                     steps, skip_first=profiling.PROFILER_STEP_OFFSET
                 )
-                self.assertEqual(len(windows), steps // self.FREQ)
                 self.assertEqual(
                     windows, [self.ACTIVE] * (steps // self.FREQ)
                 )
+                self.assertEqual(deaths, 0)
+
+    def _deaths_at(self, steps, skip_first):
+        """Dead-session transits when the end is floored to a whole cycle."""
+        _, _, deaths = self._walk(
+            self._schedule(skip_first=skip_first),
+            steps,
+            steps_first=True,
+            stop_at=(steps // self.FREQ) * self.FREQ,
+        )
+        return deaths
+
+    def test_a_partial_cycle_would_step_a_stopped_profiler(self) -> None:
+        """Why ``flags.py`` refuses one. This is the reason, not the rule.
+
+        The rule lives in ``stock_megatron_flags``, and
+        ``FlagListTest.test_a_partial_profiler_cycle_is_refused`` owns it.
+        A reader who removes the refusal must first make this test pass.
+
+        **The hazard predates the offset.** Flooring the end to the last
+        whole cycle leaves the loop running past the stop either way, so
+        both schedules reach a dead Kineto session.
+        """
+        for steps in (50, 57):
+            for skip_first in (0, profiling.PROFILER_STEP_OFFSET):
+                with self.subTest(steps=steps, skip_first=skip_first):
+                    self.assertGreater(self._deaths_at(steps, skip_first), 0)
+
+    def test_the_offset_makes_a_partial_cycle_fail_sooner(self) -> None:
+        """The offset widens the hazard, which is why the refusal landed.
+
+        At 41 steps the unshifted schedule is idle when the stop fires and
+        stays idle, so nothing transits. The shifted one is still in
+        ``RECORD_AND_SAVE``, and the next step writes a window through a
+        dead session. Neither is acceptable; the refusal removes both.
+        """
+        self.assertEqual(self._deaths_at(41, 0), 0)
+        self.assertGreater(
+            self._deaths_at(41, profiling.PROFILER_STEP_OFFSET), 0
+        )
 
     def test_the_stock_windows_match_the_titan_windows(self) -> None:
         """Same count, same recorded-step count, at every step count."""
         for steps in (40, 60, 80):
             with self.subTest(steps=steps):
-                _, titan = self._titan(steps)
-                _, stock = self._stock(
+                _, titan, _ = self._titan(steps)
+                _, stock, _ = self._stock(
                     steps, skip_first=profiling.PROFILER_STEP_OFFSET
                 )
                 self.assertEqual(stock, titan)

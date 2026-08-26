@@ -522,10 +522,41 @@ def stock_megatron_flags(
             f"pipeline schedule {spec.pp_schedule!r} is not implemented by "
             f"the stock driver; it runs {SUPPORTED_PP_SCHEDULE!r} alone"
         )
+    if workload.steps % workload.profile_freq:
+        # **This arm rides Megatron's own loop, and that loop keeps calling
+        # prof.step() after it has called prof.stop().** The stop is guarded
+        # on ``iteration == --profile-step-end``
+        # (``megatron/training/training.py``); the step at the top of the
+        # loop body is guarded only on ``--profile``. So every iteration
+        # after the stop transits a dead Kineto session.
+        #
+        # Ending the profiler on the last whole cycle does not fix that. It
+        # only delays the first bad transit: measured against the pinned
+        # torch, a 50-step run reaches ``NONE -> WARMUP`` on a stopped
+        # profiler, and a 57-step run reaches eight such transits. Ending it
+        # at ``--train-iters`` instead trades them for a **truncated**
+        # window -- 3 recorded steps rather than 5 at 57 steps -- which
+        # ``assert_windows_written`` does not catch, because it refuses a
+        # count below the requirement and not a short window. A truncated
+        # window is pooled with the full ones and moves every per-step
+        # figure.
+        #
+        # A whole number of cycles removes the case: ``--profile-step-end``
+        # is then ``--train-iters``, no iteration follows the stop, and
+        # every window holds its full ``profiler_active`` steps. Verified
+        # against the pinned torch at 40, 60, 80, 100 and 200 steps.
+        raise ValueError(
+            f"steps ({workload.steps}) must be a whole number of profiler "
+            f"cycles of {workload.profile_freq} for the stock megatron arm: "
+            "megatron steps the profiler after it stops it, so a partial "
+            "cycle either transits a dead session or writes a short "
+            "profiler window that the per-step metrics would pool"
+        )
     rows_per_sample, microbatches, megatron_seq_length = (
         microbatch_geometry(workload, spec)
     )
-    # The last whole profiler cycle. See _data_flags.
+    # A whole number of cycles, refused above, so this is workload.steps.
+    # See _data_flags, and the refusal above for why it may not be less.
     profile_step_end = (
         workload.steps // workload.profile_freq
     ) * workload.profile_freq

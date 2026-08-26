@@ -124,12 +124,22 @@ def install_profiler_shim(
     stops the profiler at ``--profile-step-end``. torch's action map holds
     ``(RECORD_AND_SAVE, None)`` and it runs ``stop_trace`` and
     ``_trace_ready``, so the window is written and holds its full
-    ``profiler_active`` steps. Verified against the pinned torch at 40, 50,
-    60 and 80 steps: every window holds 5 recorded steps and the count is
-    ``train_iters // profile_freq``.
+    ``profiler_active`` steps.
 
-    A stop that does not fire therefore costs the last window rather than
-    corrupting it, and ``assert_windows_written`` refuses that run.
+    **That is safe only because ``flags.py`` refuses a partial profiler
+    cycle.** ``--profile-step-end`` is then ``--train-iters``, and no
+    iteration follows the stop. Megatron's loop steps the profiler at the
+    top of every pass and stops it at the bottom of one, so an iteration
+    after the stop transits a dead Kineto session -- which is a hazard the
+    offset widens and did not create. Read the refusal in
+    ``stock_megatron_flags`` before you change either one.
+
+    Verified against the pinned torch at 40, 60, 80, 100 and 200 steps:
+    every window holds 5 recorded steps, the count is
+    ``train_iters // profile_freq``, and no transit follows the stop.
+
+    A stop that does not fire costs the last window rather than corrupting
+    it, and ``assert_windows_written`` refuses that run.
 
     Call this once per process, before ``pretrain()``.
     """
