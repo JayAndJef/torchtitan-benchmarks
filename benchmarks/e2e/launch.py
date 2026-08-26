@@ -24,11 +24,23 @@ from benchmarks.e2e.parallelism import (
     titan_mesh,
 )
 from benchmarks.e2e.registry import (
+    DEFAULT_COMPILE_MODE,
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
     Workload,
 )
+from benchmarks.models.piper_qwen3.shape import shape_by_name
+
+
+# What ``python -m`` starts for the stock Megatron arm. Named once, so a test
+# and the command builder cannot drift apart.
+STOCK_MEGATRON_DRIVER_MODULE = "benchmarks.e2e.megatron_stock.train"
+
+# The one pipeline schedule the stock driver implements. Megatron-LM itself
+# implements more, and this driver builds no model-chunk list, so it runs
+# ``forward_backward_pipelining_without_interleaving`` alone.
+STOCK_MEGATRON_PP_SCHEDULE = "1F1B"
 
 
 def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
@@ -172,6 +184,17 @@ def command_for_arm(
     """
     if arm.launcher == "megatron":
         return _megatron_command(
+            workload,
+            arm,
+            arm_dir,
+            extra_args,
+            compile_mode,
+            ac_mode,
+            model_size,
+            parallelism,
+        )
+    if arm.launcher == "megatron_stock":
+        return _megatron_stock_command(
             workload,
             arm,
             arm_dir,
@@ -390,3 +413,104 @@ def _megatron_command(
         )
     args.append(str(arm_dir))
     return args
+
+
+def _megatron_stock_command(
+    workload: Workload,
+    arm: Arm,
+    arm_dir: Path,
+    extra_args: list[str] | tuple[str, ...],
+    compile_mode: str,
+    ac_mode: str,
+    model_size: str = "1b",
+    parallelism: ParallelismSpec = TRIVIAL_SPEC,
+) -> list[str]:
+    """Launch command for the stock Megatron-LM driver.
+
+    This function owns three things and no more: the launcher, the ``python
+    -m`` target, and the three values ``stock_megatron_flags`` cannot read
+    off a workload. ``benchmarks/e2e/megatron_stock/flags.py`` builds every
+    flag, both the Megatron group Megatron's own parser reads and the
+    ``--bench-*`` group the driver adds through Megatron's
+    ``extra_args_provider`` hook. ``tests/test_megatron_stock_launch.py``
+    refuses a repeated flag name in the result: Megatron's parser is
+    last-wins, so a duplicate would change a value with nothing to see it.
+
+    **At the trivial spec the launcher is the plain interpreter.**
+    ``_megatron_launcher`` is shared with the tuned driver and is unchanged,
+    so this arm starts torchrun only above one rank.
+
+    The five refusals below restate what a run already refuses, and
+    ``flags.py`` restates two of them again for a caller that reaches it
+    directly. A caller may build a command line without a run, and a bare
+    Megatron failure minutes into a subprocess names neither the flag nor
+    the reason.
+
+    **The schedule refusal has a second cause, and it is not a
+    restatement.** Parallelism rule 5 reads ``"megatron" in engines``, so it
+    does not see this launcher at all: a schedule Megatron-LM implements and
+    this driver does not passes every parallelism rule. The refusal lands
+    here instead, and ``flags.py`` repeats it.
+    """
+    if extra_args:
+        raise ValueError(
+            f"{arm.name}: TorchTitan passthrough arguments cannot apply to a "
+            f"megatron arm: {list(extra_args)}"
+        )
+    if ac_mode != "none":
+        raise ValueError(
+            f"{arm.name}: the stock megatron arm runs without recompute; "
+            f"ac mode {ac_mode!r} has no Megatron parity (use --ac none)"
+        )
+    if compile_mode in UNCOMPILED_COMPILE_MODES:
+        raise ValueError(
+            f"{arm.name}: compile mode {compile_mode!r} turns off the "
+            f"whole-block torch.compile a titan arm gets, and Megatron never "
+            f"has one; it cannot apply to this arm"
+        )
+    if compile_mode != DEFAULT_COMPILE_MODE:
+        raise ValueError(
+            f"{arm.name}: this driver calls megatron.training.pretrain and "
+            f"captures no CUDA graph, so compile mode {compile_mode!r} names "
+            f"a treatment the arm cannot receive"
+        )
+    # ``flags.py`` refuses this one too, with its own message. Refused here
+    # as well, so a caller that never reaches the flag module still gets the
+    # arm's name.
+    if workload.seed is None:
+        raise ValueError(
+            f"{arm.name}: megatron arms require a seeded workload"
+        )
+    # ``flags.py`` refuses this one too. See the docstring for why the
+    # harness keeps its own copy.
+    if (
+        parallelism.pp > 1
+        and parallelism.pp_schedule != STOCK_MEGATRON_PP_SCHEDULE
+    ):
+        raise ValueError(
+            f"{arm.name}: the stock megatron driver implements "
+            f"{STOCK_MEGATRON_PP_SCHEDULE!r} alone, and this run asks for "
+            f"{parallelism.pp_schedule!r}"
+        )
+    # Imported here, and below every refusal above. Two reasons. Only this
+    # branch of the dispatch needs the stock flag list, so no other arm's
+    # command line imports it. And a refused request must fail with its own
+    # message, not with whatever the flag module raises first.
+    from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
+
+    # ``model_size`` is passed on as the operator typed it, exactly as the
+    # tuned command passes ``--model-size``. ``_resolve_run`` canonicalizes
+    # the name before it reaches here, and ``shape_by_name`` resolves an
+    # alias either way, so the flag list and the shape cannot disagree.
+    return [
+        *_megatron_launcher(parallelism),
+        STOCK_MEGATRON_DRIVER_MODULE,
+        *stock_megatron_flags(
+            shape_by_name(model_size),
+            workload,
+            parallelism,
+            arm_dir=str(arm_dir),
+            model_size=model_size,
+            compile_mode=compile_mode,
+        ),
+    ]

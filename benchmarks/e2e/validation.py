@@ -278,6 +278,81 @@ def _megatron_parallelism_markers(
     return tuple(markers)
 
 
+def _megatron_stock_parallelism_markers(
+    spec: ParallelismSpec, workload: Workload
+) -> tuple[str, ...]:
+    """``benchmarks.e2e.megatron_stock.train``'s two lines. Keep in sync.
+
+    ``dp``, ``pp`` and the microbatch count come from Megatron's own
+    resolved arguments, so those three state what the engine built and not
+    what the harness asked for. ``schedule=1F1B`` and ``stages`` do not:
+    the schedule is a literal on both sides, and ``stages`` repeats the
+    pipeline degree, which is the real stage count only while no virtual
+    pipeline exists. The driver refuses a virtual pipeline degree, and the
+    harness cannot express one. The schedule is a literal because the driver
+    refuses every other one, so the name cannot vary, and because the spec
+    carries ``None`` at ``pp`` 1, which no line may state.
+
+    **The microbatch count has no ``pp`` 1 exception here, and the tuned
+    profile's does.** Stock Megatron derives it as ``global_batch_size //
+    (micro_batch_size * data_parallel_size)``, in
+    ``ConstantNumMicroBatchesCalculator``
+    (``megatron/core/num_microbatches_calculator.py``). That calculator is
+    the one this arm gets: ``rampup_batch_size`` defaults to ``None`` and
+    the flag list never sets it, so the count is fixed for the whole run.
+    ``decrease_batch_size_if_needed`` defaults to ``False``, so Megatron
+    asserts the division instead of rounding it. The harness sends
+    ``--global-batch-size local_batch_size * dp`` and ``--micro-batch-size
+    pp_microbatch_size``, so the ``dp`` term cancels and the count is
+    ``local_batch_size // pp_microbatch_size`` at every pipeline degree.
+    That is exactly ``n_microbatches``. The tuned driver runs one pack of
+    every row at ``pp`` 1, so its profile writes 1 there; stock Megatron
+    runs a gradient-accumulation loop instead, and a 1 would fail an honest
+    run.
+
+    **OPEN: no rule this profile carries proves that a gradient was
+    reduced. Cite that beside any ``dp`` above 1 number from this arm.**
+
+    The tuned driver prints its data-parallel line **after** the wrapper
+    exists, so that line is an observation and a driver that lost its
+    wrapper cannot print it. This driver derives its line from ``args``,
+    before ``pretrain()`` wraps the model (the plan fixes it that way), so
+    the line declares the mesh. Both alternatives of
+    ``data_parallel_pattern`` read that same declaration.
+
+    **Arm rule 13 does not make up the difference here.** Stock Megatron
+    all-reduces the reported loss over the data-parallel group on every
+    last-stage rank, on every step
+    (``megatron/training/training.py``, in ``train_step``). At
+    ``pp`` 1 every rank is a last stage, so every rank emits
+    ``ncclDevKernel_AllReduce`` whether or not a gradient moved. Above
+    ``pp`` 1 the gradient-norm reduction over the pipeline group already
+    puts one on every rank, which this repo measured on a real ``pp 2, dp
+    1`` trace. So rule 13 says a collective ran, and nothing says which.
+
+    **Two ranks that never reduce their gradients train two models and
+    report roughly twice the true throughput.** That run passes every rule
+    in this file today. What would close it is a driver that prints the line
+    from the real ``ddp_config`` after ``get_model`` has wrapped the model,
+    exactly as ``benchmarks/e2e/megatron/train.py`` does. Until a driver
+    does that, read a ``dp`` above 1 stock number as ungated on this axis.
+    """
+    microbatches = n_microbatches(
+        spec, local_batch_size=workload.local_batch_size
+    )
+    markers = [
+        f"Megatron-LM stock parallelism: dp={spec.dp} pp={spec.pp} "
+        f"schedule=1F1B microbatches={microbatches} stages={spec.pp}"
+    ]
+    if spec.dp > 1:
+        markers.append(
+            f"Megatron-LM stock data parallel: DistributedDataParallel over "
+            f"{spec.dp} ranks (overlap_grad_reduce=False, "
+            "grad_reduce_in_fp32=True)"
+        )
+    return tuple(markers)
+
+
 VALIDATION_PROFILES = {
     "torchtitan": ValidationProfile(
         completion_marker="Training completed",
@@ -334,6 +409,41 @@ VALIDATION_PROFILES = {
         data_parallel_pattern=re.compile(
             r"Megatron-LM parallelism: dp=(?!1\b)\d+"
             r"|Megatron-LM data parallel:"
+        ),
+    ),
+    # The stock arm of piper_megatron_stock. It runs megatron.training's own
+    # pretrain() through pretrain_gpt's providers, so nothing here may assume
+    # the tuned driver's lines: every marker below carries the word "stock",
+    # and the driver prints the same strings.
+    "megatron_stock": ValidationProfile(
+        completion_marker="Training completed",
+        # The driver prints this on every rank. Megatron's own "after
+        # training is done" line is rank 0 only, and arm rule 1 runs per
+        # rank. The trailing comma pins the mode token and leaves the four
+        # precision fields after it free to be read rather than matched.
+        mode_line=lambda mode: f"Megatron-LM stock training loop (mode={mode},",
+        # None on purpose, for the reason the tuned profile gives:
+        # megatron-core binds jit_fuser = torch.compile at import, so no log
+        # line proves this engine ran uncompiled. The scenario declines the
+        # uncompiled modes, and validate_arm refuses one that reaches here.
+        compiled_marker=None,
+        failure_markers=(),
+        check_ac_line=False,
+        # Stock Megatron emits no Inductor whole-block annotation, and the
+        # scenario declares no regions.
+        check_regions=False,
+        parallelism_markers=_megatron_stock_parallelism_markers,
+        # The driver prints its own resolved degrees. Any pipeline degree
+        # other than 1 is what this must not see at the trivial spec.
+        pipelined_pattern=re.compile(
+            r"Megatron-LM stock parallelism: dp=\d+ pp=(?!1\b)\d+"
+        ),
+        # The same line's other degree, plus the wrapper's own line. The
+        # negative lookahead is what keeps dp=1 out: it refuses a 1 that ends
+        # the number and admits 10 or 12.
+        data_parallel_pattern=re.compile(
+            r"Megatron-LM stock parallelism: dp=(?!1\b)\d+"
+            r"|Megatron-LM stock data parallel:"
         ),
     ),
 }

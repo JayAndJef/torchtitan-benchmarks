@@ -941,9 +941,18 @@ class MegatronScenarioTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not support compile mode"):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
 
-    def test_every_other_scenario_supports_every_compile_mode(self) -> None:
+    def test_every_titan_only_scenario_supports_every_compile_mode(self) -> None:
+        """The exemption is derived from the cause, not from a name.
+
+        A scenario restricts the compile axis because one of its arms cannot
+        receive a treatment, and only a non-TorchTitan arm has that problem:
+        the axis names whole-block ``torch.compile``, which every titan arm
+        gets and no Megatron arm has. So a scenario whose arms are all
+        TorchTitan must accept every mode. A name-based skip would let a
+        future titan-only scenario restrict the axis for no stated reason.
+        """
         for name, scenario in SCENARIOS.items():
-            if name == "piper1b_megatron":
+            if any(arm.launcher != "torchtitan" for arm in scenario.arms):
                 continue
             with self.subTest(scenario=name):
                 self.assertEqual(scenario.supported_compile_modes, COMPILE_MODES)

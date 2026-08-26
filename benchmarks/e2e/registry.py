@@ -461,6 +461,100 @@ PIPER_1B_MEGATRON = Scenario(
 )
 
 
+# The stock-engine comparison: Megatron-LM as a stock user configures it,
+# against stock TorchTitan, on one c4_test stream. It is a separate scenario
+# and not a third arm on piper1b_megatron, because --resume compares the
+# selected arm names: a new arm there would refuse a resume of every
+# piper1b_megatron directory already on disk.
+#
+# **The Megatron arm here is not plain bf16, and the manifest cannot say
+# so.** With --bf16 and no --use-precision-aware-optimizer, Megatron keeps
+# fp32 master weights, fp32 optimizer moments, and forces
+# accumulate_allreduce_grads_in_fp32, so the arm holds about 18 bytes per
+# parameter against titan's 8 and reduces gradients in fp32. That is the
+# stock treatment, and this scenario keeps it. ``execution_model`` is
+# composed from the parallelism spec, so it reads "plain-bf16" for the whole
+# run and describes the titan arm alone; the difference lives in the
+# scenario description, in the arm description, and in the report.
+#
+# **OPEN: at pp 1 the two arms do not process the batch the same way, and
+# no rule sees it.** The flag list sends --micro-batch-size
+# <pp_microbatch_size>, and parallelism rule 3 forces that value to 1 at
+# pp 1. Megatron then runs local_batch_size sequential forward and backward
+# passes at batch 1, where titan_stock runs one pass at batch
+# local_batch_size: four times the launches and a quarter of the GEMM rows
+# at the default workload. The gradient is the same and the step cost is
+# not, so a cross-engine ratio taken at pp 1 is biased against Megatron on
+# a workload this repo documents as host-dispatch bound. The four cells of
+# the run matrix all run pp 4 with --pp-microbatch-size 4, where both
+# engines split the batch into the same eight microbatches. Do not publish
+# a pp 1 ratio from this scenario until somebody moves the microbatch size
+# or refuses the mesh.
+#
+# The AC axis is pinned to "none" for the reason piper1b_megatron pins it:
+# Megatron's recompute options are not parity with titan's per-op SAC, and
+# this arm does no recompute at all.
+#
+# The compile axis is pinned to "default" alone, which is narrower than
+# piper1b_megatron's pair. "none" turns off the whole-block torch.compile a
+# titan arm gets, and Megatron never has one. "cuda-graph" is declined for a
+# second reason: this driver calls megatron.training.pretrain and asks for no
+# graph capture, so a run recording that mode would claim a treatment no arm
+# received. A titan-only --arm subset may still use "none"; the runner admits
+# an uncompiled run when every selected arm is TorchTitan, which is what the
+# eager reference cell of the run matrix needs.
+PIPER_MEGATRON_STOCK = Scenario(
+    name="piper_megatron_stock",
+    description=(
+        "Piper-inspired stock Megatron-LM against stock TorchTitan on one "
+        "c4_test stream. The Megatron arm keeps fp32 master weights, an "
+        "fp32 gradient reduction and the unfused native cross entropy, so "
+        "it is not plain bf16 and its number is a configured-engine number."
+    ),
+    workload=PIPER_1B_MEGATRON_WORKLOAD,
+    # Region pooling reads Inductor's compiled-graph annotations around whole
+    # transformer blocks. Stock Megatron has none, and a pipelined run of
+    # either engine reaches a different invocation count per rank. So
+    # validation rule 7 guards nothing here. What guards this scenario is the
+    # mode line, the parameter-count line, the two mesh lines and the
+    # all-reduce trace marker.
+    regions=(),
+    supported_ac_modes=("none",),
+    supported_compile_modes=("default",),
+    arms=(
+        Arm(
+            name="baseline",
+            description=(
+                "stock megatron.training.pretrain through pretrain_gpt's own "
+                "providers: alltoall dispatcher, grouped GEMM, no aux router "
+                "loss, no cross-entropy fusion, no permute fusion, no "
+                "distributed optimizer, --init-method-std 0.01, fp32 master "
+                "weights"
+            ),
+            launcher="megatron_stock",
+            validation="megatron_stock",
+            # Both markers are expected rather than measured. They come from
+            # the tuned arm, which shares the attention backend and the fused
+            # SwiGLU. Confirm them on the first run. _permute_kernel is
+            # deliberately absent: --moe-permute-fusion is off here, because
+            # stock Megatron defaults it off.
+            trace_kernel_markers=(
+                "cudnn_generated_fort_native_sdpa",
+                "_mul_silu_split",
+            ),
+        ),
+        Arm(
+            name="titan_stock",
+            description=(
+                "TorchTitan qwen3_piper_1b on the pre-tokenized replay "
+                "stream, identical to the arm of the same name in "
+                "piper1b_megatron"
+            ),
+        ),
+    ),
+)
+
+
 # Captured by profiling, never guessed: FA4's kernels are emitted by the CuTe
 # DSL at compile time and their names appear nowhere in the torch source. The
 # full symbols are long CUTLASS manglings; these two substrings are the stable
@@ -515,6 +609,7 @@ SCENARIOS = {
         PIPER_1B_LM_HEAD,
         PIPER_1B_ATTENTION,
         PIPER_1B_MEGATRON,
+        PIPER_MEGATRON_STOCK,
     )
 }
 
