@@ -1747,7 +1747,13 @@ TEST_CENSUS = {
     # shim, the pipeline loss broadcast and the data-parallel wrapper
     # marker. Every marker string it declares is pinned here too, because
     # the driver module is the log-line contract and imports no megatron.
-    "test_megatron_stock_driver": 68,
+    # +6 with the profiler alignment: that the offset is one named
+    # constant, that the two engines share every step's profiler action,
+    # that a sampled step disagreed without the offset, that no sampled
+    # step now carries a transition, that every window still holds a full
+    # active phase at four step counts, and that the stock windows match
+    # the titan windows.
+    "test_megatron_stock_driver": 74,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -1928,7 +1934,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1629
+TEST_CENSUS_TOTAL = 1635
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

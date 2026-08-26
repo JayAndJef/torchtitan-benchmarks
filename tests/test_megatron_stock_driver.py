@@ -789,22 +789,29 @@ class ProfilerShimTest(unittest.TestCase):
         Every other test here calls the handler by hand, so none of them
         would notice a ``repeat=1`` -- which is the stock Megatron
         behaviour this shim exists to correct, and which writes one window.
+
+        The indices carry ``PROFILER_STEP_OFFSET``, because the schedule is
+        shifted by that much to put Megatron's steps on TorchTitan's
+        profiler actions. ``ProfilerAlignmentTest`` owns the offset itself;
+        this test owns the cycle.
         """
         from torch.profiler import ProfilerAction
 
+        offset = profiling.PROFILER_STEP_OFFSET
         torch.profiler.profile(schedule=None, on_trace_ready=None)
         schedule = self.built[-1]["schedule"]
         saves = [
             step
-            for step in range(1, 61)
+            for step in range(1, 61 + offset)
             if schedule(step) is ProfilerAction.RECORD_AND_SAVE
         ]
-        self.assertEqual(saves, [19, 39, 59])
+        # One per 20-step cycle, and never the single window repeat=1 gives.
+        self.assertEqual(saves, [19 + offset, 39 + offset, 59 + offset])
         # A window flushes on the transition out of RECORD_AND_SAVE, so the
-        # flush lands on the next step: 20, 40, 60.
-        for step in (20, 40, 60):
-            self.assertIs(schedule(step), ProfilerAction.NONE)
-        self.assertEqual(len([s for s in saves if s < 40]), 40 // 20)
+        # flush lands on the next step.
+        for step in saves:
+            self.assertIs(schedule(step + 1), ProfilerAction.NONE)
+        self.assertEqual(len([s for s in saves if s <= 40]), 40 // 20)
 
     def test_a_non_positive_requirement_is_refused(self) -> None:
         """A guard that accepts zero windows guards nothing."""
@@ -872,6 +879,158 @@ def stock_args(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+class ProfilerAlignmentTest(unittest.TestCase):
+    """The two engines must be sampled in the same profiler state.
+
+    Megatron calls ``prof.step()`` at the top of its training loop and
+    TorchTitan calls it at the bottom, so the same training step runs under
+    schedule indices that differ by one. ``skip_first`` removes the
+    difference. Without it the ``NONE -> WARMUP`` transition, which runs
+    torch's ``prepare_trace``, lands on a step ``stable_tps`` samples on one
+    engine only, and the published cross-engine ratio carries that bias.
+
+    Every assertion below runs against the **real**
+    ``torch.profiler.schedule`` of the pinned torch, not a model of it.
+    """
+
+    WAIT, WARMUP, ACTIVE, FREQ = 10, 5, 5, 20
+
+    # torch's own action map, restricted to the pairs that write a window.
+    # Read from torch.profiler.profiler at this rev.
+    def _writes(self):
+        action = torch.profiler.ProfilerAction
+        save = action.RECORD_AND_SAVE
+        return {
+            (save, action.NONE),
+            (save, action.WARMUP),
+            (save, action.RECORD),
+            (save, save),
+            (save, None),
+            (action.RECORD, None),
+        }
+
+    def _schedule(self, *, skip_first):
+        return torch.profiler.schedule(
+            wait=self.WAIT,
+            warmup=self.WARMUP,
+            active=self.ACTIVE,
+            repeat=0,
+            skip_first=skip_first,
+        )
+
+    def _walk(self, schedule, steps, *, steps_first, stop_at=None):
+        """Replay a training loop. Returns the per-step action and the windows.
+
+        ``steps_first`` True is Megatron: ``prof.step()`` runs before the
+        training step. False is TorchTitan: it runs after.
+        """
+        action = torch.profiler.ProfilerAction
+        writes = self._writes()
+        step_num, current = 0, schedule(0)
+        per_step, windows, recorded = {}, [], 0
+        for step in range(1, steps + 1):
+            if steps_first:
+                step_num += 1
+                previous, current = current, schedule(step_num)
+                if (previous, current) in writes:
+                    windows.append(recorded)
+                    recorded = 0
+            per_step[step] = current
+            if current in (action.RECORD, action.RECORD_AND_SAVE):
+                recorded += 1
+            if not steps_first:
+                step_num += 1
+                previous, current = current, schedule(step_num)
+                if (previous, current) in writes:
+                    windows.append(recorded)
+                    recorded = 0
+            if step == stop_at:
+                if (current, None) in writes:
+                    windows.append(recorded)
+                break
+        return per_step, windows
+
+    def _titan(self, steps):
+        return self._walk(
+            self._schedule(skip_first=0), steps, steps_first=False
+        )
+
+    def _stock(self, steps, *, skip_first):
+        return self._walk(
+            self._schedule(skip_first=skip_first),
+            steps,
+            steps_first=True,
+            stop_at=(steps // self.FREQ) * self.FREQ,
+        )
+
+    def test_the_shim_declares_the_offset(self) -> None:
+        """One named constant, so the reason is not spread over the code."""
+        self.assertEqual(profiling.PROFILER_STEP_OFFSET, 1)
+
+    def test_the_two_engines_share_every_step_s_profiler_action(self) -> None:
+        titan, _ = self._titan(40)
+        stock, _ = self._stock(40, skip_first=profiling.PROFILER_STEP_OFFSET)
+        for step in range(1, 41):
+            with self.subTest(step=step):
+                self.assertEqual(stock[step], titan[step])
+
+    def test_without_the_offset_a_sampled_step_disagrees(self) -> None:
+        """The defect this offset repairs, pinned so it cannot come back.
+
+        ``stable_tps`` keeps steps 2 to 10 of every 20-step cycle. Step 10
+        is where the two engines part without the offset.
+        """
+        titan, _ = self._titan(40)
+        unshifted, _ = self._stock(40, skip_first=0)
+        sampled = [s for s in range(1, 41) if 2 <= ((s - 1) % 20) + 1 <= 10]
+        disagreeing = [s for s in sampled if unshifted[s] != titan[s]]
+        self.assertEqual(disagreeing, [10, 30])
+        self.assertEqual(
+            unshifted[10], torch.profiler.ProfilerAction.WARMUP
+        )
+        self.assertEqual(titan[10], torch.profiler.ProfilerAction.NONE)
+
+    def test_no_sampled_step_carries_a_transition(self) -> None:
+        """With the offset, every sampled step is NONE on both engines."""
+        titan, _ = self._titan(40)
+        stock, _ = self._stock(40, skip_first=profiling.PROFILER_STEP_OFFSET)
+        for step in range(1, 41):
+            if not 2 <= ((step - 1) % 20) + 1 <= 10:
+                continue
+            with self.subTest(step=step):
+                self.assertEqual(stock[step], torch.profiler.ProfilerAction.NONE)
+                self.assertEqual(titan[step], torch.profiler.ProfilerAction.NONE)
+
+    def test_every_window_still_holds_a_full_active_phase(self) -> None:
+        """The offset must not truncate a window or lose one.
+
+        ``assert_windows_written`` refuses a run below the declared count,
+        so a lost window fails loudly. A **short** window would not: it
+        would be pooled with the full ones and would move every per-step
+        figure. Both are checked here, at every step count the 40-step floor
+        and the profiler cycle allow.
+        """
+        for steps in (40, 50, 60, 80):
+            with self.subTest(steps=steps):
+                _, windows = self._stock(
+                    steps, skip_first=profiling.PROFILER_STEP_OFFSET
+                )
+                self.assertEqual(len(windows), steps // self.FREQ)
+                self.assertEqual(
+                    windows, [self.ACTIVE] * (steps // self.FREQ)
+                )
+
+    def test_the_stock_windows_match_the_titan_windows(self) -> None:
+        """Same count, same recorded-step count, at every step count."""
+        for steps in (40, 60, 80):
+            with self.subTest(steps=steps):
+                _, titan = self._titan(steps)
+                _, stock = self._stock(
+                    steps, skip_first=profiling.PROFILER_STEP_OFFSET
+                )
+                self.assertEqual(stock, titan)
 
 
 class MarkerStringTest(unittest.TestCase):

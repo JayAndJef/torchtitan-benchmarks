@@ -38,6 +38,12 @@ import torch
 
 # The trace layout both engines write and benchmarks/artifacts/layout.py
 # reads back.
+# Megatron calls ``prof.step()`` at the top of its training loop and
+# TorchTitan calls it at the bottom, so a given training step runs under a
+# schedule index that differs by one between the engines. This many skipped
+# steps put them back on the same index. See ``install_profiler_shim``.
+PROFILER_STEP_OFFSET = 1
+
 TRACE_SUBDIR = "profiling/traces"
 WINDOW_DIR = "iteration_{step}"
 TRACE_NAME = "rank{rank}_trace.json.gz"
@@ -92,22 +98,38 @@ def install_profiler_shim(
     ``profiler_active`` timed ones, repeating for the whole run
     (``repeat=0``). Megatron calls ``prof.step()`` once per training
     iteration, so a 40-step run at the default schedule writes two windows,
-    named ``iteration_20`` and ``iteration_40`` after the profiler's own
-    step number.
+    each holding ``profiler_active`` recorded steps.
 
-    Measured against the real ``torch.profiler.schedule`` of the pinned
-    torch: the schedule returns ``RECORD_AND_SAVE`` at step 19 and 39 and
-    ``NONE`` at 20 and 40, so both windows flush through ``prof.step()``
-    alone. The flush count is exactly ``train_iters // profile_freq``,
-    because the cycle length is ``profile_freq`` by construction.
+    **``skip_first=1`` aligns the two engines, and without it the published
+    throughput is biased.** The two engines call ``prof.step()`` at opposite
+    ends of the loop body. Megatron calls it **first**
+    (``megatron/training/training.py``, at the top of ``train``'s ``while``),
+    so training step ``k`` runs under ``schedule(k)``. TorchTitan calls it
+    **last** (``torchtitan/trainer.py``, after ``train_step``), so its step
+    ``k`` runs under ``schedule(k-1)``. One step of offset.
 
-    Megatron's own ``prof.stop()`` at ``--profile-step-end`` then transits
-    ``NONE -> None``, which its action map does not hold and which is
-    therefore a no-op. **That holds only because ``flags.py`` ends the
-    profiler on a cycle boundary.** torch's map does hold
-    ``(RECORD, None)`` and ``(RECORD_AND_SAVE, None)``, and both write a
-    window -- so a stop inside an active window adds a third, short trace
-    that arm rule 5 and the per-step metrics would count.
+    That offset is not cosmetic. ``results.py``'s ``stable_tps`` samples
+    steps 2 to 10 of every 20-step cycle, and at the default schedule the
+    ``NONE -> WARMUP`` transition -- which runs torch's ``prepare_trace``,
+    and with it the CUPTI setup -- lands on step **10** for Megatron and on
+    step **11** for TorchTitan. So one sampled step per cycle carried
+    profiler setup on one engine only, and the cross-engine ratio this
+    scenario publishes was biased against Megatron by that much.
+    ``skip_first=1`` moves every Megatron action onto TorchTitan's step, so
+    the two engines are sampled in the same profiler state.
+
+    **The last window is then closed by ``prof.stop()``, not by a scheduled
+    boundary.** Under ``skip_first`` the cycle ends one step after the run
+    does, so the final ``RECORD_AND_SAVE`` is still in force when Megatron
+    stops the profiler at ``--profile-step-end``. torch's action map holds
+    ``(RECORD_AND_SAVE, None)`` and it runs ``stop_trace`` and
+    ``_trace_ready``, so the window is written and holds its full
+    ``profiler_active`` steps. Verified against the pinned torch at 40, 50,
+    60 and 80 steps: every window holds 5 recorded steps and the count is
+    ``train_iters // profile_freq``.
+
+    A stop that does not fire therefore costs the last window rather than
+    corrupting it, and ``assert_windows_written`` refuses that run.
 
     Call this once per process, before ``pretrain()``.
     """
@@ -123,6 +145,10 @@ def install_profiler_shim(
         warmup=profiler_warmup,
         active=profiler_active,
         repeat=0,
+        # See the docstring. Megatron steps the profiler at the top of the
+        # loop and TorchTitan at the bottom, so without this the two engines
+        # are sampled in different profiler states.
+        skip_first=PROFILER_STEP_OFFSET,
     )
     shim = ProfilerShim(
         replacement=lambda *a, **k: None,  # replaced below
