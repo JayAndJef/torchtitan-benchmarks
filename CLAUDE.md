@@ -325,11 +325,15 @@ above the two constants for the measured splits.
 
 **One recorded gap widens with the cap, and it is not closed.**
 `benchmarks/e2e/results.py`'s `loss_visible_rank` is
-`(world_size // pp) * (pp - 1)`. That is right for `1F1B` and for
-`Interleaved1F1B`, and wrong for the two V-shaped schedules, which give rank
-0 the last stage. Spec rule 5 refuses a V-shaped schedule only beside a
-megatron arm, so a titan-only run can still reach one. Cite the schedule
-beside any loss trajectory from a pipelined run.
+`(world_size // pp) * (pp - 1)`. That is right for the two schedules this
+repo runs and wrong for the two V-shaped ones, `ZBVZeroBubble` and
+`DualPipeV`, which give rank 0 the last stage. Spec rule 5 refuses a
+V-shaped schedule only beside a megatron arm, and spec rule 6 narrows the
+exposure without closing it: both V-shaped schedules set
+`requires_uncompiled`, so such a run also has to ask for `--compile-mode
+none`. The lift adds six `(dp, pp)` pairs to the gap. **No run has ever used
+a V-shaped schedule.** Read the comment above the two constants before you
+run one, and repair `loss_visible_rank` rather than the cap.
 
 **`--scenario` has no default, and an omitted one fails the run.** A default
 scenario can only be reached by an omission, and it would then measure one
