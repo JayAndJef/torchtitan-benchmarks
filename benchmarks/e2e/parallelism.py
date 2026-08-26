@@ -67,10 +67,12 @@ supported. Adding one means adding it to ``world_size``, to
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` outright, and
 rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
-measurement: only ``1F1B`` at ``pp <= 2`` is targeted by this pass. Real
+measurement: only ``1F1B`` is targeted, and only up to ``pp 4``. Real
 ``pp2``, ``dp2``, and ``dp2 x pp2`` correctness runs have passed on both
-engines; no parallel timing is citable because those cells ran on a loaded
-host and were not repeated on an idle one.
+engines. **No run has used ``pp 4``, and no run has used world size 8.** The
+caps admit both; that is a declaration and not evidence. No parallel timing
+is citable, because the cells that ran were on a loaded host and nobody
+repeated them on an idle one.
 """
 
 from __future__ import annotations
@@ -90,24 +92,62 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # The GPU budget for this pass, and the pipeline depth it targets. Named so
 # that lifting either is one edit here rather than a hunt through the rules.
 #
-# pp is capped at 2 because nothing plans to run pp=4. **The cap is not what
-# makes the two engines split the same way** -- an earlier version of this
-# comment claimed that, and it is false. What makes them agree is the pair of
-# flags the harness sends, and rule 7 assumes them; see rule 7 below.
+# The budget is 8 because this host holds 8 devices. The depth is 4 because
+# the stock-Megatron suite runs ``--dp 2 --pp 4`` on those 8 devices. Neither
+# number is a property of an engine. Both are a declaration of what somebody
+# plans to run.
+#
+# **An earlier revision capped pp at 2 and gave a false reason.** It said the
+# two engines count layers the same way only at pp <= 2. They agree at every
+# degree, because ``benchmarks/e2e/launch.py`` always sends
+# ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
+# ``last`` twin. Those two flags make rule 7's arithmetic the right test. See
+# rule 7 below.
 #
 # The two conventions, measured rather than assumed: TorchTitan counts the
 # embedding and the output head as stages, through
 # ``pipeline_parallel_first/last_stage_less_layers``, which both default to
 # **1**. Megatron does not (``account_for_embedding/loss_in_pipeline_split``
-# default False) and divides ``config.num_layers`` alone. Running TorchTitan's
-# own splitter at 16 layers: at 2 stages both conventions give [8, 8], and at
-# 4 stages weight 0 gives [4, 4, 4, 4] where the default weight 1 gives
-# **[4, 5, 4, 3]**. Megatron gives [4, 4, 4, 4] at 4 stages and does not
-# raise. So the disagreement is TorchTitan's uneven split, not a Megatron
-# refusal, and four stages are reachable at pp=2 -- either interleaved
-# schedule asks for them.
-MAX_WORLD_SIZE = 4
-MAX_PP = 2
+# default False) and divides ``config.num_layers`` alone. TorchTitan's own
+# splitter, run at weight 0 and at the default weight 1:
+#
+#     16 layers, 2 stages: [8, 8] either way.
+#     16 layers, 4 stages: [4, 4, 4, 4] against **[4, 5, 4, 3]**.
+#     16 layers, 8 stages: eight 2s against **[2, 3, 2, 2, 2, 2, 2, 1]**.
+#     24 layers, 4 stages: [6, 6, 6, 6] against **[6, 7, 6, 5]**.
+#     24 layers, 8 stages: eight 3s against **[3, 4, 3, 3, 3, 3, 3, 2]**.
+#
+# Megatron gives the weight 0 split in each row and does not raise. So the
+# disagreement is TorchTitan's uneven split under its own default, and the
+# harness removes it at every degree.
+#
+# Eight stages are reachable at pp 4, and four at pp 2, because **four of
+# the five registered schedules ask for two stages per rank**:
+# ``Interleaved1F1B``, ``InterleavedZeroBubble``, ``ZBVZeroBubble`` and
+# ``DualPipeV``. Rule 7 reads ``pp * stages_per_rank`` for that reason. An
+# earlier revision of this comment said "either interleaved schedule", which
+# names two of the four.
+#
+# **The cap lift widens one recorded gap, and this comment records the
+# widening.** ``benchmarks/e2e/results.py``'s ``loss_visible_rank`` returns
+# ``(world_size // pp) * (pp - 1)``. That is right for the two schedules this
+# repo runs and wrong for the two V-shaped ones. TorchTitan's
+# ``_get_pp_rank_to_stage_indices_mapping`` gives rank 0 the pair
+# ``(0, num_stages - 1)`` under ``ZBVZeroBubble`` and ``DualPipeV``, so
+# **rank 0 holds the last stage and the loss**. TorchTitan's own
+# ``_get_metrics_rank`` special-cases ``ZBVZeroBubble`` and returns 0; it
+# does not special-case ``DualPipeV``, and this repo special-cases neither.
+# Rule 5 refuses a V-shaped schedule only beside a megatron arm, so a
+# titan-only run may still ask for one. Rule 6 narrows the exposure and does
+# not close it: both V-shaped schedules set ``requires_uncompiled``, so such
+# a run also has to ask for ``--compile-mode none``.
+#
+# The gap already existed at ``dp 1`` and ``dp 2`` with ``pp 2``. The lift
+# adds six ``(dp, pp)`` pairs: (1, 3), (1, 4), (2, 3), (2, 4), (3, 2) and
+# (4, 2). No run has ever used a V-shaped schedule. Read this before you run
+# one, and repair ``loss_visible_rank`` rather than the cap.
+MAX_WORLD_SIZE = 8
+MAX_PP = 4
 
 
 @dataclass(frozen=True)
@@ -500,8 +540,8 @@ def validate_parallelism(
     if spec.pp > MAX_PP:
         raise ValueError(
             f"pipeline degree {spec.pp} exceeds the supported maximum "
-            f"{MAX_PP}; the two engines' layer-counting conventions agree "
-            "only at pp <= 2"
+            f"{MAX_PP}; no run plans a deeper pipeline, and nobody has "
+            "checked one"
         )
 
     # 3. A schedule names a pipeline. Without one it would be recorded in the
@@ -580,9 +620,11 @@ def validate_parallelism(
     #    divisor ``n_layers + 2`` rather than ``n_layers``: at 16 layers over
     #    4 stages weight 1 splits [4, 5, 4, 3] where Megatron splits
     #    [4, 4, 4, 4], and this rule would pass both. Four stages are
-    #    reachable at pp 2, because either interleaved schedule asks for two
-    #    per rank. Delivering those flags is the command-line commit's job;
-    #    this rule assumes it, and a test there must pin them.
+    #    reachable at pp 2 and eight at pp 4, because four of the five
+    #    registered schedules ask for two stages per rank. ``launch.py``
+    #    sends both flags at every ``pp > 1``; this rule assumes that, and
+    #    ``tests/test_migration_contract.py`` freezes the argv at pp 2 and
+    #    at pp 4.
     #
     #    Megatron needs no flag: it divides ``config.num_layers`` and asserts
     #    the remainder itself.
