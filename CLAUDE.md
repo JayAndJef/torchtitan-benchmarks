@@ -106,11 +106,12 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
 | `benchmarks/e2e/parallelism.py` | The parallelism run axis: `ParallelismSpec`, the `PP_SCHEDULES` registry, the four derivations and `validate_parallelism`'s fourteen rules. Parent-side and torch-free |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
-| `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm (both engines) |
-| `benchmarks/e2e/validation.py` | `validate_arm` and the `ValidationProfile` registry |
+| `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm. Three launchers: `torchtitan`, `megatron` and `megatron_stock` |
+| `benchmarks/e2e/validation.py` | `validate_arm` and the `ValidationProfile` registry. Three profiles: `torchtitan`, `megatron` and `megatron_stock` |
 | `benchmarks/e2e/results.py` | Evaluation, region comparison, `results.json`, and its renderer |
 | `benchmarks/e2e/data/piper_qwen3.py` | Replay dataloader: drains the c4_test pipeline at init (megatron scenario) |
-| `benchmarks/e2e/megatron/` | The Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`) |
+| `benchmarks/e2e/megatron/` | The **tuned** Megatron-LM training driver (`train.py`) and its THD data pipeline (`data.py`). It replicates the TorchTitan treatment step by step |
+| `benchmarks/e2e/megatron_stock/` | The **stock** Megatron-LM arm: `megatron.training.pretrain` through `pretrain_gpt`'s own providers, with one substituted dataset provider. `flags.py` is the whole command line as data and is parent-side; `bootstrap.py`, `profiling.py` and `train.py`'s step-log shim are the three in-process substitutions that make it fit the harness without a `third_party/` edit |
 | `benchmarks/kernel/schema.py` | What a kernel benchmark *is*: `KernelScenario`/`KernelArm`/`CorrectnessCheck`/`KernelWorkload`, the span types `KernelSpan`/`SpanParts`/`validate_span_parts`, plus `resolve_symbol`, `resolve_shape_and_workload` and `shape_summary` |
 | `benchmarks/kernel/registry.py` | The kernel scenarios themselves (17 at this rev, 71 arms), declared with those types. Re-derive the counts; do not quote them |
 | `benchmarks/kernel/spans.py` | The kernel spans. Parent-side and torch-free, exactly as the scenario registry is. `KERNEL_SPANS` holds five spans and eight span arms at this rev, none of them with a builder. It imports the scenario registry to check that each named part arm exists, which is why it is a separate module |
@@ -275,8 +276,10 @@ the launcher itself: `python -m torch.distributed.run` with the same flags.
   timestamp so they group under `out/<timestamp>/`. It is **fail-fast**: the
   first failing arm aborts the sweep and later scenarios never run. It cannot be
   combined with `--scenario`, `--out`, `--resume`, or `--results` (note `--out`
-  also trips on an exported `OUT`). Budget roughly 45 minutes for all 20 arms
-  at `--ac none`, 35 for the 15 at `--ac sac` (megatron is `none`-only).
+  also trips on an exported `OUT`). Seven scenarios hold 22 arms; 15 of them
+  accept `--ac sac`, because both megatron scenarios are `none`-only. Budget
+  roughly 45 minutes for the `--ac none` sweep and 35 for the `sac` one, and
+  re-derive the arm counts from the registry rather than quoting them.
 
 Shared options, with env equivalents:
 
@@ -306,6 +309,27 @@ would make a plain `run 0 --scenario X` fail its own world-size check. The
 degrees, the schedule registry and the fourteen rules that refuse an illegal
 set live in `benchmarks/e2e/parallelism.py`; read that module, not this
 table, for what a combination means.
+
+**The budget is `MAX_WORLD_SIZE = 8` and `MAX_PP = 4`**
+(`benchmarks/e2e/parallelism.py`), lifted from 4 and 2 for the
+`piper_megatron_stock` suite, which runs `--dp 2 --pp 4` on eight devices.
+Neither number is a property of an engine. Both declare what somebody plans
+to run, and lifting either is one edit at those two names. The earlier `pp
+2` cap gave a false reason -- that the two engines count layers the same way
+only at `pp <= 2`. They agree at every degree, because
+`benchmarks/e2e/launch.py` always sends
+`--parallelism.pipeline-parallel-first-stage-less-layers 0` and its `last`
+twin; without those TorchTitan splits 16 layers over 4 stages as
+`[4, 5, 4, 3]` where Megatron gives `[4, 4, 4, 4]`. Read the comment block
+above the two constants for the measured splits.
+
+**One recorded gap widens with the cap, and it is not closed.**
+`benchmarks/e2e/results.py`'s `loss_visible_rank` is
+`(world_size // pp) * (pp - 1)`. That is right for `1F1B` and for
+`Interleaved1F1B`, and wrong for the two V-shaped schedules, which give rank
+0 the last stage. Spec rule 5 refuses a V-shaped schedule only beside a
+megatron arm, so a titan-only run can still reach one. Cite the schedule
+beside any loss trajectory from a pipelined run.
 
 **`--scenario` has no default, and an omitted one fails the run.** A default
 scenario can only be reached by an omission, and it would then measure one
@@ -434,62 +458,89 @@ dataclasses and are the single source of truth for *both* engines --
 so a size cannot drift between them. That module imports nothing but
 `dataclasses`.
 
-**Four shapes are registered**, in ascending order of the parameter count:
+**Six shapes are registered**, in ascending order of the parameter count.
+`normal` is the retired name of `1b` and still resolves to it, through
+`MODEL_SIZE_ALIASES`; the manifests of every run before schema 9 record
+`normal`.
 
-| | `normal` | `large` | `huge` | `giant` |
-|---|---|---|---|---|
-| dim | 1024 | 4096 | 12288 | 16384 |
-| n_layers | 16 | 4 | 1 | 1 |
-| n_heads / n_kv_heads | 16 / 8 | 64 / 32 | 192 / 96 | 256 / 128 |
-| head_dim | 64 | 64 | 64 | 64 |
-| MoE inter_dim (3.5x dim) | 3584 | 14336 | 43008 | 57344 |
-| experts / top_k | 4 / 2 | 4 / 2 | 4 / 2 | 4 / 2 |
-| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 |
-| param_count | 1,066,241,024 | 4,264,661,504 | 10,528,837,760 | 17,058,349,184 |
-| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 1,446,023,680 / 2,818,637,824 / 2,855,375,360 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 | 5,783,994,496 / 11,274,354,688 / 11,421,204,608 |
-| num_flops_per_token @1024 | 3,551,348,736 | 13,599,599,616 | 33,096,721,152 | 53,792,637,696 |
-| per-block regions | yes (80/80) | yes (20/20) | **no** | **no** |
-| `parity_gate` | 2e-2 | 3e-2 | 5e-2 | 6e-2 |
-| measured? | yes | **no** | yes | **no** |
+| | `1b` | `large` | `9b` | `huge` | `giant` | `48b` |
+|---|---|---|---|---|---|---|
+| real or synthetic | **real** | synthetic | **real** | synthetic | synthetic | **real** |
+| dim | 1024 | 4096 | 2048 | 12288 | 16384 | 4096 |
+| n_layers | 16 | 4 | 24 | 1 | 1 | 32 |
+| n_heads / n_kv_heads | 16 / 8 | 64 / 32 | 32 / 8 | 192 / 96 | 256 / 128 | 32 / 8 |
+| head_dim | 64 | 64 | 64 | 64 | 64 | **128** |
+| MoE inter_dim (3.5x dim) | 3584 | 14336 | 7168 | 43008 | 57344 | 14336 |
+| experts / top_k | 4 / 2 | 4 / 2 | 8 / 2 | 4 / 2 | 4 / 2 | 8 / 2 |
+| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 |
+| param_count | 1,066,241,024 | 4,264,661,504 | 9,330,201,600 | 10,528,837,760 | 17,058,349,184 | 47,685,316,608 |
+| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 1,446,023,680 / 2,818,637,824 / 2,855,375,360 | 874,091,520 / 8,456,110,080 / 2,988,413,952 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 | 5,783,994,496 / 11,274,354,688 / 11,421,204,608 | 2,587,111,424 / 45,098,205,184 / 13,862,449,152 |
+| num_flops_per_token @1024 | 3,551,348,736 | 13,599,599,616 | 16,667,473,920 | 33,096,721,152 | 53,792,637,696 | 81,051,328,512 |
+| per-block regions | yes (80/80) | yes (20/20) | yes (120/120) | **no** | **no** | yes (160/160) |
+| `parity_gate` | 2e-2 | 3e-2 | 2e-2 | 5e-2 | 6e-2 | 3e-2 |
+| measured? | yes | **no** | **no** | yes | **no** | **no** |
 
-**`large` and `giant` have never run.** No scenario, no parity check, and no
-`results.json` at either shape. Two consequences follow, and both are open
-questions rather than settings:
+**Three of the six are real piper models, and three are benchmark
+inventions.** `1b`, `9b` and `48b` are transcribed field for field from the
+piper checkout's `examples/models/qwen3.py`. `large`, `huge` and `giant` are
+ours: each took a dim and a layer count for a benchmark reason, then applied
+the piper-1B rules to everything else. **A synthetic shape is not piper at
+scale.** Piper holds `n_heads` at 32 and `n_kv_heads` at 8 from 9B up, which
+is 4:1 grouped-query attention; the synthetic shapes pin `head_dim` at 64 and
+derive `n_heads = dim/head_dim`, so `huge` carries 192 query heads over 96 kv
+heads. Real piper never approaches that. `large` and `48b` share a dim and an
+expert width and agree on nothing else, so `large` does not approximate
+`48b`. `benchmarks/models/piper_qwen3/shape.py` is the authority; read its
+module docstring before you cite a shape.
 
-- **Both new parity gates are unverified.** They are fitted, not measured:
-  the two measured shapes fit `rel_l2 = 5.5e-3 * sqrt(dim/1024)` to within
-  7%, and each new gate sits above that prediction by the margin `huge` keeps
-  over its own measurement. Run `tools/megatron_parity_check.py --model-size
-  <name>` before any parity claim at either shape.
-- **Validation rule 7 at `large` is untested and could collide.** Regions are
+**Four of the six have never run.** `large`, `9b`, `giant` and `48b` have no
+scenario, no parity check and no `results.json`. Three consequences follow,
+and each is an open question rather than a setting:
+
+- **Three parity gates are unverified.** `large` and `giant` are fitted, not
+  measured: the two measured shapes fit `rel_l2 = 5.5e-3 * sqrt(dim/1024)` to
+  within 7%, and each gate sits above that prediction by the margin `huge`
+  keeps over its own measurement. `9b` and `48b` take the default 2e-2 and
+  3e-2. Run `tools/megatron_parity_check.py --model-size <name>` before any
+  parity claim at any of them.
+- **Validation rule 7 above `1b` is untested and could collide.** Regions are
   derived per shape, so `large` asks for 4 layers x 5 active steps = **20**
-  invocations per window. The uniqueness argument behind rule 7 was measured
-  on a 16-layer trace, where the forward graphs ran {5, 80, 5} times and the
-  backward graphs {5, 80}; 80 is unique there. Nobody has looked at a
-  4-layer trace, so nobody knows whether 20 is unique in it. If another
-  same-phase partition also runs 20 times, `pooled_window_metrics` raises and
-  the arm fails rule 7. Treat a `large` run as unproven on that rule until a
-  trace says otherwise.
+  invocations per window, `9b` asks for 120 and `48b` for 160. The uniqueness
+  argument behind rule 7 was measured on a 16-layer trace, where the forward
+  graphs ran {5, 80, 5} times and the backward graphs {5, 80}; 80 is unique
+  there. Nobody has looked at a 4-layer, a 24-layer or a 32-layer trace. If
+  another same-phase partition runs the same number of times,
+  `pooled_window_metrics` raises and the arm fails rule 7. Treat such a run
+  as unproven on that rule until a trace says otherwise.
+- **Memory is unproven above `huge`.** `giant` is declared from a memory
+  estimate, so its first run can run out of memory. `9b` may fit one H200 and
+  `48b` cannot; the `PIPER_48B` constant carries that arithmetic.
 
-`giant` is declared from a memory estimate only, so its first run can still
-run out of memory. `large` is 4 layers rather than 1 for the reason `huge` is
-1 rather than 16, applied in the other direction: at dim 4096 the
-layer-to-table ratio is 1.65, so a 1-layer model would be 62% embedding table
-and the benchmark would measure the lm_head and the cross entropy. Four
-layers put `n_layers * dim` at 16384, which is the product `normal` carries,
-so `large` reproduces the `normal` parameter split and keeps
-`supports_block_regions` True.
+`large` is 4 layers rather than 1 for the reason `huge` is 1 rather than 16,
+applied in the other direction: at dim 4096 the layer-to-table ratio is 1.65,
+so a 1-layer model would be 62% embedding table and the benchmark would
+measure the lm_head and the cross entropy. Four layers put `n_layers * dim`
+at 16384, which is the product `1b` carries, so `large` reproduces the `1b`
+parameter split and keeps `supports_block_regions` True. `9b` and `48b` do
+not hold that product, because piper never chose it.
 
+`dim`, `n_layers`, `head_dim`, `n_kv_heads` and `num_experts` are **fields**,
+because the registered shapes disagree about each of them. `top_k`,
+`vocab_size`, `rope_theta` and `max_seq_len` are defaults, because they all
+agree. `n_heads` and `moe_hidden_dim` are derived (`dim/head_dim` and
+`dim*7/2`), and the parameter/flops formulas mirror torchtitan's
+`get_moe_model_nparams_and_flops`. **The three fields that used to be
+derivations are the ones the real ladder broke**: `n_kv_heads = n_heads // 2`
+returns 16 at `9b` and at `48b` where piper carries 8, `head_dim` is 128 at
+`48b`, and `num_experts` is 8 at both. Each wrong value builds a different
+model and publishes it under the requested name.
 
-Everything except `dim` and `n_layers` is derived
-(`n_heads = dim/head_dim`, `n_kv_heads = n_heads/2`,
-`moe_hidden_dim = dim*7/2`), and the parameter/flops formulas mirror
-torchtitan's `get_moe_model_nparams_and_flops`. `tests/test_model_shape.py`
-pins the five normal-size numbers against what a real run logs, and derives
-every other shape's counts rather than transcribing them: a helper counts the
-parameters tensor by tensor, the test proves the helper against the `normal`
-numbers, and every registered shape must then agree with the helper. The
-counts were previously duplicated by hand in the Megatron builder.
+`tests/test_model_shape.py` pins every registered shape's numbers in
+`PINNED_SHAPES` and derives the counts rather than transcribing them: a
+helper counts the parameters tensor by tensor, the test proves the helper
+against the `1b` numbers, and every registered shape must then agree with the
+helper. The pinned table is a deliberate second statement of the geometry,
+transcribed from the model config the shape claims to be.
 
 `supports_block_regions` is derived too (`n_layers > 1`, see below), and
 `parity_gate` -- the tolerance `tools/megatron_parity_check.py` enforces --
@@ -536,10 +587,11 @@ shapes; rules 8, 9 and 11 do. Cross-mode
 metrics (total GPU kernel time, tokens/s, launch latency, peak memory) are
 unaffected.
 
-**`large` passes that test arithmetically and has not been checked against a
-trace.** It asks for 20 invocations per window, which is not 5, so it does not
-hit the collision above. Whether 20 is *unique* in a 4-layer trace is the part
-nobody has measured. See "Four shapes are registered" above.
+**The four multi-layer shapes above `1b` pass that test arithmetically and
+none has been checked against a trace.** `large` asks for 20 invocations per
+window, `9b` for 120 and `48b` for 160. None of the three is 5, so none hits
+the collision above. Whether each count is *unique* in its own trace is the
+part nobody has measured. See "Six shapes are registered" above.
 
 
 Rejected alternatives, for the record: a copy-pasted `_huge` scenario
@@ -636,6 +688,8 @@ are declining to set.
 | | `titan_swiglu` | pretokenized config + the `piper_optimized_inductor` swiglu override |
 | | `titan_lm_head` | config `qwen3_piper_1b_piper_optimized_te_ce_pretokenized` |
 | | `titan_swiglu_lm_head` | te_ce pretokenized config + the swiglu override |
+| `piper_megatron_stock` | `baseline` | `launcher="megatron_stock"`: stock `megatron.training.pretrain` (see "The stock Megatron arm") |
+| | `titan_stock` | the same config as `piper1b_megatron/titan_stock` |
 
 `piper1b_attention` swaps only the inner attention, so it needs no `seed=42`
 (the backend does not change parameter structure). Its `flash_attention_3`
@@ -781,7 +835,8 @@ are not comparable; `--resume` refuses to mix them.
 1. Missing `<arm>.log`, or log lacking the profile's completion marker
    (`Training completed` for both engines).
 2. `[Override]` line count != `arm.overrides_per_block * shape.n_layers`
-   (one per transformer block, so 16 / 4 / 1 / 1 across the four shapes).
+   (one per transformer block, so 16 / 4 / 24 / 1 / 1 / 32 across the six
+   shapes).
 
 3. A declared `override_imports` entry with no matching `[Override] <path>:` line.
 4. A profile `failure_marker` phrase in the log (`falling back to the
@@ -941,6 +996,41 @@ Engine differences live in the `ValidationProfile` registry
 (`VALIDATION_PROFILES`), selected by `Arm.validation`; rules 2/3/5/6/9/11/13
 are shared. Rules 4, 7, 8, 9, 10, 11, 12 and 13 are the ones that catch
 silent wrongness. Never work around them by relaxing the check.
+
+**There are three profiles: `torchtitan`, `megatron` and `megatron_stock`.**
+The third is the stock arm's, and every marker it carries spells the word
+"stock", so no line of the tuned driver can satisfy it and no line of the
+stock driver can satisfy the tuned profile. It sets `compiled_marker=None`
+and `check_regions=False` for the reasons the tuned profile gives, and its
+scenario declines every uncompiled mode. Its two mesh lines are the
+`megatron_stock` driver's own:
+
+```
+Megatron-LM stock training loop (mode=<mode>, main_params_dtype=..., ...)
+Megatron-LM stock parallelism: dp=<dp> pp=<pp> schedule=1F1B microbatches=<m> stages=<pp>
+Megatron-LM stock data parallel: DistributedDataParallel over <dp> ranks (...)
+```
+
+**The microbatch count in that line is `microbatch_geometry`'s, not
+`n_microbatches`'s, and it is 1 at `pp` 1.** One Megatron sample is one
+packed sequence of `rows * seq_len` tokens rather than a batch of rows, so
+the harness sends `--micro-batch-size 1` and `--global-batch-size
+microbatches * dp`. Without a pipeline neither engine splits the batch, so
+the whole local batch is one pack. `benchmarks/e2e/megatron_stock/flags.py`
+builds both the argv and the marker's count from that one function, which is
+what keeps them from drifting apart.
+
+**The stock data-parallel line observes the wrapper, and nothing declares
+it.** `install_data_parallel_marker` replaces
+`megatron.training.training.setup_model_and_optimizer`, reads the model it
+returns, and **raises when no chunk carries a `DistributedDataParallel`**. It
+then prints `overlap_grad_reduce` and `grad_reduce_in_fp32` from the
+wrapper's own `ddp_config`. `parallelism_lines` deliberately prints no copy
+of that line: a second copy derived from the arguments would satisfy arm rule
+12 on its own, and a run whose wrapper went missing would pass the rule the
+shim exists to enforce. Arm rule 13 cannot make up that difference here,
+because stock Megatron all-reduces the reported loss over the data-parallel
+group on every step.
 
 ### Resume
 
@@ -2696,13 +2786,160 @@ next to any cuda-graph-mode comparison.** Graphed-module weight grads land
 in manually attached `main_grad` buffers, merged into `.grad` before
 clipping each step.
 
+## The stock Megatron arm
+
+`piper_megatron_stock`'s `baseline` arm runs **stock Megatron-LM**: it hands
+the run to `megatron.training.pretrain` and to `pretrain_gpt`'s own
+providers, and substitutes **one** argument -- the dataset provider, so both
+engines read the same c4_test stream rank for rank. The model builder, the
+optimizer, the learning-rate schedule, the distributed setup, the forward
+step, the embedding-rank rule and the training loop all stay Megatron's.
+
+**This is not the tuned arm, and it does not replace it.** The tuned arm
+(`piper1b_megatron/baseline`, `benchmarks/e2e/megatron/train.py`) replicates
+the TorchTitan treatment step by step, and stays the "Megatron at its own
+best" comparison. The stock arm asks a different question: what does a stock
+user get?
+
+### The four deliberate differences
+
+**The claim is a systems-throughput claim about two configured engines.** It
+is not a numerical-equivalence claim, and it is not a claim about the
+Megatron engine as such. Four differences are deliberate, each one moves the
+number, and **the report must state all four beside every number**:
+
+1. **The stock arm keeps fp32 master weights and reduces gradients in
+   fp32.** `--bf16` alone does that (`arguments.py`: with the default
+   `--main-grads-dtype fp32` it sets `accumulate_allreduce_grads_in_fp32`),
+   which is about 18 bytes of optimizer state per parameter against
+   TorchTitan's 8. The titan arm and the tuned arm run plain bf16.
+2. **The stock arm runs Megatron's unfused native cross entropy.** The tuned
+   arm runs the TransformerEngine cross entropy. That path is worth 73% of
+   the engine gap at batch 48 -- see "Cross-entropy implementation is a
+   reporting-sensitive choice" above.
+3. **The stock arm keeps `--init-method-std 0.01`.** The titan arm keeps
+   TorchTitan's own initialization. **No weight transfer happens**, so the
+   two arms do not start from the same parameters.
+4. **The stock arm applies no permutation fusion**, because stock Megatron
+   defaults `--moe-permute-fusion` off. The arm therefore does **not** pin
+   `_permute_kernel` as a trace marker, where the tuned arm does.
+
+**`execution_model` says `plain-bf16` and describes the other arm.** The
+field is composed from the parallelism spec, and
+`single-gpu-plain-bf16-no-fsdp` is a fixed point every manifest since schema
+7 carries; moving it to describe one arm would move a published constant. So
+the difference is stated in three places a reader meets instead: the arm's
+`description`, the scenario's `description`, and this section. Never read a
+stock-arm number as plain bf16.
+
+### The package
+
+`benchmarks/e2e/megatron_stock/`, one file per concern:
+
+| file | contents |
+|---|---|
+| `bootstrap.py` | `install_typing_override`, then `prepare()`, which also calls `configure_te_environment` and `add_megatron_to_path` |
+| `data.py` | `StockReplayIterator` and the provider `--dataloader-type external` passes through |
+| `flags.py` | `stock_megatron_flags`, the whole command line as data. Parent-side and torch-free |
+| `model_builder.py` | `BenchGPTModelConfig` and `CountingGPTModelBuilder`, which print the two parameter lines |
+| `profiling.py` | `install_profiler_shim` and `assert_windows_written` |
+| `train.py` | The driver, and the log-line contract with `validation.py` |
+
+**No file under `third_party/` is edited.** Three shims run in this process
+instead, and each answers a way stock Megatron does not fit the harness:
+
+- **`typing.override`.** `megatron.training` reaches
+  `megatron/training/models/gpt.py`, which reads `override` from `typing`;
+  that name arrived in Python 3.12 and this venv runs 3.10.
+  `install_typing_override` adds the one name from `typing_extensions`.
+  Moving the venv to 3.12 was the alternative: it rebuilds every wheel,
+  rebuilds FlashAttention-3 from source, and makes every published number
+  incomparable.
+- **The profiler.** Stock Megatron writes **one** window per rank, to
+  `{tensorboard_dir}/../torch_profile/rank-<n>.json.gz`, with `repeat=1`.
+  The harness reads
+  `<arm>/profiling/traces/iteration_*/rank<n>_trace.json.gz` and arm rule 5
+  needs two windows. `install_profiler_shim` replaces
+  `torch.profiler.profile` on `training.py` before `pretrain()` reaches it
+  and gives Megatron the right schedule and the right path. **The repair is
+  never to lower the rule.** `assert_windows_written` refuses a run whose
+  shim was called anything but once, and a run that wrote fewer windows than
+  the workload declares, so a shim that did not install fails both guards.
+- **The step line.** Megatron's own `training_log` prints an `iteration ...
+  elapsed time per iteration (ms)` line on the last rank only.
+  `install_step_log_shim` prints the line `benchmarks/e2e/results.py`
+  parses, in the shape the tuned driver and the TorchTitan trainer both
+  print.
+
+**`--bench-` names the harness flags**, and `train.py` adds them through
+Megatron's own `extra_args_provider` hook, so Megatron's parser owns them
+and an unknown one fails at parse time rather than being ignored.
+
+### The data contract
+
+`data.py` reshapes `benchmarks/e2e/megatron/data.py`'s
+`materialize_titan_samples` and adds nothing to it, so the stock arm reads
+the byte-identical stream the tuned arm and the titan replay loader read.
+Three rules govern the iterator, and each answers a way a run can be wrong:
+
+1. **Every rank builds one.** `--dataloader-inter-document-masking` makes
+   the middle pipeline stages read the batch too, for the `cu_seqlens` the
+   attention needs.
+2. **The key is the data-parallel rank, never the global rank.** The stages
+   of one pipeline train one model on one batch, so they must read the same
+   tokens in the same order; `mpu.get_data_parallel_rank()` returns the same
+   value on every stage of one pipeline.
+3. **Exhaustion raises.** A wrap would train a second epoch under the first
+   epoch's label, and no validation rule would see it.
+
+**One microbatch is one packed sequence, never a batch of rows.** Megatron
+flattens an `(m, S)` microbatch to `(1, m*S)` whenever `cu_seqlens` is
+present, and then allocates its pipeline receive buffer as `(S, m, H)` --
+the same element count and a different layout, so the next stage would read
+a permuted activation. The iterator therefore concatenates `rows_per_sample`
+titan rows into one `(1, rows * seq_len)` sample and the harness sends
+`--micro-batch-size 1`. The attention is unchanged: `cu_seqlens` already
+marks every document, and every titan row starts at position 0, so a row
+boundary is a document boundary.
+
+### What is not settled
+
+**No cell has run.** The scenario is declared and gated on the CPU; no GPU
+run of either arm exists at this writing. Read it as a declaration until a
+`results.json` says otherwise, exactly as the never-built kernel scenarios
+are read.
+
+Four items are expected rather than measured, and the first run settles
+each:
+
+- The two trace markers, `cudnn_generated_fort_native_sdpa` and
+  `_mul_silu_split`. Both come from the tuned arm, which shares the
+  attention backend and the fused SwiGLU. If `_mul_silu_split` is absent,
+  read the trace before you change the declaration.
+- Arm rule 13's `ncclDevKernel_AllReduce` marker under Megatron's DDP
+  bucketing at world 8. A grouped launch can surface as
+  `ncclDevKernel_Generic`. Read every rank's trace before you widen it, and
+  never widen it to a bare `nccl`.
+- Whether Megatron's `--lr-decay-iters 40` decays over the 38 post-warmup
+  steps, as TorchTitan does. The rate does not change the throughput, so a
+  mismatch is a reporting defect.
+- Whether the `9b` shape fits at batch 32 on this box. The fallback is batch
+  8 with microbatch 1, which gives the same 8 microbatches.
+
+**Eight GPUs on this box span two NUMA nodes, so every eight-rank cell runs
+unpinned.** `cpu_pinning` records the reason. An unpinned run is not
+comparable to a pinned one; say so beside the number.
+
+**`tools/run_matrix.sh` does not drive this scenario.** Extending it is
+separate work.
+
 ## Tests
 
 ```bash
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The last full run at this rev discovered 1568 tests and skipped 15. Re-derive
+The last full run at this rev discovered 1717 tests and skipped 11. Re-derive
 those counts rather than quoting them; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add

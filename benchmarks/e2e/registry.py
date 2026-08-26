@@ -507,9 +507,15 @@ PIPER_MEGATRON_STOCK = Scenario(
     name="piper_megatron_stock",
     description=(
         "Piper-inspired stock Megatron-LM against stock TorchTitan on one "
-        "c4_test stream. The Megatron arm keeps fp32 master weights, an "
-        "fp32 gradient reduction and the unfused native cross entropy, so "
-        "it is not plain bf16 and its number is a configured-engine number."
+        "c4_test stream. This is a systems-throughput claim about two "
+        "configured engines, and four deliberate differences each move the "
+        "number: the Megatron arm keeps fp32 master weights and reduces "
+        "gradients in fp32, runs Megatron's unfused native cross entropy, "
+        "keeps --init-method-std 0.01 with no weight transfer, and applies "
+        "no permutation fusion. State all four beside every number. The "
+        "manifest's execution_model reads plain-bf16 because it is composed "
+        "from the parallelism spec; it describes the TorchTitan arm and not "
+        "this one."
     ),
     workload=PIPER_1B_MEGATRON_WORKLOAD,
     # Region pooling reads Inductor's compiled-graph annotations around whole
@@ -527,9 +533,13 @@ PIPER_MEGATRON_STOCK = Scenario(
             description=(
                 "stock megatron.training.pretrain through pretrain_gpt's own "
                 "providers: alltoall dispatcher, grouped GEMM, no aux router "
-                "loss, no cross-entropy fusion, no permute fusion, no "
-                "distributed optimizer, --init-method-std 0.01, fp32 master "
-                "weights"
+                "loss, unfused native cross entropy, no permute fusion, no "
+                "distributed optimizer, --init-method-std 0.01. NOT PLAIN "
+                "BF16: --bf16 alone keeps fp32 master weights, fp32 "
+                "optimizer moments and an fp32 gradient reduction, which is "
+                "about 18 bytes of state per parameter against TorchTitan's "
+                "8. The manifest's execution_model says plain-bf16 and "
+                "describes the other arm"
             ),
             launcher="megatron_stock",
             validation="megatron_stock",
