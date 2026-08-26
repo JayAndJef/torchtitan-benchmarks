@@ -333,28 +333,67 @@ class TypingOverrideShimTest(unittest.TestCase):
 
     def test_it_changes_nothing_when_the_name_exists(self) -> None:
         """A Python 3.12 interpreter must be untouched."""
-        stand_in = types.SimpleNamespace(override="the interpreter's own")
-        extensions = types.SimpleNamespace(override="the shim's")
+        def interpreters_own(function):
+            return function
+
+        def the_shims(function):
+            return function
+
+        stand_in = types.SimpleNamespace(override=interpreters_own)
+        extensions = types.SimpleNamespace(override=the_shims)
         added = bootstrap.install_typing_override(
             typing_module=stand_in, extensions=extensions
         )
         self.assertFalse(added)
-        self.assertEqual(stand_in.override, "the interpreter's own")
+        self.assertIs(stand_in.override, interpreters_own)
 
     def test_it_adds_the_name_once(self) -> None:
+        def the_shims(function):
+            return function
+
         stand_in = types.SimpleNamespace()
-        extensions = types.SimpleNamespace(override="the shim's")
+        extensions = types.SimpleNamespace(override=the_shims)
         self.assertTrue(
             bootstrap.install_typing_override(
                 typing_module=stand_in, extensions=extensions
             )
         )
-        self.assertEqual(stand_in.override, "the shim's")
+        self.assertIs(stand_in.override, the_shims)
         self.assertFalse(
             bootstrap.install_typing_override(
                 typing_module=stand_in, extensions=extensions
             )
         )
+
+    def test_a_non_callable_name_is_not_trusted(self) -> None:
+        """``hasattr`` is not enough. ``typing.override = None`` breaks
+        Megatron inside a class body, so the shim replaces it; a
+        non-callable value that is not ``None`` belongs to somebody else,
+        so the shim raises rather than shadowing it."""
+
+        def the_shims(function):
+            return function
+
+        placeholder = types.SimpleNamespace(override=None)
+        self.assertTrue(
+            bootstrap.install_typing_override(
+                typing_module=placeholder,
+                extensions=types.SimpleNamespace(override=the_shims),
+            )
+        )
+        self.assertIs(placeholder.override, the_shims)
+        with self.assertRaises(RuntimeError):
+            bootstrap.install_typing_override(
+                typing_module=types.SimpleNamespace(override="not mine"),
+                extensions=types.SimpleNamespace(override=the_shims),
+            )
+
+    def test_a_non_callable_replacement_raises(self) -> None:
+        with self.assertRaises(RuntimeError):
+            bootstrap.install_typing_override(
+                typing_module=types.SimpleNamespace(),
+                extensions=types.SimpleNamespace(override="not callable"),
+            )
 
     def test_a_missing_module_raises(self) -> None:
         with self.assertRaises(RuntimeError) as caught:
@@ -371,11 +410,34 @@ class TypingOverrideShimTest(unittest.TestCase):
             )
         self.assertIn("override", str(caught.exception))
 
-    def test_this_interpreter_ends_up_with_the_name(self) -> None:
-        import typing
+    def test_a_fresh_interpreter_gets_the_name_from_the_shim(self) -> None:
+        """Run in a subprocess, because the name is process-global.
 
-        bootstrap.install_typing_override()
-        self.assertTrue(hasattr(typing, "override"))
+        Another test in this suite calls ``bootstrap.prepare()``, which
+        installs the shim. An in-process ``hasattr`` after that asserts
+        nothing about the shim: it passes whoever set the name. A fresh
+        interpreter is the only place the claim can be tested.
+        """
+        import subprocess
+
+        probe = (
+            "import typing, sys;"
+            "before = hasattr(typing, 'override');"
+            "sys.path.insert(0, %r);"
+            "from benchmarks.e2e.megatron_stock import bootstrap;"
+            "added = bootstrap.install_typing_override();"
+            "print(before, added, callable(typing.override))"
+            % str(Path(__file__).resolve().parent.parent)
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        before, added, is_callable = result.stdout.split()
+        # On Python 3.12 and above the interpreter supplies the name and
+        # the shim declines. Below it, the shim installs one.
+        self.assertEqual(added, "False" if before == "True" else "True")
+        self.assertEqual(is_callable, "True")
 
 
 # --------------------------------------------------------------------------

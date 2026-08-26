@@ -1,10 +1,11 @@
 """Make stock Megatron-LM importable in this venv, then put it on the path.
 
 The tuned driver imports ``megatron.core`` alone. The stock driver imports
-``megatron.training``, which reaches
-``megatron/training/models/hybrid.py``. That module reads ``override`` from
+``megatron.training``, which reaches ``megatron/training/models/gpt.py``
+and ``megatron/training/models/hybrid.py``. Both read ``override`` from
 ``typing``, and ``typing.override`` arrived in Python 3.12. This venv runs
-Python 3.10, so the import fails.
+Python 3.10, so the import fails. ``gpt.py`` is the file this driver's own
+path reaches, through ``model_builder.py``.
 
 ``install_typing_override`` adds that one name from ``typing_extensions``,
 which the venv already provides. It changes nothing else, and a submodule
@@ -50,17 +51,28 @@ def install_typing_override(
     **On Python 3.12 and above this function changes nothing.** It reads
     ``typing`` first and returns before it looks at ``typing_extensions``.
 
-    **It never continues silently.** A missing ``typing_extensions``, or one
-    with no ``override``, raises ``RuntimeError``. Megatron would otherwise
-    fail later with an import error that names neither this shim nor the
-    fix.
+    **It never continues silently.** A missing ``typing_extensions``, one
+    with no ``override``, or one whose ``override`` is not callable, raises
+    ``RuntimeError``. Megatron would otherwise fail later inside a class
+    body, with an error that names neither this shim nor the fix. The same
+    reason makes the first check ``callable`` rather than ``hasattr``: a
+    ``typing.override`` of ``None`` satisfies ``hasattr`` and breaks
+    Megatron.
 
     The two keyword parameters exist for the tests. A caller in the driver
     passes neither, and gets the real ``typing`` module and a real import.
     """
     target = typing_module if typing_module is not None else typing
-    if hasattr(target, SHIMMED_NAME):
+    existing = getattr(target, SHIMMED_NAME, None)
+    if callable(existing):
         return False
+    if existing is not None:
+        raise RuntimeError(
+            f"typing.{SHIMMED_NAME} is {existing!r}, which is not callable, "
+            "so megatron.training would bind it as a decorator and fail "
+            "inside a class body; repair the interpreter rather than "
+            "letting the shim overwrite a name it did not set"
+        )
     if extensions is _IMPORT_FOR_ME:
         try:
             import typing_extensions
@@ -79,11 +91,11 @@ def install_typing_override(
             "cannot import"
         )
     replacement = getattr(extensions, SHIMMED_NAME, None)
-    if replacement is None:
+    if not callable(replacement):
         raise RuntimeError(
-            "typing_extensions supplies no override decorator, so the shim "
-            "cannot give megatron.training the name it reads; upgrade "
-            "typing_extensions"
+            "typing_extensions supplies no callable override decorator, so "
+            "the shim cannot give megatron.training the name it reads; "
+            "upgrade typing_extensions (4.4 added it)"
         )
     setattr(target, SHIMMED_NAME, replacement)
     return True
