@@ -129,9 +129,11 @@ STEP_LINE = (
     "tflops: {tflops:,.2f}  mfu: {mfu:.2f}%"
 )
 # The same line on a rank that holds no loss. Under a pipeline split only
-# the last stage computes one, and this driver broadcasts nothing, so the
-# field is absent rather than filled with a sentinel. benchmarks/e2e/
-# results.py reads the loss from one rank, which loss_visible_rank picks.
+# the last stage computes one, and broadcast_pipeline_loss gives it to every
+# rank of that pipeline, so a training step never reaches this line. It
+# stays because the shim must print a step line whatever Megatron hands it:
+# the field is then absent rather than filled with a sentinel, and a
+# sentinel is what benchmarks/e2e/results.py would parse as a loss.
 STEP_LINE_NO_LOSS = (
     "step: {step:2}  grad_norm: {grad_norm:7.4f}  "
     "memory: {memory:5.2f}GiB({percent:.2f}%)  tps: {tps:,}  "
