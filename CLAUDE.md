@@ -970,8 +970,18 @@ attention on the stage that is not checked passes a guard this file lists
 under "the ones that catch silent wrongness", and the same holds for the
 FA3 and FA4 markers. **A pipelined arm therefore has strictly less
 fallback coverage than the same arm at one rank.** Before publishing any
-`--pp 2` number that rests on a marker, read both ranks' traces by hand and
-say that you did.
+pipelined number that rests on a marker, read every rank's traces by hand
+and say that you did.
+
+**`MAX_PP = 4` halves that coverage again, and one arm now depends on
+it.** At `pp` 2 a marker was satisfied by one of two stages. At `pp` 4 it
+is satisfied by one of four, so a fallback on the other three publishes
+under the fused label -- and `gpu_time` is a **maximum over ranks**, so a
+degraded stage is exactly the rank that sets the published figure.
+`piper_megatron_stock/baseline` declares two such markers
+(`cudnn_generated_fort_native_sdpa` and `_mul_silu_split`), **both of them
+expected rather than measured**, and the scenario's own matrix runs
+`--dp 2 --pp 4`. Read all eight ranks' traces by hand on the first cell.
 
 **Arm rule 7 holds at `--dp 2, --pp 1`, measured.** A run without a pipeline
 still declares its regions, so the 80-invocations-per-window identity has to
@@ -2931,6 +2941,15 @@ each:
   bucketing at world 8. A grouped launch can surface as
   `ncclDevKernel_Generic`. Read every rank's trace before you widen it, and
   never widen it to a bare `nccl`.
+
+**Arm rule 13 proves nothing on this arm, and the wrapper check is what
+carries the axis.** Stock Megatron all-reduces the reported loss over the
+data-parallel group on every last-stage rank every step, and above `pp` 1
+the gradient-norm reduction puts a collective on every rank anyway. So
+`ncclDevKernel_AllReduce` appears whether or not a gradient moved. What
+closes the axis is `install_data_parallel_marker`, which raises when no
+model chunk carries a `DistributedDataParallel`. Treat that one function as
+load-bearing: the whole data-parallel axis of this arm rests on it.
 - Whether Megatron's `--lr-decay-iters 40` decays over the 38 post-warmup
   steps, as TorchTitan does. The rate does not change the throughput, so a
   mismatch is a reporting defect.
