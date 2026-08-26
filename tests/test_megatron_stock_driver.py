@@ -26,8 +26,14 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
+import os
+import pathlib
 import sys
+import sysconfig
+import tempfile
+import time
 import types
+import unittest.mock
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1727,6 +1733,92 @@ class ModelBuilderTest(unittest.TestCase):
                         for stage in range(degree)
                     )
                     self.assertEqual(total, shape.param_count)
+
+
+class DatasetHelperBuildTest(unittest.TestCase):
+    """``ensure_dataset_helpers`` against the hazard it exists for.
+
+    Megatron's ``compile_helpers`` calls ``sys.exit(1)`` when its ``make``
+    fails, and no flag skips it. The Makefile asks the **system**
+    ``python3-config`` for the output name, so the harness cannot predict
+    that name from this interpreter alone. The function therefore writes
+    every suffix a caller might ask for.
+    """
+
+    def _fake_checkout(self, tmp: pathlib.Path) -> pathlib.Path:
+        datasets = tmp / "megatron" / "core" / "datasets"
+        datasets.mkdir(parents=True)
+        (datasets / "helpers.cpp").write_text("int main() { return 0; }\n")
+        return tmp
+
+    def test_a_checkout_without_the_source_asks_for_no_build(self) -> None:
+        """A tree with no ``helpers.cpp`` is not an error. It is a no-op."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            (root / "megatron" / "core" / "datasets").mkdir(parents=True)
+            self.assertEqual(bootstrap.ensure_dataset_helpers(root), ())
+
+    def test_it_writes_the_name_this_interpreter_imports(self) -> None:
+        """The venv's own suffix must be among the names it guarantees."""
+        wanted = sysconfig.get_config_var("EXT_SUFFIX")
+        with tempfile.TemporaryDirectory() as raw:
+            root = self._fake_checkout(pathlib.Path(raw))
+            with unittest.mock.patch.object(
+                bootstrap, "_compile_dataset_helper", _fake_compile
+            ):
+                built = bootstrap.ensure_dataset_helpers(root)
+        names = {path.name for path in built}
+        self.assertIn(f"helpers_cpp{wanted}", names)
+
+    def test_it_compiles_once_and_copies_the_rest(self) -> None:
+        """Two names cost one compile. A second compile would be waste."""
+        calls = []
+
+        def counting(source, target):
+            calls.append(target)
+            return _fake_compile(source, target)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = self._fake_checkout(pathlib.Path(raw))
+            with unittest.mock.patch.object(
+                bootstrap, "_compile_dataset_helper", counting
+            ):
+                built = bootstrap.ensure_dataset_helpers(root)
+            # Assert inside the block. The directory goes away at its end.
+            self.assertEqual(len(calls), 1)
+            for path in built:
+                self.assertTrue(path.is_file())
+
+    def test_a_current_target_asks_for_no_second_build(self) -> None:
+        """The second call does nothing, so a run pays the build once."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = self._fake_checkout(pathlib.Path(raw))
+            with unittest.mock.patch.object(
+                bootstrap, "_compile_dataset_helper", _fake_compile
+            ):
+                first = bootstrap.ensure_dataset_helpers(root)
+                second = bootstrap.ensure_dataset_helpers(root)
+        self.assertNotEqual(first, ())
+        self.assertEqual(second, ())
+
+    def test_a_source_newer_than_the_target_rebuilds(self) -> None:
+        """A submodule bump changes helpers.cpp. A stale object must go."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = self._fake_checkout(pathlib.Path(raw))
+            source = root / "megatron" / "core" / "datasets" / "helpers.cpp"
+            with unittest.mock.patch.object(
+                bootstrap, "_compile_dataset_helper", _fake_compile
+            ):
+                bootstrap.ensure_dataset_helpers(root)
+                os.utime(source, (time.time() + 60, time.time() + 60))
+                again = bootstrap.ensure_dataset_helpers(root)
+        self.assertNotEqual(again, ())
+
+
+def _fake_compile(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+    """Stand in for the compiler. The test checks names, not machine code."""
+    target.write_bytes(b"\x7fELF fake")
+    return target
 
 
 if __name__ == "__main__":
