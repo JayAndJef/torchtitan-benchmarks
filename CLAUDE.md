@@ -658,7 +658,7 @@ kernel time, tokens/s, launch latency, and peak memory.
 
 **"Eager megatron" is shorthand, and it is imprecise.** Megatron-core sets
 `jit_fuser = torch.compile` on torch >= 2.2 (`megatron/core/jit.py:17-24`,
-enabled at import) and decorates 41 functions with it across 12 modules --
+enabled at import) and decorates 41 functions with it across 14 modules --
 cross-entropy, bias-swiglu, bias-dropout, the router, norms. Those regions go
 through Inductor in every run. What megatron does *not* do is compile whole
 transformer layers: there is no `torch_compile` knob in
