@@ -437,10 +437,11 @@ by schema <= 7 manifests) or `none` (checkpointing disabled, delivered as
 the trailing tyro subcommand token `activation-checkpoint:none`). Validation
 requires the `Applied SelectiveAC` log line to match the requested mode.
 Scenarios may restrict the axis via `Scenario.supported_ac_modes`:
-`piper1b_megatron` supports only `none` (Megatron's recompute options are
-not parity with per-op SAC, and the megatron arm itself always runs without
-recompute -- `--ac` never affects it). `Scenario.supported_compile_modes` is
-its twin on the compile axis. `run-all --all-scenarios` skips a scenario that
+**both megatron scenarios** support only `none` (Megatron's recompute
+options are not parity with per-op SAC, and a megatron arm always runs
+without recompute -- `--ac` never affects one). `Scenario.supported_compile_modes` is
+its twin on the compile axis, and `piper_megatron_stock` narrows it to
+`default` alone. `run-all --all-scenarios` skips a scenario that
 declines either mode; a direct `--scenario` request errors.
 
 **Numbers are only comparable within one `compile_mode` and one `ac_mode`.**
@@ -2567,6 +2568,9 @@ An arm changes behavior one of two ways:
 
 ## The Megatron baseline arm
 
+**This section is the TUNED arm.** The stock arm is a different arm of a
+different scenario; read "The stock Megatron arm" below for it.
+
 `piper1b_megatron`'s `baseline` arm trains the same Qwen3-1B model with
 Megatron-LM + TransformerEngine instead of TorchTitan. Megatron knowledge lives
 in two places: the driver and its data pipeline in `benchmarks/e2e/megatron/`,
@@ -3106,7 +3110,7 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
   `ac_mode`, one `model_size` and one `parallelism` record (plus one
-  `megatron_git_rev`/`te_version` for the megatron scenario). A pipelined
+  `megatron_git_rev`/`te_version` for either megatron scenario). A pipelined
   run also declares no regions, so it carries no `forward_block` or
   `backward_block` row a single-GPU run could be compared against.
   `cudnn_loader_resolves` is a **speed** axis only: the version changes no value, measured, so cite it beside a timing
