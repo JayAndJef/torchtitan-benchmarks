@@ -477,19 +477,19 @@ PIPER_1B_MEGATRON = Scenario(
 # run and describes the titan arm alone; the difference lives in the
 # scenario description, in the arm description, and in the report.
 #
-# **OPEN: at pp 1 the two arms do not process the batch the same way, and
-# no rule sees it.** The flag list sends --micro-batch-size
-# <pp_microbatch_size>, and parallelism rule 3 forces that value to 1 at
-# pp 1. Megatron then runs local_batch_size sequential forward and backward
-# passes at batch 1, where titan_stock runs one pass at batch
-# local_batch_size: four times the launches and a quarter of the GEMM rows
-# at the default workload. The gradient is the same and the step cost is
-# not, so a cross-engine ratio taken at pp 1 is biased against Megatron on
-# a workload this repo documents as host-dispatch bound. The four cells of
-# the run matrix all run pp 4 with --pp-microbatch-size 4, where both
-# engines split the batch into the same eight microbatches. Do not publish
-# a pp 1 ratio from this scenario until somebody moves the microbatch size
-# or refuses the mesh.
+# **At pp 1 the two arms process the batch the same way. An earlier
+# revision of this comment said they did not, and it was already stale when
+# it was written.** The flag list sends --micro-batch-size 1 at every
+# degree, and microbatch_geometry packs the whole local batch into one
+# Megatron sample at pp 1 (benchmarks/e2e/megatron_stock/flags.py). So
+# Megatron runs one forward and backward pass over local_batch_size *
+# seq_len tokens, and titan_stock runs one pass over (local_batch_size,
+# seq_len): the same tokens, the same GEMM rows, the same block-diagonal
+# mask, because cu_seqlens already marks every document. A pp 1 ratio from
+# this scenario is not biased by the batch mapping.
+#
+# The four cells of the run matrix still run pp 4, for the reason the
+# scenario exists: the claim is about eight GPUs.
 #
 # The AC axis is pinned to "none" for the reason piper1b_megatron pins it:
 # Megatron's recompute options are not parity with titan's per-op SAC, and

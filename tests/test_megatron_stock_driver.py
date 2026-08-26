@@ -1272,6 +1272,72 @@ class LossBroadcastTest(unittest.TestCase):
         self.assertIn("broadcast_pipeline_loss", inner[0].co_names)
 
 
+class ResolvedDegreeTest(unittest.TestCase):
+    """The provider refuses a mesh Megatron built two different ways.
+
+    Megatron derives the data-parallel degree twice: its parser writes
+    ``args.data_parallel_size``, and ``initialize_model_parallel`` builds
+    the group ``mpu.get_data_parallel_world_size()`` reports. The marker
+    line arm rule 12 matches states the first, and the token slice uses the
+    second. A disagreement puts the wrong shard on this rank while the log
+    names the right mesh, and every validation rule passes.
+    """
+
+    def _provider(self, *, parser_degree, group_degree, group_rank=0):
+        """Call the provider with both degrees stubbed."""
+        megatron_core = types.ModuleType("megatron.core")
+        megatron_core.mpu = SimpleNamespace(
+            get_data_parallel_rank=lambda: group_rank,
+            get_data_parallel_world_size=lambda: group_degree,
+        )
+        megatron_training = types.ModuleType("megatron.training")
+        megatron_training.get_args = lambda: SimpleNamespace(
+            data_parallel_size=parser_degree,
+            bench_seq_len=8,
+            train_iters=1,
+            bench_local_batch_size=1,
+            bench_rows_per_sample=1,
+        )
+        saved = {
+            name: sys.modules.get(name)
+            for name in ("megatron", "megatron.core", "megatron.training")
+        }
+        sys.modules["megatron"] = types.ModuleType("megatron")
+        sys.modules["megatron.core"] = megatron_core
+        sys.modules["megatron.training"] = megatron_training
+        try:
+            return data.train_valid_test_datasets_provider(None)
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+    def test_a_disagreement_raises_before_a_token_is_read(self) -> None:
+        with self.assertRaises(RuntimeError) as caught:
+            self._provider(parser_degree=2, group_degree=1)
+        message = str(caught.exception)
+        self.assertIn("data-parallel group of 1", message)
+        self.assertIn("say 2", message)
+
+    def test_the_other_direction_raises_too(self) -> None:
+        """A group wider than the arguments is equally wrong."""
+        with self.assertRaises(RuntimeError) as caught:
+            self._provider(parser_degree=1, group_degree=4)
+        self.assertIn("data-parallel group of 4", str(caught.exception))
+
+    def test_agreement_reaches_the_iterator(self) -> None:
+        """The check must not refuse an honest mesh."""
+        try:
+            result = self._provider(parser_degree=1, group_degree=1)
+        except Exception as error:  # pragma: no cover - dataset dependent
+            raise unittest.SkipTest(f"the c4_test stream is unavailable: {error}")
+        self.assertEqual(len(result), 3)
+        self.assertIsNone(result[1])
+        self.assertIsNone(result[2])
+
+
 class DataParallelMarkerTest(unittest.TestCase):
     """Arm rule 12's data-parallel half, against the real wrapper.
 

@@ -273,6 +273,23 @@ def train_valid_test_datasets_provider(
     from megatron.training import get_args
 
     args = get_args()
+    # Megatron resolves the data-parallel degree twice: the parser derives
+    # ``args.data_parallel_size`` from ``WORLD_SIZE`` and the other degrees,
+    # and ``initialize_model_parallel`` builds the group this reads. The
+    # marker line arm rule 12 matches states the first. The token slice
+    # below uses the second. A disagreement would put the wrong shard on
+    # this rank while the log named the right mesh, and every rule would
+    # pass. The tuned driver makes the same check
+    # (``benchmarks/e2e/megatron/train.py``); this is where the stock
+    # driver can, because ``pretrain()`` owns ``initialize_model_parallel``
+    # and the provider is the first of our code to run after it.
+    resolved = mpu.get_data_parallel_world_size()
+    if resolved != args.data_parallel_size:
+        raise RuntimeError(
+            f"megatron built a data-parallel group of {resolved} rank(s) "
+            f"where its own arguments say {args.data_parallel_size}; the "
+            "token slice and the recorded mesh would disagree"
+        )
     return (
         build_iterator(
             # The titan row length, not --seq-length: that one is the
