@@ -2886,6 +2886,20 @@ instead, and each answers a way stock Megatron does not fit the harness:
   never to lower the rule.** `assert_windows_written` refuses a run whose
   shim was called anything but once, and a run that wrote fewer windows than
   the workload declares, so a shim that did not install fails both guards.
+
+  **The schedule carries `skip_first=1`, and that is a comparability
+  property rather than a detail.** The two engines step the profiler at
+  opposite ends of the loop body -- Megatron first, TorchTitan after
+  `train_step` -- so the same training step ran one schedule index apart.
+  `stable_tps` samples steps 2 to 10 of every cycle, and the
+  `NONE -> WARMUP` transition, which runs torch's `prepare_trace` and its
+  CUPTI setup, landed on step 10 for Megatron and step 11 for TorchTitan.
+  Two of the eighteen samples behind the published median therefore carried
+  profiler setup on one engine only. No validation rule reads the profiler
+  phase, so nothing saw it. The offset puts both engines on the same action
+  at every step. Its cost is that the last window is closed by Megatron's
+  own `prof.stop()`, which writes the window in full; a stop that does not
+  fire loses that window and `assert_windows_written` refuses the run.
 - **The step line.** Megatron's own `training_log` prints an `iteration ...
   elapsed time per iteration (ms)` line on the last rank only.
   `install_step_log_shim` prints the line `benchmarks/e2e/results.py`
