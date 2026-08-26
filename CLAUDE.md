@@ -2818,9 +2818,12 @@ number, and **the report must state all four beside every number**:
    which is about 18 bytes of optimizer state per parameter against
    TorchTitan's 8. The titan arm and the tuned arm run plain bf16.
 2. **The stock arm runs Megatron's unfused native cross entropy.** The tuned
-   arm runs the TransformerEngine cross entropy. That path is worth 73% of
-   the engine gap at batch 48 -- see "Cross-entropy implementation is a
-   reporting-sensitive choice" above.
+   arm runs the TransformerEngine cross entropy. The native path upcasts the
+   whole `[tokens, 151936]` logit tensor to fp32 and makes about six
+   full-tensor passes. It is expensive: the tuned arm measured it at 88 GPU
+   ms/step against 14.9 at batch 48. **That measurement is the tuned arm's
+   and not this one's**; read "Cross-entropy implementation is a
+   reporting-sensitive choice" above for it.
 3. **The stock arm keeps `--init-method-std 0.01`.** The titan arm keeps
    TorchTitan's own initialization. **No weight transfer happens**, so the
    two arms do not start from the same parameters.
