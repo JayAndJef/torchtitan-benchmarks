@@ -305,6 +305,24 @@ class FlagListTest(unittest.TestCase):
                         int(value_after(emitted, "--seq-length")),
                     )
 
+    def test_the_profiler_ends_on_a_cycle_boundary(self) -> None:
+        """A stop inside an active window writes a third, short trace.
+
+        ``post_training_step_callbacks`` calls ``prof.stop()`` at
+        ``--profile-step-end``. torch's action map holds
+        ``(RECORD, None)`` and ``(RECORD_AND_SAVE, None)``, and both write a
+        window. Ending on a cycle boundary puts the stop on an idle step.
+        """
+        for steps in (40, 55, 59, 99):
+            with self.subTest(steps=steps):
+                workload = dataclasses.replace(
+                    BATCH_32, steps=steps, local_batch_size=32
+                )
+                emitted = flags_for("1b", PP4_SPEC, workload)
+                end = int(value_after(emitted, "--profile-step-end"))
+                self.assertEqual(end % workload.profile_freq, 0)
+                self.assertLessEqual(end, steps)
+
     def test_the_workload_supplies_the_run_lengths(self) -> None:
         emitted = flags_for("1b", TRIVIAL_SPEC)
         self.assertEqual(
@@ -317,6 +335,10 @@ class FlagListTest(unittest.TestCase):
             value_after(emitted, "--profile-step-end"), str(BATCH_32.steps)
         )
         self.assertEqual(value_after(emitted, "--profile-step-start"), "1")
+        self.assertEqual(
+            value_after(emitted, "--bench-min-trace-windows"),
+            str(BATCH_32.min_trace_windows),
+        )
         self.assertEqual(value_after(emitted, "--seed"), str(BATCH_32.seed))
         # --seq-length is the packed sample, and --bench-seq-len is the
         # titan row the workload declares.
@@ -757,6 +779,37 @@ class ProfilerShimTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             profiling.assert_windows_written(self.shim, min_trace_windows=1)
 
+    def test_the_installed_schedule_writes_one_window_per_cycle(
+        self,
+    ) -> None:
+        """Drive the REAL schedule, not a fabricated step number.
+
+        Every other test here calls the handler by hand, so none of them
+        would notice a ``repeat=1`` -- which is the stock Megatron
+        behaviour this shim exists to correct, and which writes one window.
+        """
+        from torch.profiler import ProfilerAction
+
+        torch.profiler.profile(schedule=None, on_trace_ready=None)
+        schedule = self.built[-1]["schedule"]
+        saves = [
+            step
+            for step in range(1, 61)
+            if schedule(step) is ProfilerAction.RECORD_AND_SAVE
+        ]
+        self.assertEqual(saves, [19, 39, 59])
+        # A window flushes on the transition out of RECORD_AND_SAVE, so the
+        # flush lands on the next step: 20, 40, 60.
+        for step in (20, 40, 60):
+            self.assertIs(schedule(step), ProfilerAction.NONE)
+        self.assertEqual(len([s for s in saves if s < 40]), 40 // 20)
+
+    def test_a_non_positive_requirement_is_refused(self) -> None:
+        """A guard that accepts zero windows guards nothing."""
+        self.shim.calls = 1
+        with self.assertRaises(ValueError):
+            profiling.assert_windows_written(self.shim, min_trace_windows=0)
+
     def test_a_cycle_that_cannot_hold_the_windows_raises(self) -> None:
         with self.assertRaises(ValueError):
             profiling.install_profiler_shim(
@@ -801,6 +854,7 @@ def stock_args(**overrides):
         bench_model_size="1b",
         bench_seq_len=1024,
         bench_rows_per_sample=32,
+        bench_min_trace_windows=2,
         seq_length=32 * 1024,
         micro_batch_size=1,
         pipeline_model_parallel_size=1,
@@ -1052,6 +1106,9 @@ class HarnessArgumentTest(unittest.TestCase):
         self.assertEqual(parsed.bench_pp_schedule, "1F1B")
         self.assertEqual(parsed.bench_seq_len, BATCH_32.seq_len)
         self.assertEqual(parsed.bench_rows_per_sample, 4)
+        self.assertEqual(
+            parsed.bench_min_trace_windows, BATCH_32.min_trace_windows
+        )
 
 
 # --------------------------------------------------------------------------

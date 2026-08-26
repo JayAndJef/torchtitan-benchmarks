@@ -98,10 +98,16 @@ def install_profiler_shim(
     Measured against the real ``torch.profiler.schedule`` of the pinned
     torch: the schedule returns ``RECORD_AND_SAVE`` at step 19 and 39 and
     ``NONE`` at 20 and 40, so both windows flush through ``prof.step()``
-    alone. Megatron's own ``prof.stop()`` at ``--profile-step-end`` then
-    transits ``NONE -> None``, which its action map does not hold and which
-    is therefore a no-op. Keep ``--profile-step-end`` at the step count
-    anyway: it is what stops the profiler at all.
+    alone. The flush count is exactly ``train_iters // profile_freq``,
+    because the cycle length is ``profile_freq`` by construction.
+
+    Megatron's own ``prof.stop()`` at ``--profile-step-end`` then transits
+    ``NONE -> None``, which its action map does not hold and which is
+    therefore a no-op. **That holds only because ``flags.py`` ends the
+    profiler on a cycle boundary.** torch's map does hold
+    ``(RECORD, None)`` and ``(RECORD_AND_SAVE, None)``, and both write a
+    window -- so a stop inside an active window adds a third, short trace
+    that arm rule 5 and the per-step metrics would count.
 
     Call this once per process, before ``pretrain()``.
     """
@@ -163,6 +169,12 @@ def assert_windows_written(
 
     Returns the windows this rank wrote.
     """
+    if min_trace_windows < 1:
+        raise ValueError(
+            f"a window requirement of {min_trace_windows} accepts a run "
+            "that wrote nothing; a guard against a shim that did not "
+            "install cannot evaluate to 'any count is acceptable'"
+        )
     if shim.calls != 1:
         raise RuntimeError(
             f"the torch.profiler shim ran {shim.calls} time(s), not once; "

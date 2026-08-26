@@ -49,6 +49,7 @@ from benchmarks.e2e.megatron_stock import bootstrap
 from benchmarks.e2e.megatron_stock.flags import (
     BENCH_ARM_DIR,
     BENCH_LOCAL_BATCH_SIZE,
+    BENCH_MIN_TRACE_WINDOWS,
     BENCH_MODE,
     BENCH_MODEL_SIZE,
     BENCH_PP_SCHEDULE,
@@ -174,6 +175,7 @@ def add_bench_args(parser: Any) -> Any:
     group.add_argument(BENCH_PP_SCHEDULE, type=str, default=None)
     group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
     group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
+    group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, required=True)
     return parser
 
 
@@ -540,10 +542,14 @@ def main(argv: list[str] | None = None) -> int:
     # The windows the shimmed schedule must have written. Megatron calls
     # prof.step() once per training iteration, and the schedule flushes one
     # window every --bench-profile-freq steps, so the count is exact. The
-    # harness guarantees it is at least the workload's min_trace_windows:
+    # workload's own requirement is the floor, and it is never below it:
     # workload_with_overrides refuses steps below
-    # profile_freq * min_trace_windows.
-    expected_windows = args.train_iters // args.bench_profile_freq
+    # profile_freq * min_trace_windows. Taking the larger of the two keeps
+    # the guard from ever evaluating to "any count is acceptable".
+    expected_windows = max(
+        args.bench_min_trace_windows,
+        args.train_iters // args.bench_profile_freq,
+    )
     profiling.assert_windows_written(
         shim, min_trace_windows=expected_windows
     )

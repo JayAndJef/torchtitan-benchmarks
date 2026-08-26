@@ -93,6 +93,7 @@ BENCH_MODE = "--bench-mode"
 BENCH_PP_SCHEDULE = "--bench-pp-schedule"
 BENCH_SEQ_LEN = "--bench-seq-len"
 BENCH_ROWS_PER_SAMPLE = "--bench-rows-per-sample"
+BENCH_MIN_TRACE_WINDOWS = "--bench-min-trace-windows"
 
 BENCH_FLAGS: tuple[str, ...] = (
     BENCH_ARM_DIR,
@@ -105,6 +106,7 @@ BENCH_FLAGS: tuple[str, ...] = (
     BENCH_PP_SCHEDULE,
     BENCH_SEQ_LEN,
     BENCH_ROWS_PER_SAMPLE,
+    BENCH_MIN_TRACE_WINDOWS,
 )
 
 # Flags this suite declines, each for a reason section 7 of the plan states.
@@ -359,7 +361,9 @@ def _mesh_flags(spec: ParallelismSpec) -> list[str]:
     ]
 
 
-def _data_flags(shape: PiperShape, workload: Workload) -> list[str]:
+def _data_flags(
+    shape: PiperShape, workload: Workload, *, profile_step_end: int
+) -> list[str]:
     """The data source, the logging and the profiler.
 
     ``NullTokenizer`` needs no file and adds no token, so
@@ -379,9 +383,12 @@ def _data_flags(shape: PiperShape, workload: Workload) -> list[str]:
     Megatron attends across document boundaries, which is more attention
     work, and the comparison would run against Megatron.
 
-    ``--profile-step-start 1`` and ``--profile-step-end <steps>`` bracket
-    the whole run. The driver replaces the profiler schedule, so these two
-    values only decide when Megatron calls ``prof.stop()``.
+    ``--profile-step-end`` is the **last whole profiler cycle**, not the
+    step count. The driver replaces the profiler schedule, so this value
+    only decides when Megatron calls ``prof.stop()`` -- and a stop inside
+    an active window writes a third, short trace that arm rule 5 and the
+    per-step metrics would then count. Ending on a cycle boundary puts the
+    stop on a step the schedule is idle on, where it is a no-op.
     """
     return [
         "--tokenizer-type",
@@ -412,7 +419,7 @@ def _data_flags(shape: PiperShape, workload: Workload) -> list[str]:
         "--profile-step-start",
         "1",
         "--profile-step-end",
-        str(workload.steps),
+        str(profile_step_end),
     ]
 
 
@@ -434,6 +441,10 @@ def _bench_flags(
 
     ``--bench-rows-per-sample`` states the packing, so the driver can assert
     ``rows * bench_seq_len == seq_length`` rather than divide and hope.
+
+    ``--bench-min-trace-windows`` carries the workload's own requirement,
+    so the driver's window guard reads arm rule 5's number instead of an
+    arithmetic that can evaluate to zero.
 
     ``--bench-pp-schedule`` is omitted at ``pp`` 1, where the driver refuses
     it: a schedule name there would name a split that does not happen.
@@ -457,6 +468,8 @@ def _bench_flags(
         str(workload.seq_len),
         BENCH_ROWS_PER_SAMPLE,
         str(rows_per_sample),
+        BENCH_MIN_TRACE_WINDOWS,
+        str(workload.min_trace_windows),
     ]
     if spec.pp > 1:
         flags.extend((BENCH_PP_SCHEDULE, str(spec.pp_schedule)))
@@ -512,6 +525,10 @@ def stock_megatron_flags(
     rows_per_sample, microbatches, megatron_seq_length = (
         microbatch_geometry(workload, spec)
     )
+    # The last whole profiler cycle. See _data_flags.
+    profile_step_end = (
+        workload.steps // workload.profile_freq
+    ) * workload.profile_freq
     return [
         *_geometry_flags(shape, megatron_seq_length=megatron_seq_length),
         *_engine_flags(),
@@ -520,7 +537,9 @@ def stock_megatron_flags(
             workload, global_batch_size=microbatches * spec.dp
         ),
         *_mesh_flags(spec),
-        *_data_flags(shape, workload),
+        *_data_flags(
+            shape, workload, profile_step_end=profile_step_end
+        ),
         *_bench_flags(
             workload,
             spec,
