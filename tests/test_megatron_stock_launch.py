@@ -43,7 +43,6 @@ from benchmarks.e2e.launch import (
 from benchmarks.e2e.parallelism import (
     ParallelismSpec,
     TRIVIAL_SPEC,
-    n_microbatches,
 )
 from benchmarks.e2e.registry import SCENARIOS, Arm, scenario_by_name
 from benchmarks.e2e.runner import RunRequest, _resolve_run
@@ -509,18 +508,14 @@ class StockArgvTests(unittest.TestCase):
         )
 
     def test_the_marker_count_matches_the_flags_the_argv_carries(self) -> None:
-        """The removed ``pp`` 1 exception rests on one flag mapping.
+        """The marker rests on the two batch flags the argv carries.
 
-        ``_megatron_stock_parallelism_markers`` writes ``n_microbatches`` at
-        every pipeline degree, and that is right only while the flag list
-        sends ``--micro-batch-size pp_microbatch_size`` and
-        ``--global-batch-size local_batch_size * dp``. Under the other
-        mapping -- one pack of every row at ``pp`` 1 -- Megatron would
-        derive 1 and arm rule 12 would fail an honest run.
-
-        So this reads the two flags out of the argv the harness really
-        builds, applies Megatron's own division, and compares the answer to
-        the marker. It fails whichever side moves.
+        ``_megatron_stock_parallelism_markers`` reads its count from
+        ``microbatch_geometry``, and ``flags.py`` builds ``--micro-batch-size``
+        and ``--global-batch-size`` from that same function. This test reads
+        those two flags back out of the argv, applies Megatron's own
+        division, and compares the answer to the marker. It fails whichever
+        side moves.
         """
         profile = VALIDATION_PROFILES["megatron_stock"]
         scenario = scenario_by_name(SCENARIO_NAME)
@@ -729,14 +724,17 @@ class StockValidationProfileTests(unittest.TestCase):
         self.assertEqual(len(with_dp), 2)
 
     def test_the_microbatch_count_is_megatrons_own_arithmetic(self) -> None:
-        """Stock Megatron has no ``pp`` 1 exception, and the tuned arm does.
+        """The marker must state the count Megatron itself derives.
 
-        Megatron derives ``get_num_microbatches()`` as ``global_batch_size /
-        (micro_batch_size * dp)``. The harness sends ``--global-batch-size
-        local_batch_size * dp`` and ``--micro-batch-size
-        pp_microbatch_size``, so the ``dp`` term cancels at every pipeline
-        degree. A profile that wrote 1 at ``pp`` 1, as the tuned profile
-        does for its own driver, would fail an honest run.
+        Megatron derives ``get_num_microbatches()`` as ``global_batch_size
+        // (micro_batch_size * dp)``. This test reads those two flags out of
+        the argv the harness really builds, applies that division, and
+        compares the answer to the marker. It fails whichever side moves.
+
+        **The count is 1 at ``pp`` 1**, because one Megatron sample is one
+        packed sequence and the harness packs the whole local batch into one
+        sample without a pipeline. ``n_microbatches`` describes the split a
+        pipeline would make, so it is not this number and is not read here.
         """
         for spec, local_batch_size in (
             (MESH, 32),
@@ -745,18 +743,22 @@ class StockValidationProfileTests(unittest.TestCase):
             (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B"), 8),
         ):
             with self.subTest(spec=spec, batch=local_batch_size):
-                megatron = (local_batch_size * spec.dp) // (
-                    spec.pp_microbatch_size * spec.dp
+                command = _command(
+                    _stock_arm(),
+                    parallelism=spec,
+                    local_batch_size=local_batch_size,
                 )
-                self.assertEqual(
-                    n_microbatches(spec, local_batch_size=local_batch_size),
-                    megatron,
-                )
+                micro = int(command[command.index("--micro-batch-size") + 1])
+                total = int(command[command.index("--global-batch-size") + 1])
+                # ConstantNumMicroBatchesCalculator, megatron/core.
+                megatron = total // (micro * spec.dp)
                 workload = replace(
                     self.workload, local_batch_size=local_batch_size
                 )
                 marker = self.profile.parallelism_markers(spec, workload)[0]
                 self.assertIn(f"microbatches={megatron} ", marker)
+                if spec.pp == 1:
+                    self.assertEqual(megatron, 1)
 
     # -- the two inversions ---------------------------------------------
 
@@ -860,6 +862,60 @@ class StockValidationProfileTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+class _StockArgs:
+    """The four ``args`` fields ``parallelism_lines`` reads.
+
+    Megatron's own parser produces these. Building them from a
+    ``ParallelismSpec`` is what lets this module compare the driver's real
+    line against the profile's marker without a Megatron-LM checkout.
+    """
+
+    def __init__(self, spec: ParallelismSpec) -> None:
+        self.world_size = spec.world_size
+        self.data_parallel_size = spec.dp
+        self.pipeline_model_parallel_size = spec.pp
+        self.bench_pp_schedule = spec.pp_schedule
+
+
+# The meshes the diff runs over. Each pair is a spec and the local batch
+# size the run would carry, because the microbatch count reads both.
+STOCK_MESH_CASES = (
+    (ParallelismSpec(dp=2), 4),
+    (ParallelismSpec(pp=2, pp_schedule="1F1B"), 4),
+    (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), 8),
+    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B"), 32),
+    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B"), 8),
+)
+
+
+def _geometry(workload, spec):
+    from benchmarks.e2e.megatron_stock.flags import microbatch_geometry
+
+    return microbatch_geometry(workload, spec)
+
+
+def _driver_lines() -> list[str]:
+    """Every line the driver prints that a marker fragment can live in."""
+    from benchmarks.e2e.megatron_stock import train
+
+    spec = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B")
+    return [
+        train.TRAINING_COMPLETED,
+        train.MODE_LINE.format(
+            mode="default",
+            main_params_dtype="torch.float32",
+            main_grads_dtype="torch.float32",
+            accumulate=True,
+            cross_entropy_loss_fusion=False,
+            dispatcher="alltoall",
+        ),
+        *train.parallelism_lines(_StockArgs(spec), microbatches=8),
+        train.DATA_PARALLEL_LINE.format(dp=2, overlap=False, fp32=True),
+        train.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
+        train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
+    ]
+
+
 class StockMarkerContractTests(unittest.TestCase):
     """The marker strings, pinned in both directions.
 
@@ -892,23 +948,115 @@ class StockMarkerContractTests(unittest.TestCase):
                 )
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
-    def test_the_driver_package_prints_every_fragment(self) -> None:
-        """The driver's own source must carry each fragment verbatim.
+    def test_the_driver_prints_every_fragment(self) -> None:
+        """The driver's own lines must carry each fragment verbatim.
 
-        The package is read as text and not imported: its ``train.py``
-        imports Megatron-LM, which needs a GPU host and a ``sys.path``
-        edit.
-        A text search finds a literal fragment, and the interpolated
-        values are deliberately outside every fragment.
+        The lines are built from the driver's own constants rather than
+        searched for in its source. A source search cannot see a fragment
+        that spans an interpolated field, and the driver writes
+        ``schedule={schedule} microbatches=`` rather than the literal the
+        profile matches.
+
+        Importing the driver costs no torch and no megatron: every heavy
+        import in ``train.py`` sits inside ``main``.
         """
-        source = self._package_source()
         for fragment in (
             *STOCK_LOG_FRAGMENTS,
             *STOCK_MODE_LINE_FIELDS,
             *STOCK_PARAMETER_FRAGMENTS,
         ):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, source)
+                self.assertTrue(
+                    any(fragment in line for line in _driver_lines()),
+                    f"{fragment!r} is in no line the driver prints",
+                )
+
+    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
+    def test_the_driver_mesh_line_equals_this_profile_marker(self) -> None:
+        """The character-for-character diff, at every mesh this run allows.
+
+        A one-character difference fails a real eight-GPU run at arm rule
+        12, hours after it started. The driver builds its line through
+        ``parallelism_lines``, which is the function a real run calls, so
+        this compares the two strings and not two descriptions of them.
+        """
+        from benchmarks.e2e.megatron_stock import train
+
+        profile = self.profile
+        for spec, batch in STOCK_MESH_CASES:
+            with self.subTest(spec=spec, batch=batch):
+                workload = replace(
+                    scenario_by_name(SCENARIO_NAME).workload,
+                    local_batch_size=batch,
+                )
+                _, microbatches, _ = _geometry(workload, spec)
+                printed = train.parallelism_lines(
+                    _StockArgs(spec), microbatches=microbatches
+                )
+                markers = profile.parallelism_markers(spec, workload)
+                self.assertEqual(printed[0], markers[0])
+
+    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
+    def test_the_driver_data_parallel_line_equals_this_profile_marker(
+        self,
+    ) -> None:
+        """The other half of the same diff, above ``dp`` 1.
+
+        The driver formats this line with the wrapper's own
+        ``ddp_config``. The two values below are what Megatron resolves
+        under this flag list: ``--overlap-grad-reduce`` is ``store_true``
+        and the flag list omits it, and ``--bf16`` with the default
+        ``--main-grads-dtype fp32`` sets
+        ``accumulate_allreduce_grads_in_fp32``, which
+        ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``.
+        """
+        from benchmarks.e2e.megatron_stock import train
+
+        for spec, batch in STOCK_MESH_CASES:
+            if spec.dp == 1:
+                continue
+            with self.subTest(spec=spec, batch=batch):
+                workload = replace(
+                    scenario_by_name(SCENARIO_NAME).workload,
+                    local_batch_size=batch,
+                )
+                printed = train.DATA_PARALLEL_LINE.format(
+                    dp=spec.dp, overlap=False, fp32=True
+                )
+                markers = self.profile.parallelism_markers(spec, workload)
+                self.assertEqual(printed, markers[1])
+
+    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
+    def test_the_driver_mode_line_starts_with_this_profile_marker(
+        self,
+    ) -> None:
+        """Arm rule 8 matches the prefix up to the first comma."""
+        from benchmarks.e2e.megatron_stock import train
+
+        printed = train.MODE_LINE.format(
+            mode="default",
+            main_params_dtype="torch.float32",
+            main_grads_dtype="torch.float32",
+            accumulate=True,
+            cross_entropy_loss_fusion=False,
+            dispatcher="alltoall",
+        )
+        self.assertTrue(printed.startswith(self.profile.mode_line("default")))
+
+    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
+    def test_the_driver_prints_the_data_parallel_line_once(self) -> None:
+        """``install_data_parallel_marker`` is its only source.
+
+        A copy derived from ``args`` would satisfy arm rule 12 on its own,
+        so a run that lost the wrapper shim would pass the rule the shim
+        exists to enforce.
+        """
+        from benchmarks.e2e.megatron_stock import train
+
+        spec = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B")
+        printed = train.parallelism_lines(_StockArgs(spec), microbatches=8)
+        self.assertEqual(len(printed), 1)
+        self.assertNotIn("stock data parallel", printed[0])
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_package_prints_no_tuned_marker(self) -> None:

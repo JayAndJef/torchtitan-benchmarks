@@ -255,15 +255,21 @@ def mode_line(args: Any) -> str:
 
 
 def parallelism_lines(args: Any, *, microbatches: int) -> list[str]:
-    """The mesh lines arm rule 12 matches, for this run.
+    """The mesh line arm rule 12 matches, for this run.
 
     Empty at world size 1, where there is no mesh to get wrong and rule 12
-    is not consulted. The data-parallel line is added above dp 1 only.
+    is not consulted.
+
+    **This function never prints the data-parallel line.**
+    ``install_data_parallel_marker`` is the only source of that line, and it
+    prints it from the wrapper Megatron really built. A second copy derived
+    from ``args`` would satisfy arm rule 12 on its own, so a run that lost
+    the wrapper shim would pass the rule the shim exists to enforce.
     """
     if args.world_size <= 1:
         return []
     schedule = args.bench_pp_schedule or SUPPORTED_PP_SCHEDULE
-    lines = [
+    return [
         PARALLELISM_LINE.format(
             dp=args.data_parallel_size,
             pp=args.pipeline_model_parallel_size,
@@ -272,15 +278,6 @@ def parallelism_lines(args: Any, *, microbatches: int) -> list[str]:
             stages=args.pipeline_model_parallel_size,
         )
     ]
-    if args.data_parallel_size > 1:
-        lines.append(
-            DATA_PARALLEL_LINE.format(
-                dp=args.data_parallel_size,
-                overlap=args.overlap_grad_reduce,
-                fp32=args.accumulate_allreduce_grads_in_fp32,
-            )
-        )
-    return lines
 
 
 def tokens_per_second(

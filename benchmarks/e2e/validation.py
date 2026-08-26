@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
+from benchmarks.e2e.megatron_stock.flags import microbatch_geometry
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
     ParallelismSpec,
@@ -293,34 +294,44 @@ def _megatron_stock_parallelism_markers(
     refuses every other one, so the name cannot vary, and because the spec
     carries ``None`` at ``pp`` 1, which no line may state.
 
-    **The microbatch count has no ``pp`` 1 exception here, and the tuned
-    profile's does.** Stock Megatron derives it as ``global_batch_size //
-    (micro_batch_size * data_parallel_size)``, in
+    **The microbatch count comes from ``microbatch_geometry``, and it is
+    not ``n_microbatches``.** Stock Megatron derives the count as
+    ``global_batch_size // (micro_batch_size * data_parallel_size)``, in
     ``ConstantNumMicroBatchesCalculator``
     (``megatron/core/num_microbatches_calculator.py``). That calculator is
     the one this arm gets: ``rampup_batch_size`` defaults to ``None`` and
     the flag list never sets it, so the count is fixed for the whole run.
     ``decrease_batch_size_if_needed`` defaults to ``False``, so Megatron
-    asserts the division instead of rounding it. The harness sends
-    ``--global-batch-size local_batch_size * dp`` and ``--micro-batch-size
-    pp_microbatch_size``, so the ``dp`` term cancels and the count is
-    ``local_batch_size // pp_microbatch_size`` at every pipeline degree.
-    That is exactly ``n_microbatches``. The tuned driver runs one pack of
-    every row at ``pp`` 1, so its profile writes 1 there; stock Megatron
-    runs a gradient-accumulation loop instead, and a 1 would fail an honest
-    run.
+    asserts the division instead of rounding it.
 
-    **OPEN: no rule this profile carries proves that a gradient was
-    reduced. Cite that beside any ``dp`` above 1 number from this arm.**
+    The harness sends ``--micro-batch-size 1`` and ``--global-batch-size
+    microbatches * dp``, because one Megatron sample is one packed sequence
+    of ``rows * seq_len`` tokens rather than a batch of rows
+    (``benchmarks/e2e/megatron_stock/flags.py``'s ``microbatch_geometry``
+    gives the reason). So the ``dp`` term cancels and the count Megatron
+    derives is the count that function returns. **It is 1 at ``pp`` 1**,
+    where neither engine splits the batch, exactly as the tuned profile
+    writes 1 there. Reading the count from that one function is what keeps
+    this marker and the argv from drifting apart: both come from it.
 
-    The tuned driver prints its data-parallel line **after** the wrapper
-    exists, so that line is an observation and a driver that lost its
-    wrapper cannot print it. This driver derives its line from ``args``,
-    before ``pretrain()`` wraps the model (the plan fixes it that way), so
-    the line declares the mesh. Both alternatives of
-    ``data_parallel_pattern`` read that same declaration.
+    **The data-parallel line observes the wrapper.**
+    ``install_data_parallel_marker`` in the driver replaces
+    ``setup_model_and_optimizer``, reads the model it returns, and raises
+    when no chunk carries a ``DistributedDataParallel``. It prints
+    ``overlap_grad_reduce`` and ``grad_reduce_in_fp32`` from the wrapper's
+    own ``ddp_config``. So a run whose wrapper went missing dies there and
+    prints no line, exactly as the tuned driver behaves.
 
-    **Arm rule 13 does not make up the difference here.** Stock Megatron
+    The two values above are pinned rather than read, and Megatron's own
+    resolution is what makes them right: ``--overlap-grad-reduce`` is
+    ``store_true`` and the flag list omits it, and ``--bf16`` with the
+    default ``--main-grads-dtype fp32`` sets
+    ``accumulate_allreduce_grads_in_fp32``, which
+    ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``. A
+    Megatron bump that moves either default fails this rule rather than
+    publishing a precision the log does not state.
+
+    **Arm rule 13 cannot carry this axis alone.** Stock Megatron
     all-reduces the reported loss over the data-parallel group on every
     last-stage rank, on every step
     (``megatron/training/training.py``, in ``train_step``). At
@@ -328,18 +339,12 @@ def _megatron_stock_parallelism_markers(
     ``ncclDevKernel_AllReduce`` whether or not a gradient moved. Above
     ``pp`` 1 the gradient-norm reduction over the pipeline group already
     puts one on every rank, which this repo measured on a real ``pp 2, dp
-    1`` trace. So rule 13 says a collective ran, and nothing says which.
-
-    **Two ranks that never reduce their gradients train two models and
-    report roughly twice the true throughput.** That run passes every rule
-    in this file today. What would close it is a driver that prints the line
-    from the real ``ddp_config`` after ``get_model`` has wrapped the model,
-    exactly as ``benchmarks/e2e/megatron/train.py`` does. Until a driver
-    does that, read a ``dp`` above 1 stock number as ungated on this axis.
+    1`` trace. So rule 13 says a collective ran, and the line above says
+    which mechanism built it. Cite the two together.
     """
-    microbatches = n_microbatches(
-        spec, local_batch_size=workload.local_batch_size
-    )
+    # The one authority on this count. flags.py builds the argv from it, so
+    # a marker taken from anything else could disagree with the run.
+    _, microbatches, _ = microbatch_geometry(workload, spec)
     markers = [
         f"Megatron-LM stock parallelism: dp={spec.dp} pp={spec.pp} "
         f"schedule=1F1B microbatches={microbatches} stages={spec.pp}"

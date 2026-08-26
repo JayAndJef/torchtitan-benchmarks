@@ -937,7 +937,14 @@ class MarkerStringTest(unittest.TestCase):
             ],
         )
 
-    def test_a_data_parallel_mesh_prints_both_lines(self) -> None:
+    def test_a_data_parallel_mesh_prints_the_mesh_line_alone(self) -> None:
+        """The data-parallel line comes from the wrapper, not from here.
+
+        ``install_data_parallel_marker`` prints it after
+        ``setup_model_and_optimizer`` returns, and raises when no chunk
+        carries a wrapper. A copy derived from ``args`` would satisfy arm
+        rule 12 without the wrapper, so this function must not print one.
+        """
         lines = train.parallelism_lines(
             stock_args(
                 world_size=8,
@@ -951,10 +958,7 @@ class MarkerStringTest(unittest.TestCase):
             lines,
             [
                 "Megatron-LM stock parallelism: dp=2 pp=4 schedule=1F1B "
-                "microbatches=8 stages=4",
-                "Megatron-LM stock data parallel: DistributedDataParallel "
-                "over 2 ranks (overlap_grad_reduce=False, "
-                "grad_reduce_in_fp32=True)",
+                "microbatches=8 stages=4"
             ],
         )
 
