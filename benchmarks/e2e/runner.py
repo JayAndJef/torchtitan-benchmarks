@@ -323,11 +323,12 @@ def _resolve_run(
         device_count=len(devices),
     )
     # Both engines start a second rank now, so the blanket refusal that stood
-    # here is gone. What refuses an unimplemented mesh is the fourteen rules
+    # here is gone. What refuses an unimplemented mesh is the sixteen rules
     # above plus the engines themselves: ``parallelize_piper1b`` refuses a
-    # tensor, context or data-parallel degree per axis, and the Megatron
-    # driver refuses a schedule it does not implement. Each failure lands on
-    # the module that owns the missing work.
+    # tensor or context degree, a dropped shard-degree flag and a mesh that
+    # replicates and shards at once, and the Megatron driver refuses a
+    # schedule it does not implement. Each failure lands on the module that
+    # owns the missing work.
 
     if scenario.regions:
         # A regioned scenario declares the per-block regions of the model it

@@ -818,8 +818,9 @@ class ResolveRunTests(unittest.TestCase):
         pass ``ac_mode="none"``.
 
         **It says the rule admits the run. It does not say the run
-        succeeds.** ``parallelize_piper1b`` refuses a shard degree above 1,
-        so the selected arm still raises inside the training subprocess.
+        succeeds.** ``parallelize_piper1b`` now admits an explicit shard
+        degree, so the subprocess no longer refuses the selected arm -- but
+        no sharded arm has run on a GPU, so the rule is all this checks.
         """
         sharded = ParallelismSpec(dp=2, dense_sharding="shard")
         with self.assertRaisesRegex(

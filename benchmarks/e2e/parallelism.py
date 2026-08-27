@@ -945,12 +945,21 @@ def validate_parallelism(
     #     read the same refusal a second time with nothing to say the flag
     #     was ignored.
     #
-    #     **Neither message promises the selected run then succeeds, and it
-    #     does not today.** ``parallelize_piper1b`` refuses a shard degree
-    #     above 1, so a sharded titan arm raises inside the training
-    #     subprocess. Restating that guard on the raw configured value is
-    #     declared work and is not done here. Say "passes this rule", never
-    #     "measures this mesh", until it is.
+    #     **Neither message promises the selected run then succeeds, and
+    #     the wording stays at "passes this rule" for that reason.** The
+    #     subprocess-side blocker is gone: ``parallelize_piper1b`` refused
+    #     every shard degree above 1 while this rule was written, and it now
+    #     refuses only a DROPPED flag -- it reads the raw configured
+    #     ``data_parallel_shard_degree`` and admits any degree the run asked
+    #     for. So a titan-only sharded roster is no longer refused inside
+    #     the training subprocess.
+    #
+    #     **What is still missing is a run.** No sharded arm and no expert
+    #     arm has executed on a GPU on either engine, so the path is
+    #     declared and not measured. A message that said "measures this
+    #     mesh" would promise the operator a measurement nobody has taken.
+    #     Restore that wording after the first sharded cell passes
+    #     ``validate_arm``, and not before.
     refused = engines & REPLICATE_ONLY_LAUNCHERS
     if refused and spec.ep > 1:
         raise ValueError(

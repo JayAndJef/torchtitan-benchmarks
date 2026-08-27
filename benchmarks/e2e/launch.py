@@ -58,13 +58,21 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     the log nor the manifest would say so. ``titan_mesh`` decides the pair
     and both halves are delivered.
 
-    **The pair is gated on the mesh, not on ``dp``.** An expert-parallel run
-    moves the shard degree without moving ``dp``: ``titan_mesh`` returns
-    ``(dp // ep, ep)`` at ``ep > 1``, so a spec with ``ep`` above 1 needs the
-    flag even where ``dp`` is 1. Rule 14 refuses ``ep > 1`` today, so no such
-    spec reaches here -- but a ``dp``-gated test would emit the expert degree
-    with no shard degree the day it lifts, which is the silent ZeRO-3
-    substitution this whole paragraph exists to prevent.
+    **The pair is gated on the mesh, not on ``dp``.** ``titan_mesh`` reads
+    ``spec.dense_sharding``: it returns ``(1, dp)`` under ``shard`` and
+    ``(dp, 1)`` under ``replicate``, at every expert degree. So the shard
+    degree moves without ``dp`` moving, and a ``dp``-gated test would send a
+    sharded run no shard degree at all -- which is the silent ZeRO-3
+    substitution this whole paragraph exists to prevent. Gating on the mesh
+    also keeps the trivial spec's argv empty, because ``titan_mesh`` returns
+    ``(1, 1)`` there under both values.
+
+    **``--parallelism.expert-parallel-degree`` needs no gate of its own.**
+    Spec rule 14 refuses ``ep > 1`` under ``replicate``, so every spec that
+    reaches here with an expert degree also asks for ``shard`` and therefore
+    already carries the pair above. The expert mesh degree TorchTitan derives
+    is ``efsdp = dp_shard * cp * tp // ep``, which needs the shard degree the
+    pair delivers.
 
     ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
     ``last`` twin -- both default to **1**, which counts the embedding and

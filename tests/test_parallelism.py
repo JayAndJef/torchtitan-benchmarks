@@ -1560,8 +1560,9 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         driver passes.
 
         **This says the rule admits it. It does not say the run succeeds.**
-        ``parallelize_piper1b`` refuses a shard degree above 1 today, so a
-        sharded titan arm raises inside the training subprocess.
+        ``parallelize_piper1b`` now admits an explicit shard degree, so the
+        subprocess no longer refuses such a roster -- but no sharded arm has
+        run on a GPU, so this rule is the only thing under test here.
         ``ResolveRunTests.test_an_arm_subset_narrows_the_engine_set_spec_rule_16_reads``
         checks the other half of the claim, that ``--arm`` really narrows
         the set.
