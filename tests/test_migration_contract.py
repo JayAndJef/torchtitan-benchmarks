@@ -1151,9 +1151,14 @@ class GoldenCommandTests(unittest.TestCase):
         for. Only this test says the harness asked for the right thing.
 
         The cell is ``dp 2 x pp 4`` at ``ep`` 1, which the suite runs as the
-        sharded half of its control pair. The other two sharded goldens
-        carry an expert degree, so an implementation that read ``ep`` rather
-        than the parity would pass both of them and replicate this cell.
+        sharded half of its control pair.
+
+        **What only this golden catches is a parity that a pipeline
+        cancels.** The other two sharded goldens both run at ``pp`` 1, so a
+        ``titan_mesh`` that honored ``shard`` only without a pipeline would
+        pass both and replicate this cell. (An implementation that read
+        ``ep`` rather than the parity is already caught by the wider expert
+        golden below, which expects shard 4 where such a mesh gives 2.)
         """
         for mode, replicate, shard in (
             ("replicate", "2", "1"),
@@ -1191,6 +1196,10 @@ class GoldenCommandTests(unittest.TestCase):
                     ],
                     shard,
                 )
+                # A real element test: ``_titan_parallelism_flags`` emits
+                # the flag as its own token, so a present flag fails this.
+                # It would go vacuous only if the flag ever became
+                # ``--parallelism.expert-parallel-degree=1``.
                 self.assertNotIn(
                     "--parallelism.expert-parallel-degree", command
                 )
@@ -2033,7 +2042,9 @@ TEST_CENSUS = {
     # keywords _parallelism pops, each recorded default read from the spec
     # rather than written out, the option reaching the spec, and click
     # refusing an undeclared value before it gets there.
-    "test_parallelism_plumbing": 58,
+    # +1 that an --arm subset narrows the engine set spec rule 16 reads,
+    # which is the repair that rule's two messages name.
+    "test_parallelism_plumbing": 59,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2073,7 +2084,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1687
+TEST_CENSUS_TOTAL = 1688
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

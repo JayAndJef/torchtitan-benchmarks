@@ -1468,7 +1468,13 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
             for scenario in SCENARIOS.values()
             for arm in scenario.arms
         }
-        self.assertEqual(set(self.IMPLEMENTS_NEITHER), launchers)
+        self.assertEqual(
+            set(self.IMPLEMENTS_NEITHER),
+            launchers,
+            "classify every registry launcher in IMPLEMENTS_NEITHER: say "
+            "whether its driver implements the sharded parity and an "
+            "expert degree, then make REPLICATE_ONLY_LAUNCHERS agree",
+        )
         self.assertEqual(
             REPLICATE_ONLY_LAUNCHERS,
             frozenset(
@@ -1476,6 +1482,7 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
                 for name, neither in self.IMPLEMENTS_NEITHER.items()
                 if neither
             ),
+            "REPLICATE_ONLY_LAUNCHERS disagrees with the table above",
         )
 
     def test_the_tuned_arm_refuses_an_expert_degree(self):
@@ -1555,8 +1562,9 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         **This says the rule admits it. It does not say the run succeeds.**
         ``parallelize_piper1b`` refuses a shard degree above 1 today, so a
         sharded titan arm raises inside the training subprocess.
-        ``tests/test_parallelism_plumbing.py`` checks the other half of the
-        claim, that ``--arm`` really narrows the set.
+        ``ResolveRunTests.test_an_arm_subset_narrows_the_engine_set_spec_rule_16_reads``
+        checks the other half of the claim, that ``--arm`` really narrows
+        the set.
         """
         check(ParallelismSpec(dp=2, dense_sharding="shard"))
         check(ParallelismSpec(dp=2, ep=2, dense_sharding="shard"))

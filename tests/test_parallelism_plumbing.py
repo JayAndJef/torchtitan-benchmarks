@@ -787,7 +787,7 @@ class ResumeParallelismTests(unittest.TestCase):
 class ResolveRunTests(unittest.TestCase):
     """``_resolve_run`` resolves the mesh, and derives the regions from it."""
 
-    def _resolve(self, **kwargs):
+    def _resolve(self, scenario_name: str = "piper1b_rope", **kwargs):
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", dict(_METADATA)),
@@ -796,9 +796,55 @@ class ResolveRunTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return _resolve_run(
-                RunRequest(scenario_name="piper1b_rope", **kwargs),
+                RunRequest(scenario_name=scenario_name, **kwargs),
                 {"PATH": os.environ["PATH"]},
             )
+
+    def test_an_arm_subset_narrows_the_engine_set_spec_rule_16_reads(
+        self,
+    ) -> None:
+        """**The repair rule 16's messages name, checked where it happens.**
+
+        ``_resolve_run`` builds the ``engines`` argument from the arms this
+        run will really start, so ``run --arm NAME`` narrows it. Rule 16
+        refuses the sharded parity to the tuned megatron driver, and its
+        messages tell the operator to select the TorchTitan arms alone. That
+        advice is only true if the selector reaches the engine set, and this
+        is the one test that says it does.
+
+        ``piper1b_megatron`` is the scenario that holds both engines. Its
+        ``baseline`` arm is the tuned megatron driver and ``titan_stock`` is
+        a TorchTitan arm. The scenario declines ``--ac sac``, so both cases
+        pass ``ac_mode="none"``.
+
+        **It says the rule admits the run. It does not say the run
+        succeeds.** ``parallelize_piper1b`` refuses a shard degree above 1,
+        so the selected arm still raises inside the training subprocess.
+        """
+        sharded = ParallelismSpec(dp=2, dense_sharding="shard")
+        with self.assertRaisesRegex(
+            ValueError, r"--dense-sharding shard is not implemented"
+        ):
+            self._resolve(
+                scenario_name="piper1b_megatron",
+                gpu="0,1",
+                ac_mode="none",
+                parallelism=sharded,
+            )
+        resolved = self._resolve(
+            scenario_name="piper1b_megatron",
+            gpu="0,1",
+            ac_mode="none",
+            arm_names=("titan_stock",),
+            parallelism=sharded,
+        )
+        self.assertEqual(
+            [arm.name for arm in resolved[2]], ["titan_stock"]
+        )
+        self.assertEqual(
+            {arm.launcher for arm in resolved[2]}, {"torchtitan"}
+        )
+        self.assertEqual(resolved[10], sharded)
 
     def test_a_single_gpu_run_resolves_to_the_trivial_spec(self) -> None:
         resolved = self._resolve(gpu="0")
