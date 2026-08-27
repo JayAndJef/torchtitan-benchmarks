@@ -223,8 +223,8 @@ BENCH_FLAGS: tuple[str, ...] = (
 # argument, which is False, so a sharded run enters Megatron-FSDP with
 # ``bucket_size = None``. The wrapper then flips ``overlap_grad_reduce`` to
 # True on the config it holds. So the sharded arm overlaps its gradient
-# reduction and buckets it at Megatron's unbucketed default, and **whether
-# that costs anything is unmeasured**. Say so beside any sharded number.
+# reduction with NO bucket size set, and **whether that costs anything is
+# unmeasured**. Say so beside any sharded number.
 # Sending the pair to bucket it would change the run rather than the record,
 # which is what the paragraph above refuses.
 ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (

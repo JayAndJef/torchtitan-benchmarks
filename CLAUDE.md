@@ -400,6 +400,16 @@ that beside every sharded number.** A titan peak-memory figure that barely
 moves under `shard` is expected; a **Megatron** figure that does not move is
 a real failure.
 
+**`results.json` does not record the parity, so two cells of one mesh are
+indistinguishable without their manifests.** The file carries no
+`parallelism`, `model_size` or `execution_model` key at all. Cells 1 and 2
+of the planned matrix differ in **nothing else** -- same scenario, shape,
+mesh, compile mode and ac mode -- so anyone who tables two `results.json`
+files side by side pools a replicated cell with a sharded one and reports
+the difference as noise. **Carry the manifest with every sharded number.**
+The gap is older than this axis (`model_size` has the same shape), and this
+is the first axis where two cells are otherwise identical.
+
 **Nothing has run.** No sharded cell and no expert cell has executed on a
 GPU on either engine. The value, the rules, the flags and the log markers
 are declared and tested on the CPU; read them as a specification until a
@@ -3111,10 +3121,18 @@ Re-derive that from `out/` rather than quoting it.
 
 **That manifest is schema 11, so it carries no `dense_sharding` key, and
 an absent key may not be read as `replicate`.** That is the whole reason
-the schema went to 12. What the record does carry is the derived pair
-`dp_replicate: 2, dp_shard: 1`, which is the replicated mesh -- so the run
-held the dense parameters replicated, stated from the mesh it recorded
-rather than from a value it never recorded. Its log also carries the
+the schema went to 12.
+
+**Each engine's half has to be read from that engine's own evidence, and
+one field does not cover both.** The record's `dp_replicate: 2,
+dp_shard: 1` is the **TorchTitan** mesh -- `describe`'s own docstring says
+so, and says Megatron is told neither value -- so it settles the titan arm
+and asserts nothing about the megatron one. The manifest holds the
+megatron evidence separately: `commands["baseline"]` carries none of the
+five sharding flags, and the arm's log says `DistributedDataParallel over
+2 ranks` rather than `FullyShardedDataParallelV1`. Read those two together
+and both arms held the dense parameters replicated. Read the derived pair
+alone and half the claim is unproved. Its log also carries the
 pre-schema-12 marker shape, with no `ep=` field and no `sharding_strategy=`
 field, so the block quoted above is not the block that cell wrote. No
 published number is at risk: `evaluate` re-reads no marker, and `--resume`
@@ -3125,10 +3143,10 @@ cell, no expert cell and no depth-8 pipeline has executed on either arm.
 Read those as never-built kernel scenarios are read: report what they
 declare, never what they measure.
 
-Four items are expected rather than measured, and the first run of each
-mesh settles them:
+Four items were expected rather than measured. **The first is now
+settled**; the first run of each further mesh settles the rest:
 
-- ~~The two trace markers~~ **settled, and on every rank.** Both
+- **The two trace markers: SETTLED, and on every rank.** Both
   `cudnn_generated_fort_native_sdpa` and `_mul_silu_split` appear in
   **all eight ranks of both profiler windows** of the `dp 2 x pp 4` cell
   above, at 320 and 640 per window per rank. `_permute_kernel` is 0 on

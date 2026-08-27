@@ -234,8 +234,8 @@ class FlagListTest(unittest.TestCase):
         Each is declined for a reason section 7 of the plan states. An
         emitted one would change what the arm measures without changing
         anything the manifest records. The roster is a function of the
-        dense-sharding value, because three of the five sharding flags move
-        from declined to required under ``shard``.
+        dense-sharding value, because all five sharding flags move from
+        declined to required under ``shard``.
         """
         for size in ("1b", "9b"):
             for spec in (
@@ -1963,7 +1963,12 @@ class DataParallelMarkerTest(unittest.TestCase):
         """
         source = self.adapter_constructor_source()
         self.assertIn("self.ddp_config = ddp_config\n", source)
-        self.assertIn("ddp_config=ddp_config,\n", source)
+        # Anchored to the call, not to the keyword. A bare search for
+        # ``ddp_config=ddp_config`` would be satisfied by any other
+        # constructor this method happens to call with that keyword.
+        self.assertRegex(
+            source, r"MegatronFSDP\(\s*ddp_config=ddp_config,"
+        )
 
     def test_the_overlap_table_reads_megatrons_own_guard(self) -> None:
         """The table is derived, and this pins what it derives from.
