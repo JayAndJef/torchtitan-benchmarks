@@ -1059,33 +1059,60 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
 
 
 class Rule08ExpertsDivideTest(unittest.TestCase):
-    """Dead behind rule 14. A legal expert split must reach rule 14's
-    message, and an illegal one must be named by rule 8 first."""
+    """Reachable since rule 14 stopped refusing every expert degree.
 
-    def test_a_legal_expert_split_reaches_rule_fourteen(self):
-        with self.assertRaisesRegex(ValueError, "not supported yet"):
+    Rule 8 runs before rule 14, so an illegal expert count is named by rule
+    8 under either parity. A legal one passes under ``shard`` and reaches
+    rule 14 under ``replicate``.
+    """
+
+    def test_a_legal_expert_split_passes_under_the_sharded_parity(self):
+        check(
+            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            shape=SHAPE_1B,
+        )
+
+    def test_a_legal_expert_split_reaches_rule_fourteen_under_replicate(self):
+        with self.assertRaisesRegex(ValueError, "needs --dense-sharding shard"):
             check(ParallelismSpec(dp=2, ep=2), shape=SHAPE_1B)
 
     def test_more_expert_ranks_than_experts_is_refused(self):
         two_experts = PiperShape.derived(
             name="probe", dim=128, n_layers=4, num_experts=2
         )
-        with self.assertRaisesRegex(ValueError, "exceeds shape"):
-            check(ParallelismSpec(dp=4, ep=4), shape=two_experts)
+        for mode in DENSE_SHARDING_MODES:
+            with self.subTest(dense_sharding=mode):
+                with self.assertRaisesRegex(ValueError, "exceeds shape"):
+                    check(
+                        ParallelismSpec(dp=4, ep=4, dense_sharding=mode),
+                        shape=two_experts,
+                    )
 
     def test_experts_that_do_not_divide_by_the_degree_are_refused(self):
-        with self.assertRaisesRegex(ValueError, "do not divide evenly"):
-            check(ParallelismSpec(dp=3, ep=3), shape=SHAPE_1B)
+        for mode in DENSE_SHARDING_MODES:
+            with self.subTest(dense_sharding=mode):
+                with self.assertRaisesRegex(ValueError, "do not divide evenly"):
+                    check(
+                        ParallelismSpec(dp=3, ep=3, dense_sharding=mode),
+                        shape=SHAPE_1B,
+                    )
 
 
 class Rule09ExpertDegreeDividesDataParallelTest(unittest.TestCase):
+    def test_an_expert_degree_that_divides_dp_passes_under_shard(self):
+        check(ParallelismSpec(dp=4, ep=2, dense_sharding="shard"))
+
     def test_an_expert_degree_that_divides_dp_reaches_rule_fourteen(self):
-        with self.assertRaisesRegex(ValueError, "not supported yet"):
+        with self.assertRaisesRegex(ValueError, "needs --dense-sharding shard"):
             check(ParallelismSpec(dp=4, ep=2))
 
     def test_an_expert_degree_that_does_not_divide_dp_is_refused(self):
-        with self.assertRaisesRegex(ValueError, "does not divide the data"):
-            check(ParallelismSpec(dp=3, ep=2))
+        for mode in DENSE_SHARDING_MODES:
+            with self.subTest(dense_sharding=mode):
+                with self.assertRaisesRegex(
+                    ValueError, "does not divide the data"
+                ):
+                    check(ParallelismSpec(dp=3, ep=2, dense_sharding=mode))
 
 
 class Rule10BatchDividesIntoMicrobatchesTest(unittest.TestCase):
@@ -1265,20 +1292,99 @@ class Rule13CudaGraphTest(unittest.TestCase):
         check(PP2, compile_mode="none")
 
 
-class Rule14ExpertParallelismIsRefusedTest(unittest.TestCase):
-    def test_the_trivial_expert_degree_passes(self):
+class Rule14ExpertParallelismNeedsTheShardedParityTest(unittest.TestCase):
+    """TorchTitan cannot split the experts and replicate the dense
+    parameters, so the two engines compare under an expert degree only when
+    both shard. The rule refuses the other combination and names the flag.
+    """
+
+    def test_the_trivial_expert_degree_passes_under_either_parity(self):
         check(TRIVIAL_SPEC)
         check(ParallelismSpec(dp=2, ep=1))
+        check(ParallelismSpec(dp=2, ep=1, dense_sharding="shard"))
 
-    def test_any_expert_split_is_refused(self):
+    def test_every_expert_split_passes_under_the_sharded_parity(self):
+        for spec in (
+            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=4, ep=4, dense_sharding="shard"),
+            ParallelismSpec(
+                dp=2,
+                pp=4,
+                pp_schedule="1F1B",
+                ep=2,
+                dense_sharding="shard",
+            ),
+        ):
+            with self.subTest(spec=spec):
+                check(spec, batch=8, device_count=spec.world_size)
+
+    def test_every_expert_split_is_refused_under_the_replicated_parity(self):
         for spec in (
             ParallelismSpec(dp=2, ep=2),
             ParallelismSpec(dp=4, ep=2),
             ParallelismSpec(dp=4, ep=4),
         ):
             with self.subTest(spec=spec):
-                with self.assertRaisesRegex(ValueError, "not supported yet"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"expert degree \d+ needs --dense-sharding shard",
+                ):
                     check(spec)
+
+    def test_the_message_names_the_flag_that_repairs_it(self):
+        """A refusal that named no repair would leave the operator to read
+        this module. The parity is a flag, so the message says which one."""
+        with self.assertRaisesRegex(
+            ValueError, "--dense-sharding shard"
+        ) as raised:
+            check(ParallelismSpec(dp=2, ep=2))
+        self.assertIn("'replicate'", str(raised.exception))
+
+
+class Rule15ShardNeedsADataParallelWidthTest(unittest.TestCase):
+    """``shard`` at ``dp`` 1 shards one copy over one rank, which is what a
+    replicated run already holds. The manifest would then record a parity
+    the run did not have.
+    """
+
+    def test_the_sharded_parity_passes_above_dp_one(self):
+        for dp in (2, 4, 8):
+            with self.subTest(dp=dp):
+                check(ParallelismSpec(dp=dp, dense_sharding="shard"))
+
+    def test_the_sharded_parity_is_refused_at_dp_one(self):
+        for spec in (
+            ParallelismSpec(dense_sharding="shard"),
+            ParallelismSpec(pp=2, pp_schedule="1F1B", dense_sharding="shard"),
+            ParallelismSpec(pp=8, pp_schedule="1F1B", dense_sharding="shard"),
+        ):
+            with self.subTest(spec=spec):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"--dense-sharding shard needs a data-parallel degree "
+                    r"above 1",
+                ):
+                    check(spec, batch=16)
+
+    def test_the_depth_eight_cell_forces_the_replicated_parity(self):
+        """``pp 8`` fills the budget, so ``dp`` is 1 and this rule then
+        refuses ``shard``. The depth-8 cells are replicated by arithmetic
+        rather than by choice."""
+        check(ParallelismSpec(pp=8, pp_schedule="1F1B"), batch=16)
+        with self.assertRaisesRegex(ValueError, "needs a data-parallel degree"):
+            check(
+                ParallelismSpec(
+                    pp=8, pp_schedule="1F1B", dense_sharding="shard"
+                ),
+                batch=16,
+            )
+
+    def test_the_replicated_parity_is_untouched_at_dp_one(self):
+        """Every number this repo has published was measured at ``dp`` 1
+        under ``replicate``. This rule may not reach one of those."""
+        check(TRIVIAL_SPEC)
+        check(PP2)
 
 
 class TheEightGpuCellTest(unittest.TestCase):

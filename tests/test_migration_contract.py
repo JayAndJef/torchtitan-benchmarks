@@ -1898,7 +1898,13 @@ TEST_CENSUS = {
     # registered shape, rule 12's floor of 16 microbatches from both sides,
     # the 15-microbatch count that fires rule 11 instead, and the degrees 5
     # to 8 whose verdict moved from the cap to rule 7.
-    "test_parallelism": 127,
+    # +8 when rule 14 stopped refusing every expert degree: rules 8 and 9
+    # reachable under the sharded parity and still refusing an illegal count
+    # under either, every expert split passing under shard and refused under
+    # replicate with a message that names the flag, and rule 15 refusing
+    # shard at dp 1 -- including the depth-8 cell, which fills the budget and
+    # is therefore replicated by arithmetic rather than by choice.
+    "test_parallelism": 135,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the five CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -1957,7 +1963,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1665
+TEST_CENSUS_TOTAL = 1673
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

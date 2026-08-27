@@ -64,7 +64,8 @@ and a field nobody can set misleads a later reader into thinking the axis is
 supported. Adding one means adding it to ``world_size``, to
 ``execution_model`` and to the throughput divisor at the same time.
 
-**What this module refuses today.** Rule 14 refuses ``ep > 1`` outright, and
+**What this module refuses today.** Rule 14 refuses ``ep > 1`` under the
+``replicate`` dense parity, rule 15 refuses ``shard`` at ``dp`` 1, and
 rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
 measurement: only ``1F1B`` is targeted, and the caps admit up to ``pp 8``.
@@ -599,10 +600,12 @@ def validate_parallelism(
     the megatron restriction follows the arm roster rather than a scenario
     name. ``device_count`` is how many devices the operator asked for.
 
-    Rules 8 and 9 are dead behind rule 14, which refuses ``ep > 1``
-    outright. **They are kept deliberately**: they are the specification the
-    later expert-parallel stage must meet, and they are tested in both
-    directions, so that stage lifts rule 14 rather than inventing them.
+    Rules 8 and 9 were dead behind rule 14 while it refused every
+    ``ep > 1``. Rule 14 now refuses an expert degree only under the
+    ``replicate`` parity, so both rules are reachable: a ``shard`` spec with
+    an illegal expert count reaches rule 8, and one whose expert degree does
+    not divide ``dp`` reaches rule 9. They were kept through the whole
+    refusal for exactly this, and neither had to be invented here.
 
     The one thing this function does not check is well-formedness --
     ``ParallelismSpec.__post_init__`` has already refused a degree below 1,
@@ -856,20 +859,36 @@ def validate_parallelism(
             "cuda-graph label"
         )
 
-    # 14. Expert parallelism is declared and not offered. At ep 2 the two
-    #     engines hold the DENSE parameters differently: TorchTitan's dense
-    #     mesh reads fsdp = dp_shard, and titan_mesh sets dp_shard = ep, so
-    #     the dense parameters are sharded -- while Megatron's ep subdivides
-    #     its DP group and leaves them replicated under DDP. An EP row would
-    #     therefore compare EP plus ZeRO-3 against EP plus DDP, which is two
-    #     changes rather than one, and nobody has chosen how to resolve it.
-    #     (TorchTitan's constraint is dp_shard * cp * tp == efsdp * ep, so
-    #     dp_shard = ep is titan_mesh's choice rather than the framework's
-    #     only option; the asymmetry is a consequence of that choice.)
-    if spec.ep > 1:
+    # 14. Expert parallelism needs the sharded dense parity, on both
+    #     engines. TorchTitan cannot split the experts while it keeps the
+    #     dense parameters replicated: apply_fsdp_to_decoder sends every
+    #     non-expert parameter to Shard(0) on the dense mesh, and the expert
+    #     mesh degree efsdp = dp_shard * cp * tp // ep needs dp_shard >= ep.
+    #     Megatron holds either parity. So an ep row under `replicate` would
+    #     compare EP plus sharding against EP plus replication, which is two
+    #     changes rather than one.
+    #
+    #     The refusal names the flag that repairs it. The operator declares
+    #     the parity rather than the rule deriving one from ep, so that the
+    #     sharded ep 1 control cell can be expressed and the ep row carries
+    #     one change against it.
+    if spec.ep > 1 and spec.dense_sharding != "shard":
         raise ValueError(
-            f"expert degree {spec.ep} is not supported yet: at ep > 1 "
-            "TorchTitan shards the dense parameters and Megatron replicates "
-            "them, so a cross-engine row would carry two changes rather "
-            "than one"
+            f"expert degree {spec.ep} needs --dense-sharding shard: under "
+            f"{spec.dense_sharding!r} TorchTitan shards the dense "
+            "parameters and Megatron replicates them, so a cross-engine row "
+            "would carry two changes rather than one"
+        )
+
+    # 15. The sharded parity needs a data-parallel width to shard over. At
+    #     dp 1 titan_mesh returns (1, 1) whatever the flag says, and
+    #     Megatron-FSDP shards one copy over one rank, so the run holds the
+    #     dense parameters exactly as a replicated run does. The manifest
+    #     would then record a parity the run did not have, which is the one
+    #     failure a recorded fact must not have.
+    if spec.dense_sharding == "shard" and spec.dp == 1:
+        raise ValueError(
+            "--dense-sharding shard needs a data-parallel degree above 1; "
+            f"at dp {spec.dp} the shard degree is 1 whatever the flag says, "
+            "so the manifest would record a parity the run did not have"
         )
