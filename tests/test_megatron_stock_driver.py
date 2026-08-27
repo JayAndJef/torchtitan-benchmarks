@@ -1909,7 +1909,11 @@ class DataParallelMarkerTest(unittest.TestCase):
         )
         # The wrapper keeps the reference it was given. A copy here would
         # leave the argument's False on the object the shim reads.
-        self.assertIn("self.ddp_config = ddp_config", source)
+        #
+        # The trailing newline is the point. Without it the match also
+        # accepts ``= ddp_config.copy()``, which is exactly the edit that
+        # would break the marker while the assertion stayed green.
+        self.assertIn("self.ddp_config = ddp_config\n", source)
 
     def test_the_overlap_table_reads_megatrons_own_guard(self) -> None:
         """The table is derived, and this pins what it derives from.
