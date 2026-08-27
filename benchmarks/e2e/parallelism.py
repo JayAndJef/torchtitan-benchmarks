@@ -933,28 +933,41 @@ def validate_parallelism(
     #     asked for. The explicit half also keeps the hole shut if rule 14
     #     ever narrows.
     #
-    #     **Both messages name the repair, as rule 14's does.** ``engines``
-    #     is the launcher set of the arms the run will really start, and
-    #     ``run --arm NAME`` narrows it. So an ``--arm`` subset that selects
-    #     the TorchTitan arms alone measures this mesh, and the operator
-    #     reads that in one hop rather than being sent to a flag that is a
-    #     dead end for this roster.
+    #     **Both messages name a repair, as rule 14's does.** ``engines`` is
+    #     the launcher set of the arms the run will really start.
+    #     ``run --arm NAME`` narrows it. So a subset that selects the
+    #     TorchTitan arms alone takes this axis off the megatron driver and
+    #     passes this rule.
+    #
+    #     **The messages name ``run --arm``, not a bare ``--arm``.**
+    #     ``run-all`` carries PASSTHROUGH_CONTEXT, so it accepts the flag,
+    #     forwards it to the training subprocess as a TorchTitan argument
+    #     and records it in ``extra_torchtitan_args``. The operator would
+    #     read the same refusal a second time with nothing to say the flag
+    #     was ignored.
+    #
+    #     **Neither message promises the selected run then succeeds, and it
+    #     does not today.** ``parallelize_piper1b`` refuses a shard degree
+    #     above 1, so a sharded titan arm raises inside the training
+    #     subprocess. Restating that guard on the raw configured value is
+    #     declared work and is not done here. Say "passes this rule", never
+    #     "measures this mesh", until it is.
     refused = engines & REPLICATE_ONLY_LAUNCHERS
     if refused and spec.ep > 1:
         raise ValueError(
             f"expert degree {spec.ep} is not implemented by the "
             f"{', '.join(sorted(refused))} driver, which this run holds. "
             "That driver passes no expert size to initialize_model_parallel. "
-            "The run would train every expert on every rank, and the "
-            "manifest would record a split it did not have. Select the "
-            "TorchTitan arms alone with --arm to measure this mesh"
+            "The run would train every expert on every rank. The manifest "
+            "would record a split it did not have. Use run --arm to select "
+            "the TorchTitan arms alone"
         )
     if refused and spec.dense_sharding == "shard":
         raise ValueError(
             "--dense-sharding shard is not implemented by the "
             f"{', '.join(sorted(refused))} driver, which this run holds. "
             "That driver builds a plain replicated DistributedDataParallel. "
-            "The run would replicate the dense parameters, and the manifest "
-            "would record a sharded parity. Select the TorchTitan arms alone "
-            "with --arm to measure this parity"
+            "The run would replicate the dense parameters. The manifest "
+            "would record a sharded parity. Use run --arm to select the "
+            "TorchTitan arms alone"
         )

@@ -401,9 +401,12 @@ class TitanMeshTest(unittest.TestCase):
         there, and the sharded one must be pure FSDP over the whole
         data-parallel width, because that is what Megatron-FSDP does.
 
-        ``ep`` 1 is the case to pin explicitly. Every other sharded row here
-        carries an expert degree, and an implementation that read ``ep``
-        instead of the parity would pass those rows and replicate this cell.
+        **The sweep above already covers this pair, and that is the point.**
+        ``LEGAL_DP_EP_PAIRS`` holds ``(2, 1)``, so no mutant of ``titan_mesh``
+        fails here alone. What this case guards is the ROSTER: a later edit
+        that trimmed the pair list would stop covering the geometry the suite
+        runs, and the sweep would go green while this case failed. It also
+        lets a reader find the run cell by name.
         """
         for mode, mesh in (("replicate", (2, 1)), ("shard", (1, 2))):
             with self.subTest(dense_sharding=mode):
@@ -1440,24 +1443,40 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         self.assertNotIn("megatron_stock", REPLICATE_ONLY_LAUNCHERS)
         self.assertNotIn("torchtitan", REPLICATE_ONLY_LAUNCHERS)
 
-    def test_every_registry_launcher_is_classified(self):
-        """A launcher this set does not name is one this rule admits, so an
-        unclassified launcher has to fail rather than pass quietly.
+    # Every launcher the registry runs, and whether its driver implements
+    # the sharded parity and an expert degree. Written out rather than
+    # derived: the answer is a fact about each driver's source, and a
+    # derivation would agree with the set by construction and check nothing.
+    IMPLEMENTS_NEITHER = {
+        "torchtitan": False,
+        "megatron": True,
+        "megatron_stock": False,
+    }
 
-        Two assertions, and the second is the one that reads the set. Every
-        registry launcher must appear in the classification roster, so a new
-        launcher edits this test and its author then has to decide whether it
-        belongs in ``REPLICATE_ONLY_LAUNCHERS``. And the set itself must name
-        only launchers the registry still runs, so a retired name cannot sit
-        there refusing nothing.
+    def test_the_set_is_the_declared_classification(self):
+        """A launcher this set does not name is one rule 16 admits, so a new
+        launcher must not pass quietly.
+
+        The table above is the classification, and this asserts the set is
+        exactly its true half. ``MegatronLauncherSetTest`` already checks
+        that every registry launcher is a known one; the point here is that
+        an author who adds a launcher there still has to answer this
+        question, and cannot make the suite green by editing one set.
         """
         launchers = {
             arm.launcher
             for scenario in SCENARIOS.values()
             for arm in scenario.arms
         }
-        self.assertEqual(launchers - (MEGATRON_LAUNCHERS | {"torchtitan"}), set())
-        self.assertEqual(REPLICATE_ONLY_LAUNCHERS - launchers, set())
+        self.assertEqual(set(self.IMPLEMENTS_NEITHER), launchers)
+        self.assertEqual(
+            REPLICATE_ONLY_LAUNCHERS,
+            frozenset(
+                name
+                for name, neither in self.IMPLEMENTS_NEITHER.items()
+                if neither
+            ),
+        )
 
     def test_the_tuned_arm_refuses_an_expert_degree(self):
         with self.assertRaisesRegex(
@@ -1498,25 +1517,47 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
             engines=self.STOCK,
         )
 
-    def test_both_messages_name_the_repair(self):
+    def test_each_half_names_the_repair_under_its_own_message(self):
         """Rule 14's own comment sets the standard: the refusal names the
-        flag that repairs it. A message that named only the cause would send
-        the operator to read this module."""
-        for spec in (
-            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
-            ParallelismSpec(dp=2, dense_sharding="shard"),
+        flag that repairs it.
+
+        **Each half is matched by its own opening words.** A bare
+        ``assertIn("--arm", ...)`` passes when one half is deleted, because
+        the surviving half catches the other spec and its message also holds
+        the word. Measured: with the expert half removed, both cases below
+        fell through to the shard half and both still passed.
+
+        It matches ``run --arm`` rather than ``--arm``. ``run-all`` carries
+        PASSTHROUGH_CONTEXT and forwards an unknown flag to the training
+        subprocess, so a message naming the bare flag would send a
+        ``run-all`` operator to a flag that command ignores.
+        """
+        for spec, opening in (
+            (
+                ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+                r"expert degree 2 is not implemented",
+            ),
+            (
+                ParallelismSpec(dp=2, dense_sharding="shard"),
+                r"--dense-sharding shard is not implemented",
+            ),
         ):
             with self.subTest(spec=spec):
-                with self.assertRaises(ValueError) as raised:
+                with self.assertRaisesRegex(ValueError, opening) as raised:
                     check(spec, engines=self.TUNED)
-                self.assertIn("--arm", str(raised.exception))
+                self.assertIn("run --arm", str(raised.exception))
 
-    def test_the_repair_the_messages_name_really_works(self):
-        """``engines`` is the launcher set of the arms the run will really
-        start (``benchmarks/e2e/runner.py``), and ``run --arm NAME`` narrows
-        it. So selecting the TorchTitan arms alone is a run this rule admits,
-        and a message naming a repair that failed would be worse than a
-        message naming none."""
+    def test_a_titan_only_roster_passes_this_rule(self):
+        """The state the repair reaches. ``engines`` is the launcher set of
+        the arms the run will really start, so a roster without the tuned
+        driver passes.
+
+        **This says the rule admits it. It does not say the run succeeds.**
+        ``parallelize_piper1b`` refuses a shard degree above 1 today, so a
+        sharded titan arm raises inside the training subprocess.
+        ``tests/test_parallelism_plumbing.py`` checks the other half of the
+        claim, that ``--arm`` really narrows the set.
+        """
         check(ParallelismSpec(dp=2, dense_sharding="shard"))
         check(ParallelismSpec(dp=2, ep=2, dense_sharding="shard"))
 
