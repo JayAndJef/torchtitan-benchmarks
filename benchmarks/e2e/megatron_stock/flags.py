@@ -118,21 +118,35 @@ SHARDING_STRATEGIES: dict[str, str] = {
     "shard": MEGATRON_SHARDING_STRATEGY,
 }
 
-# What ``overlap_grad_reduce`` reads on the wrapper, per value. **The
-# wrapper does not report the argument, and this is not a restatement of
-# the flag list.** ``MegatronFSDP.__init__`` sets
-# ``self.ddp_config.overlap_grad_reduce = True`` whenever the strategy
-# shards gradients, and it mutates the very object
-# ``get_megatron_ddp_config`` built, because it holds the reference rather
-# than a copy (megatron_fsdp.py, and mcore_fsdp_adapter.py's own
-# ``self.ddp_config = ddp_config``). So a sharded run reports True even
-# though the argv omits --overlap-grad-reduce.
+# The strategies under which Megatron-FSDP turns the gradient overlap on
+# by itself. ``MegatronFSDP.__init__`` reads this exact list
+# (``megatron_fsdp.py``), and it mutates the very object
+# ``get_megatron_ddp_config`` built, because it keeps the reference rather
+# than a copy (see ``mcore_fsdp_adapter.py``'s own
+# ``self.ddp_config = ddp_config``). So a sharded run reports
+# ``overlap_grad_reduce=True`` even though the argv omits the flag.
+MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES: tuple[str, ...] = (
+    "optim_grads_params",
+    "optim_grads",
+)
+
+# What ``overlap_grad_reduce`` reads on the wrapper, per value.
 #
-# ``overlap_param_gather`` moves the same way. The marker does not print
-# it, so this table holds the one field the marker states.
+# **It is DERIVED from the strategy, and it may not restate it.** Megatron
+# keys the mutation on ``data_parallel_sharding_strategy``, not on this
+# repo's dense-sharding value. ``MEGATRON_SHARDING_STRATEGY`` is a
+# documented reversal target, so a hand-written table here would keep
+# saying True after somebody moved that constant to a strategy the list
+# above does not hold -- and arm rule 12 would then fail the first run
+# after the flip. One statement of the fact, in one place.
+#
+# **``replicate`` reads False for two independent reasons.** Its strategy
+# is ``no_shard``, which the list above does not hold; and no
+# Megatron-FSDP wrapper exists at all under that value, so the mutation
+# never runs. Do not read that row as a coincidence of the derivation.
 DATA_PARALLEL_OVERLAP: dict[str, bool] = {
-    "replicate": False,
-    "shard": True,
+    value: strategy in MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES
+    for value, strategy in SHARDING_STRATEGIES.items()
 }
 
 # TorchTitan's own optimizer values, replicated flag for flag. The source is
@@ -188,17 +202,21 @@ BENCH_FLAGS: tuple[str, ...] = (
 # values, and the reason is not the reason --use-distributed-optimizer
 # leaves.** Megatron-FSDP turns all three on itself, so the "an argv that
 # omits it would deny a fact the run has" argument appears to reach all
-# three. It does not. ``arguments.py`` sets
-# ``args.use_distributed_optimizer = True`` inside the Megatron-FSDP block
-# whatever the argv said, so sending that flag changes nothing the run
-# does. The two overlap flags are read **earlier**: ``training.py`` calls
-# ``resolve_ddp_bucket_size`` with ``ddp_config.overlap_grad_reduce``
-# before it builds the wrapper, and that function returns ``None`` when the
-# value is False. So sending --overlap-grad-reduce moves the gradient
-# bucket size, which changes what the run does rather than what the argv
-# says. This arm runs stock Megatron at its own defaults, so it declines
-# them and the marker reads the resolved value instead. See
-# DATA_PARALLEL_OVERLAP.
+# three. It does not.
+#
+# ``arguments.py`` sets ``args.use_distributed_optimizer = True`` inside
+# the Megatron-FSDP block whatever the argv said. Sending that flag
+# therefore changes nothing the run does, and the argv gains a fact.
+#
+# The two overlap flags travel together: ``arguments.py`` asserts
+# ``--overlap-param-gather`` needs ``--overlap-grad-reduce``, so neither
+# can be sent alone. And ``training.py`` reads ``overlap_grad_reduce``
+# **before** it builds the wrapper, in ``resolve_ddp_bucket_size``, which
+# returns ``None`` when the value is False. So sending the pair moves the
+# gradient bucket size. That changes what the run does rather than what
+# the argv says, and this arm runs stock Megatron at its own defaults.
+#
+# The marker reads the resolved value instead. See DATA_PARALLEL_OVERLAP.
 ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--overlap-grad-reduce",
     "--overlap-param-gather",

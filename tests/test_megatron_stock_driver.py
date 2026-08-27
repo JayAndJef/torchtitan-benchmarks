@@ -56,6 +56,7 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     MEGATRON_CHECKPOINT_FORMAT,
+    MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES,
     MEGATRON_FSDP_VERSION,
     MEGATRON_SHARDING_STRATEGY,
     SHARDING_FLAGS,
@@ -1872,6 +1873,28 @@ class DataParallelMarkerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "group of 0 rank"):
             self.run_shim(chunk, ep=1, built_ep=0)
 
+    def fsdp_constructor_source(self):
+        """``MegatronFSDP.__init__``'s own source, or a skip.
+
+        **The source of that one function, not of the module.** A bump
+        that moved either statement below into another method would still
+        satisfy a whole-file search, and the mutation only reaches the
+        object the shim reads when it runs in the constructor.
+
+        Building a real wrapper needs a process group and a device, so
+        the text is what a CPU host can check.
+        """
+        import inspect
+
+        try:
+            bootstrap.prepare()
+            from megatron.core.distributed.fsdp.src.megatron_fsdp import (
+                megatron_fsdp,
+            )
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        return inspect.getsource(megatron_fsdp.MegatronFSDP.__init__)
+
     def test_megatron_fsdp_turns_the_grad_overlap_on_in_place(self) -> None:
         """The fact ``DATA_PARALLEL_OVERLAP`` states, read off Megatron.
 
@@ -1879,26 +1902,50 @@ class DataParallelMarkerTest(unittest.TestCase):
         rather than a copy, so the wrapper reports True where the argv
         says nothing. A marker that pinned the argument would fail every
         honest sharded run.
-
-        The source is read as text, because building a real wrapper needs
-        a process group and a device.
         """
-        try:
-            bootstrap.prepare()
-            import megatron.core.distributed.fsdp.src.megatron_fsdp as pkg
-        except Exception as error:  # pragma: no cover - host dependent
-            raise unittest.SkipTest(f"megatron is not importable: {error}")
-        source = (
-            Path(pkg.__file__).parent / "megatron_fsdp.py"
-        ).read_text()
+        source = self.fsdp_constructor_source()
         self.assertIn(
             "self.ddp_config.overlap_grad_reduce = True", source
         )
         # The wrapper keeps the reference it was given. A copy here would
         # leave the argument's False on the object the shim reads.
-        self.assertIn("else:\n            self.ddp_config = ddp_config", source)
+        self.assertIn("self.ddp_config = ddp_config", source)
+
+    def test_the_overlap_table_reads_megatrons_own_guard(self) -> None:
+        """The table is derived, and this pins what it derives from.
+
+        Megatron keys the mutation on the sharding **strategy**, not on
+        this repo's dense-sharding value. ``MEGATRON_SHARDING_STRATEGY``
+        is a documented reversal target, so a hand-written table would
+        keep saying True after somebody moved that constant to a strategy
+        the guard does not hold. This asserts the guard's own list.
+        """
+        source = self.fsdp_constructor_source()
+        self.assertIn(
+            'data_parallel_sharding_strategy in '
+            '["optim_grads_params", "optim_grads"]',
+            source,
+        )
+        self.assertEqual(
+            set(MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES),
+            {"optim_grads_params", "optim_grads"},
+        )
+        # Derived, so it moves with the strategy rather than beside it.
+        for value, strategy in SHARDING_STRATEGIES.items():
+            with self.subTest(dense_sharding=value):
+                self.assertIs(
+                    DATA_PARALLEL_OVERLAP[value],
+                    strategy in MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES,
+                )
         self.assertTrue(DATA_PARALLEL_OVERLAP["shard"])
+        # False for two reasons: no_shard is not in the guard's list, and
+        # no Megatron-FSDP wrapper exists under this value at all.
         self.assertFalse(DATA_PARALLEL_OVERLAP["replicate"])
+        self.assertNotIn(
+            SHARDING_STRATEGIES["replicate"],
+            MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES,
+        )
+        self.assertNotIn("--use-megatron-fsdp", flags_for("1b", PP4_SPEC))
 
     def test_the_shim_puts_megatron_back(self) -> None:
         """One wrap, then the module holds Megatron's own function again."""

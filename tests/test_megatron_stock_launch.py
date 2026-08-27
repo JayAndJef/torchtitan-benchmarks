@@ -140,6 +140,9 @@ STOCK_LOG_FRAGMENTS = (
     "Megatron-LM stock data parallel: ",
     " ranks (overlap_grad_reduce=",
     ", grad_reduce_in_fp32=True, ",
+    # The overlap VALUE is not here: it moves with the dense-sharding
+    # value. STOCK_OVERLAP_FRAGMENTS below pins it per value, so the
+    # roster still says which token sits between the two above.
     "sharding_strategy=",
     "expert_parallel=",
 )
@@ -154,6 +157,17 @@ STOCK_WRAPPER_FRAGMENTS = {
     "shard": (
         "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
     ),
+}
+
+# The other half of the line that moves with the value. Megatron-FSDP
+# turns the gradient overlap on inside its own constructor, on the config
+# object it was handed, so a sharded run reports True where the argv says
+# nothing. The whole field is pinned here, commas included, because a
+# roster entry that stopped at the "=" would no longer say which token
+# follows it.
+STOCK_OVERLAP_FRAGMENTS = {
+    "replicate": "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
+    "shard": "(overlap_grad_reduce=True, grad_reduce_in_fp32=True,",
 }
 
 # The rest of the mode line. ``ValidationProfile.mode_line`` stops at the
@@ -912,14 +926,15 @@ class StockValidationProfileTests(unittest.TestCase):
                 line = self.profile.parallelism_markers(
                     spec, self.workload
                 )[1]
-                self.assertIn(
-                    STOCK_WRAPPER_FRAGMENTS[spec.dense_sharding], line
-                )
                 other = (
                     "shard" if spec.dense_sharding == "replicate"
                     else "replicate"
                 )
-                self.assertNotIn(STOCK_WRAPPER_FRAGMENTS[other], line)
+                for roster in (
+                    STOCK_WRAPPER_FRAGMENTS, STOCK_OVERLAP_FRAGMENTS
+                ):
+                    self.assertIn(roster[spec.dense_sharding], line)
+                    self.assertNotIn(roster[other], line)
 
     def test_neither_pattern_matches_the_tuned_arms_lines(self) -> None:
         """The two drivers must not satisfy each other's rules.
@@ -1108,6 +1123,7 @@ class StockMarkerContractTests(unittest.TestCase):
         for fragment in (
             *STOCK_LOG_FRAGMENTS,
             *STOCK_WRAPPER_FRAGMENTS.values(),
+            *STOCK_OVERLAP_FRAGMENTS.values(),
             *STOCK_MODE_LINE_FIELDS,
             *STOCK_PARAMETER_FRAGMENTS,
         ):
