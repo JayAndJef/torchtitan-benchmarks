@@ -711,7 +711,8 @@ def _golden_titan_pp2_command(size: str) -> list[str]:
     ]
 
 
-# The same arm at pp 4, which the caps admit since MAX_PP rose to 4.
+# The same arm at pp 4, which the caps have admitted since MAX_PP rose
+# above 2.
 #
 # **The pp 2 golden above cannot pin what this one pins.** At 2 stages both
 # weight conventions give [8, 8], so a lost ``less-layers 0`` flag changes no
