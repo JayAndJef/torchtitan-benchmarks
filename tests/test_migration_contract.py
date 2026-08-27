@@ -1870,7 +1870,7 @@ TEST_CENSUS = {
     # reach GPTModel.
     "test_megatron_model": 29,
     # The parallelism run axis, landed before anything imports it. Every one
-    # of the fifteen validator rules in both directions, the two
+    # of the sixteen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
     # guard, the four derivations, and the schedule registry checked against
     # the PyTorch classes it names.
@@ -1905,7 +1905,12 @@ TEST_CENSUS = {
     # replicate with a message that names the flag, and rule 15 refusing
     # shard at dp 1 -- including the depth-8 cell, which fills the budget and
     # is therefore replicated by arithmetic rather than by choice.
-    "test_parallelism": 135,
+    # +8 for rule 16, which refuses both to the tuned megatron driver: the
+    # launcher set naming that driver alone, every registry launcher
+    # classified, each half refusing under its own message, the expert half
+    # checked first, the stock arm and a titan-only roster keeping both, and
+    # every mesh the tuned arm has already run staying legal.
+    "test_parallelism": 143,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the five CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -1968,7 +1973,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1677
+TEST_CENSUS_TOTAL = 1685
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -2,7 +2,7 @@
 
 ``benchmarks/e2e/parallelism.py`` owns the axis itself, while the CLI and
 runner thread it through the harness. This file checks the module-level
-contract: every one of the fifteen validator rules is exercised in both
+contract: every one of the sixteen validator rules is exercised in both
 directions, the four derivations are pinned, and the schedule registry is
 checked against the PyTorch classes it names. Plumbing and runtime validation
 have their own test modules.
@@ -33,6 +33,7 @@ from benchmarks.e2e.parallelism import (
     MAX_PP,
     MAX_WORLD_SIZE,
     MEGATRON_LAUNCHERS,
+    REPLICATE_ONLY_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
@@ -140,7 +141,7 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(fields & {"tp", "cp"}, set())
 
     def test_a_degree_below_one_is_refused_at_construction(self):
-        """The precondition the fifteen rules assume.
+        """The precondition the sixteen rules assume.
 
         Without it ``dp=-1, pp=-1`` has world size 1 and walks past rule 1
         on a one-GPU box, which is exactly the illegal mesh the rules exist
@@ -1385,6 +1386,102 @@ class Rule15ShardNeedsADataParallelWidthTest(unittest.TestCase):
         under ``replicate``. This rule may not reach one of those."""
         check(TRIVIAL_SPEC)
         check(PP2)
+
+
+class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
+    """``benchmarks/e2e/megatron/train.py`` implements neither the sharded
+    parity nor an expert degree, and its command line carries no flag for
+    either. So a spec that asks for one would be ignored by that arm and
+    recorded by the manifest anyway.
+
+    **Both halves became reachable in this pass.** Rule 14 refused every
+    expert degree before it, and the parity did not exist. Without this rule
+    a cross-engine row would put a sharded, expert-split TorchTitan arm
+    against a replicated, unsplit Megatron arm, under one manifest claiming
+    both sides had the same mesh.
+    """
+
+    TUNED = ("torchtitan", "megatron")
+    STOCK = ("torchtitan", "megatron_stock")
+
+    def test_the_set_names_the_tuned_driver_alone(self):
+        """It is a fact about one driver's source, not about Megatron-LM.
+        ``megatron_stock`` hands the run to Megatron's own ``pretrain``,
+        which implements both."""
+        self.assertEqual(REPLICATE_ONLY_LAUNCHERS, frozenset({"megatron"}))
+        self.assertIn("megatron", MEGATRON_LAUNCHERS)
+        self.assertNotIn("megatron_stock", REPLICATE_ONLY_LAUNCHERS)
+        self.assertNotIn("torchtitan", REPLICATE_ONLY_LAUNCHERS)
+
+    def test_every_registry_launcher_is_classified(self):
+        """A launcher this set does not name is one this rule admits. That
+        has to be a decision somebody took, not an omission."""
+        declared = MEGATRON_LAUNCHERS | {"torchtitan"}
+        for scenario in SCENARIOS.values():
+            for arm in scenario.arms:
+                with self.subTest(scenario=scenario.name, arm=arm.name):
+                    self.assertIn(arm.launcher, declared)
+
+    def test_the_tuned_arm_refuses_an_expert_degree(self):
+        with self.assertRaisesRegex(
+            ValueError, r"expert degree 2 is not implemented by the megatron"
+        ):
+            check(
+                ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+                engines=self.TUNED,
+            )
+
+    def test_the_tuned_arm_refuses_the_sharded_parity(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"--dense-sharding shard is not implemented by the megatron",
+        ):
+            check(
+                ParallelismSpec(dp=2, dense_sharding="shard"),
+                engines=self.TUNED,
+            )
+
+    def test_the_expert_half_names_the_expert_degree_and_not_the_parity(self):
+        """It is checked first on purpose. Rule 14 already ties an expert
+        degree to the sharded parity, so the shard half alone would refuse
+        every expert spec that reached here -- under a message about
+        sharding, which is not what the operator asked for."""
+        with self.assertRaisesRegex(ValueError, "expert degree") as raised:
+            check(
+                ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+                engines=self.TUNED,
+            )
+        self.assertNotIn("--dense-sharding shard is not", str(raised.exception))
+
+    def test_the_stock_arm_takes_both(self):
+        """Stock Megatron implements both, so the rule must not reach it."""
+        check(ParallelismSpec(dp=2, dense_sharding="shard"), engines=self.STOCK)
+        check(
+            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            engines=self.STOCK,
+        )
+
+    def test_a_titan_only_roster_takes_both(self):
+        check(ParallelismSpec(dp=2, dense_sharding="shard"))
+        check(ParallelismSpec(dp=2, ep=2, dense_sharding="shard"))
+
+    def test_the_tuned_arm_keeps_every_mesh_it_already_ran(self):
+        """The rule may not reach a cell this repo has measured. Every
+        recorded megatron cell is replicated with no expert split."""
+        for spec, batch, devices in (
+            (TRIVIAL_SPEC, 4, 1),
+            (PP2, 4, 2),
+            (ParallelismSpec(dp=2), 4, 2),
+            (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), 4, 4),
+            (DP2_PP4, 8, 8),
+        ):
+            with self.subTest(spec=spec):
+                check(
+                    spec,
+                    batch=batch,
+                    device_count=devices,
+                    engines=self.TUNED,
+                )
 
 
 class TheEightGpuCellTest(unittest.TestCase):

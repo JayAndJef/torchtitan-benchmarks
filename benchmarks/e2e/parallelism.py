@@ -65,7 +65,8 @@ supported. Adding one means adding it to ``world_size``, to
 ``execution_model`` and to the throughput divisor at the same time.
 
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` under the
-``replicate`` dense parity, rule 15 refuses ``shard`` at ``dp`` 1, and
+``replicate`` dense parity, rule 15 refuses ``shard`` at ``dp`` 1, rule 16
+refuses both to the tuned megatron driver, and
 rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
 measurement: only ``1F1B`` is targeted, and the caps admit up to ``pp 8``.
@@ -177,6 +178,25 @@ MAX_PP = 8
 # ``tests/test_parallelism.py`` refuses a registry launcher this set and
 # ``torchtitan`` do not name between them.
 MEGATRON_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
+
+
+# The ``Arm.launcher`` values whose driver implements neither the sharded
+# dense parity nor an expert degree. Rule 16 reads this set.
+#
+# ``benchmarks/e2e/megatron/train.py`` is the one such driver today. It calls
+# ``initialize_model_parallel(pipeline_model_parallel_size=args.pp)`` with no
+# expert size, it builds a plain replicated ``DistributedDataParallel``, and
+# its command line carries neither an expert flag nor a sharding flag. So a
+# spec that asks for either gets a run that ignores it, and the manifest
+# records a parity and an expert degree the arm did not have.
+#
+# **Declared one by one, for the reason MEGATRON_LAUNCHERS is declared one
+# by one.** This is a fact about one driver's source, not about Megatron-LM:
+# ``megatron_stock`` hands the run to Megatron's own ``pretrain``, which
+# implements both. A prefix or a complement would classify the two the same
+# way and would be wrong about one of them. A new launcher is an edit here
+# rather than a silent classification.
+REPLICATE_ONLY_LAUNCHERS = frozenset({"megatron"})
 
 
 @dataclass(frozen=True)
@@ -341,7 +361,7 @@ class ParallelismSpec:
 
     ``__post_init__`` enforces well-formedness only -- every degree is a
     positive count, and ``dense_sharding`` names a declared mode. That is
-    not one of the fifteen validator rules; it is the precondition they
+    not one of the sixteen validator rules; it is the precondition they
     assume. Without it a spec of ``dp=-1, pp=-1`` would have ``world_size``
     1 and walk past rule 1 on a one-GPU box, which is exactly the illegal
     mesh the rules exist to refuse. ``PiperShape`` guards its geometry the
@@ -429,8 +449,11 @@ def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
     treatment between the control cell and the expert cell, and the expert
     row would again carry two changes.
 
-    Spec rule 9 keeps ``dp // ep`` whole, so ``efsdp`` stays an integer under
-    either parity. ``replicate * shard == dp`` holds in both branches.
+    Spec rule 9 keeps ``dp // ep`` whole, so ``efsdp`` is a whole degree of
+    at least 1 under ``shard``. Under ``replicate`` at ``ep > 1`` it would be
+    ``1 // ep``, which is 0 and is not a degree -- and TorchTitan asserts no
+    lower bound on it. Spec rule 14 is what keeps that mesh out of a run.
+    ``replicate * shard == dp`` holds in both branches.
 
     **The caller must always deliver the shard degree explicitly.**
     ``data_parallel_shard_degree`` defaults to ``-1`` in TorchTitan, which
@@ -772,11 +795,13 @@ def validate_parallelism(
             f"(pp {spec.pp} x {stages_per_rank} stage(s) per rank)"
         )
 
-    # 8 and 9. The expert split. Both rules are unreachable behind rule 14
-    # today and are kept as the specification the EP stage must meet: an
-    # expert count that does not divide gives the ranks different expert
-    # counts, and an ep that does not divide dp cannot be carved out of the
-    # data-parallel axis at all.
+    # 8 and 9. The expert split. Both rules are reachable since rule 14
+    # stopped refusing every expert degree, and both were written and tested
+    # through that whole refusal: an expert count that does not divide gives
+    # the ranks different expert counts, and an ep that does not divide dp
+    # cannot be carved out of the data-parallel axis at all. They run before
+    # rule 14, so an illegal count is named by its own rule under either
+    # parity.
     if spec.ep > shape.num_experts:
         raise ValueError(
             f"expert degree {spec.ep} exceeds shape {shape.name!r}'s "
@@ -874,10 +899,11 @@ def validate_parallelism(
     #     one change against it.
     if spec.ep > 1 and spec.dense_sharding != "shard":
         raise ValueError(
-            f"expert degree {spec.ep} needs --dense-sharding shard: under "
-            f"{spec.dense_sharding!r} TorchTitan shards the dense "
-            "parameters and Megatron replicates them, so a cross-engine row "
-            "would carry two changes rather than one"
+            f"expert degree {spec.ep} needs --dense-sharding shard. "
+            "TorchTitan cannot split the experts and keep the dense "
+            f"parameters replicated, so under {spec.dense_sharding!r} it "
+            "would shard them while Megatron replicates them. The row would "
+            "carry two changes rather than one"
         )
 
     # 15. The sharded parity needs a data-parallel width to shard over. At
@@ -888,7 +914,38 @@ def validate_parallelism(
     #     failure a recorded fact must not have.
     if spec.dense_sharding == "shard" and spec.dp == 1:
         raise ValueError(
-            "--dense-sharding shard needs a data-parallel degree above 1; "
-            f"at dp {spec.dp} the shard degree is 1 whatever the flag says, "
-            "so the manifest would record a parity the run did not have"
+            "--dense-sharding shard needs a data-parallel degree above 1. "
+            f"At dp {spec.dp} the shard degree is 1 whatever the flag says. "
+            "The manifest would record a parity the run did not have"
+        )
+
+    # 16. A driver that implements neither the sharded parity nor an expert
+    #     degree may not be given one. Its command line carries no such
+    #     flag, so the run would ignore the value and the manifest would
+    #     record it anyway. That is the one failure a recorded fact must not
+    #     have, and both halves became reachable in this pass: rule 14
+    #     refused every expert degree before it, and the parity is new.
+    #
+    #     The expert half is checked first, and it is not redundant. Rule 14
+    #     already ties an expert degree to the sharded parity, so the shard
+    #     half alone would refuse every expert spec that reached here -- but
+    #     under a message about sharding, which is not what the operator
+    #     asked for. The explicit half also keeps the hole shut if rule 14
+    #     ever narrows.
+    refused = engines & REPLICATE_ONLY_LAUNCHERS
+    if refused and spec.ep > 1:
+        raise ValueError(
+            f"expert degree {spec.ep} is not implemented by the "
+            f"{', '.join(sorted(refused))} driver, which this run holds. "
+            "That driver passes no expert size to initialize_model_parallel, "
+            "so the run would train every expert on every rank and the "
+            "manifest would record a split it did not have"
+        )
+    if refused and spec.dense_sharding == "shard":
+        raise ValueError(
+            "--dense-sharding shard is not implemented by the "
+            f"{', '.join(sorted(refused))} driver, which this run holds. "
+            "That driver builds a plain replicated DistributedDataParallel, "
+            "so the run would replicate the dense parameters and the "
+            "manifest would record a sharded parity"
         )
