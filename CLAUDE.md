@@ -400,15 +400,25 @@ that beside every sharded number.** A titan peak-memory figure that barely
 moves under `shard` is expected; a **Megatron** figure that does not move is
 a real failure.
 
-**`results.json` does not record the parity, so two cells of one mesh are
+**`results.json` records no run axis at all, so two cells of one mesh are
 indistinguishable without their manifests.** The file carries no
-`parallelism`, `model_size` or `execution_model` key at all. Cells 1 and 2
-of the planned matrix differ in **nothing else** -- same scenario, shape,
-mesh, compile mode and ac mode -- so anyone who tables two `results.json`
-files side by side pools a replicated cell with a sharded one and reports
-the difference as noise. **Carry the manifest with every sharded number.**
-The gap is older than this axis (`model_size` has the same shape), and this
-is the first axis where two cells are otherwise identical.
+`compile_mode`, no `ac_mode`, no `model_size`, no `parallelism` and no
+`execution_model`. Cells 1 and 2 of the planned matrix differ in **nothing
+else** -- same scenario, shape, mesh, compile mode and ac mode -- so anyone
+who tables two `results.json` files side by side pools a replicated cell
+with a sharded one and reports the difference as noise. **Carry the
+manifest with every sharded number.**
+
+**The gap is older and wider than this axis. `dense_sharding` is the fourth
+axis it covers, not the first -- but it is the one where it bites
+hardest.** The other three announce themselves in the numbers: a different
+`model_size` changes the parameter count, `cuda-graph` changes
+`launch_count` by orders of magnitude, and `--ac none` moves peak memory by
+about 2.5 GiB. A reader who pooled two of those would see something is
+wrong. A sharded cell is expected to differ from its replicated twin only
+slightly, so pooling those two looks like a repeat measurement and the
+difference reads as noise. That is why the caption matters here and not
+merely for tidiness.
 
 **Nothing has run.** No sharded cell and no expert cell has executed on a
 GPU on either engine. The value, the rules, the flags and the log markers
@@ -3127,16 +3137,36 @@ the schema went to 12.
 one field does not cover both.** The record's `dp_replicate: 2,
 dp_shard: 1` is the **TorchTitan** mesh -- `describe`'s own docstring says
 so, and says Megatron is told neither value -- so it settles the titan arm
-and asserts nothing about the megatron one. The manifest holds the
-megatron evidence separately: `commands["baseline"]` carries none of the
-five sharding flags, and the arm's log says `DistributedDataParallel over
-2 ranks` rather than `FullyShardedDataParallelV1`. Read those two together
-and both arms held the dense parameters replicated. Read the derived pair
-alone and half the claim is unproved. Its log also carries the
-pre-schema-12 marker shape, with no `ep=` field and no `sharding_strategy=`
-field, so the block quoted above is not the block that cell wrote. No
-published number is at risk: `evaluate` re-reads no marker, and `--resume`
-already refuses the directory on the changed `benchmarks_git_rev`.
+and asserts nothing about the megatron one.
+
+**The megatron half rests on `commands["baseline"]`, which carries none of
+the five sharding flags.** That is sufficient on its own:
+`megatron/training/training.py` picks the wrapper with
+`elif args.use_megatron_fsdp: DP = FullyShardedDataParallel` and
+`else: DP = DDP`, so an argv without the flag reaches the plain
+`DistributedDataParallel` branch.
+
+**Read that cell's `Megatron-LM stock data parallel:` line with care, and
+never as a comparison against a class name it could not print.** At
+`509c716`, the rev that manifest records, `DATA_PARALLEL_LINE` **hardcoded
+the literal string `DistributedDataParallel`**. Templating the class name
+into that line is a change made after the cell ran, so the word in that log
+names no observation and discriminates nothing.
+
+**What the line does prove is that it printed at all.** At that same rev
+`install_data_parallel_marker` filtered the model chunks on
+`isinstance(chunk, DistributedDataParallel)` -- the narrow class -- and
+**raised** when nothing matched. `FullyShardedDataParallelV1` derives from
+`_BaseDataParallel` beside `DistributedDataParallel` rather than from it,
+so it could not have satisfied that filter. A printed line is therefore an
+observation that the wrapper really was a `DistributedDataParallel`. Do not
+paraphrase this as "the log names the wrapper": at that rev it did not.
+
+Its log also carries the pre-schema-12 marker shape, with no `ep=` field
+and no `sharding_strategy=` field, so the block quoted above is not the
+block that cell wrote. No published number is at risk: `evaluate` re-reads
+no marker, and `--resume` already refuses the directory on the changed
+`benchmarks_git_rev`.
 
 **Every other mesh of this scenario is still a declaration.** No sharded
 cell, no expert cell and no depth-8 pipeline has executed on either arm.
