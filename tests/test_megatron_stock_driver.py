@@ -53,6 +53,7 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     ALWAYS_OMITTED_FLAGS,
     BENCH_FLAGS,
     BENCH_PP_SCHEDULE,
+    DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     MEGATRON_CHECKPOINT_FORMAT,
     MEGATRON_FSDP_VERSION,
@@ -1645,6 +1646,12 @@ class DataParallelMarkerTest(unittest.TestCase):
 
         The accessor prefers the module global over the process group, so
         the setter reaches it without ``torch.distributed``.
+
+        **The group path is therefore unexercised here.** A real run has
+        no module global -- nothing in Megatron's training path calls the
+        setter -- so the accessor reads the group
+        ``initialize_model_parallel`` built. This proves the shim calls the
+        accessor and compares its answer, not that the group is right.
         """
         import megatron.core.parallel_state as mpu
 
@@ -1677,12 +1684,25 @@ class DataParallelMarkerTest(unittest.TestCase):
         return stream.getvalue().strip()
 
     @staticmethod
-    def ddp_config(**overrides):
-        """The ``ddp_config`` fields the shim reads."""
+    def ddp_config(dense_sharding="replicate", **overrides):
+        """The ``ddp_config`` the shim reads, as Megatron leaves it.
+
+        **``overlap_grad_reduce`` is True under ``shard``, and the argv
+        does not say so.** ``MegatronFSDP.__init__`` sets it on the object
+        ``get_megatron_ddp_config`` built, because the wrapper holds the
+        reference rather than a copy. A helper that defaulted this to
+        False would feed the shim the value the test wants back, and the
+        marker diff would then compare two copies of one assumption.
+
+        ``data_parallel_sharding_strategy`` is ``optim_grads_params`` under
+        both values, because Megatron's own argparse default puts it on
+        every config. That is measured, not assumed: see
+        ``test_a_replicated_run_reports_no_shard``.
+        """
         base = dict(
-            overlap_grad_reduce=False,
+            overlap_grad_reduce=(dense_sharding == "shard"),
             grad_reduce_in_fp32=True,
-            use_megatron_fsdp=False,
+            use_megatron_fsdp=(dense_sharding == "shard"),
             data_parallel_sharding_strategy="optim_grads_params",
         )
         base.update(overrides)
@@ -1744,10 +1764,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         """
         _, fsdp_cls = self.wrapper_classes()
         chunk = object.__new__(fsdp_cls)
-        chunk.ddp_config = self.ddp_config(
-            use_megatron_fsdp=True,
-            data_parallel_sharding_strategy="optim_grads_params",
-        )
+        chunk.ddp_config = self.ddp_config("shard")
         printed = self.run_shim(chunk, ep=2)
         self.assertIn(
             "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
@@ -1756,6 +1773,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         )
         self.assertIn("sharding_strategy=optim_grads_params", printed)
         self.assertIn("expert_parallel=2", printed)
+        self.assertIn("overlap_grad_reduce=True", printed)
 
     def test_the_two_wrappers_are_siblings_and_not_one_a_subclass(
         self,
@@ -1791,10 +1809,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         """
         ddp_cls, _ = self.wrapper_classes()
         chunk = object.__new__(ddp_cls)
-        chunk.ddp_config = self.ddp_config(
-            use_megatron_fsdp=False,
-            data_parallel_sharding_strategy="optim_grads_params",
-        )
+        chunk.ddp_config = self.ddp_config("replicate")
         printed = self.run_shim(chunk)
         self.assertIn("sharding_strategy=no_shard", printed)
         self.assertNotIn("optim_grads_params", printed)
@@ -1829,21 +1844,16 @@ class DataParallelMarkerTest(unittest.TestCase):
 
         profile = VALIDATION_PROFILES["megatron_stock"]
         ddp_cls, fsdp_cls = self.wrapper_classes()
-        for spec, cls, fsdp in (
-            (PP4_SPEC, ddp_cls, False),
-            (SHARDED_PP4_SPEC, fsdp_cls, True),
-            (EXPERT_PP4_SPEC, fsdp_cls, True),
+        for spec, cls in (
+            (PP4_SPEC, ddp_cls),
+            (SHARDED_PP4_SPEC, fsdp_cls),
+            (EXPERT_PP4_SPEC, fsdp_cls),
         ):
             with self.subTest(
                 dense_sharding=spec.dense_sharding, ep=spec.ep
             ):
                 chunk = object.__new__(cls)
-                chunk.ddp_config = self.ddp_config(
-                    use_megatron_fsdp=fsdp,
-                    data_parallel_sharding_strategy=(
-                        MEGATRON_SHARDING_STRATEGY
-                    ),
-                )
+                chunk.ddp_config = self.ddp_config(spec.dense_sharding)
                 printed = self.run_shim(chunk, dp=spec.dp, ep=spec.ep)
                 markers = profile.parallelism_markers(spec, BATCH_32)
                 self.assertEqual(printed, markers[1])
@@ -1861,6 +1871,34 @@ class DataParallelMarkerTest(unittest.TestCase):
         chunk.ddp_config = self.ddp_config()
         with self.assertRaisesRegex(RuntimeError, "group of 0 rank"):
             self.run_shim(chunk, ep=1, built_ep=0)
+
+    def test_megatron_fsdp_turns_the_grad_overlap_on_in_place(self) -> None:
+        """The fact ``DATA_PARALLEL_OVERLAP`` states, read off Megatron.
+
+        ``MegatronFSDP.__init__`` mutates the ``ddp_config`` it was handed
+        rather than a copy, so the wrapper reports True where the argv
+        says nothing. A marker that pinned the argument would fail every
+        honest sharded run.
+
+        The source is read as text, because building a real wrapper needs
+        a process group and a device.
+        """
+        try:
+            bootstrap.prepare()
+            import megatron.core.distributed.fsdp.src.megatron_fsdp as pkg
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        source = (
+            Path(pkg.__file__).parent / "megatron_fsdp.py"
+        ).read_text()
+        self.assertIn(
+            "self.ddp_config.overlap_grad_reduce = True", source
+        )
+        # The wrapper keeps the reference it was given. A copy here would
+        # leave the argument's False on the object the shim reads.
+        self.assertIn("else:\n            self.ddp_config = ddp_config", source)
+        self.assertTrue(DATA_PARALLEL_OVERLAP["shard"])
+        self.assertFalse(DATA_PARALLEL_OVERLAP["replicate"])
 
     def test_the_shim_puts_megatron_back(self) -> None:
         """One wrap, then the module holds Megatron's own function again."""

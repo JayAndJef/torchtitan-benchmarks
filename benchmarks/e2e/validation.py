@@ -45,9 +45,11 @@ from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.megatron_stock.flags import (
+    DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     SHARDING_STRATEGIES,
     microbatch_geometry,
+    refuse_unknown_dense_sharding,
 )
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
@@ -350,14 +352,23 @@ def _megatron_stock_parallelism_markers(
     and refuses a disagreement, so the two statements of the degree cannot
     differ in a run that reaches this rule.
 
-    The two values above are pinned rather than read, and Megatron's own
-    resolution is what makes them right: ``--overlap-grad-reduce`` is
-    ``store_true`` and the flag list omits it, and ``--bf16`` with the
-    default ``--main-grads-dtype fp32`` sets
+    **``overlap_grad_reduce`` is a function of the dense-sharding value,
+    and the flag list is not what decides it.** The argv omits
+    ``--overlap-grad-reduce`` under both values, so ``args`` carries False
+    either way -- but ``MegatronFSDP.__init__`` then sets
+    ``ddp_config.overlap_grad_reduce = True`` on the very object
+    ``get_megatron_ddp_config`` built, because the wrapper holds the
+    reference rather than a copy. The driver reads the wrapper, so a
+    sharded run prints True. ``DATA_PARALLEL_OVERLAP`` is the table, and it
+    lives beside the flags for the reason the other two tables do.
+
+    ``grad_reduce_in_fp32`` is pinned and does not move: ``--bf16`` with
+    the default ``--main-grads-dtype fp32`` sets
     ``accumulate_allreduce_grads_in_fp32``, which
-    ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``. A
-    Megatron bump that moves either default fails this rule rather than
-    publishing a precision the log does not state.
+    ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``, and no
+    wrapper touches that field. A Megatron bump that moves either value
+    fails this rule rather than publishing a precision the log does not
+    state.
 
     **Arm rule 13 cannot carry this axis alone.** Stock Megatron
     all-reduces the reported loss over the data-parallel group on every
@@ -373,6 +384,9 @@ def _megatron_stock_parallelism_markers(
     # The one authority on this count. flags.py builds the argv from it, so
     # a marker taken from anything else could disagree with the run.
     _, microbatches, _ = microbatch_geometry(workload, spec)
+    # A garbage value would otherwise reach the three tables below and
+    # raise a bare KeyError, which names neither the value nor the flag.
+    refuse_unknown_dense_sharding(spec.dense_sharding)
     markers = [
         f"Megatron-LM stock parallelism: dp={spec.dp} pp={spec.pp} "
         f"ep={spec.ep} schedule=1F1B microbatches={microbatches} "
@@ -382,7 +396,8 @@ def _megatron_stock_parallelism_markers(
         markers.append(
             "Megatron-LM stock data parallel: "
             f"{DATA_PARALLEL_WRAPPERS[spec.dense_sharding]} over "
-            f"{spec.dp} ranks (overlap_grad_reduce=False, "
+            f"{spec.dp} ranks (overlap_grad_reduce="
+            f"{DATA_PARALLEL_OVERLAP[spec.dense_sharding]}, "
             "grad_reduce_in_fp32=True, sharding_strategy="
             f"{SHARDING_STRATEGIES[spec.dense_sharding]}, "
             f"expert_parallel={spec.ep})"

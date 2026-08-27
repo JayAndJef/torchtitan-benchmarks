@@ -138,7 +138,8 @@ STOCK_LOG_FRAGMENTS = (
     " schedule=1F1B microbatches=",
     " stages=",
     "Megatron-LM stock data parallel: ",
-    " ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True, ",
+    " ranks (overlap_grad_reduce=",
+    ", grad_reduce_in_fp32=True, ",
     "sharding_strategy=",
     "expert_parallel=",
 )
@@ -744,7 +745,7 @@ class StockValidationProfileTests(unittest.TestCase):
         self.assertEqual(
             markers[1],
             "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
-            "over 2 ranks (overlap_grad_reduce=False, "
+            "over 2 ranks (overlap_grad_reduce=True, "
             "grad_reduce_in_fp32=True, "
             "sharding_strategy=optim_grads_params, expert_parallel=2)",
         )
@@ -1022,6 +1023,7 @@ def _driver_data_parallel_line(dense_sharding: str, *, dp: int, ep: int) -> str:
     """
     from benchmarks.e2e.megatron_stock import train
     from benchmarks.e2e.megatron_stock.flags import (
+        DATA_PARALLEL_OVERLAP,
         DATA_PARALLEL_WRAPPERS,
         SHARDING_STRATEGIES,
     )
@@ -1029,7 +1031,7 @@ def _driver_data_parallel_line(dense_sharding: str, *, dp: int, ep: int) -> str:
     return train.DATA_PARALLEL_LINE.format(
         wrapper=DATA_PARALLEL_WRAPPERS[dense_sharding],
         dp=dp,
-        overlap=False,
+        overlap=DATA_PARALLEL_OVERLAP[dense_sharding],
         fp32=True,
         sharding=SHARDING_STRATEGIES[dense_sharding],
         expert=ep,

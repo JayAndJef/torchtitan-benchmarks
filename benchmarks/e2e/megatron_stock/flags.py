@@ -79,15 +79,15 @@ SUPPORTED_PP_SCHEDULE = "1F1B"
 # expert degree, a tensor degree, a context degree, and on any config whose
 # num_moe_experts is set (mcore_fsdp_adapter.py). Every shape in
 # PIPER_SHAPES is a mixture of experts, so v2 refuses this suite even at
-# pp 1 and ep 1. Megatron already defaults this to 1; the flag list states
-# the fact rather than inherits it, so a submodule bump moves a recorded
-# argv rather than a silent run.
+# pp 1 and ep 1. Megatron already defaults this value to 1. The flag list
+# states the fact rather than inherits it. A submodule bump that moves the
+# default then changes a recorded argv rather than a silent run.
 MEGATRON_FSDP_VERSION = "1"
 
 # What Megatron-FSDP shards. It pairs with what TorchTitan shards under
 # --dense-sharding shard: the parameters, the gradients and the optimizer
-# state. Megatron already defaults this too, and it is stated for the same
-# reason.
+# state. Megatron already defaults this value too. The flag list states it
+# for the reason above.
 MEGATRON_SHARDING_STRATEGY = "optim_grads_params"
 
 # arguments.py asserts ckpt_format == "fsdp_dtensor" under
@@ -116,6 +116,23 @@ DATA_PARALLEL_WRAPPERS: dict[str, str] = {
 SHARDING_STRATEGIES: dict[str, str] = {
     "replicate": "no_shard",
     "shard": MEGATRON_SHARDING_STRATEGY,
+}
+
+# What ``overlap_grad_reduce`` reads on the wrapper, per value. **The
+# wrapper does not report the argument, and this is not a restatement of
+# the flag list.** ``MegatronFSDP.__init__`` sets
+# ``self.ddp_config.overlap_grad_reduce = True`` whenever the strategy
+# shards gradients, and it mutates the very object
+# ``get_megatron_ddp_config`` built, because it holds the reference rather
+# than a copy (megatron_fsdp.py, and mcore_fsdp_adapter.py's own
+# ``self.ddp_config = ddp_config``). So a sharded run reports True even
+# though the argv omits --overlap-grad-reduce.
+#
+# ``overlap_param_gather`` moves the same way. The marker does not print
+# it, so this table holds the one field the marker states.
+DATA_PARALLEL_OVERLAP: dict[str, bool] = {
+    "replicate": False,
+    "shard": True,
 }
 
 # TorchTitan's own optimizer values, replicated flag for flag. The source is
@@ -167,8 +184,21 @@ BENCH_FLAGS: tuple[str, ...] = (
 # so a test can assert their absence by name rather than by a hand-written
 # list that can drift from the reason.
 #
-# --overlap-grad-reduce and --overlap-param-gather stay here under both
-# values: they are a communication schedule, not a memory strategy.
+# **--overlap-grad-reduce and --overlap-param-gather stay here under both
+# values, and the reason is not the reason --use-distributed-optimizer
+# leaves.** Megatron-FSDP turns all three on itself, so the "an argv that
+# omits it would deny a fact the run has" argument appears to reach all
+# three. It does not. ``arguments.py`` sets
+# ``args.use_distributed_optimizer = True`` inside the Megatron-FSDP block
+# whatever the argv said, so sending that flag changes nothing the run
+# does. The two overlap flags are read **earlier**: ``training.py`` calls
+# ``resolve_ddp_bucket_size`` with ``ddp_config.overlap_grad_reduce``
+# before it builds the wrapper, and that function returns ``None`` when the
+# value is False. So sending --overlap-grad-reduce moves the gradient
+# bucket size, which changes what the run does rather than what the argv
+# says. This arm runs stock Megatron at its own defaults, so it declines
+# them and the marker reads the resolved value instead. See
+# DATA_PARALLEL_OVERLAP.
 ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--overlap-grad-reduce",
     "--overlap-param-gather",
@@ -201,9 +231,9 @@ SHARDING_FLAGS: tuple[str, ...] = (
 def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
     """Raise on a value this module cannot build a command line for.
 
-    ``ParallelismSpec.__post_init__`` refuses one first. This restates the
-    refusal because a caller may build a command line without a run, and a
-    silent fall through to the ``replicate`` branch would send the
+    ``ParallelismSpec`` is meant to refuse one first, and this module does
+    not depend on that: a caller may build a command line without a run,
+    and a silent fall through to the ``replicate`` branch would send the
     replicated argv under the sharded label.
     """
     if dense_sharding not in DENSE_SHARDING_MODES:
@@ -448,10 +478,11 @@ def _mesh_flags(spec: ParallelismSpec) -> list[str]:
     TorchTitan the two ``less-layers 0`` flags that produce the same split.
 
     **The expert degree is sent, and it never widens the world.** Megatron
-    derives ``args.data_parallel_size`` from the tensor, pipeline and
-    context degrees alone (``arguments.py``), so the expert degree
-    subdivides the data-parallel axis rather than adding a dimension. That
-    is the same arithmetic ``ParallelismSpec.world_size`` states.
+    divides the world by the tensor, pipeline and context degrees and by
+    ``gtp_weight_remat_size``, which defaults to 1 and which this arm never
+    sets (``arguments.py``). The expert degree is absent from that product,
+    so it subdivides the data-parallel axis rather than adding a dimension.
+    That is the same arithmetic ``ParallelismSpec.world_size`` states.
 
     **This flag is the argv, and the argv proves nothing on its own.** The
     driver reads the degree back from the group

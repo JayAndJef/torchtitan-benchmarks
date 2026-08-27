@@ -55,10 +55,17 @@ object over on both the pipeline path and the plain path
 default, so nothing shadows the ``-1``. So ``-1`` here means "nobody sent
 the flag", and nothing else means that.
 
-**A mesh that replicates AND shards is refused too.** ``titan_mesh``
-returns ``(dp, 1)`` under ``replicate`` and ``(1, dp)`` under ``shard``, so
-no spec asks for HSDP. A passthrough flag can build one, and the manifest
-carries no dense-sharding value that names it.
+**A mesh that replicates AND shards is refused too.** The harness asks for
+one treatment at a time: ``titan_mesh`` is meant to return ``(dp, 1)``
+under ``replicate`` and ``(1, dp)`` under ``shard``. So no spec asks for
+HSDP. A passthrough flag can build one, and the manifest carries no
+dense-sharding value that names it.
+
+**This module cannot check ``titan_mesh``, and nothing here can.** It runs
+in the training subprocess and reads only the mesh TorchTitan resolved. A
+``titan_mesh`` that emitted the wrong pair would produce a command line
+both guards below accept, and arm rule 12 composes its own marker from the
+same function. The parent-side pin of that table is what catches it.
 
 This module reads the ``ParallelDims`` TorchTitan builds from the command
 line, never ``benchmarks/e2e/parallelism.py``: it executes inside the

@@ -105,12 +105,11 @@ PARALLELISM_LINE = (
 # wrapper went missing raises there rather than printing the line.
 #
 # **{wrapper} is the class name, and it names the mechanism.** Megatron
-# picks DistributedDataParallel, FullyShardedDataParallelV1 or the torch
-# FSDP2 wrapper from the arguments (training.py), and the three are
-# siblings under _BaseDataParallel rather than subclasses of one another.
-# So the class name is what says which memory strategy ran, and the word
-# "DistributedDataParallel" cannot be hardcoded here: under
-# --dense-sharding shard it would be a lie.
+# picks one of three wrapper classes from the arguments (training.py).
+# Each of the three derives directly from _BaseDataParallel. None of them
+# derives from another. So the class name is what says which memory
+# strategy ran. The word "DistributedDataParallel" cannot be hardcoded
+# here, because it is wrong under --dense-sharding shard.
 #
 # **{sharding} is the strategy the run acts on, not the raw field.**
 # Megatron's argparse defaults data_parallel_sharding_strategy to
@@ -517,10 +516,11 @@ def install_data_parallel_marker(
     **The check accepts ``_BaseDataParallel``, and the line names the
     class.** Megatron picks the wrapper from the arguments
     (``training.py``): ``DistributedDataParallel``,
-    ``FullyShardedDataParallel`` or the torch FSDP2 wrapper. The first two
-    are **siblings**, both deriving directly from ``_BaseDataParallel``
-    (``data_parallel_base.py``), so a check against
-    ``DistributedDataParallel`` alone raises on an honest sharded run.
+    ``FullyShardedDataParallel`` or the torch FSDP2 wrapper. Each of them
+    derives directly from ``_BaseDataParallel``
+    (``data_parallel_base.py``). None of them derives from another. So a
+    check against ``DistributedDataParallel`` alone raises on an honest
+    sharded run.
     **``FullyShardedDataParallel`` is a factory function and not a class**
     (``mcore_fsdp_adapter.py``, whose own docstring says so), so
     ``isinstance`` against it raises ``TypeError``; the version classes are
