@@ -2,7 +2,7 @@
 
 ``benchmarks/e2e/parallelism.py`` owns the axis itself, while the CLI and
 runner thread it through the harness. This file checks the module-level
-contract: every one of the fourteen validator rules is exercised in both
+contract: every one of the fifteen validator rules is exercised in both
 directions, the four derivations are pinned, and the schedule registry is
 checked against the PyTorch classes it names. Plumbing and runtime validation
 have their own test modules.
@@ -28,6 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.e2e.parallelism import (
+    DEFAULT_DENSE_SHARDING,
+    DENSE_SHARDING_MODES,
     MAX_PP,
     MAX_WORLD_SIZE,
     MEGATRON_LAUNCHERS,
@@ -122,6 +124,8 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(TRIVIAL_SPEC.ep, 1)
         self.assertIsNone(TRIVIAL_SPEC.pp_schedule)
         self.assertEqual(TRIVIAL_SPEC.pp_microbatch_size, 1)
+        self.assertEqual(TRIVIAL_SPEC.dense_sharding, "replicate")
+        self.assertEqual(TRIVIAL_SPEC.dense_sharding, DEFAULT_DENSE_SHARDING)
         self.assertEqual(TRIVIAL_SPEC.world_size, 1)
 
     def test_the_world_size_multiplies_dp_by_pp_and_ignores_ep(self):
@@ -136,7 +140,7 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(fields & {"tp", "cp"}, set())
 
     def test_a_degree_below_one_is_refused_at_construction(self):
-        """The precondition the fourteen rules assume.
+        """The precondition the fifteen rules assume.
 
         Without it ``dp=-1, pp=-1`` has world size 1 and walks past rule 1
         on a one-GPU box, which is exactly the illegal mesh the rules exist
@@ -157,6 +161,33 @@ class ParallelismSpecTest(unittest.TestCase):
     def test_a_positive_degree_is_accepted(self):
         self.assertEqual(ParallelismSpec(dp=4).dp, 4)
         self.assertEqual(ParallelismSpec(pp_microbatch_size=2).pp_microbatch_size, 2)
+
+    def test_the_two_declared_dense_sharding_modes(self):
+        """The roster, and that the default is one of its members."""
+        self.assertEqual(DENSE_SHARDING_MODES, ("replicate", "shard"))
+        self.assertIn(DEFAULT_DENSE_SHARDING, DENSE_SHARDING_MODES)
+        self.assertEqual(DEFAULT_DENSE_SHARDING, "replicate")
+
+    def test_each_declared_dense_sharding_mode_is_accepted(self):
+        for mode in DENSE_SHARDING_MODES:
+            with self.subTest(dense_sharding=mode):
+                self.assertEqual(
+                    ParallelismSpec(dp=2, dense_sharding=mode).dense_sharding,
+                    mode,
+                )
+
+    def test_an_unknown_dense_sharding_mode_is_refused_at_construction(self):
+        """``titan_mesh`` and ``execution_model`` are total functions over a
+        spec and both branch on this value, so a spec carrying a string
+        neither branch knows must not exist. A validator rule would be too
+        late: both functions run on specs the validator never sees.
+        """
+        for mode in ("", "Shard", "replicated", "zero3", None):
+            with self.subTest(dense_sharding=mode):
+                with self.assertRaisesRegex(
+                    ValueError, "Unknown dense sharding mode"
+                ):
+                    ParallelismSpec(dp=2, dense_sharding=mode)
 
     def test_the_spec_is_frozen(self):
         """``FrozenInstanceError``, not any ``Exception``.
@@ -283,42 +314,91 @@ class ScheduleNamesMatchPyTorchTest(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+# The dp/ep pairs the budget allows. ``ep`` divides ``dp`` in every one, so
+# rule 9 admits them all and the mesh tests may read them under either
+# parity.
+LEGAL_DP_EP_PAIRS = (
+    (1, 1),
+    (2, 1),
+    (3, 1),
+    (4, 1),
+    (8, 1),
+    (2, 2),
+    (4, 2),
+    (4, 4),
+    (8, 2),
+    (8, 4),
+)
+
+
 class TitanMeshTest(unittest.TestCase):
-    def test_every_legal_dp_ep_pair_up_to_the_budgeted_world_size(self):
-        """``(dp_replicate, dp_shard)`` at each pair the budget allows.
+    def test_the_trivial_spec_still_resolves_to_one_by_one(self):
+        """The mesh every published number was measured under."""
+        self.assertEqual(titan_mesh(TRIVIAL_SPEC), (1, 1))
 
-        ``ep > 1`` borrows the shard axis, so the replicate degree is what
-        is left of ``dp``. Rule 14 refuses these specs today; the mesh
-        arithmetic is what the expert-parallel stage will inherit, so it is
-        pinned now.
+    def test_replicate_gives_the_whole_width_to_the_replicate_degree(self):
+        """``dp_shard`` 1 is HSDP over a shard group of one rank, which
+        shards nothing. That is the pairing a cross-engine DP row needs
+        against Megatron's DDP.
 
-        The budget is 8, so ``dp 8`` is a legal width and the pairs below
-        cover it.
+        **The expert degree does not move it.** An earlier revision returned
+        ``(dp // ep, ep)`` at ``ep > 1``, which moved the dense treatment
+        between an ``ep 1`` control cell and its ``ep 2`` twin and made the
+        expert row carry two changes.
         """
-        expected = {
-            (1, 1): (1, 1),
-            (2, 1): (2, 1),
-            (3, 1): (3, 1),
-            (4, 1): (4, 1),
-            (8, 1): (8, 1),
-            (2, 2): (1, 2),
-            (4, 2): (2, 2),
-            (4, 4): (1, 4),
-            (8, 2): (4, 2),
-            (8, 4): (2, 4),
-        }
-        for (dp, ep), mesh in expected.items():
+        for dp, ep in LEGAL_DP_EP_PAIRS:
             with self.subTest(dp=dp, ep=ep):
-                self.assertEqual(titan_mesh(ParallelismSpec(dp=dp, ep=ep)), mesh)
+                self.assertEqual(
+                    titan_mesh(ParallelismSpec(dp=dp, ep=ep)), (dp, 1)
+                )
+
+    def test_shard_gives_the_whole_width_to_the_shard_degree(self):
+        """Pure FSDP over the data-parallel width, at every expert degree.
+
+        Megatron-FSDP v1 shards the dense parameters over ``dp_cp`` and the
+        experts over ``expt_dp``. At ``dp 4, ep 2`` that is dense over 4 and
+        experts over 2, and ``(1, 4)`` gives TorchTitan the same two numbers:
+        ``efsdp = dp_shard // ep`` is 2 there.
+        """
+        for dp, ep in LEGAL_DP_EP_PAIRS:
+            with self.subTest(dp=dp, ep=ep):
+                self.assertEqual(
+                    titan_mesh(
+                        ParallelismSpec(dp=dp, ep=ep, dense_sharding="shard")
+                    ),
+                    (1, dp),
+                )
+
+    def test_the_expert_mesh_degree_stays_whole_under_shard(self):
+        """``efsdp = dp_shard * cp * tp // ep`` at cp = tp = 1. Spec rule 9
+        keeps ``dp`` divisible by ``ep``, so the division is exact and the
+        degree is at least 1."""
+        for dp, ep in LEGAL_DP_EP_PAIRS:
+            with self.subTest(dp=dp, ep=ep):
+                _, shard = titan_mesh(
+                    ParallelismSpec(dp=dp, ep=ep, dense_sharding="shard")
+                )
+                self.assertEqual(shard % ep, 0)
+                self.assertGreaterEqual(shard // ep, 1)
 
     def test_the_mesh_product_is_the_data_parallel_width(self):
-        for dp, ep in ((1, 1), (2, 1), (2, 2), (4, 2), (4, 4), (8, 2), (8, 4)):
-            with self.subTest(dp=dp, ep=ep):
-                replicate, shard = titan_mesh(ParallelismSpec(dp=dp, ep=ep))
-                self.assertEqual(replicate * shard, dp)
+        """The invariant that survives both branches."""
+        for mode in DENSE_SHARDING_MODES:
+            for dp, ep in LEGAL_DP_EP_PAIRS:
+                with self.subTest(dense_sharding=mode, dp=dp, ep=ep):
+                    replicate, shard = titan_mesh(
+                        ParallelismSpec(dp=dp, ep=ep, dense_sharding=mode)
+                    )
+                    self.assertEqual(replicate * shard, dp)
 
     def test_the_pipeline_degree_does_not_reach_the_mesh(self):
         self.assertEqual(titan_mesh(ParallelismSpec(dp=2, pp=2)), (2, 1))
+        self.assertEqual(
+            titan_mesh(
+                ParallelismSpec(dp=2, pp=2, dense_sharding="shard")
+            ),
+            (1, 2),
+        )
 
 
 class SkipDpTest(unittest.TestCase):
@@ -369,6 +449,44 @@ class ExecutionModelTest(unittest.TestCase):
             "2-gpu-plain-bf16-dp2-ep2",
         )
 
+    def test_the_sharded_parity_reaches_the_string(self):
+        """It is a comparability boundary, so a manifest has to carry it.
+
+        The default parity adds nothing, which is what keeps every string
+        this repo has already recorded exactly where it was.
+        """
+        self.assertEqual(
+            execution_model(ParallelismSpec(dp=2, dense_sharding="shard")),
+            "2-gpu-plain-bf16-dp2-shard",
+        )
+        self.assertEqual(
+            execution_model(
+                ParallelismSpec(dp=2, ep=2, dense_sharding="shard")
+            ),
+            "2-gpu-plain-bf16-dp2-shard-ep2",
+        )
+        self.assertEqual(
+            execution_model(
+                ParallelismSpec(
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+                )
+            ),
+            "8-gpu-plain-bf16-dp2-shard-pp4-1F1B",
+        )
+
+    def test_the_two_parities_give_two_strings(self):
+        """A run that sharded must not record the string a replicated run
+        records. The two answer different questions and the manifest is
+        where a reader meets the difference."""
+        for dp in (2, 4, 8):
+            with self.subTest(dp=dp):
+                self.assertNotEqual(
+                    execution_model(ParallelismSpec(dp=dp)),
+                    execution_model(
+                        ParallelismSpec(dp=dp, dense_sharding="shard")
+                    ),
+                )
+
     def test_the_eight_gpu_cell_names_its_two_axes(self):
         """The manifest string for the stock-Megatron cell."""
         self.assertEqual(
@@ -385,18 +503,37 @@ class ExecutionModelTest(unittest.TestCase):
     def test_the_parallel_parts_name_degrees_and_not_mechanisms(self):
         """One manifest carries one execution_model for a whole run, and a
         cross-engine run holds arms of both engines. A term only TorchTitan's
-        code produces -- ``fsdp2``, a shard degree -- would be false for the
-        megatron arm beside it. ``titan_mesh``'s resolution belongs in
-        ``describe``, under names that say whose it is."""
+        code produces -- ``fsdp2``, a resolved mesh degree -- would be false
+        for the megatron arm beside it. ``titan_mesh``'s resolution belongs
+        in ``describe``, under names that say whose it is.
+
+        **The forbidden set names the mesh spelling, not the word.** It
+        listed the bare words ``replicate`` and ``shard`` while neither could
+        appear. ``dense_sharding`` is a declared parity that BOTH engines
+        honor, so ``dp2-shard`` is true of a TorchTitan arm and of a Megatron
+        arm alike, and the word alone is no longer the thing to refuse. What
+        must stay out is the resolved pair -- ``replicate2``, ``shard1`` --
+        which is one engine's mesh and is false for the other's arm. The test
+        therefore reads ``titan_mesh`` and refuses its own two numbers, which
+        is a stronger check than the word list it replaces.
+        """
         for spec in (
             ParallelismSpec(dp=2),
             ParallelismSpec(dp=4),
             ParallelismSpec(dp=2, ep=2),
             ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
+            ParallelismSpec(dp=2, dense_sharding="shard"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="shard"),
         ):
             with self.subTest(spec=spec):
                 rendered = execution_model(spec)
-                for engine_term in ("fsdp2", "replicate", "shard", "ddp"):
+                replicate, shard = titan_mesh(spec)
+                for engine_term in (
+                    "fsdp2",
+                    "ddp",
+                    f"replicate{replicate}",
+                    f"shard{shard}",
+                ):
                     self.assertNotIn(engine_term, rendered)
                 self.assertIn(f"dp{spec.dp}", rendered)
 
@@ -409,6 +546,8 @@ class ExecutionModelTest(unittest.TestCase):
             ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
             ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
             ParallelismSpec(dp=2, ep=2),
+            ParallelismSpec(dp=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
         )
         rendered = [execution_model(spec) for spec in specs]
         self.assertEqual(len(set(rendered)), len(rendered))
@@ -424,6 +563,7 @@ class DescribeTest(unittest.TestCase):
                 "ep": 1,
                 "pp_schedule": None,
                 "pp_microbatch_size": 1,
+                "dense_sharding": "replicate",
                 "world_size": 1,
                 "dp_replicate": 1,
                 "dp_shard": 1,
@@ -440,6 +580,7 @@ class DescribeTest(unittest.TestCase):
                 "ep": 1,
                 "pp_schedule": "1F1B",
                 "pp_microbatch_size": 1,
+                "dense_sharding": "replicate",
                 "world_size": 2,
                 "dp_replicate": 1,
                 "dp_shard": 1,
@@ -447,11 +588,30 @@ class DescribeTest(unittest.TestCase):
             },
         )
 
+    def test_a_sharded_record_carries_the_parity_and_the_mesh_it_resolves_to(
+        self,
+    ):
+        """Two facts, not one. The parity is what the operator asked for and
+        the mesh is what TorchTitan builds from it; neither derives the other
+        for a reader who does not hold this module."""
+        spec = ParallelismSpec(dp=4, ep=2, dense_sharding="shard")
+        record = describe(spec, local_batch_size=8)
+        self.assertEqual(record["dense_sharding"], "shard")
+        self.assertEqual(record["dp_replicate"], 1)
+        self.assertEqual(record["dp_shard"], 4)
+        replicated = describe(
+            ParallelismSpec(dp=4, ep=2), local_batch_size=8
+        )
+        self.assertEqual(replicated["dense_sharding"], "replicate")
+        self.assertEqual(replicated["dp_replicate"], 4)
+        self.assertEqual(replicated["dp_shard"], 1)
+
     def test_the_record_is_json_safe(self):
         for spec in (
             TRIVIAL_SPEC,
             PP2,
             ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
+            ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B", dense_sharding="shard"),
         ):
             with self.subTest(spec=spec):
                 payload = describe(spec, local_batch_size=8)
@@ -1087,6 +1247,7 @@ class TheEightGpuCellTest(unittest.TestCase):
                 "ep": 1,
                 "pp_schedule": "1F1B",
                 "pp_microbatch_size": 4,
+                "dense_sharding": "replicate",
                 "world_size": 8,
                 "dp_replicate": 2,
                 "dp_shard": 1,

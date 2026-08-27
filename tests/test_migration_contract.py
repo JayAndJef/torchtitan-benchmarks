@@ -1104,18 +1104,20 @@ class GoldenCommandTests(unittest.TestCase):
     def test_an_expert_argv_carries_the_shard_degree_too(self) -> None:
         """The pair is gated on the mesh, not on ``dp``.
 
-        ``titan_mesh`` moves the shard degree for an expert-parallel run, so
-        a ``dp``-gated test would emit the expert degree with no shard
-        degree and TorchTitan's -1 default would take every remaining rank.
-        Rule 14 refuses ``ep > 1`` today; this pins the command builder so
-        the day it lifts is not the day a run silently becomes ZeRO-3.
+        A ``dp``-gated test would emit the expert degree with no shard
+        degree, and TorchTitan's -1 default would take every remaining rank.
+
+        **The spec names the sharded parity, because spec rule 14 refuses an
+        expert degree without it.** TorchTitan cannot split the experts while
+        it keeps the dense parameters replicated, so a legal expert argv is a
+        sharded argv and this is the argv such a run really gets.
         """
         command = self._command(
             GOLDEN_TITAN_ARM,
             "normal",
             "default",
             "none",
-            ParallelismSpec(dp=2, ep=2),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
         )
         self.assertEqual(
             command[
@@ -1867,7 +1869,7 @@ TEST_CENSUS = {
     # reach GPTModel.
     "test_megatron_model": 29,
     # The parallelism run axis, landed before anything imports it. Every one
-    # of the fourteen validator rules in both directions, the two
+    # of the fifteen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
     # guard, the four derivations, and the schedule registry checked against
     # the PyTorch classes it names.
@@ -1885,7 +1887,13 @@ TEST_CENSUS = {
     # registry dropped, it excludes the titan launcher, each member trips
     # rule 5 on its own, and a launcher outside the set keeps a PyTorch-only
     # schedule.
-    "test_parallelism": 112,
+    # +9 with the dense-sharding value: the mode roster and its default, each
+    # declared mode accepted and an unknown one refused at construction,
+    # titan_mesh under each parity and the whole expert mesh degree it leaves,
+    # the sharded execution_model string and that the two parities differ, and
+    # a describe record that carries the parity beside the mesh it resolves
+    # to.
+    "test_parallelism": 121,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the five CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -1900,7 +1908,11 @@ TEST_CENSUS = {
     # 80 invocations, that a pipelined run declares none, and that the
     # scenario which already declared none is unaffected. One of the four
     # replaces the refusal test.
-    "test_parallelism_plumbing": 50,
+    # +4 with the dense-sharding value: the default parity recorded rather
+    # than left out, a sharded manifest round trip at schema 12, the value
+    # alone refusing a resume in both directions, and a schema-11 block that
+    # may not claim the default parity.
+    "test_parallelism_plumbing": 54,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -1940,7 +1952,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1646
+TEST_CENSUS_TOTAL = 1659
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -53,11 +53,11 @@ bubble
 **EP does not multiply into the world size.** Both engines take the expert
 ranks out of the data-parallel axis rather than adding a fourth dimension.
 Megatron subdivides its DP group (``parallel_state.py``). TorchTitan states
-the constraint as ``dp_shard * cp * tp == efsdp * ep`` (``configs.py``), of
-which ``dp_shard = ep`` is one solution and the one ``titan_mesh``
-**chooses** -- it is not forced, and at dp 4 / ep 2 the framework would
-accept ``(1, 4)`` too. So ``dp`` is the whole data-parallel width and ``ep``
-is a split of it, which is what ``titan_mesh`` and rule 9 encode.
+the constraint as ``dp_shard * cp * tp == efsdp * ep`` (``configs.py``), and
+``titan_mesh`` satisfies it under ``shard`` by giving the whole
+data-parallel width to ``dp_shard``. So ``dp`` is the whole data-parallel
+width and ``ep`` is a split of it, which is what ``titan_mesh`` and rule 9
+encode.
 
 **TP and CP are deliberately absent.** They are out of scope for this pass,
 and a field nobody can set misleads a later reader into thinking the axis is
@@ -299,6 +299,27 @@ PP_SCHEDULES: dict[str, PipelineSchedule] = {
 PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 
 
+# How the run holds the DENSE parameters -- every parameter that is not a
+# routed expert weight. ``replicate`` gives each rank a whole copy.
+# ``shard`` splits one copy between the ranks of the data-parallel axis.
+#
+# **It is a comparability boundary at any expert degree**, because it decides
+# how much optimizer state one rank holds and what the ranks exchange each
+# step. Every number this repo has published was measured under
+# ``replicate``, which is why that is the default.
+#
+# **It is also what makes an expert degree legal, and the reason is a
+# TorchTitan constraint rather than a preference.** TorchTitan cannot split
+# the experts while it keeps the dense parameters replicated:
+# ``apply_fsdp_to_decoder`` sends every non-expert parameter to ``Shard(0)``
+# on the dense mesh, and the expert mesh degree
+# ``efsdp = dp_shard * cp * tp // ep`` needs ``dp_shard >= ep``. Megatron
+# holds either parity. So the two engines compare under an expert degree only
+# when both shard, and spec rule 14 refuses the other combination.
+DENSE_SHARDING_MODES = ("replicate", "shard")
+DEFAULT_DENSE_SHARDING = "replicate"
+
+
 @dataclass(frozen=True)
 class ParallelismSpec:
     """The parallelism degrees and pipeline settings for one run.
@@ -307,11 +328,23 @@ class ParallelismSpec:
     the run this repo has always done and ``TRIVIAL_SPEC`` is that object.
 
     ``__post_init__`` enforces well-formedness only -- every degree is a
-    positive count. That is not one of the fourteen validator rules; it is
-    the precondition they assume. Without it a spec of ``dp=-1, pp=-1`` would
-    have ``world_size`` 1 and walk past rule 1 on a one-GPU box, which is
-    exactly the illegal mesh the rules exist to refuse. ``PiperShape``
-    guards its geometry the same way and for the same reason.
+    positive count, and ``dense_sharding`` names a declared mode. That is
+    not one of the fifteen validator rules; it is the precondition they
+    assume. Without it a spec of ``dp=-1, pp=-1`` would have ``world_size``
+    1 and walk past rule 1 on a one-GPU box, which is exactly the illegal
+    mesh the rules exist to refuse. ``PiperShape`` guards its geometry the
+    same way and for the same reason.
+
+    **``dense_sharding`` takes the same treatment, and it must.**
+    ``titan_mesh`` and ``execution_model`` are total functions over a spec
+    and both branch on this value, so a spec carrying a string neither
+    branch knows must not exist. A validator rule would be too late: both
+    functions run on specs the validator never sees.
+
+    ``dense_sharding`` sits here rather than beside ``--model-size`` as a
+    run axis of its own, for the reason ``pp_schedule`` and
+    ``pp_microbatch_size`` do: it is a treatment of one parallelism axis,
+    and every function that needs it already takes the spec.
     """
 
     dp: int = 1
@@ -319,6 +352,7 @@ class ParallelismSpec:
     ep: int = 1
     pp_schedule: str | None = None
     pp_microbatch_size: int = 1
+    dense_sharding: str = DEFAULT_DENSE_SHARDING
 
     def __post_init__(self) -> None:
         for field, value in (
@@ -332,6 +366,11 @@ class ParallelismSpec:
                     f"{field} must be >= 1, got {value}: a degree counts "
                     "ranks and a microbatch size counts rows"
                 )
+        if self.dense_sharding not in DENSE_SHARDING_MODES:
+            raise ValueError(
+                f"Unknown dense sharding mode {self.dense_sharding!r}. "
+                "Available: " + ", ".join(DENSE_SHARDING_MODES)
+            )
 
     @property
     def world_size(self) -> int:
@@ -357,9 +396,29 @@ def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
     path. ``dp_shard=1`` therefore means HSDP over a shard group of one rank,
     which shards nothing and replicates across ``dp_replicate`` -- the
     closest thing TorchTitan has to Megatron's DDP, and the pairing a
-    cross-engine DP row needs. ``dp_shard=ep`` is what an expert-parallel run
-    needs instead, because TorchTitan builds the expert mesh out of the shard
-    axis.
+    cross-engine DP row needs. That is the ``replicate`` parity. Under
+    ``shard`` the whole data-parallel width becomes the shard degree, which
+    is pure FSDP.
+
+    **It reads the declared parity and does NOT infer one from ``ep``.** An
+    earlier revision returned ``(dp // ep, ep)`` at ``ep > 1``, on the
+    grounds that TorchTitan builds the expert mesh out of the shard axis.
+    That is right about the expert mesh and wrong about the dense one.
+    ``parallel_dims.py`` derives ``efsdp = dp_shard * cp * tp // ep`` and
+    builds the sparse mesh as ``("pp", "dp_replicate", "efsdp", "ep")``, so
+    ``dp_replicate`` replicates the experts too. At ``dp 4, ep 2`` the old
+    branch gave dense sharded over 2 with a replica factor of 2, where
+    Megatron-FSDP shards the dense parameters over ``dp_cp`` -- 4 ranks --
+    and the experts over ``expt_dp`` -- 2. ``(1, 4)`` gives TorchTitan those
+    same two numbers, term for term.
+
+    The control cell says it a second way: under ``shard`` at ``dp 4, ep 1``
+    the mesh is ``(1, 4)``, so an ``ep``-inferred branch would move the dense
+    treatment between the control cell and the expert cell, and the expert
+    row would again carry two changes.
+
+    Spec rule 9 keeps ``dp // ep`` whole, so ``efsdp`` stays an integer under
+    either parity. ``replicate * shard == dp`` holds in both branches.
 
     **The caller must always deliver the shard degree explicitly.**
     ``data_parallel_shard_degree`` defaults to ``-1`` in TorchTitan, which
@@ -367,8 +426,8 @@ def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
     silently run ZeRO-3 instead of the intended replication, and nothing in
     the log or the manifest would say so.
     """
-    if spec.ep > 1:
-        return (spec.dp // spec.ep, spec.ep)
+    if spec.dense_sharding == "shard":
+        return (1, spec.dp)
     return (spec.dp, 1)
 
 
@@ -431,9 +490,21 @@ def execution_model(spec: ParallelismSpec) -> str:
     engine's mechanism, which is what the paragraph above forbids, so the
     difference is documented rather than encoded. Cite it beside a
     cross-engine dp number.
+
+    **``dense_sharding`` reaches the string, and it does not name an engine.**
+    Both engines shard under ``shard``, so ``dp2-shard`` is true of a
+    TorchTitan arm and of a Megatron arm alike -- unlike
+    ``fsdp2-replicate2-shard1``, which spells out one engine's mesh. The
+    default parity adds nothing, which is what keeps every string this repo
+    has already recorded exactly where it was.
     """
     devices = "single-gpu" if spec.world_size == 1 else f"{spec.world_size}-gpu"
-    data_parallel = "no-fsdp" if skip_dp(spec) else f"dp{spec.dp}"
+    if skip_dp(spec):
+        data_parallel = "no-fsdp"
+    elif spec.dense_sharding == "shard":
+        data_parallel = f"dp{spec.dp}-shard"
+    else:
+        data_parallel = f"dp{spec.dp}"
     parts = [devices, "plain-bf16", data_parallel]
     if spec.pp > 1:
         parts.append(f"pp{spec.pp}-{spec.pp_schedule}")
@@ -450,12 +521,16 @@ def describe(
     Mirrors ``PiperShape.describe``: the declared fields, then the values a
     reader would otherwise have to re-derive with this module in hand.
 
-    ``dp_replicate`` and ``dp_shard`` are **TorchTitan's** resolved mesh, and
-    the names say so. Megatron is told neither; it gets a DP group size, and
-    at ``ep > 1`` an ``expert_model_parallel_size`` that subdivides it. They
-    are recorded anyway because the shard degree is the value a TorchTitan
-    run must be given explicitly -- see ``titan_mesh`` -- so a manifest that
-    omitted it could not distinguish replication from ZeRO-3 after the fact.
+    ``dense_sharding`` is the declared parity, and ``dp_replicate`` and
+    ``dp_shard`` are the **TorchTitan** mesh that parity resolves to. The
+    names say whose the mesh is. Megatron is told neither; it gets a DP group
+    size, and at ``ep > 1`` an ``expert_model_parallel_size`` that subdivides
+    it. They are recorded anyway because the shard degree is the value a
+    TorchTitan run must be given explicitly -- see ``titan_mesh`` -- so a
+    manifest that omitted it could not distinguish replication from ZeRO-3
+    after the fact. Both sides are recorded because neither derives the
+    other for a reader without this module: the parity is what the operator
+    asked for and the mesh is what one engine built from it.
 
     ``n_microbatches`` is arithmetic over two fields in the same record, and
     what it describes at ``pp == 1`` depends on the engine. Read it beside
@@ -488,6 +563,7 @@ def describe(
         "ep": spec.ep,
         "pp_schedule": spec.pp_schedule,
         "pp_microbatch_size": spec.pp_microbatch_size,
+        "dense_sharding": spec.dense_sharding,
         "world_size": spec.world_size,
         "dp_replicate": replicate,
         "dp_shard": shard,

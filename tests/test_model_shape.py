@@ -1123,7 +1123,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 11)
+        self.assertEqual(manifest["schema_version"], 12)
         self.assertEqual(manifest["model_size"], "huge")
         self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=1024))
         # Rule 7's structural matcher cannot identify a 1-layer block graph,

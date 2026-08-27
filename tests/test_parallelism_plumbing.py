@@ -1,7 +1,7 @@
 """The parallelism axis threaded through the harness, without leaving one GPU.
 
 ``tests/test_parallelism.py`` covers the axis itself -- the degrees, the
-schedules and the fourteen validator rules. This module covers the path the
+schedules and the fifteen validator rules. This module covers the path the
 value takes: the ``<gpu>`` positional read as a device set, the five CLI
 options, ``RunRequest``, ``_resolve_run``, the child environment, the
 provenance query, the NUMA walk, and manifest schema 10.
@@ -417,8 +417,8 @@ class ManifestSchemaTenTests(unittest.TestCase):
         )
 
     def test_the_schema_is_eleven(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 11)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 11)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 12)
+        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 12)
 
     def test_the_trivial_spec_round_trips_through_json(self) -> None:
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
@@ -436,6 +436,30 @@ class ManifestSchemaTenTests(unittest.TestCase):
         )
         self.assertEqual(recorded["parallelism"]["world_size"], 2)
         self.assertEqual(recorded["parallelism"]["n_microbatches"], 2)
+
+    def test_the_default_parity_is_recorded_rather_than_left_out(self) -> None:
+        """A key that appears only under ``shard`` would make a replicated
+        run and a schema-11 run look the same, and one of the two states a
+        fact the other cannot state."""
+        recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
+        self.assertEqual(
+            recorded["parallelism"]["dense_sharding"], "replicate"
+        )
+
+    def test_a_sharded_spec_round_trips_through_json(self) -> None:
+        """Both halves reach the file: the parity the operator asked for,
+        and the TorchTitan mesh it resolves to."""
+        spec = ParallelismSpec(dp=2, dense_sharding="shard")
+        recorded = json.loads(json.dumps(self._manifest(spec)))
+        self.assertEqual(
+            recorded["parallelism"], describe(spec, local_batch_size=4)
+        )
+        self.assertEqual(recorded["parallelism"]["dense_sharding"], "shard")
+        self.assertEqual(recorded["parallelism"]["dp_replicate"], 1)
+        self.assertEqual(recorded["parallelism"]["dp_shard"], 2)
+        self.assertEqual(
+            recorded["execution_model"], "2-gpu-plain-bf16-dp2-shard"
+        )
 
     def test_an_omitted_parallelism_is_a_type_error(self) -> None:
         """A defaulted value would record dp 1 x pp 1 for any mesh."""
@@ -650,6 +674,36 @@ class ResumeParallelismTests(unittest.TestCase):
         self.assertIn(
             "parallelism", self._mismatches(self._manifest(recorded), requested)
         )
+
+    def test_the_dense_sharding_value_alone_refuses_a_resume(self) -> None:
+        """It is a comparability boundary: the two parities hold different
+        amounts of optimizer state per rank and exchange different tensors.
+        ``_resume_mismatches`` compares the whole record, so the key is gated
+        the moment ``describe`` records it.
+        """
+        recorded = ParallelismSpec(dp=2)
+        requested = ParallelismSpec(dp=2, dense_sharding="shard")
+        self.assertIn(
+            "parallelism", self._mismatches(self._manifest(recorded), requested)
+        )
+        self.assertIn(
+            "parallelism", self._mismatches(self._manifest(requested), recorded)
+        )
+
+    def test_a_schema_eleven_block_cannot_claim_the_default_parity(self) -> None:
+        """A schema-11 ``parallelism`` block predates the key.
+
+        Reading its absence as ``replicate`` would be an inference. Every
+        such run really was replicated, but the block cannot say so, and the
+        safe direction is to refuse the resume rather than to record a parity
+        the file never carried. (A resume across this commit is refused by
+        ``benchmarks_git_rev`` anyway; this pins which way the record itself
+        reads.)
+        """
+        manifest = self._manifest(TRIVIAL_SPEC)
+        manifest["schema_version"] = 11
+        del manifest["parallelism"]["dense_sharding"]
+        self.assertIn("parallelism", self._mismatches(manifest, TRIVIAL_SPEC))
 
 
 class ResolveRunTests(unittest.TestCase):

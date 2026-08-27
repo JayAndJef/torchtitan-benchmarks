@@ -17,6 +17,16 @@ reader from writer would divide the same invariant the other way -- a schema
 bump has to move both together, and neither half is meaningful alone. Schema
 10 added ``parallelism`` the same way, in one commit and to both halves.
 
+Schema 12 is the same move one level down. The ``parallelism`` block gained
+a ``dense_sharding`` key, which says whether the run holds the dense
+parameters replicated or sharded. Nothing here had to gate it, because
+``_resume_mismatches`` compares the whole ``parallelism`` block rather than
+its keys one by one. **The bump is still required.** A schema-11 block
+carries no such key, so a reader that assumed one would read the absence as
+``replicate`` -- true of every run written so far, and an inference rather
+than a record. The version number is what separates "this run replicated the
+dense parameters" from "this file predates the question".
+
 What *is* split out is everything engine-neutral: output layout and the
 atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
 sample summarization is ``summaries.py``. This module is exactly the part
@@ -91,7 +101,7 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 11
+MANIFEST_SCHEMA_VERSION = 12
 
 # What the ``tps`` figure in every step log line, and therefore
 # ``stable_tokens_per_second`` in ``results.json``, counts.
