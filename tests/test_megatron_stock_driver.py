@@ -1905,6 +1905,23 @@ class DataParallelMarkerTest(unittest.TestCase):
             raise unittest.SkipTest(f"megatron is not importable: {error}")
         return inspect.getsource(megatron_fsdp.MegatronFSDP.__init__)
 
+    def adapter_constructor_source(self):
+        """``FullyShardedDataParallelV1.__init__``'s own source, or a skip.
+
+        The middle link of the chain below. Megatron's training loop hands
+        its ``ddp_config`` to THIS constructor, which then hands it on.
+        """
+        import inspect
+
+        try:
+            bootstrap.prepare()
+            from megatron.core.distributed.fsdp import mcore_fsdp_adapter
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        return inspect.getsource(
+            mcore_fsdp_adapter.FullyShardedDataParallelV1.__init__
+        )
+
     def test_megatron_fsdp_turns_the_grad_overlap_on_in_place(self) -> None:
         """The fact ``DATA_PARALLEL_OVERLAP`` states, read off Megatron.
 
@@ -1917,13 +1934,36 @@ class DataParallelMarkerTest(unittest.TestCase):
         self.assertIn(
             "self.ddp_config.overlap_grad_reduce = True", source
         )
-        # The wrapper keeps the reference it was given. A copy here would
-        # leave the argument's False on the object the shim reads.
-        #
-        # The trailing newline is the point. Without it the match also
-        # accepts ``= ddp_config.copy()``, which is exactly the edit that
-        # would break the marker while the assertion stayed green.
+        # Every trailing newline below is the point. Without it the match
+        # also accepts ``= ddp_config.copy()``, which is exactly the edit
+        # that would break the marker while the assertion stayed green.
         self.assertIn("self.ddp_config = ddp_config\n", source)
+
+    def test_the_mutated_config_reaches_the_object_the_shim_reads(
+        self,
+    ) -> None:
+        """**Three links carry the mutation, and the test above pins one.**
+
+        ``install_data_parallel_marker`` reads
+        ``FullyShardedDataParallelV1.ddp_config``. The mutation happens in
+        ``MegatronFSDP.__init__``, which is a different object. It reaches
+        the shim only because the adapter keeps the reference it was given
+        AND hands that same object on:
+
+        1. the adapter stores it -- ``self.ddp_config = ddp_config``;
+        2. the adapter forwards it -- ``ddp_config=ddp_config`` into
+           ``MegatronFSDP``;
+        3. ``MegatronFSDP`` stores it, then mutates it. The test above
+           pins link 3.
+
+        A submodule bump that copied at link 1 or link 2 leaves that test
+        green, leaves ``DATA_PARALLEL_OVERLAP`` saying True, and fails arm
+        rule 12 hours into the first sharded eight-GPU cell. This pins the
+        other two.
+        """
+        source = self.adapter_constructor_source()
+        self.assertIn("self.ddp_config = ddp_config\n", source)
+        self.assertIn("ddp_config=ddp_config,\n", source)
 
     def test_the_overlap_table_reads_megatrons_own_guard(self) -> None:
         """The table is derived, and this pins what it derives from.
