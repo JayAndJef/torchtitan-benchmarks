@@ -932,20 +932,29 @@ def validate_parallelism(
     #     under a message about sharding, which is not what the operator
     #     asked for. The explicit half also keeps the hole shut if rule 14
     #     ever narrows.
+    #
+    #     **Both messages name the repair, as rule 14's does.** ``engines``
+    #     is the launcher set of the arms the run will really start, and
+    #     ``run --arm NAME`` narrows it. So an ``--arm`` subset that selects
+    #     the TorchTitan arms alone measures this mesh, and the operator
+    #     reads that in one hop rather than being sent to a flag that is a
+    #     dead end for this roster.
     refused = engines & REPLICATE_ONLY_LAUNCHERS
     if refused and spec.ep > 1:
         raise ValueError(
             f"expert degree {spec.ep} is not implemented by the "
             f"{', '.join(sorted(refused))} driver, which this run holds. "
-            "That driver passes no expert size to initialize_model_parallel, "
-            "so the run would train every expert on every rank and the "
-            "manifest would record a split it did not have"
+            "That driver passes no expert size to initialize_model_parallel. "
+            "The run would train every expert on every rank, and the "
+            "manifest would record a split it did not have. Select the "
+            "TorchTitan arms alone with --arm to measure this mesh"
         )
     if refused and spec.dense_sharding == "shard":
         raise ValueError(
             "--dense-sharding shard is not implemented by the "
             f"{', '.join(sorted(refused))} driver, which this run holds. "
-            "That driver builds a plain replicated DistributedDataParallel, "
-            "so the run would replicate the dense parameters and the "
-            "manifest would record a sharded parity"
+            "That driver builds a plain replicated DistributedDataParallel. "
+            "The run would replicate the dense parameters, and the manifest "
+            "would record a sharded parity. Select the TorchTitan arms alone "
+            "with --arm to measure this parity"
         )

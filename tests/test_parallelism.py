@@ -1417,13 +1417,23 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         self.assertNotIn("torchtitan", REPLICATE_ONLY_LAUNCHERS)
 
     def test_every_registry_launcher_is_classified(self):
-        """A launcher this set does not name is one this rule admits. That
-        has to be a decision somebody took, not an omission."""
-        declared = MEGATRON_LAUNCHERS | {"torchtitan"}
-        for scenario in SCENARIOS.values():
-            for arm in scenario.arms:
-                with self.subTest(scenario=scenario.name, arm=arm.name):
-                    self.assertIn(arm.launcher, declared)
+        """A launcher this set does not name is one this rule admits, so an
+        unclassified launcher has to fail rather than pass quietly.
+
+        Two assertions, and the second is the one that reads the set. Every
+        registry launcher must appear in the classification roster, so a new
+        launcher edits this test and its author then has to decide whether it
+        belongs in ``REPLICATE_ONLY_LAUNCHERS``. And the set itself must name
+        only launchers the registry still runs, so a retired name cannot sit
+        there refusing nothing.
+        """
+        launchers = {
+            arm.launcher
+            for scenario in SCENARIOS.values()
+            for arm in scenario.arms
+        }
+        self.assertEqual(launchers - (MEGATRON_LAUNCHERS | {"torchtitan"}), set())
+        self.assertEqual(REPLICATE_ONLY_LAUNCHERS - launchers, set())
 
     def test_the_tuned_arm_refuses_an_expert_degree(self):
         with self.assertRaisesRegex(
@@ -1464,7 +1474,25 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
             engines=self.STOCK,
         )
 
-    def test_a_titan_only_roster_takes_both(self):
+    def test_both_messages_name_the_repair(self):
+        """Rule 14's own comment sets the standard: the refusal names the
+        flag that repairs it. A message that named only the cause would send
+        the operator to read this module."""
+        for spec in (
+            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, dense_sharding="shard"),
+        ):
+            with self.subTest(spec=spec):
+                with self.assertRaises(ValueError) as raised:
+                    check(spec, engines=self.TUNED)
+                self.assertIn("--arm", str(raised.exception))
+
+    def test_the_repair_the_messages_name_really_works(self):
+        """``engines`` is the launcher set of the arms the run will really
+        start (``benchmarks/e2e/runner.py``), and ``run --arm NAME`` narrows
+        it. So selecting the TorchTitan arms alone is a run this rule admits,
+        and a message naming a repair that failed would be worse than a
+        message naming none."""
         check(ParallelismSpec(dp=2, dense_sharding="shard"))
         check(ParallelismSpec(dp=2, ep=2, dense_sharding="shard"))
 

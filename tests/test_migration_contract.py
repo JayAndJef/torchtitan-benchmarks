@@ -1947,7 +1947,9 @@ TEST_CENSUS = {
     # classified, each half refusing under its own message, the expert half
     # checked first, the stock arm and a titan-only roster keeping both, and
     # every mesh the tuned arm has already run staying legal.
-    "test_parallelism": 143,
+    # +1 that both halves of rule 16 name the repair, beside the test that
+    # the named repair really passes.
+    "test_parallelism": 144,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the five CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -2010,7 +2012,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1685
+TEST_CENSUS_TOTAL = 1686
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
