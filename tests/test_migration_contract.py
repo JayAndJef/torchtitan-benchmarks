@@ -1137,6 +1137,43 @@ class GoldenCommandTests(unittest.TestCase):
             "2",
         )
 
+    def test_a_wider_expert_argv_separates_the_two_mesh_formulations(
+        self,
+    ) -> None:
+        """**The golden above cannot pin what this one pins.**
+
+        At ``dp 2, ep 2`` the retired ``(dp // ep, ep)`` mesh and the current
+        ``(1, dp)`` mesh both give ``(1, 2)``, so that argv would be
+        unchanged if the mesh went back. ``dp 4, ep 2`` separates them:
+        ``(1, 4)`` here against ``(2, 2)`` there. ``(1, 4)`` is the mesh
+        that pairs with Megatron-FSDP, which shards the dense parameters
+        over the whole data-parallel width and the experts over ``dp / ep``.
+        """
+        command = self._command(
+            GOLDEN_TITAN_ARM,
+            "normal",
+            "default",
+            "none",
+            ParallelismSpec(dp=4, ep=2, dense_sharding="shard"),
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.data-parallel-replicate-degree")
+                + 1
+            ],
+            "1",
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.data-parallel-shard-degree") + 1
+            ],
+            "4",
+        )
+        self.assertEqual(
+            command[command.index("--parallelism.expert-parallel-degree") + 1],
+            "2",
+        )
+
     def test_a_parallelism_flag_cannot_be_passed_through(self) -> None:
         """tyro is last-wins, so the passthrough would beat the built block.
 

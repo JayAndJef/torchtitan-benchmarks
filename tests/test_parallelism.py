@@ -20,6 +20,7 @@ import dataclasses
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -513,10 +514,14 @@ class ExecutionModelTest(unittest.TestCase):
         appear. ``dense_sharding`` is a declared parity that BOTH engines
         honor, so ``dp2-shard`` is true of a TorchTitan arm and of a Megatron
         arm alike, and the word alone is no longer the thing to refuse. What
-        must stay out is the resolved pair -- ``replicate2``, ``shard1`` --
-        which is one engine's mesh and is false for the other's arm. The test
-        therefore reads ``titan_mesh`` and refuses its own two numbers, which
-        is a stronger check than the word list it replaces.
+        must stay out is a resolved mesh DEGREE -- ``replicate2``,
+        ``shard1`` -- which is one engine's and is false for the other's arm.
+
+        The pattern refuses either word followed by a digit, rather than the
+        two numbers ``titan_mesh`` returns for this spec. Refusing only the
+        correct numbers would admit a wrong mesh spelling: at ``dp 2`` under
+        ``shard`` the mesh is ``(1, 2)``, so a string reading ``dp2-shard1``
+        would carry ``shard1`` past a check that forbade only ``shard2``.
         """
         for spec in (
             ParallelismSpec(dp=2),
@@ -528,14 +533,12 @@ class ExecutionModelTest(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 rendered = execution_model(spec)
-                replicate, shard = titan_mesh(spec)
-                for engine_term in (
-                    "fsdp2",
-                    "ddp",
-                    f"replicate{replicate}",
-                    f"shard{shard}",
-                ):
+                for engine_term in ("fsdp2", "ddp"):
                     self.assertNotIn(engine_term, rendered)
+                self.assertIsNone(
+                    re.search(r"(replicate|shard)\d", rendered),
+                    f"{rendered} spells out a resolved mesh degree",
+                )
                 self.assertIn(f"dp{spec.dp}", rendered)
 
     def test_every_spec_gives_a_distinct_string(self):

@@ -340,8 +340,8 @@ PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 # step. Every number this repo has published was measured under
 # ``replicate``, which is why that is the default.
 #
-# **It is also what makes an expert degree legal, and the reason is a
-# TorchTitan constraint rather than a preference.** TorchTitan cannot split
+# **It is also what makes an expert degree legal.** The reason is a
+# TorchTitan constraint rather than a preference. TorchTitan cannot split
 # the experts while it keeps the dense parameters replicated:
 # ``apply_fsdp_to_decoder`` sends every non-expert parameter to ``Shard(0)``
 # on the dense mesh, and the expert mesh degree

@@ -1,10 +1,10 @@
 """The parallelism axis threaded through the harness, without leaving one GPU.
 
 ``tests/test_parallelism.py`` covers the axis itself -- the degrees, the
-schedules and the fifteen validator rules. This module covers the path the
-value takes: the ``<gpu>`` positional read as a device set, the five CLI
+schedules and the sixteen validator rules. This module covers the path the
+value takes: the ``<gpu>`` positional read as a device set, the six CLI
 options, ``RunRequest``, ``_resolve_run``, the child environment, the
-provenance query, the NUMA walk, and manifest schema 10.
+provenance query, the NUMA walk, and manifest schema 12.
 
 **The properties under test are mostly negative.** At the trivial spec every
 recorded fact and every environment variable has to be the one this repo has
@@ -218,7 +218,16 @@ class RequestTests(unittest.TestCase):
     def test_the_dense_sharding_option_refuses_an_undeclared_value(
         self,
     ) -> None:
-        """Click refuses it, so a garbage string never reaches the spec."""
+        """**Click refuses it, and the exit code is what says so.**
+
+        A nonzero exit proves nothing here: a legal ``--dense-sharding
+        shard`` also exits nonzero, because the run then starts and fails on
+        this host for its own reasons. Click's usage error is exit 2, and
+        it names the roster. Without the ``click.Choice`` the string would
+        reach ``ParallelismSpec.__post_init__``, raise, and exit 1 -- a
+        refusal in the right direction under the wrong code, which this
+        assertion separates.
+        """
         result = CliRunner().invoke(
             cli,
             [
@@ -232,9 +241,10 @@ class RequestTests(unittest.TestCase):
                 "zero3",
             ],
         )
-        self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("'replicate', 'shard'", result.output)
 
-    def test_the_five_options_build_one_spec(self) -> None:
+    def test_the_pipeline_options_build_one_spec(self) -> None:
         request = self._request(
             "0,1",
             "--scenario",
@@ -462,7 +472,7 @@ class AffinityDeviceTests(unittest.TestCase):
         )
 
 
-class ManifestSchemaTenTests(unittest.TestCase):
+class ManifestSchemaTwelveTests(unittest.TestCase):
     def _manifest(self, parallelism: ParallelismSpec) -> dict:
         scenario = scenario_by_name("piper1b_rope")
         return manifest_data(
@@ -478,7 +488,7 @@ class ManifestSchemaTenTests(unittest.TestCase):
             parallelism=parallelism,
         )
 
-    def test_the_schema_is_eleven(self) -> None:
+    def test_the_schema_is_twelve(self) -> None:
         self.assertEqual(MANIFEST_SCHEMA_VERSION, 12)
         self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 12)
 
@@ -752,18 +762,24 @@ class ResumeParallelismTests(unittest.TestCase):
             "parallelism", self._mismatches(self._manifest(requested), recorded)
         )
 
-    def test_a_schema_eleven_block_cannot_claim_the_default_parity(self) -> None:
+    def test_a_block_without_the_key_cannot_claim_the_default_parity(
+        self,
+    ) -> None:
         """A schema-11 ``parallelism`` block predates the key.
 
         Reading its absence as ``replicate`` would be an inference. Every
         such run really was replicated, but the block cannot say so, and the
         safe direction is to refuse the resume rather than to record a parity
-        the file never carried. (A resume across this commit is refused by
+        the file never carried.
+
+        **The comparison reads no ``schema_version``.** ``_resume_mismatches``
+        compares the whole ``parallelism`` block, so the missing key alone is
+        what refuses this. Setting a version here would suggest a gate that
+        does not exist. (A resume across this commit is refused by
         ``benchmarks_git_rev`` anyway; this pins which way the record itself
         reads.)
         """
         manifest = self._manifest(TRIVIAL_SPEC)
-        manifest["schema_version"] = 11
         del manifest["parallelism"]["dense_sharding"]
         self.assertIn("parallelism", self._mismatches(manifest, TRIVIAL_SPEC))
 

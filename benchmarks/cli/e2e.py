@@ -95,11 +95,11 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     flag they did not pass. ``COMPILE_MODE``, ``AC_MODE`` and ``MODEL_SIZE``
     have no such partner and stay exported.
 
-    ``--dense-sharding`` joins them for the same reason, one step removed:
-    it is legal only above ``dp`` 1, so it too has to agree with the ``<gpu>``
-    positional. An exported ``DENSE_SHARDING=shard`` would make a plain
-    ``run 0 --scenario X`` fail spec rule 15 and name a flag the operator
-    never passed.
+    ``--dense-sharding`` joins them for the same reason, one step removed.
+    Its ``shard`` value is legal only above ``dp`` 1, so that value has to
+    agree with the ``<gpu>`` positional too. An exported
+    ``DENSE_SHARDING=shard`` would make a plain ``run 0 --scenario X`` fail
+    spec rule 15. The refusal would name a flag the operator never passed.
 
     Each of the six defaults to ``None``, meaning "not requested", exactly
     as ``--model-size`` does: ``_request`` builds a ``ParallelismSpec`` only
@@ -231,9 +231,9 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.Choice(DENSE_SHARDING_MODES),
             help=(
                 "How the run holds the dense parameters [default: "
-                f"{DEFAULT_DENSE_SHARDING}]. shard needs --dp above 1, and "
-                "an expert degree needs shard. Results are only comparable "
-                "within one value."
+                f"{DEFAULT_DENSE_SHARDING}]. The shard value needs --dp "
+                "above 1. An expert degree needs the shard value. Results "
+                "are only comparable within one value."
             ),
         ),
     ]
@@ -246,8 +246,12 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
 # the spec's own default for each. ``_parallelism`` pops all six, so a
 # renamed option here is a renamed keyword there and nowhere else.
 #
-# Each default is read from the module that owns it rather than written out,
-# so the CLI cannot disagree with the spec about what "not requested" means.
+# **Five of the six defaults are written out a second time here.** The spec
+# owns them, and a copy can drift. ``dense_sharding`` reads
+# ``DEFAULT_DENSE_SHARDING`` instead, because that default is the one
+# ``benchmarks/e2e/parallelism.py`` names as a reversal point. A test
+# compares every row against ``ParallelismSpec()``, so a drift fails rather
+# than building a spec the operator did not ask for.
 _PARALLELISM_OPTIONS = (
     ("dp", 1),
     ("pp", 1),
@@ -263,7 +267,7 @@ def _parallelism(options: dict[str, Any]) -> ParallelismSpec | None:
 
     Returns ``None`` when the operator gave none of them, which is what
     ``RunRequest.parallelism`` reads as "not requested". A spec built from
-    all five defaults would be the same object, but ``None`` is what lets a
+    all six defaults would be the same object, but ``None`` is what lets a
     later reader tell an untouched command line from one that asked for the
     trivial spec by name.
     """
