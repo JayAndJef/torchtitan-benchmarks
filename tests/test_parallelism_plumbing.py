@@ -31,7 +31,11 @@ from benchmarks.artifacts.manifests import (
     _resume_mismatches,
     manifest_data,
 )
-from benchmarks.cli.e2e import _execution_options, run_command
+from benchmarks.cli.e2e import (
+    _PARALLELISM_OPTIONS,
+    _execution_options,
+    run_command,
+)
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import (
     ParallelismSpec,
@@ -101,7 +105,8 @@ class KernelBenchDeviceTests(unittest.TestCase):
 
 
 class ExecutionOptionTests(unittest.TestCase):
-    """The five new options, and the one thing they deliberately lack."""
+    """The six parallelism options, and the one thing they deliberately
+    lack."""
 
     PARALLELISM_OPTIONS = (
         "--dp",
@@ -109,6 +114,7 @@ class ExecutionOptionTests(unittest.TestCase):
         "--ep",
         "--pp-schedule",
         "--pp-microbatch-size",
+        "--dense-sharding",
     )
 
     def _parameters(self) -> dict:
@@ -118,13 +124,35 @@ class ExecutionOptionTests(unittest.TestCase):
             for option in parameter.opts
         }
 
-    def test_all_five_options_exist_on_both_execution_commands(self) -> None:
+    def test_all_six_options_exist_on_both_execution_commands(self) -> None:
         parameters = self._parameters()
         for option in self.PARALLELISM_OPTIONS:
             with self.subTest(option=option):
                 self.assertIn(option, parameters)
 
-    def test_none_of_the_five_takes_an_environment_variable(self) -> None:
+    def test_the_option_roster_is_the_one_the_spec_is_built_from(self) -> None:
+        """``_parallelism`` pops exactly these six keywords, so an option
+        added here and not there would be dropped, and one added there and
+        not here would build a spec from a value no flag can set."""
+        self.assertEqual(
+            tuple(name for name, _ in _PARALLELISM_OPTIONS),
+            ("dp", "pp", "ep", "pp_schedule", "pp_microbatch_size",
+             "dense_sharding"),
+        )
+        self.assertEqual(
+            len(_PARALLELISM_OPTIONS), len(self.PARALLELISM_OPTIONS)
+        )
+
+    def test_the_recorded_defaults_are_the_specs_own(self) -> None:
+        """A default written out twice can drift, and the drift would build
+        a spec the operator did not ask for."""
+        defaults = dict(_PARALLELISM_OPTIONS)
+        trivial = ParallelismSpec()
+        for name, default in defaults.items():
+            with self.subTest(option=name):
+                self.assertEqual(getattr(trivial, name), default)
+
+    def test_none_of_the_six_takes_an_environment_variable(self) -> None:
         """Each value must agree with the ``<gpu>`` positional.
 
         A positional has no environment form, so an exported ``PP=2`` would
@@ -171,6 +199,40 @@ class RequestTests(unittest.TestCase):
                 request = self._request(value, "--scenario", "piper1b_rope")
                 self.assertEqual(request.gpu, value)
                 self.assertIsInstance(request.gpu, str)
+
+    def test_the_dense_sharding_option_reaches_the_spec(self) -> None:
+        request = self._request(
+            "0,1",
+            "--scenario",
+            "piper1b_rope",
+            "--dp",
+            "2",
+            "--dense-sharding",
+            "shard",
+        )
+        self.assertEqual(
+            request.parallelism,
+            ParallelismSpec(dp=2, dense_sharding="shard"),
+        )
+
+    def test_the_dense_sharding_option_refuses_an_undeclared_value(
+        self,
+    ) -> None:
+        """Click refuses it, so a garbage string never reaches the spec."""
+        result = CliRunner().invoke(
+            cli,
+            [
+                "run",
+                "0,1",
+                "--scenario",
+                "piper1b_rope",
+                "--dp",
+                "2",
+                "--dense-sharding",
+                "zero3",
+            ],
+        )
+        self.assertNotEqual(result.exit_code, 0)
 
     def test_the_five_options_build_one_spec(self) -> None:
         request = self._request(

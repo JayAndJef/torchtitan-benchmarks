@@ -57,7 +57,12 @@ import click
 from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
-from benchmarks.e2e.parallelism import PP_SCHEDULE_CHOICES, ParallelismSpec
+from benchmarks.e2e.parallelism import (
+    DEFAULT_DENSE_SHARDING,
+    DENSE_SHARDING_MODES,
+    PP_SCHEDULE_CHOICES,
+    ParallelismSpec,
+)
 from benchmarks.e2e.registry import (
     AC_MODES,
     COMPILE_MODES,
@@ -79,7 +84,7 @@ PASSTHROUGH_CONTEXT = {
 def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     """The option block ``run`` and ``run-all`` share.
 
-    **The five parallelism options take no environment variable, and the
+    **The six parallelism options take no environment variable, and the
     three older axes do.** The asymmetry is deliberate and the reason is
     specific: each parallelism value has to agree with the ``<gpu>``
     positional, which names the device set, and a positional has no
@@ -90,7 +95,13 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     flag they did not pass. ``COMPILE_MODE``, ``AC_MODE`` and ``MODEL_SIZE``
     have no such partner and stay exported.
 
-    Each of the five defaults to ``None``, meaning "not requested", exactly
+    ``--dense-sharding`` joins them for the same reason, one step removed:
+    it is legal only above ``dp`` 1, so it too has to agree with the ``<gpu>``
+    positional. An exported ``DENSE_SHARDING=shard`` would make a plain
+    ``run 0 --scenario X`` fail spec rule 15 and name a flag the operator
+    never passed.
+
+    Each of the six defaults to ``None``, meaning "not requested", exactly
     as ``--model-size`` does: ``_request`` builds a ``ParallelismSpec`` only
     when at least one was given, so an untouched command line reaches
     ``_resolve_run`` with ``parallelism=None`` and resolves to the trivial
@@ -170,7 +181,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "comparable within one size."
             ),
         ),
-        # The five parallelism options. No envvar on any of them; the
+        # The six parallelism options. No envvar on any of them; the
         # docstring above gives the reason.
         click.option(
             "--dp",
@@ -214,26 +225,41 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "size must divide by it."
             ),
         ),
+        click.option(
+            "--dense-sharding",
+            "dense_sharding",
+            type=click.Choice(DENSE_SHARDING_MODES),
+            help=(
+                "How the run holds the dense parameters [default: "
+                f"{DEFAULT_DENSE_SHARDING}]. shard needs --dp above 1, and "
+                "an expert degree needs shard. Results are only comparable "
+                "within one value."
+            ),
+        ),
     ]
     for option in reversed(options):
         command = option(command)
     return command
 
 
-# The five option names that make up one ``ParallelismSpec``, paired with
-# the spec's own default for each. ``_parallelism`` pops all five, so a
+# The six option names that make up one ``ParallelismSpec``, paired with
+# the spec's own default for each. ``_parallelism`` pops all six, so a
 # renamed option here is a renamed keyword there and nowhere else.
+#
+# Each default is read from the module that owns it rather than written out,
+# so the CLI cannot disagree with the spec about what "not requested" means.
 _PARALLELISM_OPTIONS = (
     ("dp", 1),
     ("pp", 1),
     ("ep", 1),
     ("pp_schedule", None),
     ("pp_microbatch_size", 1),
+    ("dense_sharding", DEFAULT_DENSE_SHARDING),
 )
 
 
 def _parallelism(options: dict[str, Any]) -> ParallelismSpec | None:
-    """Pop the five parallelism options and build the spec they describe.
+    """Pop the six parallelism options and build the spec they describe.
 
     Returns ``None`` when the operator gave none of them, which is what
     ``RunRequest.parallelism`` reads as "not requested". A spec built from

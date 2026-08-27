@@ -1923,7 +1923,11 @@ TEST_CENSUS = {
     # than left out, a sharded manifest round trip at schema 12, the value
     # alone refusing a resume in both directions, and a schema-11 block that
     # may not claim the default parity.
-    "test_parallelism_plumbing": 54,
+    # +4 with the --dense-sharding option: the roster agreeing with the six
+    # keywords _parallelism pops, each recorded default read from the spec
+    # rather than written out, the option reaching the spec, and click
+    # refusing an undeclared value before it gets there.
+    "test_parallelism_plumbing": 58,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -1963,7 +1967,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1673
+TEST_CENSUS_TOTAL = 1677
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
