@@ -393,6 +393,30 @@ class TitanMeshTest(unittest.TestCase):
                     )
                     self.assertEqual(replicate * shard, dp)
 
+    def test_the_planned_sharded_cell_at_expert_degree_one(self):
+        """**The cell the suite runs, named rather than derived.**
+
+        ``dp 2 x pp 4`` with no expert split is the geometry of the
+        dense-sharding control pair. The two parities must give two meshes
+        there, and the sharded one must be pure FSDP over the whole
+        data-parallel width, because that is what Megatron-FSDP does.
+
+        ``ep`` 1 is the case to pin explicitly. Every other sharded row here
+        carries an expert degree, and an implementation that read ``ep``
+        instead of the parity would pass those rows and replicate this cell.
+        """
+        for mode, mesh in (("replicate", (2, 1)), ("shard", (1, 2))):
+            with self.subTest(dense_sharding=mode):
+                spec = ParallelismSpec(
+                    dp=2,
+                    pp=4,
+                    pp_schedule="1F1B",
+                    pp_microbatch_size=4,
+                    ep=1,
+                    dense_sharding=mode,
+                )
+                self.assertEqual(titan_mesh(spec), mesh)
+
     def test_the_pipeline_degree_does_not_reach_the_mesh(self):
         self.assertEqual(titan_mesh(ParallelismSpec(dp=2, pp=2)), (2, 1))
         self.assertEqual(

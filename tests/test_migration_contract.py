@@ -1137,6 +1137,64 @@ class GoldenCommandTests(unittest.TestCase):
             "2",
         )
 
+    def test_a_sharded_argv_moves_the_pair_without_an_expert_degree(
+        self,
+    ) -> None:
+        """**The parent-side pin the arm rule cannot give.**
+
+        Arm rule 12's titan data-parallel marker is composed by
+        ``_titan_parallelism_markers`` from the same ``titan_mesh(spec)``
+        that ``_titan_parallelism_flags`` used to build these flags, so the
+        expected marker and the delivered argv agree whatever ``titan_mesh``
+        returns. TorchTitan then honestly builds that mesh and honestly
+        prints it. The marker proves TorchTitan built what the harness asked
+        for. Only this test says the harness asked for the right thing.
+
+        The cell is ``dp 2 x pp 4`` at ``ep`` 1, which the suite runs as the
+        sharded half of its control pair. The other two sharded goldens
+        carry an expert degree, so an implementation that read ``ep`` rather
+        than the parity would pass both of them and replicate this cell.
+        """
+        for mode, replicate, shard in (
+            ("replicate", "2", "1"),
+            ("shard", "1", "2"),
+        ):
+            with self.subTest(dense_sharding=mode):
+                command = self._command(
+                    GOLDEN_TITAN_ARM,
+                    "normal",
+                    "default",
+                    "none",
+                    ParallelismSpec(
+                        dp=2,
+                        pp=4,
+                        pp_schedule="1F1B",
+                        pp_microbatch_size=4,
+                        dense_sharding=mode,
+                    ),
+                )
+                self.assertEqual(
+                    command[
+                        command.index(
+                            "--parallelism.data-parallel-replicate-degree"
+                        )
+                        + 1
+                    ],
+                    replicate,
+                )
+                self.assertEqual(
+                    command[
+                        command.index(
+                            "--parallelism.data-parallel-shard-degree"
+                        )
+                        + 1
+                    ],
+                    shard,
+                )
+                self.assertNotIn(
+                    "--parallelism.expert-parallel-degree", command
+                )
+
     def test_a_wider_expert_argv_separates_the_two_mesh_formulations(
         self,
     ) -> None:
@@ -1949,7 +2007,10 @@ TEST_CENSUS = {
     # every mesh the tuned arm has already run staying legal.
     # +1 that both halves of rule 16 name the repair, beside the test that
     # the named repair really passes.
-    "test_parallelism": 144,
+    # +1 for the planned sharded cell at expert degree 1, whose mesh an
+    # implementation that read ep rather than the parity would get wrong
+    # while every other sharded row still passed.
+    "test_parallelism": 145,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the five CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -2012,7 +2073,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1686
+TEST_CENSUS_TOTAL = 1687
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
