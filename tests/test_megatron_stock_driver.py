@@ -84,8 +84,9 @@ from benchmarks.models.piper_qwen3.shape import (  # noqa: E402
 PP4_SPEC = ParallelismSpec(
     dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4
 )
-# Cell 2 and cell 4: the same mesh, dense parameters sharded on both
-# engines. Cell 5 and cell 6 add the expert split that value makes legal.
+# The same mesh with the dense parameters sharded on both engines, and then
+# with the expert split that value makes legal. Named rather than numbered:
+# two run matrices use overlapping cell numbers for different cells.
 SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, dense_sharding="shard")
 EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
 BATCH_32 = dataclasses.replace(PIPER_1B_MEGATRON_WORKLOAD, local_batch_size=32)
@@ -112,10 +113,19 @@ def value_after(emitted, flag):
 # flags.py
 # --------------------------------------------------------------------------
 
-# Section 7 of PIPER_STOCK_MEGATRON_PLAN.md, transcribed. Every one of these
-# was checked against the pinned Megatron-LM parser: argparse knows all of
-# them, and parse_and_validate_args accepted the whole list at the trivial
-# spec and at dp 2 x pp 4, for the 1b and the 9b shape.
+# Section 7 of PIPER_STOCK_MEGATRON_PLAN.md, transcribed. See the note at
+# SHARDING_FLAGS: the expert degree and the five sharding flags supersede
+# what that section declares, so read this tuple as the replicated roster.
+#
+# **What is checked, and what is not.** Megatron's argparse knows every
+# name here, and knows the five sharding flags too. Nothing in this suite
+# calls parse_and_validate_args, which is where four asserts live that stop
+# a sharded run at parsing: CUDA_DEVICE_MAX_CONNECTIONS, the checkpoint
+# format, the optimizer, and the two moe_single_grouped_* fields. Only
+# train.py calls it, at run time. The connection-limit assert is the one
+# this repo now guards parent-side, in
+# benchmarks/execution/environment.py. The other three are unexercised
+# until an eight-rank cell runs.
 SECTION_7_FLAGS = (
     "--num-layers",
     "--hidden-size",

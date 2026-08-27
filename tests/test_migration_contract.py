@@ -2021,9 +2021,9 @@ TEST_CENSUS = {
     # while every other sharded row still passed.
     "test_parallelism": 145,
     # The axis threaded through the harness, still on one GPU. The <gpu>
-    # positional read as a device set, the five CLI options and the
+    # positional read as a device set, the six CLI options and the
     # environment variable none of them takes, the child environment, the
-    # multi-device provenance query and NUMA walk, manifest schema 10 both
+    # multi-device provenance query and NUMA walk, manifest schema 12 both
     # ways, and the two refusals _resolve_run now makes.
     # +5 that the manifest's execution_model follows the run's own mesh: the
     # trivial string unchanged, a pipelined one, agreement with the module

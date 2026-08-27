@@ -1570,9 +1570,18 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         check(ParallelismSpec(dp=2, dense_sharding="shard"))
         check(ParallelismSpec(dp=2, ep=2, dense_sharding="shard"))
 
-    def test_the_tuned_arm_keeps_every_mesh_it_already_ran(self):
-        """The rule may not reach a cell this repo has measured. Every
-        recorded megatron cell is replicated with no expert split."""
+    def test_the_tuned_arm_keeps_every_mesh_it_can_reach(self):
+        """The rule may not refuse a mesh the tuned driver already runs.
+        Every recorded megatron cell is replicated with no expert split, so
+        rule 16 has to admit all of them.
+
+        **The last row is planned, not recorded.** Every manifest under
+        ``out/`` that names the ``megatron`` launcher is ``piper1b_megatron``
+        at ``pp2``, ``dp2`` or ``dp2 x pp2``. ``DP2_PP4`` has run on
+        ``megatron_stock``, which is a different launcher and a different
+        scenario. It is swept here because rule 16 must not refuse it, not
+        because the tuned arm has measured it.
+        """
         for spec, batch, devices in (
             (TRIVIAL_SPEC, 4, 1),
             (PP2, 4, 2),

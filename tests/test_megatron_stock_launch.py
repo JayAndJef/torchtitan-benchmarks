@@ -80,13 +80,11 @@ SHARDED_MESH = ParallelismSpec(
 
 # Every mesh the argv checks below sweep, with the batch each needs.
 #
-# ``MESH`` needs the lifted caps: ``MAX_WORLD_SIZE`` is 4 and ``MAX_PP`` is 2
-# until the parallelism agent's commit merges, so ``validate_parallelism``
-# refuses it today. ``command_for_arm`` calls no validator, so the argv is
-# still buildable and still worth freezing -- it is the mesh all four cells
-# of the run matrix use. The three meshes above it are the ones a run can
-# reach at this rev, and they are swept so the checks are not all taken on a
-# spec nothing can start yet.
+# ``MESH`` needs the lifted caps, and it has them: ``MAX_WORLD_SIZE`` and
+# ``MAX_PP`` are both 8, and ``tests/test_parallelism.py`` validates this
+# exact mesh. ``command_for_arm`` calls no validator either way, so the argv
+# is buildable whatever the caps say -- which is why the sweep freezes the
+# three smaller meshes beside it rather than resting on one spec.
 SPECS = (
     ("trivial", TRIVIAL_SPEC, None),
     ("dp2", ParallelismSpec(dp=2), None),
@@ -1165,12 +1163,22 @@ class StockMarkerContractTests(unittest.TestCase):
         """The other half of the same diff, above ``dp`` 1.
 
         The driver formats this line with the wrapper's own
-        ``ddp_config``. The two values below are what Megatron resolves
-        under this flag list: ``--overlap-grad-reduce`` is ``store_true``
-        and the flag list omits it, and ``--bf16`` with the default
-        ``--main-grads-dtype fp32`` sets
+        ``ddp_config``, so every value in it is resolved rather than
+        declared.
+
+        ``grad_reduce_in_fp32`` is True under both parities: ``--bf16``
+        with the default ``--main-grads-dtype fp32`` sets
         ``accumulate_allreduce_grads_in_fp32``, which
-        ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``.
+        ``get_megatron_ddp_config`` copies in.
+
+        **``overlap_grad_reduce`` MOVES with the parity, and the argv is not
+        why.** The flag list omits ``--overlap-grad-reduce`` under both
+        values, so reading the argument would give False under both.
+        ``MegatronFSDP.__init__`` then sets it True on the config object it
+        was handed -- the reference, not a copy -- whenever the sharding
+        strategy is one Megatron overlaps. ``DATA_PARALLEL_OVERLAP`` derives
+        the expected value from that guard's own strategy list rather than
+        from the flag list.
         """
         from benchmarks.e2e.megatron_stock import train
 
