@@ -67,12 +67,12 @@ supported. Adding one means adding it to ``world_size``, to
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` outright, and
 rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
-measurement: only ``1F1B`` is targeted, and only up to ``pp 4``. Real
-``pp2``, ``dp2``, and ``dp2 x pp2`` correctness runs have passed on both
-engines. **No run has used ``pp 4``, and no run has used world size 8.** The
-caps admit both; that is a declaration and not evidence. No parallel timing
-is citable, because the cells that ran were on a loaded host and nobody
-repeated them on an idle one.
+measurement: only ``1F1B`` is targeted, and the caps admit up to ``pp 8``.
+Real ``pp2``, ``dp2``, and ``dp2 x pp2`` correctness runs have passed on both
+engines. **No run has used ``pp 4`` or ``pp 8``, and no run has used world
+size 8.** The caps admit all three; that is a declaration and not evidence.
+No parallel timing is citable, because the cells that ran were on a loaded
+host and nobody repeated them on an idle one.
 """
 
 from __future__ import annotations
@@ -92,10 +92,10 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # The GPU budget for this pass, and the pipeline depth it targets. Named so
 # that lifting either is one edit here rather than a hunt through the rules.
 #
-# The budget is 8 because this host holds 8 devices. The depth is 4 because
-# the stock-Megatron suite runs ``--dp 2 --pp 4`` on those 8 devices. Neither
-# number is a property of an engine. Both are a declaration of what somebody
-# plans to run.
+# The budget is 8 because this host holds 8 devices. The depth is 8 because
+# one pipeline of eight stages is the deepest split those 8 devices hold, and
+# the suite runs that cell. Neither number is a property of an engine. Both
+# are a declaration of what somebody plans to run.
 #
 # **An earlier revision capped pp at 2 and gave a false reason.** It said the
 # two engines count layers the same way only at pp <= 2. They agree at every
@@ -121,12 +121,21 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # disagreement is TorchTitan's uneven split under its own default, and the
 # harness removes it at every degree.
 #
-# Eight stages are reachable at pp 4, and four at pp 2, because **four of
-# the five registered schedules ask for two stages per rank**:
-# ``Interleaved1F1B``, ``InterleavedZeroBubble``, ``ZBVZeroBubble`` and
-# ``DualPipeV``. Rule 7 reads ``pp * stages_per_rank`` for that reason. An
-# earlier revision of this comment said "either interleaved schedule", which
-# names two of the four.
+# Sixteen stages are reachable at pp 8, eight at pp 4 and four at pp 2,
+# because **four of the five registered schedules ask for two stages per
+# rank**: ``Interleaved1F1B``, ``InterleavedZeroBubble``, ``ZBVZeroBubble``
+# and ``DualPipeV``. Rule 7 reads ``pp * stages_per_rank`` for that reason.
+# An earlier revision of this comment said "either interleaved schedule",
+# which names two of the four.
+#
+# **The two caps are now equal, and that makes rule 2's order load-bearing.**
+# The world size is ``dp * pp``, which is never below ``pp``, so every spec
+# above the pipeline cap is also above the world-size cap. The pipeline half
+# therefore runs FIRST, and both halves still refuse every spec they refused
+# before. The pipeline message names the cap somebody has to lift, which is
+# what a reader of a ``pp 9`` refusal needs. Do not delete the pipeline half
+# to reach the same verdict: that removes the specific message rather than
+# choosing between two true ones.
 #
 # **The cap lift widens one recorded gap, and this comment records the
 # widening.** ``benchmarks/e2e/results.py``'s ``loss_visible_rank`` returns
@@ -142,12 +151,14 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # not close it: both V-shaped schedules set ``requires_uncompiled``, so such
 # a run also has to ask for ``--compile-mode none``.
 #
-# The gap already existed at ``dp 1`` and ``dp 2`` with ``pp 2``. The lift
-# adds six ``(dp, pp)`` pairs: (1, 3), (1, 4), (2, 3), (2, 4), (3, 2) and
-# (4, 2). No run has ever used a V-shaped schedule. Read this before you run
-# one, and repair ``loss_visible_rank`` rather than the cap.
+# The gap already existed at ``dp 1`` and ``dp 2`` with ``pp 2``. The lift to
+# world size 8 and pp 4 added six ``(dp, pp)`` pairs: (1, 3), (1, 4), (2, 3),
+# (2, 4), (3, 2) and (4, 2). The lift to pp 8 adds four more, all of them at
+# ``dp`` 1: (1, 5), (1, 6), (1, 7) and (1, 8). No run has ever used a
+# V-shaped schedule. Read this before you run one, and repair
+# ``loss_visible_rank`` rather than the cap.
 MAX_WORLD_SIZE = 8
-MAX_PP = 4
+MAX_PP = 8
 
 
 # The ``Arm.launcher`` values that drive Megatron-LM. Rule 5 reads this set,
@@ -636,17 +647,26 @@ def validate_parallelism(
             "multiplies the world size"
         )
 
-    # 2. The budget for this pass.
-    if spec.world_size > MAX_WORLD_SIZE:
-        raise ValueError(
-            f"parallelism world size {spec.world_size} exceeds the "
-            f"{MAX_WORLD_SIZE}-GPU budget"
-        )
+    # 2. The budget for this pass, in two halves.
+    #
+    #    **The pipeline half runs first, and the order is load-bearing.**
+    #    The world size is ``dp * pp`` and is never below ``pp``, so every
+    #    spec above MAX_PP is also above MAX_WORLD_SIZE now that the two
+    #    caps are equal. Testing the world size first would make the
+    #    pipeline half unreachable and every deep-pipeline refusal would
+    #    name the GPU budget instead of the cap somebody has to lift.
+    #    Both halves refuse every spec they refused before; this only
+    #    chooses the more specific of two true messages.
     if spec.pp > MAX_PP:
         raise ValueError(
             f"pipeline degree {spec.pp} exceeds the supported maximum "
             f"{MAX_PP}; no run plans a deeper pipeline, and nobody has "
             "checked one"
+        )
+    if spec.world_size > MAX_WORLD_SIZE:
+        raise ValueError(
+            f"parallelism world size {spec.world_size} exceeds the "
+            f"{MAX_WORLD_SIZE}-GPU budget"
         )
 
     # 3. A schedule names a pipeline. Without one it would be recorded in the
@@ -732,11 +752,11 @@ def validate_parallelism(
     #    divisor ``n_layers + 2`` rather than ``n_layers``: at 16 layers over
     #    4 stages weight 1 splits [4, 5, 4, 3] where Megatron splits
     #    [4, 4, 4, 4], and this rule would pass both. Four stages are
-    #    reachable at pp 2 and eight at pp 4, because four of the five
-    #    registered schedules ask for two stages per rank. ``launch.py``
-    #    sends both flags at every ``pp > 1``; this rule assumes that, and
-    #    ``tests/test_migration_contract.py`` freezes the argv at pp 2 and
-    #    at pp 4.
+    #    reachable at pp 2, eight at pp 4 and sixteen at pp 8, because four
+    #    of the five registered schedules ask for two stages per rank.
+    #    ``launch.py`` sends both flags at every ``pp > 1``; this rule
+    #    assumes that, and ``tests/test_migration_contract.py`` freezes the
+    #    argv at pp 2 and at pp 4.
     #
     #    Megatron needs no flag: it divides ``config.num_layers`` and asserts
     #    the remainder itself.

@@ -651,17 +651,23 @@ class Rule02BudgetTest(unittest.TestCase):
     test here matches the message of the half it means to fire. That matters
     because the caps moved: a ``pp 4`` spec fired the pp half before, and it
     passes now. A loose test would still be green and would prove nothing.
+
+    **The two caps are now equal, so the halves are no longer independent.**
+    ``world_size`` is ``dp * pp`` and is never below ``pp``, so every spec
+    the pipeline half refuses is one the world-size half would refuse too.
+    The pipeline half runs first for that reason, and the class below pins
+    the order.
     """
 
     def test_the_declared_caps_are_the_ones_this_pass_targets(self):
         """Pinned as literals, because the messages below name them.
 
-        Eight devices is what this host holds. Four stages is what the
-        stock-Megatron suite runs. Lifting either is a deliberate act, and
-        it edits this test.
+        Eight devices is what this host holds. Eight stages is the deepest
+        pipeline those devices hold, and the suite runs that cell. Lifting
+        either is a deliberate act, and it edits this test.
         """
         self.assertEqual(MAX_WORLD_SIZE, 8)
-        self.assertEqual(MAX_PP, 4)
+        self.assertEqual(MAX_PP, 8)
 
     def test_the_largest_budgeted_mesh_passes(self):
         """Both ways to fill eight devices.
@@ -694,30 +700,56 @@ class Rule02BudgetTest(unittest.TestCase):
             check(ParallelismSpec(dp=MAX_WORLD_SIZE + 1))
 
     def test_a_pipeline_deeper_than_the_maximum_is_refused(self):
-        """``pp 8`` is world size 8, which the budget allows, so this fires
-        the pp half alone.
+        """``pp 16`` is above both caps, and the pipeline half is what names
+        it.
 
-        Before the caps rose this test used ``pp 4``, which the pp half then
-        refused. ``pp 4`` is now legal, so the spec had to move as well as
-        the message.
+        The spec has moved twice. It was ``pp 4`` while the cap was 2, then
+        ``pp 8`` while the cap was 4, and both of those are legal now. The
+        message moves with it, which is what keeps the test honest about
+        which half fired.
         """
         with self.assertRaisesRegex(
-            ValueError, r"pipeline degree 8 exceeds the supported maximum 4"
+            ValueError, r"pipeline degree 16 exceeds the supported maximum 8"
         ):
             check(ParallelismSpec(pp=MAX_PP * 2, pp_schedule="1F1B"))
 
     def test_the_boundary_of_the_pipeline_cap_from_both_sides(self):
-        """``pp 4`` passes and ``pp 5`` does not.
+        """``pp 8`` passes and ``pp 9`` does not.
 
-        ``pp 5`` is world size 5, under the budget, and 16 layers do not
-        divide into 5 stages -- so rule 7 would also refuse it. The message
-        is what says rule 2 fired first.
+        ``pp 8`` needs 16 microbatches for rule 12, so it takes batch 16.
+        ``pp 9`` is world size 9, above the budget, and 16 layers do not
+        divide into 9 stages -- so two other refusals are available. The
+        message is what says rule 2's pipeline half fired first.
         """
-        check(ParallelismSpec(pp=MAX_PP, pp_schedule="1F1B"), batch=8)
+        check(ParallelismSpec(pp=MAX_PP, pp_schedule="1F1B"), batch=16)
         with self.assertRaisesRegex(
-            ValueError, r"pipeline degree 5 exceeds the supported maximum 4"
+            ValueError, r"pipeline degree 9 exceeds the supported maximum 8"
         ):
-            check(ParallelismSpec(pp=MAX_PP + 1, pp_schedule="1F1B"), batch=10)
+            check(ParallelismSpec(pp=MAX_PP + 1, pp_schedule="1F1B"), batch=18)
+
+    def test_the_pipeline_half_is_tested_before_the_world_size_half(self):
+        """**The order is what keeps the pipeline half reachable.**
+
+        ``world_size`` is ``dp * pp`` and is never below ``pp``, so once the
+        two caps are equal every spec above MAX_PP is also above
+        MAX_WORLD_SIZE. Testing the world size first would make this message
+        unreachable, and every deep-pipeline refusal would name the GPU
+        budget instead of the cap somebody has to lift.
+
+        ``pp 9`` and ``pp 16`` are both above both caps. Each must name the
+        pipeline, and neither may name the budget.
+        """
+        for pp in (MAX_PP + 1, MAX_PP * 2):
+            with self.subTest(pp=pp):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"pipeline degree {pp} exceeds the supported maximum 8",
+                ) as raised:
+                    check(
+                        ParallelismSpec(pp=pp, pp_schedule="1F1B"),
+                        batch=2 * pp,
+                    )
+                self.assertNotIn("GPU budget", str(raised.exception))
 
     def test_the_pipeline_message_no_longer_claims_an_engine_reason(self):
         """The old message said the two engines count layers the same way
@@ -726,13 +758,13 @@ class Rule02BudgetTest(unittest.TestCase):
         twin at every ``pp > 1``, which makes the two conventions agree at
         every degree. The cap is a plan, not an engine limit.
 
-        The positive match comes first, and it has to. ``pp 8`` at batch 4
-        also fails rule 11, whose message contains neither phrase -- so two
-        ``assertNotIn`` checks alone would pass with rule 2's pp half
-        deleted.
+        The positive match comes first, and it has to. ``pp 16`` at batch 4
+        also fails the world-size half and rule 11, and neither of those
+        messages contains either phrase -- so two ``assertNotIn`` checks
+        alone would pass with rule 2's pp half deleted.
         """
         with self.assertRaisesRegex(
-            ValueError, r"pipeline degree 8 exceeds the supported maximum 4"
+            ValueError, r"pipeline degree 16 exceeds the supported maximum 8"
         ) as raised:
             check(ParallelismSpec(pp=MAX_PP * 2, pp_schedule="1F1B"))
         self.assertNotIn("layer-counting", str(raised.exception))
@@ -973,6 +1005,29 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
                 batch=8,
             )
 
+    def test_every_registered_shape_at_pp_eight(self):
+        """The deepest pipeline the budget holds, shape by shape.
+
+        Three shapes divide: 1b (16 layers, 2 a stage), 9b (24, 3) and 48b
+        (32, 4). Three do not: large has 4 layers, huge and giant have 1.
+        Rule 7 is the only rule that reads the layer count, so it is the one
+        that decides which shapes the depth-8 cell can run.
+
+        Batch 16 is what rule 12 asks for at eight stages.
+        """
+        divides = {"1b", "9b", "48b"}
+        spec = ParallelismSpec(pp=8, pp_schedule="1F1B")
+        for name, shape in PIPER_SHAPES.items():
+            with self.subTest(model_size=name):
+                if name in divides:
+                    check(spec, shape=shape, batch=16, device_count=8)
+                else:
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        r"does not divide evenly into 8 pipeline stages",
+                    ):
+                        check(spec, shape=shape, batch=16, device_count=8)
+
     def test_eight_interleaved_stages_at_pp_four(self):
         """``pp 4`` with a two-stage schedule asks for 8 stages.
 
@@ -1141,6 +1196,45 @@ class Rule12MicrobatchesCoverTheWarmupTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"is below the 8 that pp 4"):
             check(ParallelismSpec(pp=4, pp_schedule="1F1B"), batch=4)
 
+    def test_the_pp_eight_floor_is_sixteen_microbatches(self):
+        """**16 passes and 8 fails. The boundary is not 16 against 15.**
+
+        Eight stages ask for ``2 * 8`` microbatches. 15 microbatches does
+        not divide by 8, so it fires rule 11 -- a different rule, with a
+        different repair -- and would prove nothing about this one. Batch 16
+        with microbatch 2 gives 8, which divides by 8 and reaches rule 12.
+        """
+        passing = ParallelismSpec(
+            pp=8, pp_schedule="1F1B", pp_microbatch_size=2
+        )
+        self.assertEqual(n_microbatches(passing, local_batch_size=32), 16)
+        check(passing, batch=32, device_count=8)
+        self.assertEqual(n_microbatches(passing, local_batch_size=16), 8)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"8 microbatches is below the 16 that pp 8 x 1 stage",
+        ):
+            check(passing, batch=16, device_count=8)
+
+    def test_fifteen_microbatches_at_pp_eight_fires_rule_eleven(self):
+        """Named so that nobody writes 15 into the test above.
+
+        Rule 11 runs first and reports an uneven split across the pipeline
+        degree. The repair differs: 15 needs a count that divides by 8, and
+        8 needs a larger batch.
+        """
+        with self.assertRaisesRegex(
+            ValueError,
+            r"15 microbatches do not divide evenly across pipeline degree 8",
+        ):
+            check(
+                ParallelismSpec(
+                    pp=8, pp_schedule="1F1B", pp_microbatch_size=2
+                ),
+                batch=30,
+                device_count=8,
+            )
+
     def test_a_single_gpu_run_at_batch_one_is_not_refused(self):
         """The guard that keeps rule 12 a pipeline rule.
 
@@ -1305,8 +1399,37 @@ class CapsThatMovedTest(unittest.TestCase):
         )
 
     def test_pipeline_degree_four_is_no_longer_refused_by_the_cap(self):
-        """The change this commit exists to make."""
+        """The change the earlier lift existed to make."""
         check(ParallelismSpec(pp=4, pp_schedule="1F1B"), batch=8)
+
+    def test_pipeline_degree_eight_is_no_longer_refused_by_the_cap(self):
+        """The change this lift exists to make.
+
+        One pipeline of eight stages fills the whole budget, so ``dp`` is 1
+        and nothing else reads the mesh. Rule 12 asks for 16 microbatches at
+        eight stages, which batch 16 gives.
+        """
+        check(ParallelismSpec(pp=8, pp_schedule="1F1B"), batch=16)
+
+    def test_pipeline_degree_five_to_seven_is_now_refused_by_rule_seven(self):
+        """**The verdict is the same and the reason is not.**
+
+        Each used to fail the cap. The cap admits all three now, and 16
+        layers divide into none of 5, 6 or 7 stages, so rule 7 refuses them
+        instead. Read the message: the repair is a shape whose layer count
+        divides, not a smaller degree.
+        """
+        for pp in (5, 6, 7):
+            with self.subTest(pp=pp):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"'1b' has 16 layers, which does not divide evenly "
+                    rf"into {pp}",
+                ):
+                    check(
+                        ParallelismSpec(pp=pp, pp_schedule="1F1B"),
+                        batch=2 * pp,
+                    )
 
 
 class PreconditionsOnTheBorrowedArgumentsTest(unittest.TestCase):
