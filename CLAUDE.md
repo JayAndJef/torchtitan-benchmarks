@@ -1060,7 +1060,8 @@ run; it can pass a wrong one.
 
 `piper_megatron_stock/baseline` declares two such markers
 (`cudnn_generated_fort_native_sdpa` and `_mul_silu_split`), and the
-scenario's own matrix runs `--dp 2 --pp 4` and a `1 x 8` pipeline. **Read
+scenario's *planned* matrix runs `--dp 2 --pp 4` and a `1 x 8` pipeline --
+planned in a document, because no in-tree tool sweeps it. **Read
 every rank's traces by hand on the first cell of each mesh** -- eight ranks
 at `dp 2 x pp 4`, and eight again at `pp 8`, where all eight are stages of
 one pipeline. Do not carry a `pp 4` reading forward to a `pp 8` cell: a
@@ -3162,8 +3163,16 @@ argv.
 unpinned.** `cpu_pinning` records the reason. An unpinned run is not
 comparable to a pinned one; say so beside the number.
 
-**`tools/run_matrix.sh` does not drive this scenario.** Extending it is
-separate work.
+**`tools/run_matrix.sh` cannot drive this scenario, and the gap is wider
+than the scenario name.** It sweeps `--compile-mode` and `--model-size`
+only. It sends no `--dp`, `--pp`, `--ep` or `--dense-sharding` at all, so
+it cannot express one cell of the planned matrix on any scenario, and it
+never names `piper_megatron_stock`. An operator following the rule to
+"drive multi-cell matrices with `tools/run_matrix.sh`" therefore has no
+tool for this axis and runs the cells by hand, losing the dirty-tree
+refusal, the `flock`, the idle-GPU wait and the contamination watchdog.
+Extending it is separate work, and it is the largest piece of unbuilt work
+this axis leaves behind.
 
 ## Comparing against Piper's artifact
 
