@@ -1929,7 +1929,7 @@ TEST_CENSUS = {
     # engine's pattern names both of its witnesses, that a shard degree
     # counts as data parallelism, that a real pipeline-only log matches
     # neither pattern, and that a double-digit degree is not read as one.
-    "test_parallel_validation": 41,
+    "test_parallel_validation": 49,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -1940,7 +1940,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1646
+TEST_CENSUS_TOTAL = 1654
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

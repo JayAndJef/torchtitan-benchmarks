@@ -30,15 +30,28 @@ refused every axis for one axis's reason. A pipeline rank holds a slice of
 the layers and needs no gradient synchronization, so it keeps exactly the
 plain-bf16 model above.
 
-**A shard degree above 1 is refused, and that is the DP refusal that
-survives.** ``data_parallel_shard_degree`` defaults to **-1** in TorchTitan
-(``config/configs.py``), which resolves to "every remaining rank". A dp 2
-run whose command line omitted the flag therefore arrives here as
-``dp_replicate=1, dp_shard=2`` -- ZeRO-3, not the replication the manifest
-records -- and every other check passes. ``titan_mesh`` asks for
-``dp_shard=1`` on every spec this repo can run today, so the refusal costs
-nothing and catches that substitution. **The expert-parallel stage must lift
-it**, because ``titan_mesh`` returns ``dp_shard=ep`` at ``ep > 1``.
+**The dropped shard-degree flag is refused, and this module reads the raw
+configured value to see it.** ``data_parallel_shard_degree`` defaults to
+**-1** in TorchTitan (``config/configs.py``), which means "take every
+remaining rank". A dp 2 run whose command line omitted the flag therefore
+shards the parameters, and the manifest still records the dense-sharding
+value the harness asked for.
+
+**The refusal reads the raw value and not the resolved mesh, because the
+harness now asks for both meshes.** Under ``--dense-sharding shard``
+``titan_mesh`` returns ``(1, dp)``, so ``dp_shard`` above 1 is an honest
+request; a refusal written on the resolved mesh would refuse every sharded
+run and would still pass a dropped flag whenever the remainder resolved to
+the requested degree. ``ParallelDims.__post_init__`` resolves ``-1`` onto
+itself and never onto the ``ParallelismConfig`` this function receives
+(``distributed/parallel_dims.py``), and TorchTitan's trainer hands that
+object over unchanged on both the pipeline and the plain path. So ``-1``
+here means "nobody sent the flag", and nothing else means that.
+
+**A mesh that replicates AND shards is refused too.** ``titan_mesh``
+returns ``(dp, 1)`` under ``replicate`` and ``(1, dp)`` under ``shard``, so
+no spec asks for HSDP. A passthrough flag can build one, and the manifest
+carries no dense-sharding value that names it.
 
 This module reads the ``ParallelDims`` TorchTitan builds from the command
 line, never ``benchmarks/e2e/parallelism.py``: it executes inside the
@@ -107,19 +120,31 @@ def parallelize_piper1b(
             f"manifest could not record this run (got cp={parallel_dims.cp})"
         )
     skip_dp = skip_data_parallel(parallel_dims)
-    # The shard degree is the one data-parallel value that can arrive wrong
-    # and still train. TorchTitan resolves an omitted
-    # --parallelism.data-parallel-shard-degree to every remaining rank, so a
-    # dp 2 run would shard the parameters and publish ZeRO-3 under a
-    # replication label. Every spec this repo can run asks for shard 1.
-    if not skip_dp and parallel_dims.dp_shard != 1:
-        raise RuntimeError(
-            "piper1b benchmark configs run TorchTitan's data-parallel path "
-            "at shard degree 1, which replicates rather than shards; a shard "
-            "degree above 1 shards the parameters instead and the manifest "
-            f"would record replication (got dp_replicate="
-            f"{parallel_dims.dp_replicate}, dp_shard={parallel_dims.dp_shard})"
-        )
+    if not skip_dp:
+        # The shard degree is the one data-parallel value that can arrive
+        # wrong and still train. Read the RAW configured value: the mesh
+        # cannot show a dropped flag, because an honest sharded run and a
+        # dropped flag reach the same resolved degree. See the module
+        # docstring for the four facts that make -1 unambiguous here.
+        if parallelism.data_parallel_shard_degree < 0:
+            raise RuntimeError(
+                "piper1b benchmark configs need an explicit "
+                "--parallelism.data-parallel-shard-degree: TorchTitan reads "
+                "an omitted one as every remaining rank, so this run shards "
+                "the parameters while the manifest records the "
+                "dense-sharding value the harness asked for (got "
+                "data_parallel_shard_degree="
+                f"{parallelism.data_parallel_shard_degree})"
+            )
+        # One treatment at a time. HSDP does both, and no spec asks for it.
+        if parallel_dims.dp_replicate > 1 and parallel_dims.dp_shard > 1:
+            raise RuntimeError(
+                "piper1b benchmark configs run one data-parallel treatment "
+                "at a time, replication or sharding; this mesh does both "
+                "and the manifest carries no dense-sharding value that "
+                f"names it (got dp_replicate={parallel_dims.dp_replicate}, "
+                f"dp_shard={parallel_dims.dp_shard})"
+            )
     if training.dtype != "bfloat16":
         raise ValueError(
             "piper1b benchmark configs require training.dtype='bfloat16': "

@@ -906,5 +906,160 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     )
 
 
+class TitanShardDegreeGuardTests(unittest.TestCase):
+    """The dropped ``--parallelism.data-parallel-shard-degree`` flag.
+
+    TorchTitan reads an omitted shard degree as every remaining rank, so a
+    run that lost the flag shards the parameters and the manifest still
+    records the dense-sharding value the harness asked for. No other check
+    sees that: the log states the mesh TorchTitan resolved, which is the
+    mesh the dropped flag produced.
+
+    **The guard reads the raw configured value, not the resolved mesh.**
+    Once the harness asks for a sharded mesh too, an honest ``shard`` run
+    and a dropped flag reach the same resolved degree, so no predicate over
+    ``ParallelDims`` separates them. ``ParallelDims`` resolves ``-1`` onto
+    itself and never onto the ``ParallelismConfig``, so ``-1`` on that
+    object means "nobody sent the flag" and nothing else.
+    """
+
+    _COMMON = dict(
+        model=object(),
+        compile_config=None,
+        ac_config=None,
+        dump_folder="",
+    )
+
+    @staticmethod
+    def _dims(replicate: int, shard: int, pp: int = 1):
+        from torchtitan.distributed import ParallelDims
+
+        return ParallelDims(
+            dp_replicate=replicate,
+            dp_shard=shard,
+            cp=1,
+            tp=1,
+            pp=pp,
+            ep=1,
+            world_size=replicate * shard * pp,
+        )
+
+    def _run(self, dims, shard_degree: int):
+        """Call ``parallelize_piper1b`` with the delegate stubbed out."""
+        import torch.nn as nn
+        from torchtitan.config import ParallelismConfig, TrainingConfig
+
+        from benchmarks.models.piper_qwen3 import parallelize as module
+
+        class _Wrapped(nn.Module):
+            pass
+
+        model = nn.Sequential(_Wrapped(), nn.Linear(2, 2))
+        with mock.patch.object(module, "FSDPModule", _Wrapped):
+            with mock.patch.object(
+                module, "parallelize_qwen3", return_value=model
+            ):
+                return module.parallelize_piper1b(
+                    parallel_dims=dims,
+                    training=TrainingConfig(dtype="bfloat16"),
+                    parallelism=ParallelismConfig(
+                        data_parallel_shard_degree=shard_degree
+                    ),
+                    **self._COMMON,
+                )
+
+    def test_the_default_shard_degree_is_the_omitted_flag(self) -> None:
+        """The premise the guard rests on, read off TorchTitan itself."""
+        from torchtitan.config import ParallelismConfig
+
+        self.assertEqual(ParallelismConfig().data_parallel_shard_degree, -1)
+
+    def test_a_dropped_flag_is_refused_under_replication(self) -> None:
+        """The resolved mesh agrees with the request, and the flag is gone.
+
+        This is the case the old resolved-mesh guard passed: the remainder
+        resolves to the degree the harness asked for, so every value the
+        mesh carries is right and the command line still states nothing.
+        """
+        with self.assertRaisesRegex(
+            RuntimeError, "data-parallel-shard-degree"
+        ):
+            self._run(self._dims(2, 1), shard_degree=-1)
+
+    def test_a_dropped_flag_is_refused_under_sharding(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError, "data-parallel-shard-degree"
+        ):
+            self._run(self._dims(1, 2), shard_degree=-1)
+
+    def test_the_refusal_names_the_value_it_read(self) -> None:
+        with self.assertRaises(RuntimeError) as caught:
+            self._run(self._dims(2, 1), shard_degree=-1)
+        self.assertIn("data_parallel_shard_degree=-1", str(caught.exception))
+
+    def test_a_stated_shard_degree_runs(self) -> None:
+        """``--dense-sharding shard`` asks for exactly this mesh.
+
+        The old guard refused every mesh with a shard degree above 1, so it
+        would refuse an honest sharded run. This is the behaviour change.
+        """
+        with self.assertLogs(level="INFO") as logs:
+            self._run(self._dims(1, 2), shard_degree=2)
+        self.assertIn(
+            "fully_shard applied (dp_replicate=1, dp_shard=2)",
+            "\n".join(logs.output),
+        )
+
+    def test_a_stated_replicate_degree_still_runs(self) -> None:
+        with self.assertLogs(level="INFO") as logs:
+            self._run(self._dims(2, 1), shard_degree=1)
+        self.assertIn(
+            "fully_shard applied (dp_replicate=2, dp_shard=1)",
+            "\n".join(logs.output),
+        )
+
+    def test_a_mesh_that_replicates_and_shards_is_refused(self) -> None:
+        """No dense-sharding value names HSDP.
+
+        ``titan_mesh`` returns ``(dp, 1)`` under ``replicate`` and
+        ``(1, dp)`` under ``shard``, so a passthrough flag is the only way
+        to build this mesh and the manifest could not record it.
+        """
+        with self.assertRaisesRegex(
+            RuntimeError, "one data-parallel treatment at a time"
+        ):
+            self._run(self._dims(2, 2), shard_degree=2)
+
+    def test_the_skipped_path_accepts_the_omitted_flag(self) -> None:
+        """The single-GPU and pipeline-only runs send no shard degree.
+
+        ``_titan_parallelism_flags`` emits the pair only when the mesh is
+        not ``(1, 1)``, so every run this repo has published arrives here
+        with the raw ``-1``. A guard above the skipped path would fail all
+        of them.
+        """
+        import torch.nn as nn
+        from torchtitan.config import ParallelismConfig, TrainingConfig
+
+        from benchmarks.models.piper_qwen3 import parallelize as module
+
+        sentinel = nn.Linear(2, 2)
+        for name, dims in (
+            ("single gpu", self._dims(1, 1)),
+            ("pipeline only", self._dims(1, 1, pp=2)),
+        ):
+            with self.subTest(mesh=name):
+                with mock.patch.object(
+                    module, "parallelize_qwen3", return_value=sentinel
+                ):
+                    result = module.parallelize_piper1b(
+                        parallel_dims=dims,
+                        training=TrainingConfig(dtype="bfloat16"),
+                        parallelism=ParallelismConfig(),
+                        **self._COMMON,
+                    )
+                self.assertIs(result, sentinel)
+
+
 if __name__ == "__main__":
     unittest.main()
