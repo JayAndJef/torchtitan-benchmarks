@@ -930,6 +930,83 @@ class ResolveRunTests(unittest.TestCase):
                 )
 
 
+class ConnectionLimitPreconditionTests(unittest.TestCase):
+    """The one host variable that stops a sharded Megatron run at parsing.
+
+    ``megatron/training/arguments.py`` asserts
+    ``CUDA_DEVICE_MAX_CONNECTIONS != "1"`` under ``--use-megatron-fsdp``,
+    and ``runtime_environment`` copies the host environment into the child.
+    So an operator's own shell can fail every sharded cell of a matrix for
+    a reason no log explains.
+
+    **The refusal reads the built argv, not the spec.** That is what keeps
+    it from drifting away from ``megatron_stock/flags.py``: the day a flag
+    list stops sending the flag, the refusal stops firing on its own.
+    """
+
+    def _resolve(self, environment: dict, **kwargs):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", dict(_METADATA)),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0,1",
+                    scenario_name="piper_megatron_stock",
+                    ac_mode="none",
+                    **kwargs,
+                ),
+                environment,
+            )
+
+    def _environment(self, value: str | None) -> dict:
+        environment = {"PATH": os.environ["PATH"]}
+        if value is not None:
+            environment["CUDA_DEVICE_MAX_CONNECTIONS"] = value
+        return environment
+
+    def test_the_sharded_stock_argv_really_carries_the_flag(self) -> None:
+        """The premise of every case below."""
+        resolved = self._resolve(
+            self._environment(None),
+            parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+        )
+        self.assertIn("--use-megatron-fsdp", resolved[6]["baseline"])
+
+    def test_the_forbidden_value_refuses_a_sharded_run(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "CUDA_DEVICE_MAX_CONNECTIONS"
+        ) as raised:
+            self._resolve(
+                self._environment("1"),
+                parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+            )
+        # The refusal names its own repair, as every other refusal here does.
+        self.assertIn("Unset CUDA_DEVICE_MAX_CONNECTIONS", str(raised.exception))
+
+    def test_another_value_and_an_unset_variable_both_pass(self) -> None:
+        """Only the literal '1' is refused. Megatron asserts on that value
+        alone, so refusing more would refuse a run Megatron accepts."""
+        for value in ("8", None):
+            with self.subTest(value=value):
+                self._resolve(
+                    self._environment(value),
+                    parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+                )
+
+    def test_a_replicated_run_is_untouched_by_the_variable(self) -> None:
+        """A replicated stock run sends no ``--use-megatron-fsdp``, so the
+        assert never runs and the variable is none of this repo's business.
+        Refusing it here would refuse a cell this suite has already run."""
+        resolved = self._resolve(
+            self._environment("1"), parallelism=ParallelismSpec(dp=2)
+        )
+        self.assertNotIn("--use-megatron-fsdp", resolved[6]["baseline"])
+
+
 class RunBannerTests(unittest.TestCase):
     """The run banner names every comparability boundary the manifest gates.
 

@@ -86,6 +86,50 @@ def _rank_logging(world_size: int) -> dict[str, str]:
     }
 
 
+# The one host variable that stops a run before it trains a step.
+#
+# ``megatron/training/arguments.py`` asserts
+# ``os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS') != "1"`` under
+# ``--use-megatron-fsdp``. ``runtime_environment`` copies the host
+# environment into the child, so an ambient ``CUDA_DEVICE_MAX_CONNECTIONS=1``
+# reaches Megatron and the sharded arm dies at argument parsing -- after the
+# output directory exists and after every rank has started.
+#
+# **Nothing under ``benchmarks/`` sets the variable, and that is not the
+# hazard.** The hazard is the operator's own shell: the variable is a common
+# NCCL and tensor-parallel tuning knob, and a session that exported it once
+# would fail every sharded cell of a matrix for a reason no log explains.
+#
+# **The check refuses; it does not repair.** Unsetting the variable would
+# change how the driver schedules work on every rank, which moves the
+# measurement rather than the record. The operator unsets it and says so.
+CONNECTION_LIMIT_VARIABLE = "CUDA_DEVICE_MAX_CONNECTIONS"
+CONNECTION_LIMIT_REFUSED_VALUE = "1"
+
+
+def refuse_megatron_fsdp_connection_limit(
+    environment: Mapping[str, str], *, megatron_fsdp: bool
+) -> None:
+    """Refuse a host that would make Megatron-FSDP fail at argument parsing.
+
+    ``megatron_fsdp`` says whether any command line this run will start
+    carries ``--use-megatron-fsdp``. The caller reads that off the built
+    argv rather than re-deriving it from the parallelism spec, so this
+    refusal cannot drift from the flag list that produces the flag.
+    """
+    if not megatron_fsdp:
+        return
+    value = environment.get(CONNECTION_LIMIT_VARIABLE)
+    if value != CONNECTION_LIMIT_REFUSED_VALUE:
+        return
+    raise ValueError(
+        f"{CONNECTION_LIMIT_VARIABLE}={value!r} in this shell, and this run "
+        "sends --use-megatron-fsdp. Megatron asserts the variable is not "
+        f"'1' under that flag, so every rank would die at argument parsing. "
+        f"Unset {CONNECTION_LIMIT_VARIABLE} and start the run again"
+    )
+
+
 def runtime_environment(
     paths: RuntimePaths,
     gpu: str,

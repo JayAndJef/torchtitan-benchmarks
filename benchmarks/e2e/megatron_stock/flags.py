@@ -535,11 +535,17 @@ def _sharding_flags(dense_sharding: str) -> list[str]:
     the combination for v1. Version 2 refuses every shape here; see
     ``MEGATRON_FSDP_VERSION``.
 
-    **One precondition lives outside this module.** ``arguments.py``
-    asserts ``CUDA_DEVICE_MAX_CONNECTIONS != "1"`` under
+    **One precondition lives outside this module, and it is enforced.**
+    ``arguments.py`` asserts ``CUDA_DEVICE_MAX_CONNECTIONS != "1"`` under
     ``--use-megatron-fsdp``. Nothing under ``benchmarks/`` sets that
-    variable today. If ``benchmarks/execution/environment.py`` ever sets it
-    to ``"1"``, this arm dies at argument parsing.
+    variable, but the child inherits the operator's own shell, so an
+    ambient ``"1"`` would kill every rank at argument parsing.
+    ``benchmarks/execution/environment.py``'s
+    ``refuse_megatron_fsdp_connection_limit`` refuses such a host, and
+    ``_resolve_run`` calls it after it builds the argv -- reading the flag
+    off this list rather than re-deriving the condition, so the two cannot
+    drift apart. This module reads no environment variable, which is what
+    keeps a test able to build the whole command line without a shell.
     """
     refuse_unknown_dense_sharding(dense_sharding)
     if dense_sharding != "shard":
