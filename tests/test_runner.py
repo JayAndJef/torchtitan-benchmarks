@@ -57,7 +57,11 @@ from benchmarks.models.piper_qwen3.parallelize import (
     skip_data_parallel,
 )
 from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B, PIPER_SHAPES
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import (
+    CompileConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common import FusedQKVLinear, QKVLinear
 
@@ -403,9 +407,12 @@ class ParallelizeTests(unittest.TestCase):
                     self.assertEqual(config.training.dtype, "bfloat16")
 
     # Every guard fires before the model is touched, so dummies suffice.
+    # ``parallelism`` is real: the shard-degree guard reads the RAW
+    # configured value, because the resolved mesh cannot show a dropped
+    # flag once the harness asks for a sharded mesh too.
     _PARALLELIZE_COMMON = dict(
         model=object(),
-        parallelism=None,
+        parallelism=ParallelismConfig(data_parallel_shard_degree=1),
         compile_config=None,
         ac_config=None,
         dump_folder="",
@@ -434,18 +441,11 @@ class ParallelizeTests(unittest.TestCase):
                 "context parallelism",
             ),
             (
-                "dp_shard",
-                ParallelDims(
-                    dp_replicate=1, dp_shard=2, cp=1, tp=1, pp=1, ep=1, world_size=2
-                ),
-                "shard degree above 1 shards the parameters",
-            ),
-            (
                 "hsdp",
                 ParallelDims(
                     dp_replicate=2, dp_shard=2, cp=1, tp=1, pp=1, ep=1, world_size=4
                 ),
-                "shard degree above 1 shards the parameters",
+                "one data-parallel treatment at a time",
             ),
         ):
             with self.subTest(axis=name):

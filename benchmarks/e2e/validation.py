@@ -44,7 +44,13 @@ from pathlib import Path
 from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
-from benchmarks.e2e.megatron_stock.flags import microbatch_geometry
+from benchmarks.e2e.megatron_stock.flags import (
+    DATA_PARALLEL_OVERLAP,
+    DATA_PARALLEL_WRAPPERS,
+    SHARDING_STRATEGIES,
+    microbatch_geometry,
+    refuse_unknown_dense_sharding,
+)
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
     ParallelismSpec,
@@ -284,9 +290,8 @@ def _megatron_stock_parallelism_markers(
 ) -> tuple[str, ...]:
     """``benchmarks.e2e.megatron_stock.train``'s two lines. Keep in sync.
 
-    ``dp``, ``pp`` and the microbatch count come from Megatron's own
-    resolved arguments, so those three state what the engine built and not
-    what the harness asked for. ``schedule=1F1B`` and ``stages`` do not:
+    ``dp``, ``pp``, ``ep`` and the microbatch count come from Megatron's
+    own resolved arguments. ``schedule=1F1B`` and ``stages`` do not:
     the schedule is a literal on both sides, and ``stages`` repeats the
     pipeline degree, which is the real stage count only while no virtual
     pipeline exists. The driver refuses a virtual pipeline degree, and the
@@ -317,19 +322,53 @@ def _megatron_stock_parallelism_markers(
     **The data-parallel line observes the wrapper.**
     ``install_data_parallel_marker`` in the driver replaces
     ``setup_model_and_optimizer``, reads the model it returns, and raises
-    when no chunk carries a ``DistributedDataParallel``. It prints
-    ``overlap_grad_reduce`` and ``grad_reduce_in_fp32`` from the wrapper's
-    own ``ddp_config``. So a run whose wrapper went missing dies there and
-    prints no line, exactly as the tuned driver behaves.
+    when no chunk carries a data-parallel wrapper. It prints the wrapper's
+    class name, ``overlap_grad_reduce``, ``grad_reduce_in_fp32`` and the
+    sharding strategy from the wrapper's own ``ddp_config``, and the expert
+    degree from the group ``initialize_model_parallel`` built. So a run
+    whose wrapper went missing dies there and prints no line, exactly as
+    the tuned driver behaves.
 
-    The two values above are pinned rather than read, and Megatron's own
-    resolution is what makes them right: ``--overlap-grad-reduce`` is
-    ``store_true`` and the flag list omits it, and ``--bf16`` with the
-    default ``--main-grads-dtype fp32`` sets
+    **The class name is what proves the dense-sharding value.** Megatron
+    picks ``DistributedDataParallel`` under ``replicate`` and
+    ``FullyShardedDataParallelV1`` under ``shard``, from
+    ``--use-megatron-fsdp`` alone (``training.py``), and the two are
+    siblings rather than one a subclass of the other. So a run that lost
+    the sharding flags prints the other class name here and fails this
+    rule. ``DATA_PARALLEL_WRAPPERS`` is the table, and it lives beside the
+    flags that produce it so the two cannot drift.
+
+    **The sharding strategy is the value the run acts on**, which is not
+    the raw argument. Megatron defaults
+    ``data_parallel_sharding_strategy`` to ``optim_grads_params`` and
+    copies it into every ``ddp_config``, but its optimizer reads it only
+    under ``use_megatron_fsdp``. ``SHARDING_STRATEGIES`` therefore names
+    ``no_shard`` under ``replicate``, and the driver derives the printed
+    value the same way.
+
+    **The expert degree here is an observation and the mesh line's is
+    not.** The mesh line prints before ``pretrain()`` runs, where no
+    process group exists. The driver reads the built group inside the shim
+    and refuses a disagreement, so the two statements of the degree cannot
+    differ in a run that reaches this rule.
+
+    **``overlap_grad_reduce`` is a function of the dense-sharding value,
+    and the flag list is not what decides it.** The argv omits
+    ``--overlap-grad-reduce`` under both values, so ``args`` carries False
+    either way -- but ``MegatronFSDP.__init__`` then sets
+    ``ddp_config.overlap_grad_reduce = True`` on the very object
+    ``get_megatron_ddp_config`` built, because the wrapper holds the
+    reference rather than a copy. The driver reads the wrapper, so a
+    sharded run prints True. ``DATA_PARALLEL_OVERLAP`` is the table, and it
+    lives beside the flags for the reason the other two tables do.
+
+    ``grad_reduce_in_fp32`` is pinned and does not move: ``--bf16`` with
+    the default ``--main-grads-dtype fp32`` sets
     ``accumulate_allreduce_grads_in_fp32``, which
-    ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``. A
-    Megatron bump that moves either default fails this rule rather than
-    publishing a precision the log does not state.
+    ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``, and no
+    wrapper touches that field. A Megatron bump that moves either value
+    fails this rule rather than publishing a precision the log does not
+    state.
 
     **Arm rule 13 cannot carry this axis alone.** Stock Megatron
     all-reduces the reported loss over the data-parallel group on every
@@ -345,15 +384,23 @@ def _megatron_stock_parallelism_markers(
     # The one authority on this count. flags.py builds the argv from it, so
     # a marker taken from anything else could disagree with the run.
     _, microbatches, _ = microbatch_geometry(workload, spec)
+    # A garbage value would otherwise reach the three tables below and
+    # raise a bare KeyError, which names neither the value nor the flag.
+    refuse_unknown_dense_sharding(spec.dense_sharding)
     markers = [
         f"Megatron-LM stock parallelism: dp={spec.dp} pp={spec.pp} "
-        f"schedule=1F1B microbatches={microbatches} stages={spec.pp}"
+        f"ep={spec.ep} schedule=1F1B microbatches={microbatches} "
+        f"stages={spec.pp}"
     ]
     if spec.dp > 1:
         markers.append(
-            f"Megatron-LM stock data parallel: DistributedDataParallel over "
-            f"{spec.dp} ranks (overlap_grad_reduce=False, "
-            "grad_reduce_in_fp32=True)"
+            "Megatron-LM stock data parallel: "
+            f"{DATA_PARALLEL_WRAPPERS[spec.dense_sharding]} over "
+            f"{spec.dp} ranks (overlap_grad_reduce="
+            f"{DATA_PARALLEL_OVERLAP[spec.dense_sharding]}, "
+            "grad_reduce_in_fp32=True, sharding_strategy="
+            f"{SHARDING_STRATEGIES[spec.dense_sharding]}, "
+            f"expert_parallel={spec.ep})"
         )
     return tuple(markers)
 

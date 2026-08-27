@@ -79,29 +79,59 @@ MODE_LINE = (
     "moe_token_dispatcher_type={dispatcher})"
 )
 
-# Arm rule 12. Every rank prints it above world size 1, and every value in
-# it comes from what Megatron itself resolved rather than from what the
-# harness asked for.
+# Arm rule 12. Every rank prints it above world size 1.
+#
+# ``dp`` and ``microbatches`` are what Megatron itself resolved. ``pp`` and
+# ``ep`` are the two degrees it takes verbatim from the command line, and
+# ``schedule`` and ``stages`` are literals the driver refuses every other
+# value of. The titan mesh line names ``ep`` too, so arm rule 12 reads the
+# same three degrees on both engines.
+#
+# **``ep`` here restates the argv, and the data-parallel line below proves
+# it.** ``install_data_parallel_marker`` reads the expert group
+# ``initialize_model_parallel`` really built and refuses a disagreement.
+# This line cannot do that itself: it prints before ``pretrain()`` runs, so
+# no process group exists yet.
 PARALLELISM_LINE = (
-    "Megatron-LM stock parallelism: dp={dp} pp={pp} schedule={schedule} "
-    "microbatches={microbatches} stages={stages}"
+    "Megatron-LM stock parallelism: dp={dp} pp={pp} ep={ep} "
+    "schedule={schedule} microbatches={microbatches} stages={stages}"
 )
 
 # The data-parallel half of arm rule 12, printed above dp 1.
 #
-# **It observes the wrapper, and does not declare the mesh.**
-# install_data_parallel_marker reads the DistributedDataParallel object
-# Megatron really built, and its real ddp_config, after
-# setup_model_and_optimizer returns. A run whose wrapper went missing
-# raises there rather than printing the line.
+# **Every value in it observes the wrapper or the group.**
+# install_data_parallel_marker reads the object Megatron really built, and
+# its real ddp_config, after setup_model_and_optimizer returns. A run whose
+# wrapper went missing raises there rather than printing the line.
 #
-# Arm rule 13 cannot cover for a declared line, which is why this one is an
-# observation: stock Megatron all-reduces the loss over its data-parallel
-# group on every last-stage rank every step (training.py's train_step), so
-# ncclDevKernel_AllReduce appears whether or not a gradient was reduced.
+# **{wrapper} is the class name, and it names the mechanism.** Megatron
+# picks one of three wrapper classes from the arguments (training.py).
+# Each of the three derives directly from _BaseDataParallel. None of them
+# derives from another. So the class name is what says which memory
+# strategy ran. The word "DistributedDataParallel" cannot be hardcoded
+# here, because it is wrong under --dense-sharding shard.
+#
+# **{sharding} is the strategy the run acts on, not the raw field.**
+# Megatron's argparse defaults data_parallel_sharding_strategy to
+# "optim_grads_params" and copies it into every ddp_config, but
+# megatron/core/optimizer/__init__.py reads it only under
+# use_megatron_fsdp. So the raw field says "optim_grads_params" on a
+# replicated run that shards nothing, and this line reports "no_shard"
+# there. Both halves are read off the wrapper's own config.
+#
+# **{expert} is the expert group's real width**, from
+# mpu.get_expert_model_parallel_world_size(). The expert degree carves its
+# ranks out of the data-parallel axis, so this is its line.
+#
+# Arm rule 13 cannot cover for a declared line, which is why every value
+# here is an observation: stock Megatron all-reduces the loss over its
+# data-parallel group on every last-stage rank every step (training.py's
+# train_step), so ncclDevKernel_AllReduce appears whether or not a gradient
+# was reduced.
 DATA_PARALLEL_LINE = (
-    "Megatron-LM stock data parallel: DistributedDataParallel over {dp} "
-    "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32})"
+    "Megatron-LM stock data parallel: {wrapper} over {dp} "
+    "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
+    "sharding_strategy={sharding}, expert_parallel={expert})"
 )
 
 # Arm rule 1. Megatron's own completion line is rank 0 only
@@ -275,6 +305,7 @@ def parallelism_lines(args: Any, *, microbatches: int) -> list[str]:
         PARALLELISM_LINE.format(
             dp=args.data_parallel_size,
             pp=args.pipeline_model_parallel_size,
+            ep=args.expert_model_parallel_size,
             schedule=schedule,
             microbatches=microbatches,
             stages=args.pipeline_model_parallel_size,
@@ -465,18 +496,54 @@ def install_step_log_shim(
     return uninstall
 
 
-def install_data_parallel_marker(*, data_parallel_size: int) -> None:
+def install_data_parallel_marker(
+    *, data_parallel_size: int, expert_parallel_size: int = 1
+) -> None:
     """Print the data-parallel line from the wrapper Megatron really built.
 
     Below two data-parallel ranks there is nothing to observe and nothing
     is printed: arm rule 12's data-parallel marker applies above ``dp`` 1.
+    Spec rule 9 makes ``ep`` divide ``dp``, so every expert split above 1
+    also has ``dp`` above 1 and reaches this line.
 
     Above it, this wraps ``setup_model_and_optimizer`` and reads the model
-    it returns. **It raises when no chunk carries a
-    ``DistributedDataParallel`` wrapper.** Two ranks that never reduce their
-    gradients train two models and report about twice the true throughput,
-    and every other rule passes -- including arm rule 13, because stock
-    Megatron all-reduces the loss over the same group every step.
+    it returns. **It raises when no chunk carries a data-parallel
+    wrapper.** Two ranks that never reduce their gradients train two models
+    and report about twice the true throughput, and every other rule passes
+    -- including arm rule 13, because stock Megatron all-reduces the loss
+    over the same group every step.
+
+    **The check accepts ``_BaseDataParallel``, and the line names the
+    class.** Megatron picks the wrapper from the arguments
+    (``training.py``): ``DistributedDataParallel``,
+    ``FullyShardedDataParallel`` or the torch FSDP2 wrapper. Each of them
+    derives directly from ``_BaseDataParallel``
+    (``data_parallel_base.py``). None of them derives from another. So a
+    check against ``DistributedDataParallel`` alone raises on an honest
+    sharded run.
+    **``FullyShardedDataParallel`` is a factory function and not a class**
+    (``mcore_fsdp_adapter.py``, whose own docstring says so), so
+    ``isinstance`` against it raises ``TypeError``; the version classes are
+    what a type check may name.
+
+    Accepting the base class alone would prove less than the narrow check
+    did. Printing ``type(chunk).__name__`` restores that and adds what the
+    dense-sharding value needs: the class name says which mechanism ran.
+
+    **The sharding strategy printed is the one the run acts on.**
+    ``data_parallel_sharding_strategy`` reaches every ``ddp_config``,
+    because Megatron's argparse defaults it, but
+    ``megatron/core/optimizer/__init__.py`` reads it only under
+    ``use_megatron_fsdp``. A line built from the raw field would say a
+    replicated run sharded. Both fields come from the wrapper's own config.
+
+    **The expert degree is read from the group, and a disagreement
+    raises.** ``initialize_model_parallel`` has run by the time this
+    replacement fires, so ``mpu.get_expert_model_parallel_world_size()``
+    reports the group that really exists. The argv states the degree twice
+    -- once as ``--expert-model-parallel-size`` and once on the mesh line
+    -- and neither statement proves it. This is the same cross-check
+    ``data.py`` already applies to the data-parallel degree.
 
     ``overlap_grad_reduce`` and ``grad_reduce_in_fp32`` come from the
     wrapper's own ``ddp_config``, not from the arguments.
@@ -484,8 +551,11 @@ def install_data_parallel_marker(*, data_parallel_size: int) -> None:
     if data_parallel_size <= 1:
         return
 
+    import megatron.core.parallel_state as mpu
     import megatron.training.training as megatron_training
-    from megatron.core.distributed import DistributedDataParallel
+    from megatron.core.distributed.data_parallel_base import (
+        _BaseDataParallel,
+    )
 
     original = megatron_training.setup_model_and_optimizer
 
@@ -494,24 +564,37 @@ def install_data_parallel_marker(*, data_parallel_size: int) -> None:
         model = result[0]
         chunks = model if isinstance(model, list) else [model]
         wrapped = [
-            chunk
-            for chunk in chunks
-            if isinstance(chunk, DistributedDataParallel)
+            chunk for chunk in chunks if isinstance(chunk, _BaseDataParallel)
         ]
         if not wrapped:
             raise RuntimeError(
                 f"the data-parallel degree is {data_parallel_size} and no "
-                "model chunk carries a DistributedDataParallel wrapper, so "
+                "model chunk carries a data-parallel wrapper, so "
                 "no gradient is reduced; the ranks would train separate "
                 "models and report about "
                 f"{data_parallel_size}x the true throughput"
             )
         config = wrapped[0].ddp_config
+        built_expert_size = mpu.get_expert_model_parallel_world_size()
+        if built_expert_size != expert_parallel_size:
+            raise RuntimeError(
+                "megatron built an expert-model-parallel group of "
+                f"{built_expert_size} rank(s) and the arguments say "
+                f"{expert_parallel_size}; the log would name one expert "
+                "split and the run would do another"
+            )
         print(
             DATA_PARALLEL_LINE.format(
+                wrapper=type(wrapped[0]).__name__,
                 dp=data_parallel_size,
                 overlap=config.overlap_grad_reduce,
                 fp32=config.grad_reduce_in_fp32,
+                sharding=(
+                    config.data_parallel_sharding_strategy
+                    if config.use_megatron_fsdp
+                    else "no_shard"
+                ),
+                expert=built_expert_size,
             ),
             flush=True,
         )
@@ -634,7 +717,10 @@ def main(argv: list[str] | None = None) -> int:
         pipeline_degree=args.pipeline_model_parallel_size,
         num_flops_per_token=shape.num_flops_per_token(args.bench_seq_len),
     )
-    install_data_parallel_marker(data_parallel_size=args.data_parallel_size)
+    install_data_parallel_marker(
+        data_parallel_size=args.data_parallel_size,
+        expert_parallel_size=args.expert_model_parallel_size,
+    )
 
     model_cfg = gpt_config_from_args(
         args, model_config_cls=BenchGPTModelConfig

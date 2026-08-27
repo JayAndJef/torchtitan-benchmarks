@@ -330,7 +330,6 @@ PP_SCHEDULES: dict[str, PipelineSchedule] = {
 # here -- the same rule ``MODEL_SIZE_CHOICES`` follows in ``shape.py``.
 PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 
-
 # How the run holds the DENSE parameters -- every parameter that is not a
 # routed expert weight. ``replicate`` gives each rank a whole copy.
 # ``shard`` splits one copy between the ranks of the data-parallel axis.
