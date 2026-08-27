@@ -543,11 +543,16 @@ PIPER_MEGATRON_STOCK = Scenario(
             ),
             launcher="megatron_stock",
             validation="megatron_stock",
-            # Both markers are expected rather than measured. They come from
-            # the tuned arm, which shares the attention backend and the fused
-            # SwiGLU. Confirm them on the first run. _permute_kernel is
-            # deliberately absent: --moe-permute-fusion is off here, because
-            # stock Megatron defaults it off.
+            # Both markers are MEASURED, on every rank. The dp 2 x pp 4
+            # cell at out/20260826T172258Z carries them in all eight ranks
+            # of both profiler windows, at 320 and 640 per window per rank.
+            # _permute_kernel is 0 on every rank there, which is why this
+            # arm does not declare it: --moe-permute-fusion is off here,
+            # because stock Megatron defaults it off.
+            #
+            # That is one mesh at one shape. A deeper split gives each stage
+            # fewer layers, so re-read every rank at pp 8 before citing a
+            # marker there.
             trace_kernel_markers=(
                 "cudnn_generated_fort_native_sdpa",
                 "_mul_silu_split",

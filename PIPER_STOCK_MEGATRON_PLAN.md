@@ -487,6 +487,12 @@ reporting defect and not a measurement defect.
 --pipeline-model-parallel-size <pp>
 ```
 
+> **Superseded on 2026-08-27 by the `--dense-sharding` value.**
+> `--expert-model-parallel-size` now carries `spec.ep`, not a fixed 1.
+> `_mesh_flags` in `benchmarks/e2e/megatron_stock/flags.py` is the
+> authority. An expert degree is legal only under `--dense-sharding shard`,
+> which spec rule 14 enforces.
+
 Both `--account-for-embedding-in-pipeline-split` and
 `--account-for-loss-in-pipeline-split` stay **off**, which is their default.
 Megatron then divides `config.num_layers`.
@@ -531,6 +537,18 @@ Piper passes the first four whenever `dp > 1`. This suite omits all five, so
 that both engines replicate their parameters and the DP axis carries one
 change and not two. A sharding study is separate work and must not be pooled
 with this result.
+
+> **Superseded on 2026-08-27 by the `--dense-sharding` value**, which is
+> that sharding study, expressed so the two parities cannot be pooled.
+> Under `replicate` this paragraph still holds and all five stay omitted.
+> Under `shard` the arm sends `--use-megatron-fsdp`,
+> `--megatron-fsdp-version`, `--data-parallel-sharding-strategy`,
+> `--use-distributed-optimizer` and `--ckpt-format fsdp_dtensor`, and both
+> engines shard. `--overlap-grad-reduce` and `--overlap-param-gather` stay
+> omitted under **both** values, for a reason `ALWAYS_OMITTED_FLAGS` gives.
+> `SHARDING_FLAGS` and `omitted_flags` in
+> `benchmarks/e2e/megatron_stock/flags.py` are the authority. The manifest
+> records the parity, and `--resume` refuses to cross it.
 
 `NCCL_P2P_DISABLE` is never set.
 

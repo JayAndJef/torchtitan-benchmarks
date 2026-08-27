@@ -1065,8 +1065,10 @@ every rank's traces by hand on the first cell of each mesh** -- eight ranks
 at `dp 2 x pp 4`, and eight again at `pp 8`, where all eight are stages of
 one pipeline. Do not carry a `pp 4` reading forward to a `pp 8` cell: a
 deeper split gives each stage fewer layers, so a stage can honestly lack a
-marker the shallower split put on every stage. **Nobody has done that
-reading on any cell yet**, including the `dp 2 x pp 4` cell that has run.
+marker the shallower split put on every stage. **The `dp 2 x pp 4` cell has
+had that reading**, and both declared markers appear on all eight ranks of
+both windows -- so "any rank" costs that arm nothing at that mesh. No other
+mesh has been read.
 
 **Arm rule 7 holds at `--dp 2, --pp 1`, measured.** A run without a pipeline
 still declares its regions, so the 80-invocations-per-window identity has to
@@ -2620,24 +2622,38 @@ would leave the ranks reducing nothing. It logs `piper1b data parallel:
 fully_shard applied (dp_replicate=R, dp_shard=S)`, which is arm rule 12's
 data-parallel marker.
 
-**A DP spec asks for `dp_replicate=dp, dp_shard=1`**: the parameters are
-replicated, not sharded, so the model each rank holds is still the
-plain-bf16 model above. **The delegate logs it as `Applied HSDP to the
-model`**, because it takes the two-dimensional mesh branch whenever a
-replicate degree exists; the shard group is one rank wide, so nothing is
-sharded. Say "replication at shard degree 1", never "TorchTitan calls it
-DDP" -- its config names the flag that way and its log does not. The harness always
-sends the shard-degree flag for such a spec, because
+**Under `--dense-sharding replicate` a DP spec asks for
+`dp_replicate=dp, dp_shard=1`**: the parameters are replicated, not
+sharded, so the model each rank holds is still the plain-bf16 model above.
+**The delegate logs it as `Applied HSDP to the model`**, because it takes
+the two-dimensional mesh branch whenever a replicate degree exists; the
+shard group is one rank wide, so nothing is sharded. Say "replication at
+shard degree 1", never "TorchTitan calls it DDP" -- its config names the
+flag that way and its log does not.
+
+**Under `shard` the same spec asks for `dp_replicate=1, dp_shard=dp`**, so
+the delegate really shards and the model is no longer the plain-bf16 model
+above. That is the point of the value, and it is why it is a comparability
+boundary.
+
+The harness always sends the shard-degree flag for either spec, because
 `data_parallel_shard_degree` defaults to **-1** and an omitted flag would
-turn `--dp 2` into ZeRO-3 silently. `parallelize_piper1b` refuses
-`dp_shard > 1` for the same reason, from the other side.
+turn `--dp 2` into ZeRO-3 silently. `parallelize_piper1b` guards the same
+hazard from the other side, and reads the **raw configured value** to do
+it: it refuses a negative degree, which is the only unambiguous "nobody
+sent the flag". A guard written on the resolved mesh could not tell an
+honest sharded run from a dropped flag.
 
 **Its parallel refusals are per axis, and each names its own reason.** One
 `world_size != 1` check stood there before, and it refused every axis for
 one axis's reason. It now refuses `tp > 1` and `cp > 1` (the harness cannot
-express either degree, so the manifest could not record such a run) and
-`dp_shard > 1` (sharded parameters are a different execution model, and the
-manifest would record this one). **A pipeline rank passes**, because it
+express either degree, so the manifest could not record such a run), a
+**negative** `data_parallel_shard_degree` (nobody sent the flag, so the run
+would shard while the manifest recorded whatever parity the harness asked
+for) and a mesh that replicates **and** shards (no `dense_sharding` value
+names HSDP). **It no longer refuses a shard degree above 1**, because
+`--dense-sharding shard` asks for exactly that. **A pipeline rank passes**,
+because it
 holds a slice of the layers, needs no gradient synchronization, and
 therefore keeps exactly the plain-bf16 model above. The module reads the
 `ParallelDims` TorchTitan builds from the command line, never
@@ -3087,11 +3103,21 @@ boundary is a document boundary.
 
 ### What is not settled
 
-**One mesh has run, and it is the replicated one.**
+**One mesh has run.**
 `out/20260826T172258Z/piper_megatron_stock/nvidia-h200` holds both arms at
-the `1b` shape, `--dp 2 --pp 4`, `--dense-sharding replicate`, both
-`completed`, with a `results.json`. Re-derive that from `out/` rather than
-quoting it.
+the `1b` shape, `--dp 2 --pp 4`, both `completed`, with a `results.json`.
+Re-derive that from `out/` rather than quoting it.
+
+**That manifest is schema 11, so it carries no `dense_sharding` key, and
+an absent key may not be read as `replicate`.** That is the whole reason
+the schema went to 12. What the record does carry is the derived pair
+`dp_replicate: 2, dp_shard: 1`, which is the replicated mesh -- so the run
+held the dense parameters replicated, stated from the mesh it recorded
+rather than from a value it never recorded. Its log also carries the
+pre-schema-12 marker shape, with no `ep=` field and no `sharding_strategy=`
+field, so the block quoted above is not the block that cell wrote. No
+published number is at risk: `evaluate` re-reads no marker, and `--resume`
+already refuses the directory on the changed `benchmarks_git_rev`.
 
 **Every other mesh of this scenario is still a declaration.** No sharded
 cell, no expert cell and no depth-8 pipeline has executed on either arm.
@@ -3101,10 +3127,15 @@ declare, never what they measure.
 Four items are expected rather than measured, and the first run of each
 mesh settles them:
 
-- The two trace markers, `cudnn_generated_fort_native_sdpa` and
-  `_mul_silu_split`. Both come from the tuned arm, which shares the
-  attention backend and the fused SwiGLU. If `_mul_silu_split` is absent,
-  read the trace before you change the declaration.
+- ~~The two trace markers~~ **settled, and on every rank.** Both
+  `cudnn_generated_fort_native_sdpa` and `_mul_silu_split` appear in
+  **all eight ranks of both profiler windows** of the `dp 2 x pp 4` cell
+  above, at 320 and 640 per window per rank. `_permute_kernel` is 0 on
+  every rank, which is correct and is why this arm does not declare it:
+  stock Megatron defaults `--moe-permute-fusion` off. Because the counts
+  are uniform across the eight ranks, arm rule 6's "any rank" reading costs
+  this arm nothing **at this mesh and this shape**. It is one cell; a `pp 8`
+  split gives each stage fewer layers, so repeat the reading there.
 - Arm rule 13's `ncclDevKernel_AllReduce` marker under Megatron's DDP
   bucketing at world 8. A grouped launch can surface as
   `ncclDevKernel_Generic`. Read every rank's trace before you widen it, and
