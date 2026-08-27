@@ -217,6 +217,16 @@ BENCH_FLAGS: tuple[str, ...] = (
 # the argv says, and this arm runs stock Megatron at its own defaults.
 #
 # The marker reads the resolved value instead. See DATA_PARALLEL_OVERLAP.
+#
+# **The consequence under ``shard`` is a caption obligation, not a defect.**
+# ``resolve_ddp_bucket_size`` runs before the wrapper exists and reads the
+# argument, which is False, so a sharded run enters Megatron-FSDP with
+# ``bucket_size = None``. The wrapper then flips ``overlap_grad_reduce`` to
+# True on the config it holds. So the sharded arm overlaps its gradient
+# reduction and buckets it at Megatron's unbucketed default, and **whether
+# that costs anything is unmeasured**. Say so beside any sharded number.
+# Sending the pair to bucket it would change the run rather than the record,
+# which is what the paragraph above refuses.
 ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--overlap-grad-reduce",
     "--overlap-param-gather",
@@ -264,7 +274,7 @@ def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
 def omitted_flags(dense_sharding: str) -> tuple[str, ...]:
     """Every flag this arm declines at ``dense_sharding``.
 
-    The roster is a function of the value because three of the five
+    The roster is a function of the value because all five
     sharding flags move from declined to required under ``shard``. A test
     reads this rather than a hand-written list, so the absence under
     ``replicate`` and the presence under ``shard`` are both asserted by

@@ -71,8 +71,10 @@ rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
 measurement: only ``1F1B`` is targeted, and the caps admit up to ``pp 8``.
 Real ``pp2``, ``dp2``, and ``dp2 x pp2`` correctness runs have passed on both
-engines. **No run has used ``pp 4`` or ``pp 8``, and no run has used world
-size 8.** The caps admit all three; that is a declaration and not evidence.
+engines, and one ``dp 2 x pp 4`` cell at world size 8 has completed on the
+stock arm. **No run has used ``pp 8``, no run has used the sharded parity,
+and no run has used an expert degree.** The caps admit all three; that is a
+declaration and not evidence.
 No parallel timing is citable, because the cells that ran were on a loaded
 host and nobody repeated them on an idle one.
 """
@@ -329,6 +331,7 @@ PP_SCHEDULES: dict[str, PipelineSchedule] = {
 # so that registering a schedule is one entry above and never a second edit
 # here -- the same rule ``MODEL_SIZE_CHOICES`` follows in ``shape.py``.
 PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
+
 
 # How the run holds the DENSE parameters -- every parameter that is not a
 # routed expert weight. ``replicate`` gives each rank a whole copy.

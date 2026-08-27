@@ -158,7 +158,8 @@ def _refuse_parallelism_passthrough(
     if offenders:
         raise ValueError(
             f"{arm.name}: {', '.join(offenders)} cannot be passed through: "
-            "the parallelism block is built from --dp/--pp/--ep and recorded "
+            "the parallelism block is built from --dp/--pp/--ep and "
+            "--dense-sharding, and recorded "
             "in the manifest, and a trailing flag would override it while "
             "the record still named the requested mesh"
         )

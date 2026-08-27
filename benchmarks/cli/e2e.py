@@ -206,7 +206,9 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             "ep",
             type=click.IntRange(min=1),
             help=(
-                "Expert-parallel degree [default: 1]. Declared and refused; "
+                "Expert-parallel degree [default: 1]. Needs "
+                "--dense-sharding shard, because TorchTitan cannot split "
+                "the experts and keep the dense parameters replicated. "
                 "ep takes its ranks out of the dp axis."
             ),
         ),
