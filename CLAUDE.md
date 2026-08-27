@@ -104,7 +104,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 |---|---|
 | `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans |
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
-| `benchmarks/e2e/parallelism.py` | The parallelism run axis: `ParallelismSpec`, the `PP_SCHEDULES` registry, the four derivations and `validate_parallelism`'s fourteen rules. Parent-side and torch-free |
+| `benchmarks/e2e/parallelism.py` | The parallelism run axis: `ParallelismSpec`, the `PP_SCHEDULES` registry, the four derivations and `validate_parallelism`'s sixteen rules. Parent-side and torch-free |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm. Three launchers: `torchtitan`, `megatron` and `megatron_stock` |
 | `benchmarks/e2e/validation.py` | `validate_arm` and the `ValidationProfile` registry. Three profiles: `torchtitan`, `megatron` and `megatron_stock` |
@@ -224,11 +224,12 @@ recorded fact rather than a missing one, and it now fails.
 **`run 0,1 --pp 2 --pp-schedule 1F1B --compile-mode default --ac none`
 starts two ranks, on both engines.** `_resolve_run`'s blanket refusal of
 every world size above 1 is gone. What refuses an unimplemented mesh is the
-fourteen rules of `benchmarks/e2e/parallelism.py` plus the engines
+sixteen rules of `benchmarks/e2e/parallelism.py` plus the engines
 themselves, and each failure lands on the module that owns the missing work:
-`parallelize_piper1b` refuses a tensor, context or data-parallel degree per
-axis, and the megatron driver refuses a schedule it does not implement (it
-runs `1F1B` alone). A bare `run 0,1` still dies at parallelism rule 1, which
+`parallelize_piper1b` refuses a tensor or context degree, a dropped
+shard-degree flag and a mesh that replicates and shards at once, and the
+megatron driver refuses a schedule it does not implement (it runs `1F1B`
+alone). A bare `run 0,1` still dies at parallelism rule 1, which
 compares `dp * pp` against the device count: "parallelism world size 1 (dp 1
 x pp 1) does not match the 2 device(s) requested". That lands before any
 host probe.
@@ -301,22 +302,36 @@ Shared options, with env equivalents:
 | `--ep` | -- | 1 |
 | `--pp-schedule` | -- | none |
 | `--pp-microbatch-size` | -- | 1 |
+| `--dense-sharding` | -- | `replicate` |
 
-**The five parallelism options take no environment variable, and the three
+**The six parallelism options take no environment variable, and the three
 axes above them do.** Each parallelism value has to agree with the `<gpu>`
 positional, and a positional has no environment form; an exported `PP=2`
 would make a plain `run 0 --scenario X` fail its own world-size check. The
-degrees, the schedule registry and the fourteen rules that refuse an illegal
+degrees, the schedule registry and the sixteen rules that refuse an illegal
 set live in `benchmarks/e2e/parallelism.py`; read that module, not this
 table, for what a combination means.
 
-**The budget is `MAX_WORLD_SIZE = 8` and `MAX_PP = 4`**
-(`benchmarks/e2e/parallelism.py`), lifted from 4 and 2 for the
-`piper_megatron_stock` suite, which runs `--dp 2 --pp 4` on eight devices.
-Neither number is a property of an engine. Both declare what somebody plans
-to run, and lifting either is one edit at those two names. The earlier `pp
-2` cap gave a false reason -- that the two engines count layers the same way
-only at `pp <= 2`. They agree at every degree, because
+**The budget is `MAX_WORLD_SIZE = 8` and `MAX_PP = 8`**
+(`benchmarks/e2e/parallelism.py`). `MAX_WORLD_SIZE` went from 4 to 8 for
+the `piper_megatron_stock` suite, which runs `--dp 2 --pp 4` on eight
+devices. `MAX_PP` went 2, then 4, then 8: the last lift is for the
+depth-8 pipeline, the deepest split eight GPUs can hold, and `pp 8`
+forces `dp 1`. Neither number is a property of an engine. Both declare
+what somebody plans to run, and lifting either is one edit at those two
+names.
+
+**The cap lift made rule 2's own pipeline half unreachable, and the
+repair is an order swap rather than a deletion.** The world size is
+`dp * pp`, which is never less than `pp`, so once `MAX_PP` equals
+`MAX_WORLD_SIZE` every spec above the pipeline cap is also above the world
+budget. Rule 2 now tests the pipeline degree first, so a `pp 9` spec reads
+the message that names the cap somebody has to lift rather than the
+world-size message. Both halves refuse every spec they refused before; the
+rule chooses the more specific of two true messages.
+
+The earlier `pp 2` cap gave a false reason -- that the two engines count
+layers the same way only at `pp <= 2`. They agree at every degree, because
 `benchmarks/e2e/launch.py` always sends
 `--parallelism.pipeline-parallel-first-stage-less-layers 0` and its `last`
 twin; without those TorchTitan splits 16 layers over 4 stages as
@@ -331,9 +346,64 @@ repo runs and wrong for the two V-shaped ones, `ZBVZeroBubble` and
 V-shaped schedule only beside a megatron arm, and spec rule 6 narrows the
 exposure without closing it: both V-shaped schedules set
 `requires_uncompiled`, so such a run also has to ask for `--compile-mode
-none`. The lift adds six `(dp, pp)` pairs to the gap. **No run has ever used
-a V-shaped schedule.** Read the comment above the two constants before you
+none`. The lift to `MAX_PP = 8` adds four `(dp, pp)` pairs to the gap --
+`pp` 5, 6, 7 and 8, each at `dp 1`, because nothing else fits eight ranks.
+**No run has ever used a V-shaped schedule.** Read the comment above the two constants before you
 run one, and repair `loss_visible_rank` rather than the cap.
+
+**`--dense-sharding {replicate,shard}` names how the run holds the DENSE
+parameters** -- every parameter that is not a routed expert weight.
+`replicate` gives each rank a whole copy; `shard` splits one copy between
+the ranks of the data-parallel axis. It defaults to `replicate`, which is
+the treatment every number this repo has published was measured under, and
+it is a **comparability boundary**: the manifest records it inside the
+`parallelism` record, so `--resume` gates it for free and two parities are
+never one series. It is a field on `ParallelismSpec`, not a run axis of its
+own, because it is a treatment of the data-parallel axis exactly as
+`--pp-schedule` is a treatment of the pipeline axis.
+
+**The value is what makes an expert degree legal, and the reason is a
+TorchTitan constraint rather than a preference.** TorchTitan cannot split
+the experts while it keeps the dense parameters replicated:
+`apply_fsdp_to_decoder` sends every non-expert parameter to `Shard(0)` on
+the dense mesh, and the expert mesh degree is
+`efsdp = dp_shard * cp * tp // ep`, which needs `dp_shard >= ep`. Megatron
+holds either parity. So the two engines compare under an expert degree only
+when **both** shard, and three rules enforce it:
+
+- **Spec rule 14** refuses `ep > 1` under `replicate`, and names
+  `--dense-sharding shard` as the repair. It used to refuse every `ep > 1`.
+- **Spec rule 15** refuses `shard` at `dp 1`. The shard degree is 1 there
+  whatever the flag says, so the manifest would record a parity the run did
+  not have.
+- **Spec rule 16** refuses both the sharded parity and an expert degree to
+  the **tuned** megatron driver, which implements neither. `run --arm`
+  narrows the engine set, so a TorchTitan-only subset passes.
+
+**What each value delivers.** TorchTitan gets
+`--parallelism.data-parallel-replicate-degree` and its shard twin from
+`titan_mesh`, which returns `(dp, 1)` under `replicate` and `(1, dp)` under
+`shard`, at **every** expert degree -- it reads the declared parity and
+never infers one from `ep`. The stock Megatron arm gets nothing extra under
+`replicate` and five flags under `shard`: `--use-megatron-fsdp`,
+`--megatron-fsdp-version 1`, `--data-parallel-sharding-strategy
+optim_grads_params`, `--use-distributed-optimizer` and `--ckpt-format
+fsdp_dtensor`. Two of the five restate a Megatron default on purpose, so a
+submodule bump that moved either default changes a recorded argv rather than
+a silent run.
+
+**The two engines still reshard differently, and no flag here removes it.**
+TorchTitan's `get_fsdp_reshard_after_forward_policy` returns `not
+pp_enabled` at the default policy, so under a pipeline TorchTitan keeps the
+gathered parameters through the step where Megatron-FSDP reshards. **State
+that beside every sharded number.** A titan peak-memory figure that barely
+moves under `shard` is expected; a **Megatron** figure that does not move is
+a real failure.
+
+**Nothing has run.** No sharded cell and no expert cell has executed on a
+GPU on either engine. The value, the rules, the flags and the log markers
+are declared and tested on the CPU; read them as a specification until a
+`results.json` says otherwise.
 
 **`--scenario` has no default, and an omitted one fails the run.** A default
 scenario can only be reached by an omission, and it would then measure one
@@ -758,7 +828,7 @@ sets `replay_dataloader=True` and `command_for_arm` delivers
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 11: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism, throughput_definition, execution_model, hardware_metadata
+  manifest.json     # schema 12: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism (with dense_sharding), throughput_definition, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 5: throughput (per rank), memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -973,15 +1043,30 @@ fallback coverage than the same arm at one rank.** Before publishing any
 pipelined number that rests on a marker, read every rank's traces by hand
 and say that you did.
 
-**`MAX_PP = 4` halves that coverage again, and one arm now depends on
-it.** At `pp` 2 a marker was satisfied by one of two stages. At `pp` 4 it
-is satisfied by one of four, so a fallback on the other three publishes
-under the fused label -- and `gpu_time` is a **maximum over ranks**, so a
-degraded stage is exactly the rank that sets the published figure.
+**Every lift of `MAX_PP` thins that coverage again, and it is now as thin
+as eight ranks allow.** At `pp` 2 a marker was satisfied by one of two
+stages. At `pp` 4 it is one of four. At `MAX_PP = 8` it is **one of
+eight**: a fallback on the other seven publishes under the fused label,
+and `gpu_time` is a **maximum over ranks**, so a degraded stage is exactly
+the rank that sets the published figure. The rule reads seven eighths of
+the run's stages not at all.
+
+**The fraction is what moved, not the rule.** "Any rank" always meant one
+stage speaks for the arm. `pp 8` makes the odds of that stage being the
+degraded one seven in eight rather than one in two, so the same rule that
+was a coverage hole at `pp 2` is close to no coverage at `pp 8`. It is
+still the safe direction only in the sense that it cannot fail an honest
+run; it can pass a wrong one.
+
 `piper_megatron_stock/baseline` declares two such markers
-(`cudnn_generated_fort_native_sdpa` and `_mul_silu_split`), **both of them
-expected rather than measured**, and the scenario's own matrix runs
-`--dp 2 --pp 4`. Read all eight ranks' traces by hand on the first cell.
+(`cudnn_generated_fort_native_sdpa` and `_mul_silu_split`), and the
+scenario's own matrix runs `--dp 2 --pp 4` and a `1 x 8` pipeline. **Read
+every rank's traces by hand on the first cell of each mesh** -- eight ranks
+at `dp 2 x pp 4`, and eight again at `pp 8`, where all eight are stages of
+one pipeline. Do not carry a `pp 4` reading forward to a `pp 8` cell: a
+deeper split gives each stage fewer layers, so a stage can honestly lack a
+marker the shallower split put on every stage. **Nobody has done that
+reading on any cell yet**, including the `dp 2 x pp 4` cell that has run.
 
 **Arm rule 7 holds at `--dp 2, --pp 1`, measured.** A run without a pipeline
 still declares its regions, so the 80-invocations-per-window identity has to
@@ -1022,8 +1107,8 @@ scenario declines every uncompiled mode. Its two mesh lines are the
 
 ```
 Megatron-LM stock training loop (mode=<mode>, main_params_dtype=..., ...)
-Megatron-LM stock parallelism: dp=<dp> pp=<pp> schedule=1F1B microbatches=<m> stages=<pp>
-Megatron-LM stock data parallel: DistributedDataParallel over <dp> ranks (...)
+Megatron-LM stock parallelism: dp=<dp> pp=<pp> ep=<ep> schedule=1F1B microbatches=<m> stages=<pp>
+Megatron-LM stock data parallel: <wrapper> over <dp> ranks (overlap_grad_reduce=..., grad_reduce_in_fp32=..., sharding_strategy=..., expert_parallel=<ep>)
 ```
 
 **The microbatch count in that line is `microbatch_geometry`'s, not
@@ -1038,14 +1123,55 @@ what keeps them from drifting apart.
 **The stock data-parallel line observes the wrapper, and nothing declares
 it.** `install_data_parallel_marker` replaces
 `megatron.training.training.setup_model_and_optimizer`, reads the model it
-returns, and **raises when no chunk carries a `DistributedDataParallel`**. It
-then prints `overlap_grad_reduce` and `grad_reduce_in_fp32` from the
-wrapper's own `ddp_config`. `parallelism_lines` deliberately prints no copy
-of that line: a second copy derived from the arguments would satisfy arm rule
-12 on its own, and a run whose wrapper went missing would pass the rule the
-shim exists to enforce. Arm rule 13 cannot make up that difference here,
-because stock Megatron all-reduces the reported loss over the data-parallel
-group on every step.
+returns, and **raises when no chunk carries a `_BaseDataParallel`**. It then
+prints the wrapper's own class name, `overlap_grad_reduce`,
+`grad_reduce_in_fp32`, the sharding strategy and the expert group's real
+width. `parallelism_lines` deliberately prints no copy of that line: a second
+copy derived from the arguments would satisfy arm rule 12 on its own, and a
+run whose wrapper went missing would pass the rule the shim exists to
+enforce. Arm rule 13 cannot make up that difference here, because stock
+Megatron all-reduces the reported loss over the data-parallel group on every
+step.
+
+**Five things about that line, and each is a trap somebody already fell
+into:**
+
+- **The isinstance is `_BaseDataParallel`, not `DistributedDataParallel`.**
+  Megatron picks one of three wrapper classes from the arguments, and
+  `FullyShardedDataParallelV1` is a **sibling** of `DistributedDataParallel`
+  rather than a subclass -- both derive directly from `_BaseDataParallel`.
+  The narrow check raised on an honest sharded run. Widening it loses what
+  the old check proved, so the class name is printed to restore it.
+- **`FullyShardedDataParallel` is a FACTORY FUNCTION, not a class.** Its own
+  docstring says so. `isinstance(chunk, FullyShardedDataParallel)` raises
+  `TypeError`. Do not write it.
+- **The word `DistributedDataParallel` is not hardcoded in the line.** Under
+  `shard` it would be a lie, so the class name is templated in and it is
+  what says which memory strategy ran.
+- **`sharding_strategy` is the strategy the run ACTS on, not the raw
+  field.** Megatron's argparse defaults `data_parallel_sharding_strategy` to
+  `optim_grads_params` and copies it into every `ddp_config`, but
+  `megatron/core/optimizer/__init__.py` reads it only under
+  `use_megatron_fsdp`. So the raw field says `optim_grads_params` on a
+  replicated run that shards nothing, and the line reports `no_shard` there.
+- **`overlap_grad_reduce` MOVES under `shard`, and the marker table derives
+  it.** `MegatronFSDP.__init__` sets
+  `self.ddp_config.overlap_grad_reduce = True` on the config it was handed
+  -- the reference, not a copy -- whenever the strategy is `optim_grads` or
+  `optim_grads_params`. So the marker pins `False` under `replicate` and
+  `True` under `shard`. **Do not repair this by sending
+  `--overlap-grad-reduce`**: `resolve_ddp_bucket_size` reads that value
+  before the wrapper exists, so the flag would move the gradient bucket size
+  and change the run rather than the record.
+
+**The expert degree is proved in two halves, because no one line can prove
+it.** `PARALLELISM_LINE` prints `ep=` from the arguments, and it prints in
+`main()` **before** `pretrain()` runs, so no process group exists there and
+an accessor would return 0. `install_data_parallel_marker` therefore reads
+the **built** expert group after `setup_model_and_optimizer` returns and
+**raises** when it disagrees with the argument. The argument is never
+trusted on its own; the observation moves to the one place in the run where
+the group exists.
 
 ### Resume
 
@@ -1064,7 +1190,7 @@ mode names and imply `ac=sac`).
 
 **`parallelism` does not inherit, and the asymmetry is deliberate.** The
 three axes above are single strings, so a resume can read one back and
-rebuild the run from it. A spec is five fields that together decide every
+rebuild the run from it. A spec is six fields that together decide every
 arm's command line, and `--resume` compares no command line -- so a
 reconstruction that dropped one field would relaunch the arms differently
 and the gate would not see it. Omitting the flags on a resume therefore asks
@@ -2559,11 +2685,21 @@ not trivial. **The trivial spec still returns
 `single-gpu-plain-bf16-no-fsdp`, character for character** -- that string is
 a fixed point every manifest since schema 7 carries, `EXECUTION_MODEL` in
 `benchmarks/e2e/registry.py` is what pins it, and a test compares the two.
-A pipelined run records `2-gpu-plain-bf16-no-fsdp-pp2-1F1B`. **The parts
-name degrees, not mechanisms**, because one manifest carries one
-`execution_model` for a whole run and a cross-engine run holds arms of both
-engines: `dp2` is true of both, where `fsdp2-replicate2-shard1` would
-describe TorchTitan's path and misdescribe Megatron's. The field is **not**
+A pipelined run records `2-gpu-plain-bf16-no-fsdp-pp2-1F1B`.
+
+**The data-parallel part carries the dense-sharding value.** It is `dp<N>`
+under `replicate` and `dp<N>-shard` under `shard`, so
+`--dp 2 --pp 4 --ep 2 --dense-sharding shard` records
+`8-gpu-plain-bf16-dp2-shard-pp4-1F1B-ep2` and the same mesh under
+`replicate` records `8-gpu-plain-bf16-dp2-pp4-1F1B-ep2`. Two runs of one
+mesh under different parities therefore no longer read alike.
+
+**The parts name degrees, not mechanisms**, because one manifest carries
+one `execution_model` for a whole run and a cross-engine run holds arms of
+both engines: `dp2` is true of both, where `fsdp2-replicate2-shard1` would
+describe TorchTitan's path and misdescribe Megatron's. `shard` passes that
+test for the same reason -- both engines shard under it, TorchTitan through
+`fully_shard` and Megatron through Megatron-FSDP. The field is **not**
 resume-gated -- `parallelism` is, and this is derived from it, so gating
 both would refuse the same run twice.
 
@@ -2951,13 +3087,19 @@ boundary is a document boundary.
 
 ### What is not settled
 
-**No cell has run.** The scenario is declared and gated on the CPU; no GPU
-run of either arm exists at this writing. Read it as a declaration until a
-`results.json` says otherwise, exactly as the never-built kernel scenarios
-are read.
+**One mesh has run, and it is the replicated one.**
+`out/20260826T172258Z/piper_megatron_stock/nvidia-h200` holds both arms at
+the `1b` shape, `--dp 2 --pp 4`, `--dense-sharding replicate`, both
+`completed`, with a `results.json`. Re-derive that from `out/` rather than
+quoting it.
 
-Four items are expected rather than measured, and the first run settles
-each:
+**Every other mesh of this scenario is still a declaration.** No sharded
+cell, no expert cell and no depth-8 pipeline has executed on either arm.
+Read those as never-built kernel scenarios are read: report what they
+declare, never what they measure.
+
+Four items are expected rather than measured, and the first run of each
+mesh settles them:
 
 - The two trace markers, `cudnn_generated_fort_native_sdpa` and
   `_mul_silu_split`. Both come from the tuned arm, which shares the
@@ -2974,8 +3116,11 @@ data-parallel group on every last-stage rank every step, and above `pp` 1
 the gradient-norm reduction puts a collective on every rank anyway. So
 `ncclDevKernel_AllReduce` appears whether or not a gradient moved. What
 closes the axis is `install_data_parallel_marker`, which raises when no
-model chunk carries a `DistributedDataParallel`. Treat that one function as
-load-bearing: the whole data-parallel axis of this arm rests on it.
+model chunk carries a `_BaseDataParallel`. Treat that one function as
+load-bearing: the whole data-parallel axis of this arm rests on it, and
+under `--dense-sharding shard` it is also the only observed proof that
+Megatron sharded -- it reads the strategy off the wrapper, not off the
+argv.
 - Whether Megatron's `--lr-decay-iters 40` decays over the 38 post-warmup
   steps, as TorchTitan does. The rate does not change the throughput, so a
   mismatch is a reporting defect.
@@ -3003,7 +3148,7 @@ evidence, and the rules for what may be said.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The last full run at this rev discovered 1717 tests and skipped 11. Re-derive
+The last full run at this rev discovered 1813 tests and skipped 11. Re-derive
 those counts rather than quoting them; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
