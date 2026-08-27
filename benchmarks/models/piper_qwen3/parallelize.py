@@ -42,11 +42,18 @@ harness now asks for both meshes.** Under ``--dense-sharding shard``
 ``titan_mesh`` returns ``(1, dp)``, so ``dp_shard`` above 1 is an honest
 request; a refusal written on the resolved mesh would refuse every sharded
 run and would still pass a dropped flag whenever the remainder resolved to
-the requested degree. ``ParallelDims.__post_init__`` resolves ``-1`` onto
-itself and never onto the ``ParallelismConfig`` this function receives
-(``distributed/parallel_dims.py``), and TorchTitan's trainer hands that
-object over unchanged on both the pipeline and the plain path. So ``-1``
-here means "nobody sent the flag", and nothing else means that.
+the requested degree.
+
+Four facts make ``-1`` unambiguous on this object.
+``ParallelismConfig.__post_init__`` does not touch the field
+(``config/configs.py``). ``ParallelDims.__post_init__`` resolves ``-1``
+onto itself and never onto the ``ParallelismConfig``
+(``distributed/parallel_dims.py``). TorchTitan's trainer hands the raw
+object over on both the pipeline path and the plain path
+(``trainer.py``, ``distributed/pipeline_parallel.py``).
+``benchmarks/models/piper_qwen3/config_registry.py`` sets no parallelism
+default, so nothing shadows the ``-1``. So ``-1`` here means "nobody sent
+the flag", and nothing else means that.
 
 **A mesh that replicates AND shards is refused too.** ``titan_mesh``
 returns ``(dp, 1)`` under ``replicate`` and ``(1, dp)`` under ``shard``, so
