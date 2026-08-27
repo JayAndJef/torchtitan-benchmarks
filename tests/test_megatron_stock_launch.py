@@ -65,6 +65,18 @@ STOCK_DRIVER_MODULE = f"{STOCK_PACKAGE}.train"
 
 # The mesh of the run matrix: two pipelines of four stages, eight GPUs.
 MESH = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4)
+# The same mesh under the other dense-sharding value, plus the expert
+# split that value makes legal. Every marker the profile builds moves
+# between the two, so a test that reads only MESH proves half the
+# contract.
+SHARDED_MESH = ParallelismSpec(
+    dp=2,
+    pp=4,
+    ep=2,
+    pp_schedule="1F1B",
+    pp_microbatch_size=4,
+    dense_sharding="shard",
+)
 
 # Every mesh the argv checks below sweep, with the batch each needs.
 #
@@ -122,11 +134,26 @@ STOCK_LOG_FRAGMENTS = (
     # the pipeline token is part of the contract and not decoration. A
     # driver printing ``dp=2, pp=4`` fails arm rule 12 on a real run.
     " pp=",
+    " ep=",
     " schedule=1F1B microbatches=",
     " stages=",
-    "Megatron-LM stock data parallel: DistributedDataParallel over ",
-    " ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True)",
+    "Megatron-LM stock data parallel: ",
+    " ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True, ",
+    "sharding_strategy=",
+    "expert_parallel=",
 )
+
+# The wrapper class name is the half of the data-parallel line that moves
+# with --dense-sharding, so it cannot sit in the roster above. Megatron
+# picks the class from --use-megatron-fsdp alone, and the two classes are
+# siblings rather than one a subclass of the other, so the name is what
+# says which memory strategy ran.
+STOCK_WRAPPER_FRAGMENTS = {
+    "replicate": "Megatron-LM stock data parallel: DistributedDataParallel ",
+    "shard": (
+        "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
+    ),
+}
 
 # The rest of the mode line. ``ValidationProfile.mode_line`` stops at the
 # comma after the mode, so no run-time rule reads these five fields; the
@@ -688,14 +715,56 @@ class StockValidationProfileTests(unittest.TestCase):
         markers = _megatron_stock_parallelism_markers(MESH, self.workload)
         self.assertEqual(
             markers[0],
-            "Megatron-LM stock parallelism: dp=2 pp=4 schedule=1F1B "
+            "Megatron-LM stock parallelism: dp=2 pp=4 ep=1 schedule=1F1B "
             "microbatches=8 stages=4",
         )
         self.assertEqual(
             markers[1],
             "Megatron-LM stock data parallel: DistributedDataParallel over "
-            "2 ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True)",
+            "2 ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True, "
+            "sharding_strategy=no_shard, expert_parallel=1)",
         )
+
+    def test_the_sharded_markers_name_the_other_wrapper(self) -> None:
+        """``--dense-sharding shard`` moves three fields of two lines.
+
+        Megatron picks ``FullyShardedDataParallelV1`` from
+        ``--use-megatron-fsdp`` alone, and the strategy it then acts on is
+        ``optim_grads_params``. A run that lost the sharding flags prints
+        the replicated line and fails arm rule 12, which is the point.
+        """
+        markers = _megatron_stock_parallelism_markers(
+            SHARDED_MESH, self.workload
+        )
+        self.assertEqual(
+            markers[0],
+            "Megatron-LM stock parallelism: dp=2 pp=4 ep=2 schedule=1F1B "
+            "microbatches=8 stages=4",
+        )
+        self.assertEqual(
+            markers[1],
+            "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
+            "over 2 ranks (overlap_grad_reduce=False, "
+            "grad_reduce_in_fp32=True, "
+            "sharding_strategy=optim_grads_params, expert_parallel=2)",
+        )
+
+    def test_the_two_values_share_no_data_parallel_marker(self) -> None:
+        """A replicated log must not satisfy a sharded arm's rule.
+
+        The manifest records the dense-sharding value. If one log could
+        satisfy both markers, a run that ignored the sharding flags would
+        publish under the sharded label.
+        """
+        replicated = _megatron_stock_parallelism_markers(
+            MESH, self.workload
+        )[1]
+        sharded = _megatron_stock_parallelism_markers(
+            SHARDED_MESH, self.workload
+        )[1]
+        self.assertNotEqual(replicated, sharded)
+        self.assertNotIn(replicated, sharded)
+        self.assertNotIn(sharded, replicated)
 
     def test_the_markers_are_non_empty_above_world_size_one(self) -> None:
         """An empty tuple would make ``validate_arm`` refuse the run.
@@ -712,7 +781,9 @@ class StockValidationProfileTests(unittest.TestCase):
             with self.subTest(spec=spec):
                 markers = self.profile.parallelism_markers(spec, self.workload)
                 self.assertTrue(markers)
-                self.assertIn(f"dp={spec.dp} pp={spec.pp}", markers[0])
+                self.assertIn(
+                    f"dp={spec.dp} pp={spec.pp} ep={spec.ep}", markers[0]
+                )
 
     def test_the_data_parallel_line_appears_only_above_dp_one(self) -> None:
         pipeline_only = self.profile.parallelism_markers(
@@ -819,8 +890,35 @@ class StockValidationProfileTests(unittest.TestCase):
                 )
 
     def test_the_data_parallel_pattern_sees_the_wrapper_line(self) -> None:
-        line = self.profile.parallelism_markers(MESH, self.workload)[1]
-        self.assertIsNotNone(self.profile.data_parallel_pattern.search(line))
+        for spec in (MESH, SHARDED_MESH):
+            with self.subTest(dense_sharding=spec.dense_sharding):
+                line = self.profile.parallelism_markers(
+                    spec, self.workload
+                )[1]
+                self.assertIsNotNone(
+                    self.profile.data_parallel_pattern.search(line)
+                )
+
+    def test_each_value_names_its_own_wrapper_class(self) -> None:
+        """Asserted by name, from the table beside the flags that build it.
+
+        The class name is the only field of this line that Megatron picks
+        from ``--use-megatron-fsdp`` alone, so it is the field that proves
+        the dense-sharding value.
+        """
+        for spec in (MESH, SHARDED_MESH):
+            with self.subTest(dense_sharding=spec.dense_sharding):
+                line = self.profile.parallelism_markers(
+                    spec, self.workload
+                )[1]
+                self.assertIn(
+                    STOCK_WRAPPER_FRAGMENTS[spec.dense_sharding], line
+                )
+                other = (
+                    "shard" if spec.dense_sharding == "replicate"
+                    else "replicate"
+                )
+                self.assertNotIn(STOCK_WRAPPER_FRAGMENTS[other], line)
 
     def test_neither_pattern_matches_the_tuned_arms_lines(self) -> None:
         """The two drivers must not satisfy each other's rules.
@@ -863,17 +961,24 @@ class StockValidationProfileTests(unittest.TestCase):
 
 
 class _StockArgs:
-    """The four ``args`` fields ``parallelism_lines`` reads.
+    """The five ``args`` fields ``parallelism_lines`` reads.
 
     Megatron's own parser produces these. Building them from a
     ``ParallelismSpec`` is what lets this module compare the driver's real
     line against the profile's marker without a Megatron-LM checkout.
+
+    ``expert_model_parallel_size`` is the flag verbatim, which is what
+    Megatron's parser holds at the point the driver prints this line: no
+    process group exists until ``pretrain()`` runs. The driver reads the
+    built group later, in ``install_data_parallel_marker``, and refuses a
+    disagreement there.
     """
 
     def __init__(self, spec: ParallelismSpec) -> None:
         self.world_size = spec.world_size
         self.data_parallel_size = spec.dp
         self.pipeline_model_parallel_size = spec.pp
+        self.expert_model_parallel_size = spec.ep
         self.bench_pp_schedule = spec.pp_schedule
 
 
@@ -885,6 +990,19 @@ STOCK_MESH_CASES = (
     (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), 8),
     (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B"), 32),
     (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B"), 8),
+    # The dense-sharding control cell of the matrix, and the expert split
+    # it makes legal. Both lines carry a field that moves between the two
+    # values, so a diff over the replicated cells alone proves half of it.
+    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"), 32),
+    (
+        ParallelismSpec(
+            dp=2, pp=4, ep=2, pp_schedule="1F1B", dense_sharding="shard"
+        ),
+        32,
+    ),
+    # The deepest pipeline eight GPUs hold. pp 8 forces dp 1, so it prints
+    # the mesh line and no data-parallel line.
+    (ParallelismSpec(pp=8, pp_schedule="1F1B", pp_microbatch_size=2), 32),
 )
 
 
@@ -892,6 +1010,30 @@ def _geometry(workload, spec):
     from benchmarks.e2e.megatron_stock.flags import microbatch_geometry
 
     return microbatch_geometry(workload, spec)
+
+
+def _driver_data_parallel_line(dense_sharding: str, *, dp: int, ep: int) -> str:
+    """The driver's data-parallel line for one dense-sharding value.
+
+    ``install_data_parallel_marker`` fills these four fields from the
+    wrapper and the expert group. This helper states the values Megatron
+    resolves for each ``--dense-sharding`` value, so the diff below reads
+    the driver's own template.
+    """
+    from benchmarks.e2e.megatron_stock import train
+    from benchmarks.e2e.megatron_stock.flags import (
+        DATA_PARALLEL_WRAPPERS,
+        SHARDING_STRATEGIES,
+    )
+
+    return train.DATA_PARALLEL_LINE.format(
+        wrapper=DATA_PARALLEL_WRAPPERS[dense_sharding],
+        dp=dp,
+        overlap=False,
+        fp32=True,
+        sharding=SHARDING_STRATEGIES[dense_sharding],
+        expert=ep,
+    )
 
 
 def _driver_lines() -> list[str]:
@@ -910,7 +1052,8 @@ def _driver_lines() -> list[str]:
             dispatcher="alltoall",
         ),
         *train.parallelism_lines(_StockArgs(spec), microbatches=8),
-        train.DATA_PARALLEL_LINE.format(dp=2, overlap=False, fp32=True),
+        _driver_data_parallel_line("replicate", dp=2, ep=1),
+        _driver_data_parallel_line("shard", dp=2, ep=2),
         train.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
         train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
     ]
@@ -962,6 +1105,7 @@ class StockMarkerContractTests(unittest.TestCase):
         """
         for fragment in (
             *STOCK_LOG_FRAGMENTS,
+            *STOCK_WRAPPER_FRAGMENTS.values(),
             *STOCK_MODE_LINE_FIELDS,
             *STOCK_PARAMETER_FRAGMENTS,
         ):
@@ -1020,8 +1164,8 @@ class StockMarkerContractTests(unittest.TestCase):
                     scenario_by_name(SCENARIO_NAME).workload,
                     local_batch_size=batch,
                 )
-                printed = train.DATA_PARALLEL_LINE.format(
-                    dp=spec.dp, overlap=False, fp32=True
+                printed = _driver_data_parallel_line(
+                    spec.dense_sharding, dp=spec.dp, ep=spec.ep
                 )
                 markers = self.profile.parallelism_markers(spec, workload)
                 self.assertEqual(printed, markers[1])

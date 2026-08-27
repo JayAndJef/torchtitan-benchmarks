@@ -1759,7 +1759,7 @@ TEST_CENSUS = {
     # +3 for the partial profiler cycle: that flags.py refuses one, that a
     # floored end steps a stopped profiler on either schedule, and that the
     # offset makes that failure arrive sooner.
-    "test_megatron_stock_driver": 85,
+    "test_megatron_stock_driver": 101,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -1767,7 +1767,7 @@ TEST_CENSUS = {
     # run uncompiled, and the character-for-character diff between the
     # driver's own printed lines and the megatron_stock validation
     # profile's markers.
-    "test_megatron_stock_launch": 53,
+    "test_megatron_stock_launch": 56,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1940,7 +1940,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1654
+TEST_CENSUS_TOTAL = 1673
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

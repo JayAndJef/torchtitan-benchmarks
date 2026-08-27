@@ -50,10 +50,17 @@ from benchmarks.e2e.megatron_stock import (  # noqa: E402
     train,
 )
 from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
+    ALWAYS_OMITTED_FLAGS,
     BENCH_FLAGS,
     BENCH_PP_SCHEDULE,
-    OMITTED_FLAGS,
+    DATA_PARALLEL_WRAPPERS,
+    MEGATRON_CHECKPOINT_FORMAT,
+    MEGATRON_FSDP_VERSION,
+    MEGATRON_SHARDING_STRATEGY,
+    SHARDING_FLAGS,
+    SHARDING_STRATEGIES,
     microbatch_geometry,
+    omitted_flags,
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import (  # noqa: E402
@@ -75,6 +82,10 @@ from benchmarks.models.piper_qwen3.shape import (  # noqa: E402
 PP4_SPEC = ParallelismSpec(
     dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4
 )
+# Cell 2 and cell 4: the same mesh, dense parameters sharded on both
+# engines. Cell 5 and cell 6 add the expert split that value makes legal.
+SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, dense_sharding="shard")
+EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
 BATCH_32 = dataclasses.replace(PIPER_1B_MEGATRON_WORKLOAD, local_batch_size=32)
 
 
@@ -206,18 +217,154 @@ class FlagListTest(unittest.TestCase):
         )
 
     def test_no_declined_flag_is_emitted(self) -> None:
-        """The five sharding flags, the two fusions and the rest stay out.
+        """Every flag the value declines, asserted by name.
 
         Each is declined for a reason section 7 of the plan states. An
         emitted one would change what the arm measures without changing
-        anything the manifest records.
+        anything the manifest records. The roster is a function of the
+        dense-sharding value, because three of the five sharding flags move
+        from declined to required under ``shard``.
         """
         for size in ("1b", "9b"):
-            for spec in (TRIVIAL_SPEC, PP4_SPEC):
+            for spec in (
+                TRIVIAL_SPEC,
+                PP4_SPEC,
+                SHARDED_PP4_SPEC,
+                EXPERT_PP4_SPEC,
+            ):
                 emitted = set(flags_for(size, spec))
-                for flag in OMITTED_FLAGS:
-                    with self.subTest(size=size, pp=spec.pp, flag=flag):
+                for flag in omitted_flags(spec.dense_sharding):
+                    with self.subTest(
+                        size=size,
+                        pp=spec.pp,
+                        dense_sharding=spec.dense_sharding,
+                        flag=flag,
+                    ):
                         self.assertNotIn(flag, emitted)
+
+    def test_replicate_declines_every_sharding_flag(self) -> None:
+        """The five flags, asserted by name against the roster.
+
+        ``replicate`` is stock Megatron's own default, and it is what every
+        published cell of this scenario ran.
+        """
+        self.assertEqual(
+            omitted_flags("replicate"),
+            ALWAYS_OMITTED_FLAGS + SHARDING_FLAGS,
+        )
+        for flag in SHARDING_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, set(flags_for("1b", PP4_SPEC)))
+
+    def test_shard_emits_every_sharding_flag(self) -> None:
+        """The other half of the same roster, and the values it carries.
+
+        ``--use-distributed-optimizer`` is one of the five. Megatron-FSDP
+        v1 turns it on itself, so an argv that omitted it would deny a fact
+        the run has.
+        """
+        self.assertEqual(omitted_flags("shard"), ALWAYS_OMITTED_FLAGS)
+        for spec in (SHARDED_PP4_SPEC, EXPERT_PP4_SPEC):
+            emitted = flags_for("1b", spec)
+            for flag in SHARDING_FLAGS:
+                with self.subTest(ep=spec.ep, flag=flag):
+                    self.assertIn(flag, emitted)
+            self.assertEqual(
+                value_after(emitted, "--megatron-fsdp-version"),
+                MEGATRON_FSDP_VERSION,
+            )
+            self.assertEqual(
+                value_after(emitted, "--data-parallel-sharding-strategy"),
+                MEGATRON_SHARDING_STRATEGY,
+            )
+            self.assertEqual(
+                value_after(emitted, "--ckpt-format"),
+                MEGATRON_CHECKPOINT_FORMAT,
+            )
+
+    def test_megatron_fsdp_runs_at_version_one(self) -> None:
+        """Version 2 refuses every shape in this suite.
+
+        ``FullyShardedDataParallelV2._validate_config`` raises on a
+        pipeline degree, an expert degree and on any config whose
+        ``num_moe_experts`` is set. Every registered shape is a mixture of
+        experts, so v2 refuses this suite even at pp 1 and ep 1.
+        """
+        self.assertEqual(MEGATRON_FSDP_VERSION, "1")
+        self.assertEqual(
+            DATA_PARALLEL_WRAPPERS["shard"], "FullyShardedDataParallelV1"
+        )
+
+    def test_the_expert_degree_reaches_the_argv(self) -> None:
+        """A degree the harness holds and the argv drops trains a
+        different model.
+        """
+        for spec, expected in (
+            (TRIVIAL_SPEC, "1"),
+            (PP4_SPEC, "1"),
+            (SHARDED_PP4_SPEC, "1"),
+            (EXPERT_PP4_SPEC, "2"),
+        ):
+            with self.subTest(ep=spec.ep):
+                self.assertEqual(
+                    value_after(
+                        flags_for("1b", spec),
+                        "--expert-model-parallel-size",
+                    ),
+                    expected,
+                )
+
+    def test_the_trivial_spec_argv_does_not_move(self) -> None:
+        """The default value must change no published command line.
+
+        Every cell under ``out/`` ran at ``replicate``. The expert degree
+        was already sent as a literal ``1``, and the sharding flags are
+        empty there, so the trivial argv is what it was.
+        """
+        emitted = flags_for("1b", TRIVIAL_SPEC)
+        self.assertEqual(
+            value_after(emitted, "--expert-model-parallel-size"), "1"
+        )
+        for flag in SHARDING_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, emitted)
+
+    def test_an_expert_split_without_sharding_is_refused(self) -> None:
+        """TorchTitan cannot split experts and replicate the dense
+        parameters.
+
+        A replicated expert row would compare two memory strategies, which
+        is two changes rather than one.
+        """
+        with self.assertRaisesRegex(ValueError, "--dense-sharding shard"):
+            flags_for("1b", dataclasses.replace(PP4_SPEC, ep=2))
+
+    def test_an_unknown_dense_sharding_value_is_refused(self) -> None:
+        """A silent fall through would send the replicated argv under the
+        other label.
+        """
+        with self.assertRaisesRegex(ValueError, "dense sharding"):
+            flags_for(
+                "1b", dataclasses.replace(PP4_SPEC, dense_sharding="zero3")
+            )
+        with self.assertRaisesRegex(ValueError, "dense sharding"):
+            omitted_flags("zero3")
+
+    def test_the_sharding_strategy_table_reads_no_shard_under_replicate(
+        self,
+    ) -> None:
+        """Megatron's argparse default is not the value the run acts on.
+
+        ``--data-parallel-sharding-strategy`` defaults to
+        ``optim_grads_params`` and reaches every ``ddp_config``, but
+        ``megatron/core/optimizer/__init__.py`` reads it only under
+        ``use_megatron_fsdp``. A marker built from the raw field would say
+        a replicated run sharded.
+        """
+        self.assertEqual(SHARDING_STRATEGIES["replicate"], "no_shard")
+        self.assertEqual(
+            SHARDING_STRATEGIES["shard"], MEGATRON_SHARDING_STRATEGY
+        )
 
     def test_geometry_comes_from_the_shape(self) -> None:
         """Every registered shape, field by field.
@@ -869,12 +1016,13 @@ class ProfilerShimTest(unittest.TestCase):
 # real run at validation time.
 PLAN_MODE_PREFIX = "Megatron-LM stock training loop (mode="
 PLAN_PARALLELISM_LINE = (
-    "Megatron-LM stock parallelism: dp={dp} pp={pp} schedule={schedule} "
-    "microbatches={microbatches} stages={stages}"
+    "Megatron-LM stock parallelism: dp={dp} pp={pp} ep={ep} "
+    "schedule={schedule} microbatches={microbatches} stages={stages}"
 )
 PLAN_DATA_PARALLEL_LINE = (
-    "Megatron-LM stock data parallel: DistributedDataParallel over {dp} "
-    "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32})"
+    "Megatron-LM stock data parallel: {wrapper} over {dp} "
+    "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
+    "sharding_strategy={sharding}, expert_parallel={expert})"
 )
 PLAN_STAGE_SIZE_LINE = (
     "stock-megatron stage {stage}/{stages} local size: {count} parameters"
@@ -898,6 +1046,7 @@ def stock_args(**overrides):
         micro_batch_size=1,
         pipeline_model_parallel_size=1,
         virtual_pipeline_model_parallel_size=None,
+        expert_model_parallel_size=1,
         data_parallel_size=1,
         world_size=1,
         main_params_dtype=torch.float32,
@@ -1182,8 +1331,8 @@ class MarkerStringTest(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                "Megatron-LM stock parallelism: dp=1 pp=4 schedule=1F1B "
-                "microbatches=8 stages=4"
+                "Megatron-LM stock parallelism: dp=1 pp=4 ep=1 "
+                "schedule=1F1B microbatches=8 stages=4"
             ],
         )
 
@@ -1207,8 +1356,34 @@ class MarkerStringTest(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                "Megatron-LM stock parallelism: dp=2 pp=4 schedule=1F1B "
-                "microbatches=8 stages=4"
+                "Megatron-LM stock parallelism: dp=2 pp=4 ep=1 "
+                "schedule=1F1B microbatches=8 stages=4"
+            ],
+        )
+
+    def test_the_mesh_line_carries_the_expert_degree(self) -> None:
+        """A degree the harness holds and no line names cannot be read.
+
+        This field restates the argv, which is what ``pp`` already does:
+        the line prints before ``pretrain()`` runs, so no process group
+        exists yet. ``install_data_parallel_marker`` reads the built group
+        later and refuses a disagreement.
+        """
+        lines = train.parallelism_lines(
+            stock_args(
+                world_size=8,
+                pipeline_model_parallel_size=4,
+                data_parallel_size=2,
+                expert_model_parallel_size=2,
+                bench_pp_schedule="1F1B",
+            ),
+            microbatches=8,
+        )
+        self.assertEqual(
+            lines,
+            [
+                "Megatron-LM stock parallelism: dp=2 pp=4 ep=2 "
+                "schedule=1F1B microbatches=8 stages=4"
             ],
         )
 
@@ -1447,6 +1622,72 @@ class DataParallelMarkerTest(unittest.TestCase):
             raise unittest.SkipTest(f"megatron is not importable: {error}")
         return megatron_training, DistributedDataParallel
 
+    def wrapper_classes(self):
+        """The two classes Megatron picks between, or a skip.
+
+        ``FullyShardedDataParallel`` is a **factory function**, not a
+        class, so it is not one of them: its own docstring says to use the
+        version classes for a type check.
+        """
+        try:
+            bootstrap.prepare()
+            from megatron.core.distributed import DistributedDataParallel
+            from megatron.core.distributed.fsdp.mcore_fsdp_adapter import (
+                FullyShardedDataParallelV1,
+            )
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        return DistributedDataParallel, FullyShardedDataParallelV1
+
+    @contextlib.contextmanager
+    def expert_group_of(self, size):
+        """Report ``size`` from ``mpu.get_expert_model_parallel_world_size``.
+
+        The accessor prefers the module global over the process group, so
+        the setter reaches it without ``torch.distributed``.
+        """
+        import megatron.core.parallel_state as mpu
+
+        original = mpu.get_expert_model_parallel_world_size()
+        mpu.set_expert_model_parallel_world_size(size)
+        try:
+            yield
+        finally:
+            mpu.set_expert_model_parallel_world_size(original or None)
+
+    def run_shim(self, chunk, *, dp=2, ep=1, built_ep=None):
+        """Install the shim over a stub and return what it printed."""
+        megatron_training, _ = self.megatron_symbols()
+        original = megatron_training.setup_model_and_optimizer
+        megatron_training.setup_model_and_optimizer = (
+            lambda *args, **keywords: ([chunk], None, None)
+        )
+        stream = io.StringIO()
+        try:
+            with self.expert_group_of(
+                ep if built_ep is None else built_ep
+            ):
+                train.install_data_parallel_marker(
+                    data_parallel_size=dp, expert_parallel_size=ep
+                )
+                with contextlib.redirect_stdout(stream):
+                    megatron_training.setup_model_and_optimizer()
+        finally:
+            megatron_training.setup_model_and_optimizer = original
+        return stream.getvalue().strip()
+
+    @staticmethod
+    def ddp_config(**overrides):
+        """The ``ddp_config`` fields the shim reads."""
+        base = dict(
+            overlap_grad_reduce=False,
+            grad_reduce_in_fp32=True,
+            use_megatron_fsdp=False,
+            data_parallel_sharding_strategy="optim_grads_params",
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
     def test_the_marker_is_silent_at_one_data_parallel_rank(self) -> None:
         """Below dp 2 there is no wrapper, and rule 12 asks for no line."""
         stream = io.StringIO()
@@ -1472,46 +1713,170 @@ class DataParallelMarkerTest(unittest.TestCase):
         finally:
             megatron_training.setup_model_and_optimizer = original
         self.assertIn("no gradient is reduced", str(caught.exception))
+        self.assertIn("no model chunk carries a data-parallel wrapper",
+                      str(caught.exception))
 
     def test_the_line_reads_the_wrapper_and_not_the_arguments(self) -> None:
         """The values come from the live ``ddp_config``."""
-        megatron_training, ddp_cls = self.megatron_symbols()
+        ddp_cls, _ = self.wrapper_classes()
         chunk = object.__new__(ddp_cls)
-        chunk.ddp_config = SimpleNamespace(
-            overlap_grad_reduce=False, grad_reduce_in_fp32=True
-        )
-        original = megatron_training.setup_model_and_optimizer
-        megatron_training.setup_model_and_optimizer = (
-            lambda *args, **keywords: ([chunk], None, None)
-        )
-        stream = io.StringIO()
-        try:
-            train.install_data_parallel_marker(data_parallel_size=2)
-            with contextlib.redirect_stdout(stream):
-                megatron_training.setup_model_and_optimizer()
-        finally:
-            megatron_training.setup_model_and_optimizer = original
+        chunk.ddp_config = self.ddp_config()
         self.assertEqual(
-            stream.getvalue().strip(),
+            self.run_shim(chunk),
             train.DATA_PARALLEL_LINE.format(
-                dp=2, overlap=False, fp32=True
+                wrapper="DistributedDataParallel",
+                dp=2,
+                overlap=False,
+                fp32=True,
+                sharding="no_shard",
+                expert=1,
             ),
         )
+
+    def test_the_megatron_fsdp_wrapper_is_accepted_and_named(self) -> None:
+        """The repair, stated as one assertion.
+
+        ``DistributedDataParallel`` and ``FullyShardedDataParallelV1`` are
+        siblings under ``_BaseDataParallel``, so the old narrow isinstance
+        raised on an honest sharded run. Widening it alone would prove less
+        than the narrow check did; the class name restores that, because it
+        says which mechanism ran.
+        """
+        _, fsdp_cls = self.wrapper_classes()
+        chunk = object.__new__(fsdp_cls)
+        chunk.ddp_config = self.ddp_config(
+            use_megatron_fsdp=True,
+            data_parallel_sharding_strategy="optim_grads_params",
+        )
+        printed = self.run_shim(chunk, ep=2)
+        self.assertIn(
+            "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
+            "over 2 ranks",
+            printed,
+        )
+        self.assertIn("sharding_strategy=optim_grads_params", printed)
+        self.assertIn("expert_parallel=2", printed)
+
+    def test_the_two_wrappers_are_siblings_and_not_one_a_subclass(
+        self,
+    ) -> None:
+        """Read off Megatron itself. This is why the narrow check broke."""
+        ddp_cls, fsdp_cls = self.wrapper_classes()
+        from megatron.core.distributed.data_parallel_base import (
+            _BaseDataParallel,
+        )
+
+        self.assertTrue(issubclass(ddp_cls, _BaseDataParallel))
+        self.assertTrue(issubclass(fsdp_cls, _BaseDataParallel))
+        self.assertFalse(issubclass(fsdp_cls, ddp_cls))
+        self.assertFalse(issubclass(ddp_cls, fsdp_cls))
+
+    def test_the_fsdp_name_megatron_exports_is_a_function(self) -> None:
+        """``isinstance`` against it raises ``TypeError``. Never write it."""
+        try:
+            bootstrap.prepare()
+            from megatron.core.distributed import FullyShardedDataParallel
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        self.assertFalse(isinstance(FullyShardedDataParallel, type))
+        with self.assertRaises(TypeError):
+            isinstance(object(), FullyShardedDataParallel)
+
+    def test_a_replicated_run_reports_no_shard(self) -> None:
+        """Megatron's argparse default is not the value the run acts on.
+
+        ``data_parallel_sharding_strategy`` reaches every ``ddp_config``,
+        but the optimizer reads it only under ``use_megatron_fsdp``. A line
+        built from the raw field would say this run sharded.
+        """
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config(
+            use_megatron_fsdp=False,
+            data_parallel_sharding_strategy="optim_grads_params",
+        )
+        printed = self.run_shim(chunk)
+        self.assertIn("sharding_strategy=no_shard", printed)
+        self.assertNotIn("optim_grads_params", printed)
+
+    def test_an_expert_group_that_contradicts_the_arguments_raises(
+        self,
+    ) -> None:
+        """The argv states the degree twice and proves it neither time.
+
+        ``initialize_model_parallel`` has run by now, so the group is the
+        one the run really has. This is the cross-check ``data.py``
+        already applies to the data-parallel degree.
+        """
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config()
+        with self.assertRaises(RuntimeError) as caught:
+            self.run_shim(chunk, ep=2, built_ep=1)
+        message = str(caught.exception)
+        self.assertIn("expert-model-parallel group of 1", message)
+        self.assertIn("say 2", message)
+
+    def test_the_matching_profile_marker_is_the_line_the_shim_prints(
+        self,
+    ) -> None:
+        """The character-for-character diff, for both values.
+
+        A one-character difference fails a real eight-GPU run at arm rule
+        12, hours after it started.
+        """
+        from benchmarks.e2e.validation import VALIDATION_PROFILES
+
+        profile = VALIDATION_PROFILES["megatron_stock"]
+        ddp_cls, fsdp_cls = self.wrapper_classes()
+        for spec, cls, fsdp in (
+            (PP4_SPEC, ddp_cls, False),
+            (SHARDED_PP4_SPEC, fsdp_cls, True),
+            (EXPERT_PP4_SPEC, fsdp_cls, True),
+        ):
+            with self.subTest(
+                dense_sharding=spec.dense_sharding, ep=spec.ep
+            ):
+                chunk = object.__new__(cls)
+                chunk.ddp_config = self.ddp_config(
+                    use_megatron_fsdp=fsdp,
+                    data_parallel_sharding_strategy=(
+                        MEGATRON_SHARDING_STRATEGY
+                    ),
+                )
+                printed = self.run_shim(chunk, dp=spec.dp, ep=spec.ep)
+                markers = profile.parallelism_markers(spec, BATCH_32)
+                self.assertEqual(printed, markers[1])
+
+    def test_an_expert_group_that_does_not_exist_raises(self) -> None:
+        """``get_expert_model_parallel_world_size`` returns 0 without a
+        group.
+
+        ``initialize_model_parallel`` has run by the time this replacement
+        fires, so 0 means the mesh Megatron built is not the mesh it says
+        it built. The comparison against the argument catches it.
+        """
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config()
+        with self.assertRaisesRegex(RuntimeError, "group of 0 rank"):
+            self.run_shim(chunk, ep=1, built_ep=0)
 
     def test_the_shim_puts_megatron_back(self) -> None:
         """One wrap, then the module holds Megatron's own function again."""
         megatron_training, ddp_cls = self.megatron_symbols()
         chunk = object.__new__(ddp_cls)
-        chunk.ddp_config = SimpleNamespace(
+        chunk.ddp_config = self.ddp_config(
             overlap_grad_reduce=True, grad_reduce_in_fp32=False
         )
         stub = lambda *args, **keywords: ([chunk], None, None)  # noqa: E731
         original = megatron_training.setup_model_and_optimizer
         megatron_training.setup_model_and_optimizer = stub
         try:
-            train.install_data_parallel_marker(data_parallel_size=2)
-            with contextlib.redirect_stdout(io.StringIO()):
-                megatron_training.setup_model_and_optimizer()
+            with self.expert_group_of(1):
+                train.install_data_parallel_marker(data_parallel_size=2)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    megatron_training.setup_model_and_optimizer()
             self.assertIs(
                 megatron_training.setup_model_and_optimizer, stub
             )
