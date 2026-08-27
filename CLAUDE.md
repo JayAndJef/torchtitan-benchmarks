@@ -2989,6 +2989,14 @@ comparable to a pinned one; say so beside the number.
 **`tools/run_matrix.sh` does not drive this scenario.** Extending it is
 separate work.
 
+## Comparing against Piper's artifact
+
+Piper's published Megatron baseline loses ZeRO-1 whenever the expert degree
+equals the data-parallel degree. Five handicaps sit on its TorchTitan arm.
+**Read the `piper-comparison` skill before you compare any number of ours
+against Piper's paper** (arXiv 2606.11169). The skill holds the defect, the
+evidence, and the rules for what may be said.
+
 ## Tests
 
 ```bash

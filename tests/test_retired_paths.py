@@ -352,12 +352,19 @@ class RetiredPathAuditTests(unittest.TestCase):
         roughly 200 manifests recording the retired paths; if any of it
         reached the scan, the audit below would be unsatisfiable except by
         deleting evidence.
+
+        ``.claude/`` is deliberately absent from the refused prefixes.
+        ``.gitignore`` ignores ``/.claude/*`` and then un-ignores
+        ``/.claude/skills/``, so the skills are tracked first-party
+        documentation and the audit must read them. Every other part of
+        ``.claude/`` stays ignored, and ``git ls-files`` cannot return an
+        ignored path, so git remains the enumerator either way.
         """
         scanned = scanned_files()
         self.assertTrue(scanned, "git ls-files returned nothing to scan")
         for path in scanned:
             self.assertFalse(
-                path.startswith(("out/", "reports/", ".claude/", ".venv/")),
+                path.startswith(("out/", "reports/", ".venv/")),
                 f"{path} is gitignored output and must not be scanned",
             )
         # Sanity: the scan really does reach real source, config and docs.
@@ -367,6 +374,7 @@ class RetiredPathAuditTests(unittest.TestCase):
             "run_bench.sh",
             "pyproject.toml",
             "CLAUDE.md",
+            ".claude/skills/piper-comparison/SKILL.md",
         ):
             self.assertIn(anchor, scanned)
 
