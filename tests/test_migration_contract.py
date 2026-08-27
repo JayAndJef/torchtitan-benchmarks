@@ -2044,7 +2044,7 @@ TEST_CENSUS = {
     # refusing an undeclared value before it gets there.
     # +1 that an --arm subset narrows the engine set spec rule 16 reads,
     # which is the repair that rule's two messages name.
-    "test_parallelism_plumbing": 59,
+    "test_parallelism_plumbing": 61,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2084,7 +2084,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1717
+TEST_CENSUS_TOTAL = 1719
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

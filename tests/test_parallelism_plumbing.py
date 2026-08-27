@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -44,7 +45,7 @@ from benchmarks.e2e.parallelism import (
     execution_model,
 )
 from benchmarks.e2e.registry import EXECUTION_MODEL, scenario_by_name
-from benchmarks.e2e.runner import RunRequest, _resolve_run
+from benchmarks.e2e.runner import RunRequest, _resolve_run, execute_run
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
@@ -927,6 +928,76 @@ class ResolveRunTests(unittest.TestCase):
                     RunRequest(gpu="0,1", scenario_name="piper1b_rope"),
                     {"PATH": os.environ["PATH"]},
                 )
+
+
+class RunBannerTests(unittest.TestCase):
+    """The run banner names every comparability boundary the manifest gates.
+
+    A boundary the manifest records and the screen does not is one the
+    operator cannot see while the run is starting. ``--resume`` refuses a
+    changed ``parallelism`` record, and ``dense_sharding`` sits inside it,
+    so the banner has to name the parity beside the three degrees.
+
+    The run is made to fail at once: the banner prints before any arm
+    starts, so a fixture that trains nothing still emits it. What is under
+    test is the summary line, not the failure.
+    """
+
+    def _summaries(self, spec: ParallelismSpec, gpu: str) -> list[str]:
+        events: list[str] = []
+
+        def failing_process(command, **kwargs):
+            kwargs["stdout"].write("nothing trained\n")
+            return SimpleNamespace(returncode=1)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", dict(_METADATA)),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            request = RunRequest(
+                gpu=gpu,
+                scenario_name="piper1b_rope",
+                arm_names=("baseline",),
+                out_dir=Path(temporary) / "run",
+                ac_mode="none",
+                parallelism=spec,
+            )
+            with self.assertRaises(RuntimeError):
+                execute_run(
+                    request,
+                    event_handler=lambda event: events.append(
+                        event.message if event.kind == "summary" else ""
+                    ),
+                    process_runner=failing_process,
+                    environment={"PATH": os.environ["PATH"]},
+                )
+        return [message for message in events if message]
+
+    def test_the_trivial_spec_banner_names_the_replicated_parity(self) -> None:
+        lines = self._summaries(TRIVIAL_SPEC, "0")
+        self.assertIn(
+            "parallelism: dp 1 x pp 1 (ep 1, world size 1, "
+            "dense sharding replicate)",
+            lines,
+        )
+
+    def test_the_sharded_parity_reaches_the_banner(self) -> None:
+        """The line has to MOVE with the value.
+
+        A banner that named the parity but always printed ``replicate``
+        would pass the test above and tell the operator nothing.
+        """
+        lines = self._summaries(
+            ParallelismSpec(dp=2, dense_sharding="shard"), "0,1"
+        )
+        self.assertIn(
+            "parallelism: dp 2 x pp 1 (ep 1, world size 2, "
+            "dense sharding shard)",
+            lines,
+        )
 
 
 if __name__ == "__main__":

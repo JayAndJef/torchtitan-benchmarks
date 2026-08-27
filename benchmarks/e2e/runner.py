@@ -491,7 +491,8 @@ def execute_run(
         event_handler,
         "summary",
         f"parallelism: dp {parallelism.dp} x pp {parallelism.pp} "
-        f"(ep {parallelism.ep}, world size {parallelism.world_size})",
+        f"(ep {parallelism.ep}, world size {parallelism.world_size}, "
+        f"dense sharding {parallelism.dense_sharding})",
     )
     _emit(event_handler, "summary", f"output: {out_dir}")
 
