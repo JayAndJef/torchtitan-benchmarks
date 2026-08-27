@@ -298,6 +298,15 @@ PP_SCHEDULES: dict[str, PipelineSchedule] = {
 # here -- the same rule ``MODEL_SIZE_CHOICES`` follows in ``shape.py``.
 PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 
+# How the two engines hold the DENSE parameters -- every parameter that is
+# not a routed expert weight. ``replicate`` gives each rank a whole copy;
+# ``shard`` splits one copy between them. It is a comparability boundary at
+# any expert degree, and expert parallelism is legal only under ``shard``,
+# because TorchTitan cannot split experts while replicating the dense
+# parameters.
+DENSE_SHARDING_MODES: tuple[str, ...] = ("replicate", "shard")
+DEFAULT_DENSE_SHARDING = "replicate"
+
 
 @dataclass(frozen=True)
 class ParallelismSpec:
@@ -319,6 +328,7 @@ class ParallelismSpec:
     ep: int = 1
     pp_schedule: str | None = None
     pp_microbatch_size: int = 1
+    dense_sharding: str = DEFAULT_DENSE_SHARDING
 
     def __post_init__(self) -> None:
         for field, value in (
