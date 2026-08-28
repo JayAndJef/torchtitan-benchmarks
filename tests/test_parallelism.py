@@ -2,7 +2,7 @@
 
 ``benchmarks/e2e/parallelism.py`` owns the axis itself, while the CLI and
 runner thread it through the harness. This file checks the module-level
-contract: every one of the sixteen validator rules is exercised in both
+contract: every one of the seventeen validator rules is exercised in both
 directions, the four derivations are pinned, and the schedule registry is
 checked against the PyTorch classes it names. Plumbing and runtime validation
 have their own test modules.
@@ -33,6 +33,7 @@ from benchmarks.e2e.parallelism import (
     DENSE_SHARDING_MODES,
     MAX_PP,
     MAX_WORLD_SIZE,
+    MEGATRON_FSDP_LAUNCHERS,
     MEGATRON_LAUNCHERS,
     REPLICATE_ONLY_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
@@ -142,7 +143,7 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(fields & {"tp", "cp"}, set())
 
     def test_a_degree_below_one_is_refused_at_construction(self):
-        """The precondition the sixteen rules assume.
+        """The precondition the seventeen rules assume.
 
         Without it ``dp=-1, pp=-1`` has world size 1 and walks past rule 1
         on a one-GPU box, which is exactly the illegal mesh the rules exist
@@ -1596,6 +1597,135 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
                     device_count=devices,
                     engines=self.TUNED,
                 )
+
+
+class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
+    """Megatron-FSDP factors the GLOBAL world size into ``dp_cp x ep x tp``
+    and has no pipeline term, so it builds a mesh only at ``pp`` 1.
+
+    **This rule exists because a run measured it.** On 2026-08-28 a
+    ``--dense-sharding shard --dp 2 --pp 4`` cell died on all eight ranks in
+    20 seconds inside ``einops.rearrange``, before the wrapper existed. The
+    error names no flag of ours and no repair, so the refusal has to happen
+    here instead.
+
+    **The rule is engine-scoped.** TorchTitan shards under a pipeline
+    through ``fully_shard``, so a titan-only roster passes.
+    """
+
+    STOCK = ("torchtitan", "megatron_stock")
+    TITAN = ("torchtitan",)
+
+    def test_the_set_names_the_stock_driver_alone(self):
+        """``megatron`` shards not at all and rule 16 refuses it earlier;
+        ``torchtitan`` shards through ``fully_shard``, which holds a
+        pipeline."""
+        self.assertEqual(MEGATRON_FSDP_LAUNCHERS, frozenset({"megatron_stock"}))
+        self.assertNotIn("megatron", MEGATRON_FSDP_LAUNCHERS)
+        self.assertNotIn("torchtitan", MEGATRON_FSDP_LAUNCHERS)
+
+    def test_the_two_sets_are_disjoint(self):
+        """A launcher cannot both shard through Megatron-FSDP and implement
+        no sharding at all. Rule 16 would refuse it first, so a launcher in
+        both sets would make rule 17 unreachable for it."""
+        self.assertEqual(
+            MEGATRON_FSDP_LAUNCHERS & REPLICATE_ONLY_LAUNCHERS,
+            frozenset(),
+        )
+
+    def test_the_sharded_pipeline_is_refused(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"--dense-sharding shard with pp 4 is not buildable by the "
+            r"megatron_stock driver",
+        ):
+            check(
+                ParallelismSpec(
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+                ),
+                engines=self.STOCK,
+                batch=32,
+            )
+
+    def test_the_message_names_the_missing_factor(self):
+        """An operator who reads only the message must learn that the
+        missing factor is the pipeline degree, and that ``--pp 1`` is the
+        repair. The einops error says neither."""
+        with self.assertRaises(ValueError) as raised:
+            check(
+                ParallelismSpec(
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+                ),
+                engines=self.STOCK,
+                batch=32,
+            )
+        message = str(raised.exception)
+        self.assertIn("no pipeline term", message)
+        self.assertIn("the missing factor is exactly pp 4", message)
+        self.assertIn("The product is 2 and the world is 8", message)
+        self.assertIn("Use --pp 1", message)
+
+    def test_an_expert_split_under_a_pipeline_is_refused(self):
+        """Rule 14 ties an expert degree to the sharded parity, so every
+        expert spec reaches this rule as a sharded one."""
+        with self.assertRaisesRegex(
+            ValueError, r"--dense-sharding shard with pp 4 is not buildable"
+        ):
+            check(
+                ParallelismSpec(
+                    dp=2,
+                    pp=4,
+                    ep=2,
+                    pp_schedule="1F1B",
+                    dense_sharding="shard",
+                ),
+                engines=self.STOCK,
+                batch=32,
+            )
+
+    def test_the_sharded_mesh_without_a_pipeline_passes(self):
+        """``--dp 8 --pp 1`` satisfies the pattern at eight ranks: the
+        product is 8 and the world is 8."""
+        check(
+            ParallelismSpec(dp=8, dense_sharding="shard"),
+            engines=self.STOCK,
+            batch=32,
+            device_count=8,
+        )
+
+    def test_the_expert_split_without_a_pipeline_passes(self):
+        """At ``ep`` 2 the product is ``4 x 2 x 1``, which is still 8."""
+        check(
+            ParallelismSpec(dp=8, ep=2, dense_sharding="shard"),
+            engines=self.STOCK,
+            batch=32,
+            device_count=8,
+        )
+
+    def test_the_replicated_pipeline_passes(self):
+        """The rule reads the parity, not the pipeline alone. A replicated
+        run builds no Megatron-FSDP mesh."""
+        check(
+            ParallelismSpec(
+                dp=2, pp=4, pp_schedule="1F1B", dense_sharding="replicate"
+            ),
+            engines=self.STOCK,
+            batch=32,
+            device_count=8,
+        )
+
+    def test_the_titan_arms_alone_pass(self):
+        """TorchTitan shards under a pipeline through ``fully_shard``, so
+        ``run --arm`` narrowing to the titan arms takes this axis off the
+        Megatron driver."""
+        check(
+            ParallelismSpec(
+                dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+            ),
+            engines=self.TITAN,
+            batch=32,
+            device_count=8,
+        )
 
 
 class TheEightGpuCellTest(unittest.TestCase):

@@ -104,7 +104,7 @@ their names are listed once, in the provenance note below, and nowhere else.
 |---|---|
 | `benchmarks/cli/` | `main.py` (the Click group, `scenarios`, and the `add_command` wiring), `e2e.py` (`run`/`run-all`/`evaluate` and their shared option block), `kernel.py` (`kernel-bench`), `rendering.py` (the `RunEvent` renderer both families share), plus `__main__.py`, which is what `python -m benchmarks.cli` runs. Commands are declared with plain `@click.command` and attached in `main.py`, so importing `main` is what populates the group. `scenarios` prints three rosters: the e2e scenarios, the kernel scenarios, and the kernel spans |
 | `benchmarks/e2e/registry.py` | Scenario/arm/workload declarations, the compile-mode and AC-mode tables, `EXECUTION_MODEL` |
-| `benchmarks/e2e/parallelism.py` | The parallelism run axis: `ParallelismSpec`, the `PP_SCHEDULES` registry, the four derivations and `validate_parallelism`'s sixteen rules. Parent-side and torch-free |
+| `benchmarks/e2e/parallelism.py` | The parallelism run axis: `ParallelismSpec`, the `PP_SCHEDULES` registry, the four derivations and `validate_parallelism`'s seventeen rules. Parent-side and torch-free |
 | `benchmarks/e2e/runner.py` | Executes and resumes a scenario; `RunRequest`/`RunResult` |
 | `benchmarks/e2e/launch.py` | Builds the training subprocess command line for each arm. Three launchers: `torchtitan`, `megatron` and `megatron_stock` |
 | `benchmarks/e2e/validation.py` | `validate_arm` and the `ValidationProfile` registry. Three profiles: `torchtitan`, `megatron` and `megatron_stock` |
@@ -224,7 +224,7 @@ recorded fact rather than a missing one, and it now fails.
 **`run 0,1 --pp 2 --pp-schedule 1F1B --compile-mode default --ac none`
 starts two ranks, on both engines.** `_resolve_run`'s blanket refusal of
 every world size above 1 is gone. What refuses an unimplemented mesh is the
-sixteen rules of `benchmarks/e2e/parallelism.py` plus the engines
+seventeen rules of `benchmarks/e2e/parallelism.py` plus the engines
 themselves, and each failure lands on the module that owns the missing work:
 `parallelize_piper1b` refuses a tensor or context degree, a dropped
 shard-degree flag and a mesh that replicates and shards at once, and the
@@ -308,7 +308,7 @@ Shared options, with env equivalents:
 axes above them do.** Each parallelism value has to agree with the `<gpu>`
 positional, and a positional has no environment form; an exported `PP=2`
 would make a plain `run 0 --scenario X` fail its own world-size check. The
-degrees, the schedule registry and the sixteen rules that refuse an illegal
+degrees, the schedule registry and the seventeen rules that refuse an illegal
 set live in `benchmarks/e2e/parallelism.py`; read that module, not this
 table, for what a combination means.
 
@@ -420,10 +420,47 @@ slightly, so pooling those two looks like a repeat measurement and the
 difference reads as noise. That is why the caption matters here and not
 merely for tidiness.
 
-**Nothing has run.** No sharded cell and no expert cell has executed on a
-GPU on either engine. The value, the rules, the flags and the log markers
-are declared and tested on the CPU; read them as a specification until a
-`results.json` says otherwise.
+**The sharded parity cannot be built under a pipeline, and this is
+measured.** On 2026-08-28 a `--dense-sharding shard --dp 2 --pp 4` cell
+died on all eight ranks in 20 seconds, inside `einops.rearrange`, before
+Megatron built the wrapper. **Spec rule 17 now refuses that combination
+parent-side**, so no GPU is claimed for it.
+
+Megatron-FSDP factors the **global** world size into terms that carry no
+pipeline degree. Both of its mesh builders do it:
+
+```
+mcore_fsdp_adapter.py:810   "(dp_cp ep tp) -> ep dp_cp tp"
+mcore_fsdp_adapter.py:739   "(outer_fsdp_dp fsdp ep tp) -> ep outer_fsdp_dp fsdp tp"
+```
+
+The product must equal the world size, so both hold only at `pp` 1. At
+`dp 2, pp 4` the product is 2 against a world of 8, and the missing factor
+is exactly `pp`.
+
+**It blocks every model, not only a mixture of experts.** The failing call
+is the unconditional one at `:455`, which builds the dense mesh. Only the
+expert mesh at `:445` is gated on `num_moe_experts is not None`, and the
+error reports `ep: 1`, which that gated call cannot produce -- it passes
+`ep_size=ep_group.size()`. The HSDP builder omits `pp` too, so
+`--outer-dp-sharding-strategy` is no escape.
+
+**Our five flags are not the fault, and Megatron parses all of them.** The
+run reaches `use_megatron_fsdp=True, megatron_fsdp_version=1,
+data_parallel_sharding_strategy='optim_grads_params',
+use_distributed_optimizer=True` and dies one layer lower, building the
+mesh. A submodule bump that gives both patterns a pipeline term removes
+rule 17.
+
+**The reachable sharded mesh is `--dp 8 --pp 1`**, where the product is 8
+against a world of 8, and `--dp 8 --pp 1 --ep 2` gives `4 x 2 x 1`. That
+is a different mesh from every `pp 4` cell, so **never divide a number
+taken under it by a `pp 4` number.**
+
+**Beyond that refusal, nothing has run.** No sharded cell and no expert
+cell has completed on a GPU on either engine. The value, the remaining
+rules, the flags and the log markers are declared and tested on the CPU;
+read them as a specification until a `results.json` says otherwise.
 
 **`--scenario` has no default, and an omitted one fails the run.** A default
 scenario can only be reached by an omission, and it would then measure one

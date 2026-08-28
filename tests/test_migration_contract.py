@@ -1974,7 +1974,7 @@ TEST_CENSUS = {
     # reach GPTModel.
     "test_megatron_model": 29,
     # The parallelism run axis, landed before anything imports it. Every one
-    # of the sixteen validator rules in both directions, the two
+    # of the seventeen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
     # guard, the four derivations, and the schedule registry checked against
     # the PyTorch classes it names.
@@ -2019,7 +2019,7 @@ TEST_CENSUS = {
     # +1 for the planned sharded cell at expert degree 1, whose mesh an
     # implementation that read ep rather than the parity would get wrong
     # while every other sharded row still passed.
-    "test_parallelism": 145,
+    "test_parallelism": 154,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the six CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -2084,7 +2084,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1724
+TEST_CENSUS_TOTAL = 1733
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

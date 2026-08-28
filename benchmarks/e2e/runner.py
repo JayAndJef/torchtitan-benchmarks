@@ -324,7 +324,7 @@ def _resolve_run(
         device_count=len(devices),
     )
     # Both engines start a second rank now, so the blanket refusal that stood
-    # here is gone. What refuses an unimplemented mesh is the sixteen rules
+    # here is gone. What refuses an unimplemented mesh is the seventeen rules
     # above plus the engines themselves: ``parallelize_piper1b`` refuses a
     # tensor or context degree, a dropped shard-degree flag and a mesh that
     # replicates and shards at once, and the Megatron driver refuses a

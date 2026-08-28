@@ -66,7 +66,8 @@ supported. Adding one means adding it to ``world_size``, to
 
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` under the
 ``replicate`` dense parity, rule 15 refuses ``shard`` at ``dp`` 1, rule 16
-refuses both to the tuned megatron driver, and
+refuses both to the tuned megatron driver, rule 17 refuses the sharded
+parity under a pipeline to the stock megatron driver, and
 rules 5 and 6 refuse three of the five registered schedules for every
 cross-engine run. Read a registered schedule as a declaration, never as a
 measurement: only ``1F1B`` is targeted, and the caps admit up to ``pp 8``.
@@ -199,6 +200,41 @@ MEGATRON_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
 # way and would be wrong about one of them. A new launcher is an edit here
 # rather than a silent classification.
 REPLICATE_ONLY_LAUNCHERS = frozenset({"megatron"})
+
+
+# The ``Arm.launcher`` values whose sharded parity goes through
+# Megatron-FSDP. Rule 17 reads this set.
+#
+# **Megatron-FSDP cannot build its device mesh under a pipeline, and this is
+# measured rather than predicted.** Both of its mesh builders factor the
+# GLOBAL world size into terms that omit ``pp``:
+#
+#     mcore_fsdp_adapter.py:810  "(dp_cp ep tp) -> ep dp_cp tp"
+#     mcore_fsdp_adapter.py:739  "(outer_fsdp_dp fsdp ep tp) -> ..."
+#
+# The product of the terms must equal the world size, so both hold only at
+# ``pp`` 1. On 2026-08-28 a ``--dense-sharding shard --dp 2 --pp 4`` cell
+# died on all eight ranks in 20 seconds with ``einops.EinopsError: ... Shape
+# mismatch, 8 != 2``. The missing factor is exactly ``pp``.
+#
+# **The failing call is the UNCONDITIONAL one.** ``:455`` builds the dense
+# mesh for every model; only the expert mesh at ``:445`` is gated on
+# ``num_moe_experts is not None``. The error reports ``ep: 1``, which the
+# gated call could not produce, because it passes ``ep_size=ep_group.size()``.
+# So this blocks every model, not only a mixture of experts. The HSDP builder
+# omits ``pp`` too, so ``--outer-dp-sharding-strategy`` is no escape.
+#
+# **It is a fact about the pinned Megatron rev, not about our flags.**
+# Megatron parses all five sharding flags and fails one layer lower, building
+# the mesh: the run reaches ``use_megatron_fsdp=True,
+# data_parallel_sharding_strategy='optim_grads_params'`` before it dies. A
+# submodule bump that gives both patterns a pipeline term removes this rule.
+#
+# **Declared one by one, for the reason the two sets above are.** This names
+# the drivers that shard through Megatron-FSDP. ``megatron`` shards not at
+# all and rule 16 refuses it earlier; ``torchtitan`` shards through
+# ``fully_shard``, which holds a pipeline.
+MEGATRON_FSDP_LAUNCHERS = frozenset({"megatron_stock"})
 
 
 @dataclass(frozen=True)
@@ -363,7 +399,7 @@ class ParallelismSpec:
 
     ``__post_init__`` enforces well-formedness only -- every degree is a
     positive count, and ``dense_sharding`` names a declared mode. That is
-    not one of the sixteen validator rules; it is the precondition they
+    not one of the seventeen validator rules; it is the precondition they
     assume. Without it a spec of ``dp=-1, pp=-1`` would have ``world_size``
     1 and walk past rule 1 on a one-GPU box, which is exactly the illegal
     mesh the rules exist to refuse. ``PiperShape`` guards its geometry the
@@ -980,5 +1016,41 @@ def validate_parallelism(
             "That driver builds a plain replicated DistributedDataParallel. "
             "The run would replicate the dense parameters. The manifest "
             "would record a sharded parity. Use run --arm to select the "
+            "TorchTitan arms alone"
+        )
+
+    # 17. A launcher that shards through Megatron-FSDP cannot also hold a
+    #     pipeline. ``MEGATRON_FSDP_LAUNCHERS`` carries the arithmetic and
+    #     the measured failure.
+    #
+    #     **This refuses parent-side what Megatron refuses 20 seconds into
+    #     the run, and that is the whole value of it.** The einops error
+    #     names no flag of ours, no rule and no repair, so an operator reads
+    #     it as a harness defect and looks in the wrong place. Refusing here
+    #     claims no GPU and names the cause.
+    #
+    #     **The rule is engine-scoped, exactly as rule 16 is.** TorchTitan
+    #     shards under a pipeline through ``fully_shard`` and is unaffected,
+    #     so ``run --arm`` selecting the TorchTitan arms alone passes it.
+    #
+    #     **The expert degree needs no separate half here.** Rule 14 refuses
+    #     ``ep > 1`` under ``replicate``, so every expert run reaches this
+    #     rule as a sharded one and the sharded test already covers it.
+    #
+    #     **The repair is a mesh without a pipeline, and it is a different
+    #     measurement.** ``--dp 8 --pp 1`` satisfies both patterns at eight
+    #     ranks. It is not comparable to a ``pp 4`` cell; say so beside any
+    #     number taken under it.
+    fsdp_refused = engines & MEGATRON_FSDP_LAUNCHERS
+    if fsdp_refused and spec.dense_sharding == "shard" and spec.pp > 1:
+        raise ValueError(
+            f"--dense-sharding shard with pp {spec.pp} is not buildable by "
+            f"the {', '.join(sorted(fsdp_refused))} driver, which this run "
+            "holds. That driver shards through Megatron-FSDP, whose device "
+            "mesh factors the world size into dp_cp x ep x tp with no "
+            f"pipeline term. The product is {spec.dp * spec.ep} and the "
+            f"world is {spec.world_size}; the missing factor is exactly pp "
+            f"{spec.pp}. Megatron dies in einops.rearrange before the "
+            "wrapper exists. Use --pp 1, or run --arm to select the "
             "TorchTitan arms alone"
         )

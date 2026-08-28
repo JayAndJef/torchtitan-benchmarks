@@ -1,7 +1,7 @@
 """The parallelism axis threaded through the harness, without leaving one GPU.
 
 ``tests/test_parallelism.py`` covers the axis itself -- the degrees, the
-schedules and the sixteen validator rules. This module covers the path the
+schedules and the seventeen validator rules. This module covers the path the
 value takes: the ``<gpu>`` positional read as a device set, the six CLI
 options, ``RunRequest``, ``_resolve_run``, the child environment, the
 provenance query, the NUMA walk, and manifest schema 12.
