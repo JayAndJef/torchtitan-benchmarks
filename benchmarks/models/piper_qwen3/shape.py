@@ -364,9 +364,13 @@ class PiperShape:
         return self._per_layer_dense + self._router + self._experts
 
     def stage_param_count(
-        self, *, pipeline_degree: int, stage_index: int
+        self,
+        *,
+        pipeline_degree: int,
+        stage_index: int,
+        expert_degree: int = 1,
     ) -> int:
-        """Parameters one pipeline stage holds, under the split both engines use.
+        """Parameters one rank holds, under the split both engines use.
 
         **The convention is that the embedding and the output head are not
         layers.** Megatron divides ``config.num_layers`` alone
@@ -385,10 +389,28 @@ class PiperShape:
         ``range(pipeline_degree)`` is ``param_count`` exactly, which is the
         other half a driver asserts.
 
+        **``expert_degree`` is the second axis a rank is split along, and
+        it is not the pipeline.** Under an expert degree a rank holds
+        ``num_experts // expert_degree`` of the routed experts, so the
+        expert term of every layer it owns divides. The router does NOT
+        divide: it is the gate that chooses an expert, so every rank needs
+        the whole of it. Nor does any dense parameter.
+
+        **Without this term the guard refuses an honest expert-parallel
+        run**, and it did: on 2026-08-28 a ``1b`` run at ``ep 2`` counted
+        713,919,488 parameters against the 1,066,241,024 this function
+        declared, and the driver raised. That number happens to equal
+        ``nparams_active`` at ``1b`` because ``num_experts // expert_degree``
+        is 2 there and ``top_k`` is 2 as well. **It is a coincidence of that
+        shape and that degree, not a rule** -- at ``9b, ep 2`` a rank holds
+        5,102,343,168 where ``nparams_active`` is 2,988,413,952. Never
+        substitute one for the other.
+
         Rejects a degree the layer count does not divide, rather than
         rounding: an uneven split is a different model per rank, and
         ``validate_parallelism``'s rule 7 refuses such a run for the same
-        reason.
+        reason. It rejects an expert degree the expert count does not
+        divide for the same reason.
         """
         if pipeline_degree < 1:
             raise ValueError(
@@ -404,7 +426,21 @@ class PiperShape:
                 f"{self.name}: {self.n_layers} layers do not divide evenly "
                 f"into {pipeline_degree} pipeline stages"
             )
-        count = (self.n_layers // pipeline_degree) * self._per_layer
+        if expert_degree < 1:
+            raise ValueError(
+                f"{self.name}: expert_degree {expert_degree} must be >= 1"
+            )
+        if self.num_experts % expert_degree:
+            raise ValueError(
+                f"{self.name}: {self.num_experts} experts do not divide "
+                f"evenly into {expert_degree} expert-parallel rank(s)"
+            )
+        per_layer = (
+            self._per_layer_dense
+            + self._router
+            + self._experts // expert_degree
+        )
+        count = (self.n_layers // pipeline_degree) * per_layer
         if stage_index == 0:
             count += self.nparams_embedding
         if stage_index == pipeline_degree - 1:

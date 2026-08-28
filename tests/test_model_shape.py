@@ -599,6 +599,102 @@ class StageParamCountTests(unittest.TestCase):
                     )
 
 
+
+class StageParamCountUnderAnExpertDegreeTest(unittest.TestCase):
+    """A rank under an expert degree holds ``num_experts // ep`` of the
+    routed experts, so the guard has to divide that term or it refuses an
+    honest run. It did refuse one, on 2026-08-28.
+    """
+
+    def test_the_default_is_one_and_reproduces_the_whole_model(self):
+        """Every recorded run so far passed no expert degree, so the default
+        must reproduce what those runs asserted, exactly."""
+        for shape in PIPER_SHAPES.values():
+            with self.subTest(shape=shape.name):
+                self.assertEqual(
+                    shape.stage_param_count(pipeline_degree=1, stage_index=0),
+                    shape.stage_param_count(
+                        pipeline_degree=1, stage_index=0, expert_degree=1
+                    ),
+                )
+
+    def test_only_the_expert_term_divides(self):
+        """The router is the gate that chooses an expert, so every rank
+        needs the whole of it. No dense parameter divides either."""
+        for shape in PIPER_SHAPES.values():
+            if shape.num_experts % 2:
+                continue
+            with self.subTest(shape=shape.name):
+                whole = shape.stage_param_count(
+                    pipeline_degree=1, stage_index=0
+                )
+                split = shape.stage_param_count(
+                    pipeline_degree=1, stage_index=0, expert_degree=2
+                )
+                self.assertEqual(
+                    whole - split, shape.n_layers * shape._experts // 2
+                )
+
+    def test_the_1b_run_that_was_refused_now_agrees(self):
+        """The measured count from the refused run, transcribed. ``1b`` at
+        ``ep 2``, one stage."""
+        self.assertEqual(
+            PIPER_1B.stage_param_count(
+                pipeline_degree=1, stage_index=0, expert_degree=2
+            ),
+            713_919_488,
+        )
+
+    def test_the_1b_match_with_active_params_is_a_coincidence(self):
+        """It holds at ``1b`` because ``num_experts // ep`` is ``top_k``
+        there. It does not hold at ``9b``, and nobody may substitute one for
+        the other."""
+        self.assertEqual(
+            PIPER_1B.stage_param_count(
+                pipeline_degree=1, stage_index=0, expert_degree=2
+            ),
+            PIPER_1B.nparams_active,
+        )
+        nine = shape_by_name("9b")
+        self.assertNotEqual(
+            nine.stage_param_count(
+                pipeline_degree=1, stage_index=0, expert_degree=2
+            ),
+            nine.nparams_active,
+        )
+
+    def test_an_expert_count_that_does_not_divide_is_refused(self):
+        with self.assertRaisesRegex(
+            ValueError, r"experts do not divide evenly into 3"
+        ):
+            PIPER_1B.stage_param_count(
+                pipeline_degree=1, stage_index=0, expert_degree=3
+            )
+
+    def test_a_degree_below_one_is_refused(self):
+        with self.assertRaisesRegex(ValueError, r"expert_degree 0 must be"):
+            PIPER_1B.stage_param_count(
+                pipeline_degree=1, stage_index=0, expert_degree=0
+            )
+
+    def test_the_split_still_sums_to_the_whole_model_at_ep_one(self):
+        """Rule 11's other half: the sum over the stages is ``param_count``.
+        The expert term must not disturb it at the default."""
+        for shape in PIPER_SHAPES.values():
+            for degree in (1, 2, 4):
+                if shape.n_layers % degree:
+                    continue
+                with self.subTest(shape=shape.name, pp=degree):
+                    self.assertEqual(
+                        sum(
+                            shape.stage_param_count(
+                                pipeline_degree=degree, stage_index=i
+                            )
+                            for i in range(degree)
+                        ),
+                        shape.param_count,
+                    )
+
 class ModelSizeAliasTests(unittest.TestCase):
     """``normal`` is the retired name of ``1b``, and it must keep working.
 

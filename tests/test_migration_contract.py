@@ -1899,7 +1899,7 @@ TEST_CENSUS = {
     # model, that the stages sum to it at every degree, that the two end
     # stages carry the tables, and that an uneven split or a stage outside
     # the pipeline raises rather than rounding.
-    "test_model_shape": 47,
+    "test_model_shape": 54,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -2084,7 +2084,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1733
+TEST_CENSUS_TOTAL = 1740
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

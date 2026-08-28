@@ -102,14 +102,23 @@ class CountingGPTModelBuilder(GPTModelBuilder):
         stages = args.pipeline_model_parallel_size
         stage = mpu.get_pipeline_model_parallel_rank()
         counted = sum(parameter.numel() for parameter in model.parameters())
+        # The expert degree divides the routed experts a rank holds, so the
+        # guard has to know it or it refuses an honest expert-parallel run.
+        # It is read from the arguments rather than from ``mpu`` because
+        # ``install_data_parallel_marker`` separately reads the BUILT expert
+        # group and raises when the two disagree. So the argument is checked
+        # against the world by that shim, and used here.
         expected = shape.stage_param_count(
-            pipeline_degree=stages, stage_index=stage
+            pipeline_degree=stages,
+            stage_index=stage,
+            expert_degree=args.expert_model_parallel_size,
         )
         if counted != expected:
             raise ValueError(
                 f"stage {stage} of {stages} built {counted} parameters, "
-                f"where shape {shape.name!r} declares {expected}; the model "
-                "on this rank is not the model the run claims to measure"
+                f"where shape {shape.name!r} declares {expected} at expert "
+                f"degree {args.expert_model_parallel_size}; the model on "
+                "this rank is not the model the run claims to measure"
             )
         print(
             STAGE_SIZE_LINE.format(
