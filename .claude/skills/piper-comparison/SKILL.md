@@ -1,6 +1,6 @@
 ---
 name: piper-comparison
-description: "Piper's published Megatron baseline loses ZeRO-1 whenever the expert degree equals the data-parallel degree, and five handicaps sit on its TorchTitan arm. Use when: comparing any number of ours against Piper's paper (arXiv 2606.11169), reading the piper checkout or its run archive, or citing Figure 7, Figure 8, or Table 2."
+description: "Piper's published Megatron baseline loses ZeRO-1 whenever the expert degree equals the data-parallel degree, five handicaps sit on its TorchTitan arm, and their multi-node rows compare two rank layouts rather than two engines. Use when: comparing any number of ours against Piper's paper (arXiv 2606.11169), reading the piper checkout or its run archive, or citing Figure 7, Figure 8, or Table 2."
 ---
 
 # Comparing against Piper's artifact
@@ -10,6 +10,13 @@ description: "Piper's published Megatron baseline loses ZeRO-1 whenever the expe
 with **no optimizer-state sharding** whenever the expert degree equals the
 data-parallel degree. Every Megatron bar in the paper's Figure 7 is such a
 run.
+
+**There is a second defect, and on multi-node rows it is the larger one.**
+Piper patched TorchTitan's rank placement and left Megatron on the default,
+so their data-parallel axis crosses the machine boundary and Megatron's does
+not. Every multi-node comparison in the archive measures that difference as
+well as the two engines. Read `references/rank-placement.md` before you cite
+one.
 
 This is read from a checkout outside this repository:
 `/m-coriander/coriander/jayden/piper`, branch `main`, rev `439e960`. The
@@ -33,6 +40,13 @@ on this shared box. **Say where the evidence comes from if you cite it.**
 - **The paper states no ZeRO level for Figure 7**, for any system. So the
   runs contradict no printed claim. What they contradict is the authors'
   own `--zero-level zero1` on every command line.
+- **Never quote a multi-node row as an engine result.** At one machine the
+  rank placement does not matter and their numbers are comparable. At two or
+  four it decides the winner. Their archive also holds **no** multi-node
+  `qwen3_1b` pair, so any "machine count decides it" claim rests on one
+  model size.
+- **Pair their runs inside one run directory.** Their repeats of one cell
+  span up to 5.6x, so a cross-session median can invert the order.
 
 ## The evidence
 
@@ -42,5 +56,9 @@ on this shared box. **Say where the evidence comes from if you cite it.**
 - `references/comparing-our-numbers.md` -- our stock-Megatron results against
   theirs, the five handicaps on their TorchTitan arm, and the two that run
   the other way. Read it before you cite a Piper figure.
+- `references/rank-placement.md` -- the mesh patch, both engines' rank
+  equations, the flag their own harness defines and never passes, and the
+  measured 2.3 GB/s against 209 GB/s. Read it before you cite a multi-node
+  figure.
 - `reports/20260826-stock-megatron/piper-evidence/` -- 812 result CSVs and
   four decisive logs, with a manifest recording their origin.
