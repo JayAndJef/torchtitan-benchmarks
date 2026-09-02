@@ -389,6 +389,7 @@ def transformer_config_kwargs(
     cuda_graph_modules: tuple[str, ...] = (),
     use_cpu_initialization: bool = False,
     pipeline_model_parallel_size: int = 1,
+    batch_p2p_sync: bool = True,
 ) -> dict[str, Any]:
     """Every ``TransformerConfig`` keyword, with torch values still encoded.
 
@@ -403,6 +404,15 @@ def transformer_config_kwargs(
     ``initialize_model_parallel``. It is written only above 1, so the payload
     at the default is the payload this function has always returned.
 
+    ``batch_p2p_sync`` is a runtime knob for the same reason. Megatron calls
+    ``torch.cuda.synchronize()`` once per pipeline point-to-point message
+    while the field is True (``pipeline_parallel/p2p_communication.py``,
+    guarded by ``batch_p2p_comm and batch_p2p_sync``). True is megatron's
+    own default, and the field is inert without a pipeline. A profile is
+    shared by kernel arms that build one process, so the knob belongs to
+    the run and not to the profile. It is written only when False, so the
+    payload at the default does not move.
+
     Torch-free by construction, which is what lets the frozen-literal test
     assert the whole payload on CPU without importing megatron.
     """
@@ -410,6 +420,8 @@ def transformer_config_kwargs(
     kwargs.update(profile.config_overrides)
     if pipeline_model_parallel_size > 1:
         kwargs["pipeline_model_parallel_size"] = pipeline_model_parallel_size
+    if not batch_p2p_sync:
+        kwargs["batch_p2p_sync"] = False
     if use_cpu_initialization:
         kwargs["use_cpu_initialization"] = True
     if cuda_graph_impl is not None:

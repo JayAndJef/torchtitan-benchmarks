@@ -160,6 +160,56 @@ class BaseProfileExtractionTests(unittest.TestCase):
                 for field in profile.config_overrides:
                     self.assertNotIn("parallel_size", field)
 
+    def test_the_p2p_sync_default_writes_no_key(self) -> None:
+        """True is megatron's own default, so writing it would add a key to
+        every config for no change in behaviour, and the frozen literal
+        above would stop describing what a run builds."""
+        self.assertEqual(
+            transformer_config_kwargs(
+                shape=PIPER_1B, profile=BASE, batch_p2p_sync=True
+            ),
+            BASE_KWARGS_AT_NORMAL,
+        )
+
+    def test_turning_the_p2p_sync_off_moves_exactly_one_field(self) -> None:
+        """The knob reaches the config as the field megatron reads.
+
+        ``p2p_communication.py`` guards its per-message
+        ``torch.cuda.synchronize()`` on ``batch_p2p_comm and
+        batch_p2p_sync``, so this one field is what removes the call. It
+        is a run treatment and not a profile field, for the reason the
+        pipeline degree is not one: the profile is shared by kernel arms
+        that build one process, where the field is inert.
+        """
+        self.assertEqual(
+            transformer_config_kwargs(
+                shape=PIPER_1B, profile=BASE, batch_p2p_sync=False
+            ),
+            {**BASE_KWARGS_AT_NORMAL, "batch_p2p_sync": False},
+        )
+        self.assertEqual(
+            transformer_config_kwargs(
+                shape=PIPER_1B,
+                profile=BASE,
+                pipeline_model_parallel_size=4,
+                batch_p2p_sync=False,
+            ),
+            {
+                **BASE_KWARGS_AT_NORMAL,
+                "pipeline_model_parallel_size": 4,
+                "batch_p2p_sync": False,
+            },
+        )
+
+    def test_no_profile_declares_the_p2p_sync(self) -> None:
+        """A profile that carried it would set it for every kernel arm, and
+        the kernel arms build one process, where no pipeline message
+        exists. The run delivers it through the knob instead."""
+        for name, profile in MCORE_PROFILES.items():
+            with self.subTest(profile=name):
+                self.assertNotIn("batch_p2p_sync", profile.config_overrides)
+                self.assertNotIn("batch_p2p_comm", profile.config_overrides)
+
     def test_no_graph_modules_means_no_graph_modules_key(self) -> None:
         """An empty tuple must not reach megatron as an empty list.
 
@@ -485,6 +535,26 @@ class BuilderContractTests(unittest.TestCase):
         parameter = inspect.signature(build_model).parameters["profile"]
         self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
         self.assertIs(parameter.default, inspect.Parameter.empty)
+
+    def test_the_megatron_builder_forwards_the_p2p_sync_knob(self) -> None:
+        """The builder is the one caller of ``transformer_config_kwargs``.
+
+        A knob the builder did not forward would be a knob no run can set.
+        The default is True, which is megatron's own, so every caller that
+        passes nothing builds the config it always built. Signature
+        inspection only; this imports no megatron.
+        """
+        import inspect
+
+        from benchmarks.models.piper_qwen3.megatron_model import build_model
+
+        parameter = inspect.signature(build_model).parameters[
+            "batch_p2p_sync"
+        ]
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(parameter.default, True)
+        source = inspect.getsource(build_model)
+        self.assertIn("batch_p2p_sync=batch_p2p_sync,", source)
 
 
 if __name__ == "__main__":

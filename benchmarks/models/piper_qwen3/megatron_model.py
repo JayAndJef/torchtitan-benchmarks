@@ -223,6 +223,11 @@ def build_model(
     pipeline_model_parallel_size: int = 1,
     pre_process: bool = True,
     post_process: bool = True,
+    # The pipeline point-to-point sync. True is megatron's own default and
+    # the treatment every published megatron number was measured under. It
+    # is inert without a pipeline, so every caller but the e2e driver leaves
+    # it alone.
+    batch_p2p_sync: bool = True,
 ):
     """Build the bare GPTModel in bf16 (on the current CUDA device unless
     use_cpu_initialization, which tests and the parity tool use).
@@ -234,6 +239,12 @@ def build_model(
     table on the first stage, the final norm and the output head on the last.
     The caller resolves all three; this builder consults no global state, so
     a test can ask for any stage of any pipeline without one.
+
+    ``batch_p2p_sync`` reaches ``TransformerConfig`` too. Megatron reads it
+    in ``p2p_communication.py``, where a True value puts one
+    ``torch.cuda.synchronize()`` behind every batched pipeline message.
+    ``transformer_config_kwargs`` writes it only when False, so the config a
+    caller builds at the default is the config it always built.
 
     **The caller must pass a degree that agrees with
     ``initialize_model_parallel``.** Megatron reads the degree off the config
@@ -312,6 +323,7 @@ def build_model(
         cuda_graph_modules=cuda_graph_modules,
         use_cpu_initialization=use_cpu_initialization,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
+        batch_p2p_sync=batch_p2p_sync,
     )
     for name in ACTIVATION_FUNC_FIELDS:
         if name in kwargs:

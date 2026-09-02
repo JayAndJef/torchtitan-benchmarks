@@ -1820,7 +1820,10 @@ TEST_CENSUS = {
     # degree above 1 moves exactly one config field, and that no profile
     # carries a parallelism degree at all -- a profile records behaviour and
     # cannot see initialize_model_parallel.
-    "test_mcore_profiles": 23,
+    # +4 with the batch_p2p_sync knob: that the default writes no key, that
+    # False moves exactly one field, that no profile carries the field, and
+    # that the builder forwards it.
+    "test_mcore_profiles": 27,
     # +6 with the data-parallel slice: that two ranks read different tokens
     # and that each engine reads the same shard on the same rank, plus the
     # four that pin one static cu_seqlens length -- per rank, across two
@@ -2084,7 +2087,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1743
+TEST_CENSUS_TOTAL = 1747
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
