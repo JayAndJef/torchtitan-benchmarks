@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts.layout import trace_files
 from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.launch import command_for_arm
-from benchmarks.e2e.parallelism import TRIVIAL_SPEC
+from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     Arm,
     COMPILE_MODES,
@@ -386,6 +386,193 @@ class SelectedArmTests(unittest.TestCase):
                     process_runner=fake_process,
                     environment={"PATH": os.environ["PATH"]},
                 )
+
+
+def _p2p_flags(command: list[str]) -> list[str]:
+    """The flag tokens of ``command`` that name the p2p sync.
+
+    Flags only: a path in the argv can carry the substring too, and the
+    interpreter's own path does on a checkout named after this option.
+    """
+    return [
+        token for token in command if token.startswith("--") and "p2p" in token
+    ]
+
+
+class MegatronP2pSyncResolutionTests(unittest.TestCase):
+    """What ``_resolve_run`` does with ``--megatron-p2p-sync``.
+
+    Both refusals are parent-side and land before any host probe, so a
+    refused request claims no GPU. The value reaches the megatron commands
+    alone; a TorchTitan argv is untouched under either value.
+    """
+
+    PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
+
+    def setUp(self) -> None:
+        self.metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+            "megatron_git_rev": "mcore-rev",
+        }
+
+    def _resolve(
+        self,
+        names: tuple[str, ...],
+        *,
+        gpu: str = "0,1",
+        parallelism: ParallelismSpec | None = None,
+        megatron_p2p_sync: str | None = "off",
+        scenario_name: str = "piper1b_megatron",
+    ):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu=gpu,
+                    scenario_name=scenario_name,
+                    arm_names=names,
+                    out_dir=Path("/tmp/p2p-sync-test"),
+                    ac_mode="none",
+                    parallelism=self.PP2 if parallelism is None else parallelism,
+                    megatron_p2p_sync=megatron_p2p_sync,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def _refused_before_any_probe(self, pattern: str, **keywords) -> None:
+        def never(*args, **kwargs):
+            raise AssertionError("a host probe ran for a refused request")
+
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
+        ):
+            with self.assertRaisesRegex(ValueError, pattern):
+                _resolve_run(
+                    RunRequest(
+                        scenario_name="piper1b_megatron",
+                        out_dir=Path("/tmp/p2p-sync-test"),
+                        ac_mode="none",
+                        **keywords,
+                    ),
+                    {"PATH": os.environ["PATH"]},
+                )
+
+    def test_off_at_pp_one_is_refused_before_any_host_probe(self) -> None:
+        """No pipeline message exists, so the manifest would record a
+        treatment the run did not have."""
+        self._refused_before_any_probe(
+            "no pipeline message",
+            gpu="0",
+            arm_names=("baseline",),
+            megatron_p2p_sync="off",
+        )
+
+    def test_off_without_a_megatron_arm_is_refused_before_any_host_probe(
+        self,
+    ) -> None:
+        """The ``--compile-mode none`` exception, the other way round.
+
+        That mode needs every selected arm to be TorchTitan. This value
+        needs at least one not to be, because TorchTitan sends no pipeline
+        message through Megatron and the value would reach nothing.
+        """
+        self._refused_before_any_probe(
+            "reaches no arm",
+            gpu="0,1",
+            arm_names=("titan_stock",),
+            parallelism=self.PP2,
+            megatron_p2p_sync="off",
+        )
+
+    def test_an_unknown_value_is_refused(self) -> None:
+        self._refused_before_any_probe(
+            "unknown megatron p2p sync",
+            gpu="0,1",
+            arm_names=("baseline",),
+            parallelism=self.PP2,
+            megatron_p2p_sync="false",
+        )
+
+    def test_off_reaches_the_megatron_command_and_not_the_titan_one(
+        self,
+    ) -> None:
+        """``run --arm`` narrows the engine set, and a mixed selection is
+        legal: the megatron arm gets the flag and the titan arm gets
+        nothing."""
+        resolved = self._resolve(("baseline", "titan_stock"))
+        self.assertEqual(resolved[12], "off")
+        commands = resolved[6]
+        megatron = commands["baseline"]
+        self.assertEqual(megatron[-3:-1], ["--batch-p2p-sync", "off"])
+        self.assertEqual(_p2p_flags(commands["titan_stock"]), [])
+
+    def test_a_megatron_only_subset_passes(self) -> None:
+        resolved = self._resolve(("baseline",))
+        self.assertEqual([arm.name for arm in resolved[2]], ["baseline"])
+        self.assertEqual(resolved[12], "off")
+
+    def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
+        for requested in (None, "on"):
+            with self.subTest(requested=requested):
+                resolved = self._resolve(
+                    ("baseline", "titan_stock"), megatron_p2p_sync=requested
+                )
+                self.assertEqual(resolved[12], "on")
+                for name, command in resolved[6].items():
+                    self.assertEqual(_p2p_flags(command), [], name)
+
+    def test_the_stock_scenario_takes_the_value_too(self) -> None:
+        resolved = self._resolve(
+            ("baseline",), scenario_name="piper_megatron_stock"
+        )
+        command = resolved[6]["baseline"]
+        self.assertEqual(command[-2:], ["--bench-batch-p2p-sync", "off"])
+
+    def test_the_banner_names_the_value(self) -> None:
+        """The banner names every comparability boundary the manifest
+        gates, and this value is one."""
+        events: list[str] = []
+
+        def failing_process(command, **kwargs):
+            kwargs["stdout"].write("nothing trained\n")
+            return SimpleNamespace(returncode=1)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            with self.assertRaises(RuntimeError):
+                execute_run(
+                    RunRequest(
+                        gpu="0,1",
+                        scenario_name="piper1b_megatron",
+                        arm_names=("baseline",),
+                        out_dir=Path(temporary) / "run",
+                        ac_mode="none",
+                        parallelism=self.PP2,
+                        megatron_p2p_sync="off",
+                    ),
+                    event_handler=lambda event: events.append(
+                        event.message if event.kind == "summary" else ""
+                    ),
+                    process_runner=failing_process,
+                    environment={"PATH": os.environ["PATH"]},
+                )
+        self.assertIn("megatron p2p sync: off", events)
 
 
 class ParallelizeTests(unittest.TestCase):

@@ -60,6 +60,7 @@ from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.parallelism import (
     DEFAULT_DENSE_SHARDING,
     DENSE_SHARDING_MODES,
+    MEGATRON_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
     ParallelismSpec,
 )
@@ -68,6 +69,8 @@ from benchmarks.e2e.registry import (
     COMPILE_MODES,
     DEFAULT_AC_MODE,
     DEFAULT_COMPILE_MODE,
+    DEFAULT_MEGATRON_P2P_SYNC,
+    MEGATRON_P2P_SYNC_MODES,
     SCENARIOS,
 )
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
@@ -106,6 +109,15 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     when at least one was given, so an untouched command line reaches
     ``_resolve_run`` with ``parallelism=None`` and resolves to the trivial
     spec.
+
+    ``--megatron-p2p-sync`` takes no environment variable either, for the
+    reason ``--dense-sharding`` gives. Its ``off`` value is legal only above
+    ``pp`` 1 and only beside a megatron arm, so it has to agree with the
+    ``<gpu>`` positional and with ``--arm``. An exported value would make a
+    plain ``run 0 --scenario X`` fail a refusal naming a flag the operator
+    never passed. It defaults to ``None`` for the reason ``--compile-mode``
+    does: a resume inherits the recorded value, and a fresh run takes
+    ``on``.
     """
     options = [
         click.option(
@@ -235,6 +247,19 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "How the run holds the dense parameters [default: "
                 f"{DEFAULT_DENSE_SHARDING}]. The shard value needs --dp "
                 "above 1. An expert degree needs the shard value. Results "
+                "are only comparable within one value."
+            ),
+        ),
+        # No envvar; the docstring above gives the reason.
+        click.option(
+            "--megatron-p2p-sync",
+            "megatron_p2p_sync",
+            type=click.Choice(MEGATRON_P2P_SYNC_MODES),
+            help=(
+                "Whether Megatron synchronizes the device after every "
+                f"pipeline message [default: {DEFAULT_MEGATRON_P2P_SYNC}]. "
+                "on is stock Megatron. off needs --pp above 1 and a "
+                "megatron arm; TorchTitan arms receive nothing. Results "
                 "are only comparable within one value."
             ),
         ),
@@ -420,6 +445,9 @@ def run_all_command(
     timestamp = run_timestamp()
     ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
     compile_mode = options.get("compile_mode") or DEFAULT_COMPILE_MODE
+    megatron_p2p_sync = (
+        options.get("megatron_p2p_sync") or DEFAULT_MEGATRON_P2P_SYNC
+    )
     for name, scenario in SCENARIOS.items():
         # A sweep skips a scenario that declines either global axis, rather
         # than aborting: the axis restriction is a declaration, not a fault.
@@ -435,6 +463,19 @@ def run_all_command(
                 f"\n===== scenario: {name} ====="
                 f"\nskipped: does not support ac mode {ac_mode!r} "
                 f"(supported: {', '.join(scenario.supported_ac_modes)})"
+            )
+            continue
+        # The p2p value reaches megatron arms alone. A scenario with none
+        # cannot honor ``off``, and ``_resolve_run`` refuses it; the sweep
+        # skips such a scenario for the reason it skips a declined mode.
+        if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC and not any(
+            arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms
+        ):
+            click.echo(
+                f"\n===== scenario: {name} ====="
+                f"\nskipped: --megatron-p2p-sync {megatron_p2p_sync!r} "
+                "reaches no arm of this scenario (every arm runs on "
+                "TorchTitan)"
             )
             continue
         click.echo(f"\n===== scenario: {name} =====")

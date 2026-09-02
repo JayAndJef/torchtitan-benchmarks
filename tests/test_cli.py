@@ -15,7 +15,9 @@ from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.cli.e2e import run_all_command, run_command
 from benchmarks.cli.main import cli
+from benchmarks.e2e.parallelism import MEGATRON_LAUNCHERS
 from benchmarks.e2e.registry import PIPER_1B_ROPE, SCENARIOS
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
@@ -429,6 +431,104 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("arm failed", result.output)
         evaluate.assert_not_called()
+
+    def test_megatron_p2p_sync_reaches_the_request(self) -> None:
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(
+                cli, ["run", "2", "--megatron-p2p-sync", "off"]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_args.args[0].megatron_p2p_sync, "off")
+
+    def test_megatron_p2p_sync_defaults_to_unrequested(self) -> None:
+        """``None`` is what lets a resume inherit the recorded value."""
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(cli, ["run", "2"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(execute.call_args.args[0].megatron_p2p_sync)
+
+    def test_an_unknown_megatron_p2p_sync_value_is_rejected(self) -> None:
+        result = self.runner.invoke(
+            cli, ["run", "2", "--megatron-p2p-sync", "false"]
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Invalid value", result.output)
+
+    def test_megatron_p2p_sync_takes_no_environment_variable(self) -> None:
+        """Its ``off`` value has to agree with ``<gpu>`` and with ``--arm``.
+
+        An exported value would make a plain ``run 0 --scenario X`` fail a
+        refusal naming a flag the operator never passed.
+        """
+        for command in (run_command, run_all_command):
+            parameters = {
+                option: parameter
+                for parameter in command.params
+                for option in parameter.opts
+            }
+            with self.subTest(command=command.name):
+                self.assertIsNone(parameters["--megatron-p2p-sync"].envvar)
+
+    def test_all_scenarios_at_p2p_sync_off_skips_titan_only_scenarios(
+        self,
+    ) -> None:
+        """The value reaches megatron arms alone.
+
+        ``_resolve_run`` refuses ``off`` for a run with no megatron arm, so
+        a sweep that reached such a scenario would abort at its first
+        titan-only entry. The sweep skips it with a message instead, as it
+        skips a scenario that declines a mode.
+        """
+        holds_megatron = [
+            name
+            for name, scenario in SCENARIOS.items()
+            if any(arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms)
+        ]
+        self.assertTrue(holds_megatron)
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(
+                    cli,
+                    [
+                        "run-all",
+                        "0,1",
+                        "--all-scenarios",
+                        "--ac",
+                        "none",
+                        "--pp",
+                        "2",
+                        "--pp-schedule",
+                        "1F1B",
+                        "--megatron-p2p-sync",
+                        "off",
+                    ],
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            [request.scenario_name for request in requests], holds_megatron
+        )
+        self.assertEqual(
+            {request.megatron_p2p_sync for request in requests}, {"off"}
+        )
+        self.assertIn(
+            "skipped: --megatron-p2p-sync 'off' reaches no arm", result.output
+        )
 
     def test_run_all_records_evaluation_failure_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

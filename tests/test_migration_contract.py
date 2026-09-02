@@ -1291,6 +1291,44 @@ class GoldenCommandTests(unittest.TestCase):
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(command[1:], _golden_megatron_pp2_tail("normal"))
 
+    def _p2p_command(self, megatron_p2p_sync: str, parallelism=None):
+        scenario = scenario_by_name(GOLDEN_MEGATRON_ARM[0])
+        extra = {} if parallelism is None else {"parallelism": parallelism}
+        return command_for_arm(
+            scenario.workload,
+            scenario.arm(GOLDEN_MEGATRON_ARM[1]),
+            Path("/tmp/arm-dir"),
+            (),
+            "default",
+            "none",
+            model_size="normal",
+            megatron_p2p_sync=megatron_p2p_sync,
+            **extra,
+        )
+
+    def test_the_default_p2p_value_is_the_pre_option_argv(self) -> None:
+        """``on`` by name builds the argv a caller that passes nothing
+        builds, at the trivial spec and at pp 2."""
+        self.assertEqual(
+            self._p2p_command("on")[1:], _golden_megatron_tail("normal")
+        )
+        self.assertEqual(
+            self._p2p_command("on", GOLDEN_TITAN_PP2_SPEC)[1:],
+            _golden_megatron_pp2_tail("normal"),
+        )
+
+    def test_megatron_argv_at_pp2_with_the_p2p_sync_off(self) -> None:
+        """One pair, before the arm directory, and nothing else moves."""
+        golden = _golden_megatron_pp2_tail("normal")
+        self.assertEqual(
+            self._p2p_command("off", GOLDEN_TITAN_PP2_SPEC)[1:],
+            golden[:-1] + ["--batch-p2p-sync", "off"] + golden[-1:],
+        )
+
+    def test_the_p2p_sync_off_is_refused_at_the_trivial_spec(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no pipeline message"):
+            self._p2p_command("off")
+
     def test_both_engines_are_told_the_same_pipeline(self) -> None:
         """One spec, two spellings, and they must not drift apart.
 
@@ -1527,7 +1565,10 @@ TEST_CENSUS = {
     # into main/e2e/kernel/rendering. +1 with the uncompiled compile mode:
     # the sweep skips a scenario that declines it, as it already does for ac.
     # +1 for repeatable e2e --arm preserving command-line order.
-    "test_cli": 20,
+    # +5 with --megatron-p2p-sync: it reaches the request, defaults to
+    # unrequested, refuses an unknown value, takes no environment variable,
+    # and the sweep skips a scenario with no megatron arm under off.
+    "test_cli": 25,
     # 19 pre-fix, +2 for the two halves of the correctness verdict: a failed
     # gate fragment beside a clean exit code, and a timing worker that dies
     # after it writes. +2 more for the arm that measured nothing, as a
@@ -1886,7 +1927,9 @@ TEST_CENSUS = {
     # run uncompiled, and the character-for-character diff between the
     # driver's own printed lines and the megatron_stock validation
     # profile's markers.
-    "test_megatron_stock_launch": 56,
+    # +2 with --megatron-p2p-sync: the off argv is exactly its two parts,
+    # and the titan arm of the scenario gets no token under it.
+    "test_megatron_stock_launch": 58,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1961,7 +2004,12 @@ TEST_CENSUS = {
     # +7 with repeatable e2e --arm: zero/one/many selection, duplicate and
     # unknown refusals, the engine-aware compile table, and ordered
     # execution/manifest/state/resume provenance.
-    "test_runner": 64,
+    # +8 with --megatron-p2p-sync: off refused at pp 1 and without a
+    # megatron arm before any host probe, an unknown value refused, off
+    # reaching the megatron command and not the titan one, a megatron-only
+    # subset passing, the default adding no token, the stock scenario
+    # taking the value, and the banner naming it.
+    "test_runner": 72,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2096,7 +2144,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1766
+TEST_CENSUS_TOTAL = 1781
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -229,6 +229,7 @@ def _command(
     ac_mode: str = "none",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     local_batch_size: int | None = None,
+    megatron_p2p_sync: str = "on",
 ) -> list[str]:
     scenario = scenario_by_name(SCENARIO_NAME)
     workload = scenario.workload
@@ -243,6 +244,7 @@ def _command(
         ac_mode,
         model_size=model_size,
         parallelism=parallelism,
+        megatron_p2p_sync=megatron_p2p_sync,
     )
 
 
@@ -445,6 +447,7 @@ class StockArgvTests(unittest.TestCase):
         local_batch_size=None,
         model_size="1b",
         compile_mode="default",
+        megatron_p2p_sync="on",
     ):
         from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
@@ -459,7 +462,36 @@ class StockArgvTests(unittest.TestCase):
                 arm_dir="/tmp/arm-dir",
                 model_size=model_size,
                 compile_mode=compile_mode,
+                megatron_p2p_sync=megatron_p2p_sync,
             )
+        )
+
+    def test_the_p2p_sync_off_argv_is_exactly_its_two_parts(self) -> None:
+        """The value crosses ``launch.py`` untouched into ``flags.py``."""
+        command = _command(
+            _stock_arm(),
+            parallelism=MESH,
+            local_batch_size=32,
+            megatron_p2p_sync="off",
+        )
+        head = command[: command.index(STOCK_MEGATRON_DRIVER_MODULE) + 1]
+        self.assertEqual(
+            command,
+            head
+            + self._flags(MESH, local_batch_size=32, megatron_p2p_sync="off"),
+        )
+        self.assertEqual(command[-2:], ["--bench-batch-p2p-sync", "off"])
+
+    def test_the_titan_arm_gets_no_token_under_p2p_sync_off(self) -> None:
+        """TorchTitan sends no pipeline message through Megatron."""
+        self.assertEqual(
+            _command(
+                _titan_arm(),
+                parallelism=MESH,
+                local_batch_size=32,
+                megatron_p2p_sync="off",
+            ),
+            _command(_titan_arm(), parallelism=MESH, local_batch_size=32),
         )
 
     def test_the_trivial_spec_argv_starts_no_launcher(self) -> None:

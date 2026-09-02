@@ -25,6 +25,7 @@ from benchmarks.e2e.parallelism import (
 )
 from benchmarks.e2e.registry import (
     DEFAULT_COMPILE_MODE,
+    DEFAULT_MEGATRON_P2P_SYNC,
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
@@ -175,12 +176,13 @@ def command_for_arm(
     *,
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
 ) -> list[str]:
     """Build the training command for one arm, dispatching on its launcher.
 
-    ``model_size`` and ``parallelism`` are keyword-only: the six positional
-    parameters are the historical signature and callers pass them
-    positionally.
+    ``model_size``, ``parallelism`` and ``megatron_p2p_sync`` are
+    keyword-only: the six positional parameters are the historical
+    signature and callers pass them positionally.
 
     ``parallelism`` defaults to ``TRIVIAL_SPEC`` rather than being required,
     and the asymmetry with ``manifest_data`` -- which takes its parallelism
@@ -190,6 +192,13 @@ def command_for_arm(
     the single-GPU command line, which is the identity: it cannot introduce
     a ``--parallelism.*`` token. ``_resolve_run`` passes the run's own spec
     explicitly either way.
+
+    ``megatron_p2p_sync`` defaults to ``on`` for the same reason: the
+    default is the identity, and it adds no token to any argv. The value
+    reaches the two megatron commands alone. A TorchTitan arm sends no
+    pipeline message through Megatron, so its argv is untouched under
+    either value; ``_resolve_run`` is what refuses ``off`` for a run that
+    holds no megatron arm.
     """
     if arm.launcher == "megatron":
         return _megatron_command(
@@ -201,6 +210,7 @@ def command_for_arm(
             ac_mode,
             model_size,
             parallelism,
+            megatron_p2p_sync,
         )
     if arm.launcher == "megatron_stock":
         return _megatron_stock_command(
@@ -212,6 +222,7 @@ def command_for_arm(
             ac_mode,
             model_size,
             parallelism,
+            megatron_p2p_sync,
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
@@ -332,19 +343,26 @@ def _megatron_command(
     ac_mode: str,
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
 ) -> list[str]:
     """Launch command for the Megatron baseline driver.
 
     The driver replicates the titan workload treatment itself; the only
     parameters that cross the seam are the workload sizes, the seed, the
-    profiler schedule, and the compile mode (mapped to Megatron's native
-    CUDA-graph mechanism by the driver).
+    profiler schedule, the compile mode (mapped to Megatron's native
+    CUDA-graph mechanism by the driver), and the p2p sync value.
 
     **At the trivial spec the argv is unchanged**: ``_megatron_launcher``
     returns the plain interpreter, and the three pipeline flags are omitted
     rather than passed at their defaults. The driver refuses
     ``--pp-schedule`` and ``--pp-microbatch-size`` at ``--pp 1`` for that
     reason -- a value there names a split that does not happen.
+
+    ``--batch-p2p-sync`` follows the same rule: it is sent only under
+    ``off``, so the argv at the default is the argv every megatron directory
+    under ``out/`` records, and it is refused at ``pp`` 1, where there is no
+    pipeline message. ``_resolve_run`` refuses that first; it is restated
+    here for a caller that builds a command line without a run.
 
     Above one rank the driver reads ``RANK``, ``WORLD_SIZE`` and
     ``LOCAL_RANK`` from torchrun, passes ``pipeline_model_parallel_size`` to
@@ -375,6 +393,15 @@ def _megatron_command(
     if workload.seed is None:
         raise ValueError(
             f"{arm.name}: megatron arms require a seeded workload"
+        )
+    if (
+        megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC
+        and parallelism.pp == 1
+    ):
+        raise ValueError(
+            f"{arm.name}: megatron p2p sync {megatron_p2p_sync!r} was "
+            "requested at pp 1, where there is no pipeline message to "
+            "synchronize"
         )
     args = [
         *_megatron_launcher(parallelism),
@@ -420,6 +447,11 @@ def _megatron_command(
                 str(parallelism.pp_microbatch_size),
             )
         )
+    if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+        # Omitted at the default, which is megatron's own, so no recorded
+        # argv moves. The driver reads the value into the built config and
+        # prints what that config carries.
+        args.extend(("--batch-p2p-sync", megatron_p2p_sync))
     args.append(str(arm_dir))
     return args
 
@@ -433,11 +465,12 @@ def _megatron_stock_command(
     ac_mode: str,
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
 ) -> list[str]:
     """Launch command for the stock Megatron-LM driver.
 
     This function owns three things and no more: the launcher, the ``python
-    -m`` target, and the three values ``stock_megatron_flags`` cannot read
+    -m`` target, and the four values ``stock_megatron_flags`` cannot read
     off a workload. ``benchmarks/e2e/megatron_stock/flags.py`` builds every
     flag, both the Megatron group Megatron's own parser reads and the
     ``--bench-*`` group the driver adds through Megatron's
@@ -521,5 +554,9 @@ def _megatron_stock_command(
             arm_dir=str(arm_dir),
             model_size=model_size,
             compile_mode=compile_mode,
+            # flags.py refuses off at pp 1 and an unknown value, with its
+            # own messages; a run never reaches either, because
+            # _resolve_run refuses both first.
+            megatron_p2p_sync=megatron_p2p_sync,
         ),
     ]

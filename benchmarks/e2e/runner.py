@@ -24,6 +24,7 @@ from benchmarks.artifacts.run_state import (
 )
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import (
+    MEGATRON_LAUNCHERS,
     ParallelismSpec,
     TRIVIAL_SPEC,
     validate_parallelism,
@@ -33,7 +34,9 @@ from benchmarks.e2e.registry import (
     COMPILE_MODES,
     DEFAULT_AC_MODE,
     DEFAULT_COMPILE_MODE,
+    DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MODEL_SIZE,
+    MEGATRON_P2P_SYNC_MODES,
     SCENARIOS,
     UNCOMPILED_COMPILE_MODES,
     Arm,
@@ -109,6 +112,13 @@ class RunRequest:
     # first runs a parallel job may add inheritance, with the round trip
     # under test.
     parallelism: ParallelismSpec | None = None
+    # The Megatron pipeline p2p sync treatment. ``None`` means "not
+    # requested": a resume inherits the recorded value, and a fresh run
+    # takes ``on``, exactly as ``compile_mode`` does. It is not a field of
+    # ``parallelism``, because it is a treatment of the pipeline messages
+    # the way ``compile_mode`` is a treatment of the blocks, and
+    # ``execution_model`` names degrees rather than mechanisms.
+    megatron_p2p_sync: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +199,7 @@ def _resolve_run(
     str,
     ParallelismSpec,
     bool,
+    str,
 ]:
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
@@ -247,6 +258,17 @@ def _resolve_run(
             if request.model_size is None
             else request.model_size
         )
+        # Schema <= 12 manifests predate the p2p axis, and every one of
+        # them ran stock Megatron's own sync.
+        megatron_p2p_sync = (
+            str(
+                existing_manifest.get(
+                    "megatron_p2p_sync", DEFAULT_MEGATRON_P2P_SYNC
+                )
+            )
+            if request.megatron_p2p_sync is None
+            else request.megatron_p2p_sync
+        )
     else:
         workload = workload_with_overrides(
             scenario,
@@ -259,6 +281,14 @@ def _resolve_run(
         compile_mode = request.compile_mode or DEFAULT_COMPILE_MODE
         ac_mode = request.ac_mode or DEFAULT_AC_MODE
         model_size = request.model_size or DEFAULT_MODEL_SIZE
+        megatron_p2p_sync = (
+            request.megatron_p2p_sync or DEFAULT_MEGATRON_P2P_SYNC
+        )
+    if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
+        raise ValueError(
+            f"unknown megatron p2p sync {megatron_p2p_sync!r}. Available: "
+            f"{', '.join(MEGATRON_P2P_SYNC_MODES)}"
+        )
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
             f"unknown compile mode {compile_mode!r} (schema <= 7 manifests "
@@ -331,6 +361,31 @@ def _resolve_run(
     # schedule it does not implement. Each failure lands on the module that
     # owns the missing work.
 
+    # The p2p sync treatment, refused parent-side for two reasons that each
+    # name their own cause. Without a pipeline there is no message to
+    # synchronize, so the field is inert and the manifest would record a
+    # treatment the run did not have. Without a megatron arm the value
+    # reaches nothing: TorchTitan sends no pipeline message through
+    # Megatron. This is the ``--compile-mode none`` exception the other way
+    # round -- that mode needs every selected arm to be TorchTitan, this
+    # value needs at least one not to be -- and ``run --arm`` narrows the
+    # engine set on purpose, so a megatron-only subset passes.
+    if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+        if parallelism.pp == 1:
+            raise ValueError(
+                f"--megatron-p2p-sync {megatron_p2p_sync!r} was requested at "
+                "pp 1, where there is no pipeline message to synchronize; "
+                "the manifest would record a treatment the run did not have"
+            )
+        if not any(arm.launcher in MEGATRON_LAUNCHERS for arm in arms):
+            raise ValueError(
+                f"--megatron-p2p-sync {megatron_p2p_sync!r} reaches no arm "
+                f"of this run: {', '.join(arm.name for arm in arms)} run on "
+                "TorchTitan, which sends no pipeline message through "
+                "Megatron; select a megatron arm, or leave the option at "
+                f"{DEFAULT_MEGATRON_P2P_SYNC!r}"
+            )
+
     if scenario.regions:
         # A regioned scenario declares the per-block regions of the model it
         # actually runs. Three runs declare none instead. A shape whose block
@@ -389,6 +444,7 @@ def _resolve_run(
             ac_mode,
             model_size=model_size,
             parallelism=parallelism,
+            megatron_p2p_sync=megatron_p2p_sync,
         )
         for arm in arms
     }
@@ -437,6 +493,7 @@ def _resolve_run(
         model_size,
         parallelism,
         resumed,
+        megatron_p2p_sync,
     )
 
 
@@ -462,6 +519,7 @@ def execute_run(
         model_size,
         parallelism,
         resumed,
+        megatron_p2p_sync,
     ) = _resolve_run(request, host_environment)
 
     if resumed:
@@ -508,6 +566,7 @@ def execute_run(
         f"(ep {parallelism.ep}, world size {parallelism.world_size}, "
         f"dense sharding {parallelism.dense_sharding})",
     )
+    _emit(event_handler, "summary", f"megatron p2p sync: {megatron_p2p_sync}")
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
