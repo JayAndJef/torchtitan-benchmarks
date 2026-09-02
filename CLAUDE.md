@@ -303,6 +303,7 @@ Shared options, with env equivalents:
 | `--pp-schedule` | -- | none |
 | `--pp-microbatch-size` | -- | 1 |
 | `--dense-sharding` | -- | `replicate` |
+| `--megatron-p2p-sync` | -- | `on` |
 
 **The six parallelism options take no environment variable, and the three
 axes above them do.** Each parallelism value has to agree with the `<gpu>`
@@ -310,7 +311,10 @@ positional, and a positional has no environment form; an exported `PP=2`
 would make a plain `run 0 --scenario X` fail its own world-size check. The
 degrees, the schedule registry and the seventeen rules that refuse an illegal
 set live in `benchmarks/e2e/parallelism.py`; read that module, not this
-table, for what a combination means.
+table, for what a combination means. `--megatron-p2p-sync` has no
+environment variable for a different reason: it changes a Megatron
+treatment, and an exported value would reach every megatron cell of a shell
+session and move a recorded fact without a flag on the command line.
 
 **The budget is `MAX_WORLD_SIZE = 8` and `MAX_PP = 8`**
 (`benchmarks/e2e/parallelism.py`). `MAX_WORLD_SIZE` went from 4 to 8 for
@@ -461,6 +465,27 @@ taken under it by a `pp 4` number.**
 cell has completed on a GPU on either engine. The value, the remaining
 rules, the flags and the log markers are declared and tested on the CPU;
 read them as a specification until a `results.json` says otherwise.
+
+**`--megatron-p2p-sync {on,off}` names whether Megatron synchronizes the
+device after each batched pipeline send and receive.** It maps to
+`ModelParallelConfig.batch_p2p_sync`. `on` is stock Megatron: the field
+defaults to `True`, and stock Megatron exposes no flag for it. `off` skips
+the `torch.cuda.synchronize()` that `p2p_communication.py` runs when
+`batch_p2p_comm and batch_p2p_sync` holds. The value reaches the two
+megatron launchers alone -- `--batch-p2p-sync off` for the tuned driver,
+`--bench-batch-p2p-sync off` for the stock one -- and a TorchTitan argv is
+the same under either value. Two refusals land in `_resolve_run`, before
+any host probe: `off` at `pp` 1, because there is no pipeline message to
+synchronize, and `off` in a run that selects no megatron arm, because the
+value would reach nothing. `run --arm` narrows the engine set, so a
+megatron-only subset passes, and `run-all --all-scenarios` skips a
+scenario with no megatron arm under `off`. The manifest records the value
+as `megatron_p2p_sync`, and `--resume` gates it. It is not part of
+`execution_model` and not a field of `ParallelismSpec`: it is a treatment
+of the pipeline messages, not a degree. **Every number this repo has
+published was measured at `on`.** The measured effect of `off`, and the
+caveats that go with it, live in `reports/20260901-p2p-sync-ab.md`; read
+that report before you cite a number taken under `off`.
 
 **`--scenario` has no default, and an omitted one fails the run.** A default
 scenario can only be reached by an omission, and it would then measure one
@@ -885,7 +910,7 @@ sets `replay_dataloader=True` and `command_for_arm` delivers
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 12: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism (with dense_sharding), throughput_definition, execution_model, hardware_metadata
+  manifest.json     # schema 13: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism (with dense_sharding), megatron_p2p_sync, throughput_definition, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 5: throughput (per rank), memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -899,7 +924,8 @@ out/<timestamp>/<scenario>/<hardware>/
 `cudnn_loader_resolves`. Always cite `torchtitan_git_rev`,
 `torch_version`, `compile_mode`, and `ac_mode` when reporting numbers --
 plus `megatron_git_rev`, `te_version` and the two cuDNN fields for the
-megatron scenario.
+megatron scenario, and `megatron_p2p_sync` beside any megatron number taken
+above `pp` 1.
 
 ### Which cuDNN a megatron arm runs is a host property
 
@@ -1029,6 +1055,20 @@ are not comparable; `--resume` refuses to mix them.
     `Megatron-LM data parallel: DistributedDataParallel over N ranks (...)`
     after the wrapper exists. Neither line can be printed by a run that
     skipped the path.
+
+    Above `pp` 1 each megatron profile also asks every rank for its
+    driver's p2p line, against the requested `--megatron-p2p-sync` value.
+    The tuned driver prints `Megatron-LM p2p: batch_p2p_comm=True
+    batch_p2p_sync=<bool>` and the stock driver `Megatron-LM stock p2p:
+    batch_p2p_comm=True batch_p2p_sync=<bool>`, each read off the config
+    the driver BUILT rather than off its arguments. `batch_p2p_comm` is
+    pinned to `True`, because Megatron's guard is `batch_p2p_comm and
+    batch_p2p_sync`, and a run with the first field False would skip the
+    sync under either label. The line is a second profile callable,
+    `p2p_markers`, of the spec and the value. The TorchTitan profile
+    returns an empty tuple at every mesh, because the option never reaches
+    it; that empty tuple is not the refusal above, which reads the mesh
+    markers alone.
 13. A rank of a `dp > 1` run whose traces carry no all-reduce kernel
     (`ncclDevKernel_AllReduce`). **Two ranks that never reduce their
     gradients train two models and report roughly twice the true
@@ -1239,17 +1279,20 @@ the group exists.
 skips those that already pass, archives partial artifacts under `attempts/`,
 and re-runs the rest. It aborts if any of these changed since the manifest was
 written: scenario, workload, selected arms, hardware label, extra TorchTitan
-args, `compile_mode`, `ac_mode`, `model_size`, `parallelism`, `nvidia_smi`,
-`cpu_pinning`, `torchtitan_git_rev`, `benchmarks_git_rev`,
-`megatron_git_rev`. A different GPU or a different commit will not resume --
-that is intentional. Omitting `--compile-mode`, `--ac`, or `--model-size` on
-a resume inherits the recorded value; passing a different one is refused.
-Schema <= 8 manifests carry no `model_size` and resume as `normal`; schema
-<= 7 manifests cannot be resumed by this code at all (they record pre-rename
-mode names and imply `ac=sac`).
+args, `compile_mode`, `ac_mode`, `model_size`, `parallelism`,
+`megatron_p2p_sync`, `nvidia_smi`, `cpu_pinning`, `torchtitan_git_rev`,
+`benchmarks_git_rev`, `megatron_git_rev`. A different GPU or a different
+commit will not resume -- that is intentional. Omitting `--compile-mode`,
+`--ac`, `--model-size` or `--megatron-p2p-sync` on a resume inherits the
+recorded value; passing a different one is refused. Schema <= 12 manifests
+carry no `megatron_p2p_sync` and resume as `on`, because no run before
+schema 13 could turn the sync off. Schema <= 8 manifests carry no
+`model_size` and resume as `normal`; schema <= 7 manifests cannot be
+resumed by this code at all (they record pre-rename mode names and imply
+`ac=sac`).
 
 **`parallelism` does not inherit, and the asymmetry is deliberate.** The
-three axes above are single strings, so a resume can read one back and
+four values above are single strings, so a resume can read one back and
 rebuild the run from it. A spec is six fields that together decide every
 arm's command line, and `--resume` compares no command line -- so a
 reconstruction that dropped one field would relaunch the arms differently
@@ -3441,8 +3484,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Use at least 40 steps. The runner enforces this; do not try to route around it.
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
-  `ac_mode`, one `model_size` and one `parallelism` record (plus one
-  `megatron_git_rev`/`te_version` for either megatron scenario). A pipelined
+  `ac_mode`, one `model_size`, one `parallelism` record and one `megatron_p2p_sync`
+  value (plus one `megatron_git_rev`/`te_version` for either megatron
+  scenario). A pipelined
   run also declares no regions, so it carries no `forward_block` or
   `backward_block` row a single-GPU run could be compared against.
   `cudnn_loader_resolves` is a **speed** axis only: the version changes no value, measured, so cite it beside a timing
