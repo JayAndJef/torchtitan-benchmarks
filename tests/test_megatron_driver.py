@@ -55,6 +55,16 @@ class DriverDefaultTests(unittest.TestCase):
         self.assertIsNone(args.pp_schedule)
         self.assertEqual(args.pp_microbatch_size, 1)
 
+    def test_the_p2p_sync_defaults_to_on(self) -> None:
+        """``on`` is megatron's own default, and every published number's."""
+        args = _args()
+        self.assertEqual(args.batch_p2p_sync, "on")
+        self.assertTrue(train.batch_p2p_sync_enabled(args))
+
+    def test_an_unknown_p2p_sync_value_is_refused_at_parsing(self) -> None:
+        with self.assertRaises(SystemExit):
+            _args(batch_p2p_sync="maybe")
+
 
 class PipelineSettingsTests(unittest.TestCase):
     def test_one_rank_keeps_the_whole_batch_in_one_pack(self) -> None:
@@ -154,6 +164,20 @@ class PipelineRefusalTests(unittest.TestCase):
                 _args(pp=2, pp_schedule="GPipe"), 2
             )
 
+    def test_p2p_sync_off_at_pp_one_is_refused(self) -> None:
+        """The field is inert without a pipeline message.
+
+        A run that accepted the value would print a treatment it did not
+        have, and the harness would record it.
+        """
+        with self.assertRaisesRegex(ValueError, "no pipeline message"):
+            train.refuse_unsupported_mesh(_args(batch_p2p_sync="off"), 1)
+
+    def test_p2p_sync_off_under_a_pipeline_is_accepted(self) -> None:
+        args = _args(pp=2, pp_schedule="1F1B", batch_p2p_sync="off")
+        train.refuse_unsupported_mesh(args, 2)
+        self.assertFalse(train.batch_p2p_sync_enabled(args))
+
 
 class BatchLossIsASumTests(unittest.TestCase):
     """Megatron scales the recorded loss, not only the gradient.
@@ -195,6 +219,52 @@ class BatchLossIsASumTests(unittest.TestCase):
         loss *= 1  # cp_group_size, 1 here
         loss /= 4  # num_microbatches
         self.assertEqual(float(recorded), 0.5)
+
+
+class P2pSyncLineTests(unittest.TestCase):
+    """The p2p line reads the built config, never the arguments.
+
+    Megatron guards its per-message ``torch.cuda.synchronize()`` on
+    ``batch_p2p_comm and batch_p2p_sync``. A line that restated the
+    requested value would prove nothing about the call.
+    """
+
+    def test_the_line_reads_both_fields_off_the_config(self) -> None:
+        from types import SimpleNamespace
+
+        config = SimpleNamespace(batch_p2p_comm=True, batch_p2p_sync=False)
+        self.assertEqual(
+            train.p2p_line(config),
+            "Megatron-LM p2p: batch_p2p_comm=True batch_p2p_sync=False",
+        )
+        config = SimpleNamespace(batch_p2p_comm=True, batch_p2p_sync=True)
+        self.assertEqual(
+            train.p2p_line(config),
+            "Megatron-LM p2p: batch_p2p_comm=True batch_p2p_sync=True",
+        )
+
+    def test_the_line_is_the_template_filled_in(self) -> None:
+        self.assertEqual(
+            train.P2P_LINE,
+            "Megatron-LM p2p: batch_p2p_comm={comm} batch_p2p_sync={sync}",
+        )
+
+    def test_main_builds_with_the_knob_and_prints_the_built_config(
+        self,
+    ) -> None:
+        """Read off the source, the way the inertness tests are.
+
+        The build call must take the mapped value, and the print must read
+        ``model.config`` at the body's own indentation: a print inside a
+        branch would leave some mesh without the line arm rule 12 reads.
+        """
+        source = inspect.getsource(train.main)
+        self.assertIn(
+            "batch_p2p_sync=batch_p2p_sync_enabled(args),", source
+        )
+        self.assertIn(
+            "\n    print(p2p_line(model.config), flush=True)\n", source
+        )
 
 
 class SingleRankInertnessTests(unittest.TestCase):

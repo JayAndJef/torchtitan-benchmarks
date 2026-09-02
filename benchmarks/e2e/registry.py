@@ -80,6 +80,23 @@ DEFAULT_COMPILE_MODE = "default"
 DEFAULT_AC_MODE = "sac"
 DEFAULT_MODEL_SIZE = "1b"
 
+# The Megatron pipeline point-to-point sync treatment, selectable per run.
+# Stock Megatron calls torch.cuda.synchronize() once per batched pipeline
+# message (megatron/core/pipeline_parallel/p2p_communication.py, guarded by
+# ``config.batch_p2p_comm and config.batch_p2p_sync``). "on" keeps that
+# call, and it is what every published number was measured under. "off"
+# sets the ``batch_p2p_sync`` config field False on both megatron drivers,
+# which removes the call. TorchTitan arms receive nothing.
+#
+# It is a run axis and not a ParallelismSpec field. The value is a treatment
+# of the pipeline messages, the way --compile-mode is a treatment of the
+# blocks, and execution_model names degrees rather than mechanisms. Megatron
+# exposes no CLI flag for the field, so each driver takes the value from the
+# harness and prints what its BUILT config carries. The measured effect and
+# its caveats are in reports/20260901-p2p-sync-ab.md.
+MEGATRON_P2P_SYNC_MODES = ("on", "off")
+DEFAULT_MEGATRON_P2P_SYNC = "on"
+
 
 @dataclass(frozen=True)
 class Workload:

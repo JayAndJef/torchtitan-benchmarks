@@ -1847,7 +1847,10 @@ TEST_CENSUS = {
     # parameter sum is taken over one pipeline, and that the global token
     # line multiplies by dp. The norm-reduction test now names the pipeline
     # degree and its group rather than the world size.
-    "test_megatron_driver": 29,
+    # +7 with --batch-p2p-sync: the default, an unknown value, off refused
+    # at pp 1 and accepted under a pipeline, the line read off the built
+    # config, its template, and the build call plus the unguarded print.
+    "test_megatron_driver": 36,
     # The stock Megatron-LM driver package, checked on the CPU: the flag
     # list it builds, the flags it deliberately omits by name, the
     # microbatch geometry it packs, the eight keys of one microbatch dict,
@@ -2087,7 +2090,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1747
+TEST_CENSUS_TOTAL = 1754
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -26,6 +26,12 @@ gradients over the data-parallel group. `WORLD_SIZE` has to equal
 give two ranks the same data, never reduce their gradients, and report
 roughly twice the true throughput.
 
+P2p handling: --batch-p2p-sync {on,off} decides whether megatron puts one
+`torch.cuda.synchronize()` behind every batched pipeline message. `on` is
+megatron's own default. The driver prints a `Megatron-LM p2p:` line from
+the config it really built, on every rank, and refuses `off` at --pp 1,
+where there is no pipeline message.
+
 At --pp 1 and --dp 1 every branch below takes the value it always took: one
 pack of `--batch` rows, one microbatch, `pre_process` and `post_process`
 both true, no wrapper, and no collective at all.
@@ -70,6 +76,13 @@ DATA_PARALLEL_LINE = (
     "Megatron-LM data parallel: DistributedDataParallel over {dp} ranks "
     "(overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32})"
 )
+# The pipeline point-to-point sync treatment, printed on every rank at every
+# mesh. Both values are read from the BUILT config and never from the
+# arguments: megatron guards its per-message torch.cuda.synchronize() on
+# ``batch_p2p_comm and batch_p2p_sync`` (p2p_communication.py), so a line
+# that named only the requested value would say nothing about the call.
+# ``--batch-p2p-sync off`` is what turns the second field False.
+P2P_LINE = "Megatron-LM p2p: batch_p2p_comm={comm} batch_p2p_sync={sync}"
 
 # Megatron's per-layer partial-capture recipe for MoE models: the router and
 # dispatch preprocessing are graphed (MoETransformerLayer's partial mode);
@@ -100,6 +113,10 @@ H100_CLASS_BF16_PEAK_FLOPS = 989e12
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    from benchmarks.e2e.registry import (
+        DEFAULT_MEGATRON_P2P_SYNC,
+        MEGATRON_P2P_SYNC_MODES,
+    )
     from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -120,8 +137,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pp", type=int, default=1)
     parser.add_argument("--pp-schedule", default=None)
     parser.add_argument("--pp-microbatch-size", type=int, default=1)
+    # The pipeline point-to-point sync. "on" is megatron's own default, so
+    # an argv built before the option existed describes the same run.
+    parser.add_argument(
+        "--batch-p2p-sync",
+        choices=MEGATRON_P2P_SYNC_MODES,
+        default=DEFAULT_MEGATRON_P2P_SYNC,
+    )
     parser.add_argument("arm_dir", type=Path)
     return parser.parse_args(argv)
+
+
+def batch_p2p_sync_enabled(args: argparse.Namespace) -> bool:
+    """The ``batch_p2p_sync`` value the built config must carry.
+
+    ``on`` keeps megatron's per-message ``torch.cuda.synchronize()`` and is
+    the treatment every published megatron number was measured under.
+    ``off`` removes it. The mapping lives in one function so the build call
+    and the refusal below read one answer.
+    """
+    return args.batch_p2p_sync == "on"
+
+
+def p2p_line(config) -> str:
+    """The p2p line, from the BUILT config and never from the arguments.
+
+    ``config`` is the ``TransformerConfig`` the model was built with. Both
+    fields are read off it, because megatron's guard reads both: a False
+    ``batch_p2p_comm`` would skip the sync whatever the second field says,
+    and a line that printed the requested value alone could not show that.
+    """
+    return P2P_LINE.format(
+        comm=config.batch_p2p_comm, sync=config.batch_p2p_sync
+    )
 
 
 def pipeline_settings(args: argparse.Namespace) -> tuple[int, int]:
@@ -227,6 +275,13 @@ def refuse_unsupported_mesh(args: argparse.Namespace, world_size: int) -> None:
             raise ValueError(
                 f"--pp-microbatch-size {args.pp_microbatch_size} was given at "
                 "--pp 1, where the batch is not split"
+            )
+        if not batch_p2p_sync_enabled(args):
+            # The field is inert without a pipeline message, so a run that
+            # accepted the value would print a treatment it did not have.
+            raise ValueError(
+                f"--batch-p2p-sync {args.batch_p2p_sync!r} was given at "
+                "--pp 1, where there is no pipeline message to synchronize"
             )
     elif args.pp_schedule != SUPPORTED_PP_SCHEDULE:
         raise ValueError(
@@ -471,7 +526,12 @@ def main(argv: list[str] | None = None) -> None:
         pipeline_model_parallel_size=args.pp,
         pre_process=parallel_state.is_pipeline_first_stage(),
         post_process=parallel_state.is_pipeline_last_stage(),
+        batch_p2p_sync=batch_p2p_sync_enabled(args),
     )
+    # Printed at every mesh, from the config megatron really built. Arm
+    # rule 12 reads it above pp 1, where the field decides whether a sync
+    # sits behind every pipeline message.
+    print(p2p_line(model.config), flush=True)
     if graphs and not use_ddp:
         # The captured backward accumulates graphed-module weight grads into
         # param.main_grad (megatron.core cuda_graphs), which mcore DDP would
