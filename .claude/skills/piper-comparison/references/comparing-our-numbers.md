@@ -21,6 +21,18 @@ date and the sweep constant.
 still divides by `ngpu` alone**, and is correct only because it filters
 `nnode == 1`.
 
+## Their workload, which is not ours
+
+**Sequence length is 512 in 616 of their 618 runs** (the two exceptions are
+256). Ours is 1024. **Global batch is 8 rows per GPU** at every single-node
+mesh, so 4,096 tokens per GPU per step; multi-node cells hold the local
+batch at 64 and scale the global batch with the node count.
+
+Attention cost grows with the square of the sequence length, so their
+512-token runs are cheaper per token than ours. **Never divide one of their
+per-device figures by one of ours.** A ratio taken inside one of their own
+sessions is unaffected, because both arms share the workload.
+
 ## Which of their numbers we can compare against
 
 **Their single-node cells are a fair engine comparison. Their multi-node
@@ -38,12 +50,31 @@ archive splits:
 | 1 node, any `pp` | mixed; see below | **yes** |
 | 2 or 4 nodes | Megatron, about 3x | **no** -- placement, see `rank-placement.md` |
 
-**On one machine the winner is not settled.** Matched same-session pairs
-split **4-4** between the engines. The `1b` figure of "TorchTitan 3.4x
-ahead", which earlier versions of this file stated beside our own 3.6x,
-**has no shown derivation**. It traces to one session,
-`csv/june/schedule_local` (3.39x), which is a legitimate same-session pair
-and one draw from a wide spread. Do not quote it as their headline result.
+**On one machine the winner is not settled, and the reason is that the
+answer depends on how you aggregate.** Counted over their single-node
+same-session pairs:
+
+| how you count | result |
+|---|---|
+| per pair, both models | 20 pairs, **TorchTitan wins 14** |
+| per pair, `1b` only | 10 pairs, **TorchTitan wins 9** |
+| per distinct cell, median of its repeats | 6 cells, **TorchTitan wins 2** |
+
+The two counts disagree because 8 of the 20 pairs are the **same** 1-GPU
+`1b` cell, and two of those repeats are extreme (6.53x and 7.10x). A pair
+count therefore reports one configuration's repeats; a cell count reports
+one vote per configuration, and Megatron takes 4 of the 6.
+
+**The schedule flips it too.** At `9b`, 8 GPUs, `pp 8`, TorchTitan leads
+1.36x to 1.39x on `1f1b` across three repeats and **loses** at 0.95 on
+`interleaved1f1b`. Megatron gains about 15% from interleaving and
+TorchTitan loses about 20%.
+
+The `1b` figure of "TorchTitan 3.4x ahead", which earlier versions of this
+file stated beside our own 3.6x, **has no shown derivation**. It traces to
+one session, `csv/june/schedule_local` (3.39x), which is a legitimate
+same-session pair and one draw from a spread that runs 1.60x to 7.10x on
+that same 1-GPU cell. Do not quote it as their headline result.
 
 **Their archive holds no multi-node `qwen3_1b` pair at all.** Every
 multi-node comparison is `9b`.
