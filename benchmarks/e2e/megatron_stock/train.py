@@ -41,9 +41,10 @@ is Megatron's own, so a help run pays for the ML stack like any other.
 from __future__ import annotations
 
 import os
+import socket
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, MutableMapping
 
 from benchmarks.e2e.megatron_stock import bootstrap
 from benchmarks.e2e.megatron_stock.flags import (
@@ -647,6 +648,23 @@ def broadcast_pipeline_loss(loss: "Any") -> "Any":
     return float(payload[0]) if float(payload[1]) > 0 else None
 
 
+def install_rendezvous_defaults(environ: "MutableMapping[str, str]" = os.environ) -> None:
+    """Fill the rendezvous variables at one rank, and keep the launcher's.
+
+    Megatron's ``_initialize_distributed`` calls ``init_process_group`` with
+    no store, so torch reads ``MASTER_ADDR`` and ``MASTER_PORT`` from the
+    environment. Above one rank ``torch.distributed.run`` sets both. At one
+    rank nothing did, and the arm died before it trained a step. The two
+    ``setdefault`` calls keep a value the launcher chose and fill the
+    single-rank case only, which is what the tuned driver does.
+    """
+    environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    if "MASTER_PORT" not in environ:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            environ["MASTER_PORT"] = str(sock.getsockname()[1])
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one stock Megatron-LM arm.
 
@@ -665,6 +683,9 @@ def main(argv: list[str] | None = None) -> int:
     # scenario then run one allocator policy, which is the comparability
     # property that matters here.
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    # torchrun sets both variables above one rank. At one rank nothing
+    # does, and Megatron's env:// rendezvous fails before a step trains.
+    install_rendezvous_defaults()
 
     bootstrap.prepare()
 

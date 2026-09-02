@@ -1458,6 +1458,29 @@ class DriverRefusalTest(unittest.TestCase):
         )
 
 
+class RendezvousDefaultsTest(unittest.TestCase):
+    """At one rank the driver fills the rendezvous; under torchrun it does not."""
+
+    def test_an_empty_environment_gets_both_variables(self) -> None:
+        env: dict[str, str] = {}
+        train.install_rendezvous_defaults(env)
+        self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
+        self.assertTrue(1024 <= int(env["MASTER_PORT"]) <= 65535)
+
+    def test_the_launcher_values_are_kept(self) -> None:
+        env = {"MASTER_ADDR": "10.0.0.7", "MASTER_PORT": "29500"}
+        train.install_rendezvous_defaults(env)
+        self.assertEqual(
+            env, {"MASTER_ADDR": "10.0.0.7", "MASTER_PORT": "29500"}
+        )
+
+    def test_a_set_port_is_kept_when_only_the_address_is_absent(self) -> None:
+        env = {"MASTER_PORT": "29500"}
+        train.install_rendezvous_defaults(env)
+        self.assertEqual(env["MASTER_PORT"], "29500")
+        self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
+
+
 class StepLineTest(unittest.TestCase):
     """The line ``benchmarks/e2e/results.py`` parses."""
 

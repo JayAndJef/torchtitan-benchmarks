@@ -3161,6 +3161,15 @@ boundary is a document boundary.
 
 ### What is not settled
 
+**At one rank the stock driver fills `MASTER_ADDR` and `MASTER_PORT`
+itself.** `torch.distributed.run` sets both above one rank. At one rank
+nothing did, and Megatron's `_initialize_distributed` calls
+`init_process_group` with no store, so the `env://` rendezvous failed
+before a step trained. `install_rendezvous_defaults` in
+`benchmarks/e2e/megatron_stock/train.py` mirrors the tuned driver's two
+`setdefault` calls, since 2026-09-02. No single-GPU cell of this scenario
+exists before that date.
+
 **One mesh has run.**
 `out/20260826T172258Z/piper_megatron_stock/nvidia-h200` holds both arms at
 the `1b` shape, `--dp 2 --pp 4`, both `completed`, with a `results.json`.
