@@ -22,6 +22,14 @@ process instead:
 * ``install_step_log_shim`` below adds the step line
   ``benchmarks/e2e/results.py`` parses.
 
+**One config field takes a value Megatron has no flag for.**
+``--bench-batch-p2p-sync off`` makes ``apply_p2p_sync`` set
+``args.batch_p2p_sync = False`` after Megatron has parsed its arguments.
+``core_transformer_config_from_args`` copies every ``args`` attribute whose
+name is a config field, so the value reaches ``TransformerConfig`` through
+Megatron's own path. The driver then prints a ``Megatron-LM stock p2p:``
+line from the config it really built, on every rank.
+
 **This arm is not plain bf16.** ``--bf16`` alone keeps fp32 master
 parameters, fp32 optimizer moments and an fp32 gradient reduction, which is
 about 18 bytes of state per parameter against TorchTitan's 8. The arm keeps
@@ -49,6 +57,7 @@ from typing import Any, Callable, MutableMapping
 from benchmarks.e2e.megatron_stock import bootstrap
 from benchmarks.e2e.megatron_stock.flags import (
     BENCH_ARM_DIR,
+    BENCH_BATCH_P2P_SYNC,
     BENCH_LOCAL_BATCH_SIZE,
     BENCH_MIN_TRACE_WINDOWS,
     BENCH_MODE,
@@ -61,6 +70,10 @@ from benchmarks.e2e.megatron_stock.flags import (
     BENCH_SEQ_LEN,
     SUPPORTED_MODE,
     SUPPORTED_PP_SCHEDULE,
+)
+from benchmarks.e2e.registry import (
+    DEFAULT_MEGATRON_P2P_SYNC,
+    MEGATRON_P2P_SYNC_MODES,
 )
 
 # --------------------------------------------------------------------------
@@ -133,6 +146,17 @@ DATA_PARALLEL_LINE = (
     "Megatron-LM stock data parallel: {wrapper} over {dp} "
     "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
     "sharding_strategy={sharding}, expert_parallel={expert})"
+)
+
+# The pipeline point-to-point sync treatment, printed on every rank at every
+# mesh. Both values come from the BUILT config, never from ``args``:
+# megatron guards its per-message torch.cuda.synchronize() on
+# ``batch_p2p_comm and batch_p2p_sync`` (p2p_communication.py), and
+# ``batch_p2p_comm`` is derived from ``overlap_p2p_comm`` inside
+# ``core_transformer_config_from_args``. A line built from the arguments
+# could not show either.
+P2P_LINE = (
+    "Megatron-LM stock p2p: batch_p2p_comm={comm} batch_p2p_sync={sync}"
 )
 
 # Arm rule 1. Megatron's own completion line is rank 0 only
@@ -214,7 +238,46 @@ def add_bench_args(parser: Any) -> Any:
     group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
     group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
     group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, required=True)
+    # Defaulted rather than required: the flag list omits it at ``on``, so
+    # the default argv reaches Megatron's own default for the field.
+    group.add_argument(
+        BENCH_BATCH_P2P_SYNC,
+        type=str,
+        choices=MEGATRON_P2P_SYNC_MODES,
+        default=DEFAULT_MEGATRON_P2P_SYNC,
+    )
     return parser
+
+
+def apply_p2p_sync(args: Any) -> Any:
+    """Set ``args.batch_p2p_sync`` False under ``--bench-batch-p2p-sync off``.
+
+    Megatron lists ``batch_p2p_sync`` under the config fields no CLI
+    argument exists for, so its parser never sets the attribute.
+    ``core_transformer_config_from_args`` copies every ``args`` attribute
+    whose name is a config field, which is what makes this assignment reach
+    ``TransformerConfig`` through Megatron's own path.
+
+    Under ``on`` the attribute is left absent, so Megatron's dataclass
+    default rules exactly as it did before the option existed. Returns
+    ``args`` for the caller's convenience.
+    """
+    if args.bench_batch_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+        args.batch_p2p_sync = False
+    return args
+
+
+def p2p_line(model_cfg: Any) -> str:
+    """The p2p line, from the BUILT config and never from ``args``.
+
+    ``model_cfg`` is what ``gpt_config_from_args`` returns; its
+    ``transformer`` field is the ``TransformerConfig`` the model is built
+    from. Both fields are read off it, because megatron's guard reads both.
+    """
+    transformer = model_cfg.transformer
+    return P2P_LINE.format(
+        comm=transformer.batch_p2p_comm, sync=transformer.batch_p2p_sync
+    )
 
 
 def refuse_unsupported_run(args: Any) -> None:
@@ -243,6 +306,17 @@ def refuse_unsupported_run(args: Any) -> None:
         raise ValueError(
             f"{BENCH_PP_SCHEDULE} {args.bench_pp_schedule!r} was given at "
             "pipeline degree 1, where there is no pipeline to schedule"
+        )
+    if (
+        pipeline_degree == 1
+        and args.bench_batch_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC
+    ):
+        # The field is inert without a pipeline message, so the run would
+        # print a treatment it did not have.
+        raise ValueError(
+            f"{BENCH_BATCH_P2P_SYNC} {args.bench_batch_p2p_sync!r} was given "
+            "at pipeline degree 1, where there is no pipeline message to "
+            "synchronize"
         )
     if args.virtual_pipeline_model_parallel_size is not None:
         raise ValueError(
@@ -709,6 +783,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_and_validate_args(extra_args_provider=add_bench_args)
     refuse_unsupported_run(args)
+    # After the refusal, and before Megatron builds its config from args.
+    apply_p2p_sync(args)
 
     shape = shape_by_name(args.bench_model_size)
     # The engine's own count, not the harness's arithmetic. Megatron
@@ -746,6 +822,8 @@ def main(argv: list[str] | None = None) -> int:
     model_cfg = gpt_config_from_args(
         args, model_config_cls=BenchGPTModelConfig
     )
+    # From the built config, on every rank. Arm rule 12 reads it above pp 1.
+    print(p2p_line(model_cfg), flush=True)
     full_config = pretrain_cfg_container_from_args(args, model_cfg)
     pretrain(
         full_config,

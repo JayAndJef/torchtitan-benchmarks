@@ -1872,7 +1872,13 @@ TEST_CENSUS = {
     # +3 for the partial profiler cycle: that flags.py refuses one, that a
     # floored end steps a stopped profiler on either schedule, and that the
     # offset makes that failure arrive sooner.
-    "test_megatron_stock_driver": 107,
+    # +12 with --bench-batch-p2p-sync: the default argv does not move, off
+    # adds exactly one flag, off is refused at pipeline degree 1 by the
+    # flags and by the driver and accepted under a pipeline, an unknown
+    # value is refused, the mapping sets the field only under off, the line
+    # reads the built config, main orders the steps, the template matches
+    # the plan, and the harness group parses the flag.
+    "test_megatron_stock_driver": 119,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2090,7 +2096,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1754
+TEST_CENSUS_TOTAL = 1766
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

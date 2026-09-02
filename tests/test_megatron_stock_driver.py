@@ -51,7 +51,9 @@ from benchmarks.e2e.megatron_stock import (  # noqa: E402
 )
 from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     ALWAYS_OMITTED_FLAGS,
+    BENCH_BATCH_P2P_SYNC,
     BENCH_FLAGS,
+    BENCH_FLAGS_OMITTED_BY_DEFAULT,
     BENCH_PP_SCHEDULE,
     DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
@@ -63,6 +65,7 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     SHARDING_STRATEGIES,
     microbatch_geometry,
     omitted_flags,
+    refuse_unknown_p2p_sync,
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import (  # noqa: E402
@@ -92,13 +95,14 @@ EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
 BATCH_32 = dataclasses.replace(PIPER_1B_MEGATRON_WORKLOAD, local_batch_size=32)
 
 
-def flags_for(shape_name, spec, workload=BATCH_32):
+def flags_for(shape_name, spec, workload=BATCH_32, **keywords):
     return stock_megatron_flags(
         shape_by_name(shape_name),
         workload,
         spec,
         arm_dir="/tmp/arm",
         model_size=shape_name,
+        **keywords,
     )
 
 
@@ -211,22 +215,76 @@ class FlagListTest(unittest.TestCase):
                         self.assertIn(flag, emitted)
 
     def test_the_harness_group_is_emitted(self) -> None:
-        """Every ``--bench-`` flag except the pipeline schedule.
+        """Every ``--bench-`` flag except the two a default argv omits.
 
         The schedule is absent at pipeline degree 1, where the driver
         refuses it: a schedule there names a split that does not happen.
+        The p2p value is absent at ``on``, which restates Megatron's own
+        default. ``BENCH_FLAGS_OMITTED_BY_DEFAULT`` names both.
         """
+        self.assertEqual(
+            BENCH_FLAGS_OMITTED_BY_DEFAULT,
+            (BENCH_PP_SCHEDULE, BENCH_BATCH_P2P_SYNC),
+        )
         trivial = set(flags_for("1b", TRIVIAL_SPEC))
         pipelined = set(flags_for("1b", PP4_SPEC))
         for flag in BENCH_FLAGS:
             with self.subTest(flag=flag):
-                self.assertIn(flag, pipelined)
-                if flag != BENCH_PP_SCHEDULE:
+                if flag == BENCH_BATCH_P2P_SYNC:
+                    self.assertNotIn(flag, pipelined)
+                else:
+                    self.assertIn(flag, pipelined)
+                if flag not in BENCH_FLAGS_OMITTED_BY_DEFAULT:
                     self.assertIn(flag, trivial)
-        self.assertNotIn(BENCH_PP_SCHEDULE, trivial)
+        for flag in BENCH_FLAGS_OMITTED_BY_DEFAULT:
+            self.assertNotIn(flag, trivial)
         self.assertEqual(
             value_after(flags_for("1b", PP4_SPEC), BENCH_PP_SCHEDULE), "1F1B"
         )
+
+    def test_the_default_p2p_value_changes_no_argv(self) -> None:
+        """``on`` is Megatron's own default, and every published cell's.
+
+        Passing it by name must build the argv a caller that passes nothing
+        builds, token for token, with no p2p flag in it.
+        """
+        for spec in (TRIVIAL_SPEC, PP4_SPEC, SHARDED_PP4_SPEC):
+            with self.subTest(pp=spec.pp, dense_sharding=spec.dense_sharding):
+                emitted = flags_for("1b", spec)
+                self.assertEqual(
+                    emitted, flags_for("1b", spec, megatron_p2p_sync="on")
+                )
+                self.assertNotIn(BENCH_BATCH_P2P_SYNC, emitted)
+
+    def test_p2p_sync_off_adds_exactly_one_flag(self) -> None:
+        """The off argv is the default argv plus one harness pair.
+
+        Megatron has no flag for the field, so nothing else in the argv
+        may move: the driver sets the field on ``args`` from this one pair.
+        """
+        for spec in (PP4_SPEC, SHARDED_PP4_SPEC, EXPERT_PP4_SPEC):
+            with self.subTest(dense_sharding=spec.dense_sharding, ep=spec.ep):
+                default = flags_for("1b", spec)
+                off = flags_for("1b", spec, megatron_p2p_sync="off")
+                self.assertEqual(
+                    off, default + [BENCH_BATCH_P2P_SYNC, "off"]
+                )
+                self.assertEqual(off.count(BENCH_BATCH_P2P_SYNC), 1)
+
+    def test_p2p_sync_off_at_pipeline_degree_one_is_refused(self) -> None:
+        """The field is inert without a pipeline message."""
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
+            with self.subTest(dp=spec.dp):
+                with self.assertRaisesRegex(
+                    ValueError, "no pipeline message"
+                ):
+                    flags_for("1b", spec, megatron_p2p_sync="off")
+
+    def test_an_unknown_p2p_value_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not one of"):
+            flags_for("1b", PP4_SPEC, megatron_p2p_sync="maybe")
+        with self.assertRaisesRegex(ValueError, "not one of"):
+            refuse_unknown_p2p_sync("false")
 
     def test_no_declined_flag_is_emitted(self) -> None:
         """Every flag the value declines, asserted by name.
@@ -1042,6 +1100,12 @@ PLAN_STAGE_SIZE_LINE = (
 PLAN_MODEL_SIZE_LINE = (
     "Model qwen3_piper_{size} stock-megatron size: {total} total parameters"
 )
+# The p2p line the driver prints from its built config. The validation
+# profile carries the same string; both fields are in it because megatron
+# guards its per-message sync on both.
+PLAN_P2P_LINE = (
+    "Megatron-LM stock p2p: batch_p2p_comm={comm} batch_p2p_sync={sync}"
+)
 
 
 def stock_args(**overrides):
@@ -1049,6 +1113,7 @@ def stock_args(**overrides):
     base = dict(
         bench_mode="default",
         bench_pp_schedule=None,
+        bench_batch_p2p_sync="on",
         bench_local_batch_size=32,
         bench_model_size="1b",
         bench_seq_len=1024,
@@ -1314,6 +1379,9 @@ class MarkerStringTest(unittest.TestCase):
         self.assertEqual(train.STAGE_SIZE_LINE, PLAN_STAGE_SIZE_LINE)
         self.assertEqual(train.MODEL_SIZE_LINE, PLAN_MODEL_SIZE_LINE)
 
+    def test_the_p2p_template_matches_the_plan(self) -> None:
+        self.assertEqual(train.P2P_LINE, PLAN_P2P_LINE)
+
     def test_the_model_size_line_carries_a_thousands_separator(self) -> None:
         """Arm rule 11 builds its target with ``f"{param_count:,}"``."""
         for name, shape in PIPER_SHAPES.items():
@@ -1456,6 +1524,84 @@ class DriverRefusalTest(unittest.TestCase):
                 seq_length=4096,
             )
         )
+
+    def test_p2p_sync_off_at_pipeline_degree_one_is_refused(self) -> None:
+        """The field is inert without a pipeline message, and the run would
+        print a treatment it did not have."""
+        with self.assertRaises(ValueError) as caught:
+            train.refuse_unsupported_run(stock_args(bench_batch_p2p_sync="off"))
+        self.assertIn(BENCH_BATCH_P2P_SYNC, str(caught.exception))
+        self.assertIn("no pipeline message", str(caught.exception))
+
+    def test_p2p_sync_off_under_a_pipeline_is_accepted(self) -> None:
+        train.refuse_unsupported_run(
+            stock_args(
+                world_size=4,
+                pipeline_model_parallel_size=4,
+                bench_pp_schedule="1F1B",
+                bench_rows_per_sample=8,
+                seq_length=8192,
+                bench_batch_p2p_sync="off",
+            )
+        )
+
+
+class P2pSyncMappingTest(unittest.TestCase):
+    """How ``--bench-batch-p2p-sync`` reaches a field Megatron has no flag for.
+
+    ``core_transformer_config_from_args`` copies every ``args`` attribute
+    whose name is a config field. Megatron's own parser never sets
+    ``batch_p2p_sync``, so the attribute exists only when this driver puts
+    it there.
+    """
+
+    def test_off_sets_the_field_false_on_args(self) -> None:
+        args = train.apply_p2p_sync(stock_args(bench_batch_p2p_sync="off"))
+        self.assertIs(args.batch_p2p_sync, False)
+
+    def test_on_leaves_the_attribute_absent(self) -> None:
+        """Megatron's dataclass default must rule, exactly as it did before
+        the option existed. An attribute set to True would be copied too,
+        and a Megatron bump that moved the default would then be masked."""
+        args = train.apply_p2p_sync(stock_args())
+        self.assertFalse(hasattr(args, "batch_p2p_sync"))
+
+    def test_the_line_reads_the_built_transformer_config(self) -> None:
+        """Both fields off the config, never off ``args``.
+
+        ``batch_p2p_comm`` is derived inside
+        ``core_transformer_config_from_args`` from ``overlap_p2p_comm``, so
+        no argument carries it at all.
+        """
+        for sync in (True, False):
+            with self.subTest(sync=sync):
+                model_cfg = SimpleNamespace(
+                    transformer=SimpleNamespace(
+                        batch_p2p_comm=True, batch_p2p_sync=sync
+                    )
+                )
+                self.assertEqual(
+                    train.p2p_line(model_cfg),
+                    "Megatron-LM stock p2p: batch_p2p_comm=True "
+                    f"batch_p2p_sync={sync}",
+                )
+
+    def test_main_maps_after_the_refusal_and_prints_the_built_config(
+        self,
+    ) -> None:
+        """Read off the source: the assignment sits between the refusal and
+        the config build, and the print reads ``model_cfg``."""
+        import inspect
+
+        source = inspect.getsource(train.main)
+        refusal = source.index("refuse_unsupported_run(args)")
+        mapping = source.index("apply_p2p_sync(args)")
+        build = source.index("model_cfg = gpt_config_from_args(")
+        printed = source.index("print(p2p_line(model_cfg), flush=True)")
+        self.assertLess(refusal, mapping)
+        self.assertLess(mapping, build)
+        self.assertLess(build, printed)
+        self.assertLess(printed, source.index("\n    pretrain(\n"))
 
 
 class RendezvousDefaultsTest(unittest.TestCase):
@@ -2083,6 +2229,33 @@ class HarnessArgumentTest(unittest.TestCase):
         self.assertEqual(
             parsed.bench_min_trace_windows, BATCH_32.min_trace_windows
         )
+        # The default argv omits the p2p flag, and the parser fills in
+        # the value the flag list stands for.
+        self.assertEqual(parsed.bench_batch_p2p_sync, "on")
+
+    def test_the_group_parses_the_p2p_flag_and_refuses_another_value(
+        self,
+    ) -> None:
+        import argparse
+
+        parser = train.add_bench_args(
+            argparse.ArgumentParser(allow_abbrev=False)
+        )
+        emitted = flags_for("1b", PP4_SPEC, megatron_p2p_sync="off")
+        bench_only, index = [], 0
+        while index < len(emitted):
+            token = emitted[index]
+            if token.startswith("--bench-"):
+                bench_only.extend(emitted[index : index + 2])
+                index += 2
+            else:
+                index += 1
+        parsed = parser.parse_args(bench_only)
+        self.assertEqual(parsed.bench_batch_p2p_sync, "off")
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                bench_only[:-2] + [BENCH_BATCH_P2P_SYNC, "maybe"]
+            )
 
 
 # --------------------------------------------------------------------------

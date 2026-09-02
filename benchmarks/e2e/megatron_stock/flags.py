@@ -54,6 +54,12 @@ carries one change).
 Both engines then shard the dense parameters, so the axis still carries one
 change, and Megatron needs its own distributed optimizer to do it. See
 ``SHARDING_FLAGS``.
+
+**``--megatron-p2p-sync off`` adds one harness flag and nothing else.**
+Megatron has no CLI flag for ``batch_p2p_sync``, so ``--bench-batch-p2p-sync
+off`` carries the value and ``train.py`` sets the field on ``args`` before
+Megatron builds its config. The flag is omitted at ``on``, so the default
+argv is the argv every published cell ran.
 """
 
 from __future__ import annotations
@@ -62,7 +68,11 @@ from benchmarks.e2e.parallelism import (
     DENSE_SHARDING_MODES,
     ParallelismSpec,
 )
-from benchmarks.e2e.registry import Workload
+from benchmarks.e2e.registry import (
+    DEFAULT_MEGATRON_P2P_SYNC,
+    MEGATRON_P2P_SYNC_MODES,
+    Workload,
+)
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 # The one compile mode this arm accepts. Megatron compiles no whole
@@ -178,6 +188,9 @@ BENCH_PP_SCHEDULE = "--bench-pp-schedule"
 BENCH_SEQ_LEN = "--bench-seq-len"
 BENCH_ROWS_PER_SAMPLE = "--bench-rows-per-sample"
 BENCH_MIN_TRACE_WINDOWS = "--bench-min-trace-windows"
+# The pipeline point-to-point sync. Emitted only under ``off``, because
+# Megatron has no flag of its own for the field and ``on`` is its default.
+BENCH_BATCH_P2P_SYNC = "--bench-batch-p2p-sync"
 
 BENCH_FLAGS: tuple[str, ...] = (
     BENCH_ARM_DIR,
@@ -191,6 +204,16 @@ BENCH_FLAGS: tuple[str, ...] = (
     BENCH_SEQ_LEN,
     BENCH_ROWS_PER_SAMPLE,
     BENCH_MIN_TRACE_WINDOWS,
+    BENCH_BATCH_P2P_SYNC,
+)
+
+# The two harness flags a default argv omits. The schedule names a split
+# that does not happen at pp 1, and the p2p value restates Megatron's own
+# default at ``on``. A test reads this tuple, so a third such flag is an
+# edit here rather than a silent gap in the roster check.
+BENCH_FLAGS_OMITTED_BY_DEFAULT: tuple[str, ...] = (
+    BENCH_PP_SCHEDULE,
+    BENCH_BATCH_P2P_SYNC,
 )
 
 # Flags this suite declines under EVERY dense-sharding value, each for a
@@ -268,6 +291,19 @@ def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
         raise ValueError(
             f"dense sharding {dense_sharding!r} is not one of "
             + ", ".join(repr(mode) for mode in DENSE_SHARDING_MODES)
+        )
+
+
+def refuse_unknown_p2p_sync(megatron_p2p_sync: str) -> None:
+    """Raise on a p2p value this module cannot build a command line for.
+
+    A silent fall through would send the default argv under the ``off``
+    label, which is the wrong record this option exists to prevent.
+    """
+    if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
+        raise ValueError(
+            f"megatron p2p sync {megatron_p2p_sync!r} is not one of "
+            + ", ".join(repr(mode) for mode in MEGATRON_P2P_SYNC_MODES)
         )
 
 
@@ -642,6 +678,7 @@ def _bench_flags(
     model_size: str,
     compile_mode: str,
     rows_per_sample: int,
+    megatron_p2p_sync: str,
 ) -> list[str]:
     """The harness group, which ``train.py`` adds to Megatron's own parser.
 
@@ -659,6 +696,11 @@ def _bench_flags(
 
     ``--bench-pp-schedule`` is omitted at ``pp`` 1, where the driver refuses
     it: a schedule name there would name a split that does not happen.
+
+    ``--bench-batch-p2p-sync`` is omitted at ``on``, which is Megatron's own
+    default for the field. The default argv therefore does not move, and a
+    reader of a recorded command line sees the flag exactly where the run
+    turned the sync off.
     """
     flags = [
         BENCH_ARM_DIR,
@@ -684,6 +726,8 @@ def _bench_flags(
     ]
     if spec.pp > 1:
         flags.extend((BENCH_PP_SCHEDULE, str(spec.pp_schedule)))
+    if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+        flags.extend((BENCH_BATCH_P2P_SYNC, megatron_p2p_sync))
     return flags
 
 
@@ -695,6 +739,7 @@ def stock_megatron_flags(
     arm_dir: str,
     model_size: str,
     compile_mode: str = SUPPORTED_MODE,
+    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
 ) -> list[str]:
     """The whole argument list for one stock Megatron-LM arm.
 
@@ -707,10 +752,22 @@ def stock_megatron_flags(
     it with ``str``. This module imports no ``pathlib``, so a caller in a
     torch-free process pays for nothing it does not use.
 
+    ``megatron_p2p_sync`` defaults to ``on``, so a caller that passes
+    nothing builds the argv every published cell ran. ``off`` is refused at
+    ``pp`` 1: the field is inert without a pipeline message, and the argv
+    would carry a treatment the run did not have.
+
     Raises ``ValueError`` on a request this arm cannot honour. Each refusal
     names the reason, because a caller may build a command line without a
     run and a bare failure names nothing.
     """
+    refuse_unknown_p2p_sync(megatron_p2p_sync)
+    if spec.pp == 1 and megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+        raise ValueError(
+            f"megatron p2p sync {megatron_p2p_sync!r} was requested at pp 1, "
+            "where there is no pipeline message to synchronize; the argv "
+            "would carry a treatment the run did not have"
+        )
     if workload.seed is None:
         raise ValueError(
             "the stock megatron arm needs a seeded workload: both engines "
@@ -792,5 +849,6 @@ def stock_megatron_flags(
             model_size=model_size,
             compile_mode=compile_mode,
             rows_per_sample=rows_per_sample,
+            megatron_p2p_sync=megatron_p2p_sync,
         ),
     ]
