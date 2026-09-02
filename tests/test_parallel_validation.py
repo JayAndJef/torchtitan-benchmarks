@@ -32,7 +32,11 @@ from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
     n_microbatches,
 )
-from benchmarks.e2e.registry import PIPER_1B_ROPE, PIPER_1B_SWIGLU
+from benchmarks.e2e.registry import (
+    PIPER_1B_ROPE,
+    PIPER_1B_SWIGLU,
+    scenario_by_name,
+)
 from benchmarks.e2e.validation import (
     ALL_REDUCE_MARKER,
     VALIDATION_PROFILES,
@@ -904,6 +908,151 @@ class ArmRuleTwelveTests(unittest.TestCase):
                         PIPER_1B_ROPE.workload,
                         parallelism=PP2,
                     )
+
+
+def _megatron_log(spec: ParallelismSpec, p2p_line: str | None) -> str:
+    """One rank's tuned-driver output: every line the rules read.
+
+    The mesh lines come from the profile the validator uses, exactly as
+    ``_titan_log`` builds them. The p2p line is the argument, so a test can
+    give a rank the wrong value or no line at all.
+    """
+    profile = VALIDATION_PROFILES["megatron"]
+    lines = [
+        "Megatron-LM training loop (mode=default, graphs=none)",
+        _SIZE_LINE.rstrip("\n"),
+        *profile.parallelism_markers(spec, PIPER_1B_ROPE.workload),
+    ]
+    if p2p_line is not None:
+        lines.append(p2p_line)
+    lines.append("Training completed")
+    return "\n".join(lines)
+
+
+class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
+    """The ``--megatron-p2p-sync`` half of arm rule 12.
+
+    Each megatron driver prints its p2p line off the config it built, on
+    every rank. Above ``pp`` 1 the profile asks for that line with the
+    ``batch_p2p_sync`` token the requested value implies, so a run that
+    ignored the flag cannot be published under the label it was asked for.
+    """
+
+    def test_the_megatron_line_is_pinned_to_the_driver_constant(self) -> None:
+        """The validator and the driver state one line in two places."""
+        for value, sync in (("on", True), ("off", False)):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    VALIDATION_PROFILES["megatron"].p2p_markers(PP2, value),
+                    (train.P2P_LINE.format(comm=True, sync=sync),),
+                )
+
+    def test_no_line_is_asked_below_a_pipeline(self) -> None:
+        """Below ``pp`` 1 there is no message to synchronize, and ``off``
+        is refused parent-side; the callable asks for nothing there."""
+        for name in ("megatron", "megatron_stock", "torchtitan"):
+            for spec in (TRIVIAL_SPEC, DP2):
+                for value in ("on", "off"):
+                    with self.subTest(profile=name, spec=spec, value=value):
+                        self.assertEqual(
+                            VALIDATION_PROFILES[name].p2p_markers(spec, value),
+                            (),
+                        )
+
+    def test_the_titan_profile_asks_for_no_line_and_still_checks_the_value(
+        self,
+    ) -> None:
+        titan = VALIDATION_PROFILES["torchtitan"]
+        for value in ("on", "off"):
+            self.assertEqual(titan.p2p_markers(PP2, value), ())
+        for name in ("megatron", "megatron_stock", "torchtitan"):
+            with self.subTest(profile=name):
+                with self.assertRaisesRegex(ValueError, "unknown megatron p2p"):
+                    VALIDATION_PROFILES[name].p2p_markers(PP2, "sometimes")
+
+    def test_a_pipelined_megatron_log_must_carry_the_requested_value(
+        self,
+    ) -> None:
+        """The line is read on every rank, against the requested value.
+
+        A log at ``True`` passes the default and fails ``off``; a log at
+        ``False`` passes ``off`` and fails ``on``; a log with no line fails
+        both. The failure names the token the log lacked.
+        """
+        scenario = scenario_by_name("piper1b_megatron")
+        arm = scenario.arm("baseline")
+        on_line = train.P2P_LINE.format(comm=True, sync=True)
+        off_line = train.P2P_LINE.format(comm=True, sync=False)
+        cases = (
+            (on_line, "on", None),
+            (on_line, "off", "batch_p2p_sync=False"),
+            (off_line, "off", None),
+            (off_line, "on", "batch_p2p_sync=True"),
+            (None, "on", "batch_p2p_sync=True"),
+            (None, "off", "batch_p2p_sync=False"),
+        )
+        for p2p_line, value, refused in cases:
+            with self.subTest(line=p2p_line, value=value):
+                with tempfile.TemporaryDirectory() as temporary:
+                    fixture = _ArmFixture(
+                        Path(temporary), markers=arm.trace_kernel_markers
+                    )
+                    log = _megatron_log(PP2, p2p_line)
+                    fixture.write({0: log, 1: log})
+                    keywords = dict(
+                        compile_mode="default",
+                        ac_mode="none",
+                        model_size="1b",
+                        parallelism=PP2,
+                        megatron_p2p_sync=value,
+                    )
+                    if refused is None:
+                        validate_arm(
+                            arm,
+                            fixture.root,
+                            fixture.log,
+                            scenario.workload,
+                            **keywords,
+                        )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, refused):
+                            validate_arm(
+                                arm,
+                                fixture.root,
+                                fixture.log,
+                                scenario.workload,
+                                **keywords,
+                            )
+
+    def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
+        """The rule runs per rank, so a stage that kept the sync under an
+        ``off`` label is caught even when the other stage dropped it."""
+        scenario = scenario_by_name("piper1b_megatron")
+        arm = scenario.arm("baseline")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(
+                Path(temporary), markers=arm.trace_kernel_markers
+            )
+            fixture.write({
+                0: _megatron_log(
+                    PP2, train.P2P_LINE.format(comm=True, sync=False)
+                ),
+                1: _megatron_log(
+                    PP2, train.P2P_LINE.format(comm=True, sync=True)
+                ),
+            })
+            with self.assertRaisesRegex(RuntimeError, "on rank 1"):
+                validate_arm(
+                    arm,
+                    fixture.root,
+                    fixture.log,
+                    scenario.workload,
+                    compile_mode="default",
+                    ac_mode="none",
+                    model_size="1b",
+                    parallelism=PP2,
+                    megatron_p2p_sync="off",
+                )
 
 
 class TitanShardDegreeGuardTests(unittest.TestCase):

@@ -143,6 +143,11 @@ STOCK_LOG_FRAGMENTS = (
     # roster still says which token sits between the two above.
     "sharding_strategy=",
     "expert_parallel=",
+    # The p2p line, printed off the built config on every rank. The sync
+    # VALUE is not here: it moves with --megatron-p2p-sync, and the
+    # contract test below pins it per value.
+    "Megatron-LM stock p2p: batch_p2p_comm=",
+    " batch_p2p_sync=",
 )
 
 # The wrapper class name is the half of the data-parallel line that moves
@@ -1103,6 +1108,8 @@ def _driver_lines() -> list[str]:
         _driver_data_parallel_line("shard", dp=2, ep=2),
         train.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
         train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
+        train.P2P_LINE.format(comm=True, sync=True),
+        train.P2P_LINE.format(comm=True, sync=False),
     ]
 
 
@@ -1129,6 +1136,7 @@ class StockMarkerContractTests(unittest.TestCase):
             self.profile.completion_marker,
             self.profile.mode_line("default"),
             *self.profile.parallelism_markers(MESH, self.workload),
+            *self.profile.p2p_markers(MESH, "on"),
         ]
         for fragment in STOCK_LOG_FRAGMENTS:
             with self.subTest(fragment=fragment):
@@ -1227,6 +1235,44 @@ class StockMarkerContractTests(unittest.TestCase):
                 )
                 markers = self.profile.parallelism_markers(spec, workload)
                 self.assertEqual(printed, markers[1])
+
+    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
+    def test_the_driver_p2p_line_equals_this_profile_marker(self) -> None:
+        """The p2p half of arm rule 12, character for character.
+
+        The driver formats the line off the config ``gpt_config_from_args``
+        built, so the two fields are observations. ``batch_p2p_comm`` reads
+        True on this arm: stock Megatron derives it as ``not
+        overlap_p2p_comm`` and forces the overlap off for the
+        non-interleaved schedule.
+        """
+        from benchmarks.e2e.megatron_stock import train
+
+        for value, sync in (("on", True), ("off", False)):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.profile.p2p_markers(MESH, value),
+                    (train.P2P_LINE.format(comm=True, sync=sync),),
+                )
+
+    def test_no_p2p_line_is_asked_below_a_pipeline(self) -> None:
+        """Below ``pp`` 1 there is no message to synchronize."""
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
+            for value in ("on", "off"):
+                with self.subTest(spec=spec, value=value):
+                    self.assertEqual(self.profile.p2p_markers(spec, value), ())
+
+    def test_the_tuned_p2p_line_does_not_satisfy_this_profile(self) -> None:
+        """The two drivers must not satisfy each other's p2p rule."""
+        tuned = VALIDATION_PROFILES["megatron"]
+        for value in ("on", "off"):
+            with self.subTest(value=value):
+                (tuned_line,) = tuned.p2p_markers(MESH, value)
+                (stock_line,) = self.profile.p2p_markers(MESH, value)
+                self.assertNotIn(tuned_line, stock_line)
+                self.assertNotIn(stock_line, tuned_line)
+                self.assertIn("stock", stock_line)
+                self.assertNotIn("stock", tuned_line)
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_mode_line_starts_with_this_profile_marker(

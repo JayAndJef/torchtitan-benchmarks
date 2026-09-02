@@ -592,6 +592,7 @@ def execute_run(
                     ac_mode=ac_mode,
                     model_size=model_size,
                     parallelism=parallelism,
+                    megatron_p2p_sync=megatron_p2p_sync,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -655,6 +656,7 @@ def execute_run(
                 ac_mode=ac_mode,
                 model_size=model_size,
                 parallelism=parallelism,
+                megatron_p2p_sync=megatron_p2p_sync,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

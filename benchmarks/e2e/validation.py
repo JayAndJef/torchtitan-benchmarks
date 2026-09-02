@@ -60,6 +60,8 @@ from benchmarks.e2e.parallelism import (
 )
 from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
+    DEFAULT_MEGATRON_P2P_SYNC,
+    MEGATRON_P2P_SYNC_MODES,
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
@@ -168,6 +170,16 @@ class ValidationProfile:
     532 arm logs under ``out/`` -- every run this repo has ever done, all of
     them single-GPU or pipeline-only -- **none** matches either pattern. So
     the rule refuses nothing that has already happened.
+
+    ``p2p_markers`` is the ``--megatron-p2p-sync`` half of arm rule 12. It
+    takes the spec and the requested value, and returns the line the engine
+    prints from its BUILT config, above ``pp`` 1 alone: below a pipeline
+    there is no message to synchronize, and the option is refused there
+    before a GPU is claimed. It is a second callable rather than a third
+    argument of ``parallelism_markers``, because the value is not part of
+    the mesh and a TorchTitan arm never receives it. An empty tuple here is
+    therefore not a refusal: the titan profile returns one at every mesh,
+    and ``validate_arm`` reads only the mesh markers for that.
     """
 
     completion_marker: str
@@ -181,6 +193,7 @@ class ValidationProfile:
     ]
     pipelined_pattern: re.Pattern[str]
     data_parallel_pattern: re.Pattern[str]
+    p2p_markers: Callable[[ParallelismSpec, str], tuple[str, ...]]
 
 
 def _titan_parallelism_markers(
@@ -405,6 +418,78 @@ def _megatron_stock_parallelism_markers(
     return tuple(markers)
 
 
+def _p2p_sync_token(megatron_p2p_sync: str) -> str:
+    """The ``batch_p2p_sync`` token a built config prints for a value.
+
+    Both drivers format the field with ``str`` on the config's own bool,
+    so ``on`` reads ``True`` and ``off`` reads ``False``. An unknown value
+    is refused here, before it becomes a marker no log can carry.
+    """
+    if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
+        raise ValueError(
+            f"unknown megatron p2p sync {megatron_p2p_sync!r}. Available: "
+            f"{', '.join(MEGATRON_P2P_SYNC_MODES)}"
+        )
+    return str(megatron_p2p_sync == "on")
+
+
+def _no_p2p_markers(
+    spec: ParallelismSpec, megatron_p2p_sync: str
+) -> tuple[str, ...]:
+    """TorchTitan has no p2p sync to prove.
+
+    ``--megatron-p2p-sync`` reaches the two megatron launchers alone, and a
+    TorchTitan argv is the same under either value. So no line is asked of
+    a titan rank, and its absence is not a failure. The value is still
+    checked, so an unknown one does not pass through a titan arm unseen.
+    """
+    _p2p_sync_token(megatron_p2p_sync)
+    return ()
+
+
+def _megatron_p2p_markers(
+    spec: ParallelismSpec, megatron_p2p_sync: str
+) -> tuple[str, ...]:
+    """``benchmarks.e2e.megatron.train``'s p2p line. Keep in sync.
+
+    The driver prints the two fields off the ``TransformerConfig`` it
+    built, after ``build_model`` returns, so the line is an observation of
+    the config the schedule reads and not a copy of the argument.
+
+    **``batch_p2p_comm`` is pinned to ``True``, and that is what gives the
+    ``off`` label a meaning.** Megatron's guard is ``batch_p2p_comm and
+    batch_p2p_sync`` (``p2p_communication.py``), so a run with the first
+    field False skips the synchronize under either label. The tuned driver
+    runs the non-interleaved 1F1B schedule and leaves the field at its
+    ``TransformerConfig`` default, which is True.
+    """
+    sync = _p2p_sync_token(megatron_p2p_sync)
+    if spec.pp == 1:
+        return ()
+    return (f"Megatron-LM p2p: batch_p2p_comm=True batch_p2p_sync={sync}",)
+
+
+def _megatron_stock_p2p_markers(
+    spec: ParallelismSpec, megatron_p2p_sync: str
+) -> tuple[str, ...]:
+    """``benchmarks.e2e.megatron_stock.train``'s p2p line. Keep in sync.
+
+    The driver prints the two fields off the config ``gpt_config_from_args``
+    built, which is the config ``pretrain`` trains with. Stock Megatron
+    derives ``batch_p2p_comm`` as ``not overlap_p2p_comm``
+    (``arguments.py``), and forces ``overlap_p2p_comm`` off for the
+    non-interleaved schedule this arm runs, so the first field reads True
+    for the reason the tuned marker gives.
+    """
+    sync = _p2p_sync_token(megatron_p2p_sync)
+    if spec.pp == 1:
+        return ()
+    return (
+        "Megatron-LM stock p2p: batch_p2p_comm=True "
+        f"batch_p2p_sync={sync}",
+    )
+
+
 VALIDATION_PROFILES = {
     "torchtitan": ValidationProfile(
         completion_marker="Training completed",
@@ -435,6 +520,8 @@ VALIDATION_PROFILES = {
             r"|dp_shard=(?!1\b)\d+"
             r"|piper1b data parallel:"
         ),
+        # The option never reaches a TorchTitan arm.
+        p2p_markers=_no_p2p_markers,
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -462,6 +549,8 @@ VALIDATION_PROFILES = {
             r"Megatron-LM parallelism: dp=(?!1\b)\d+"
             r"|Megatron-LM data parallel:"
         ),
+        # The driver's own p2p line, read off the built config.
+        p2p_markers=_megatron_p2p_markers,
     ),
     # The stock arm of piper_megatron_stock. It runs megatron.training's own
     # pretrain() through pretrain_gpt's providers, so nothing here may assume
@@ -497,6 +586,8 @@ VALIDATION_PROFILES = {
             r"Megatron-LM stock parallelism: dp=(?!1\b)\d+"
             r"|Megatron-LM stock data parallel:"
         ),
+        # The stock driver's own p2p line, and it carries the word "stock".
+        p2p_markers=_megatron_stock_p2p_markers,
     ),
 }
 
@@ -656,6 +747,7 @@ def validate_arm(
     ac_mode: str = "sac",
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
 ) -> None:
     """Reject partial or wrongly configured runs before analysis.
 
@@ -666,6 +758,14 @@ def validate_arm(
     evaluation then publishes a maximum over the survivors. It defaults to
     the trivial spec, under which every check below is the check this
     function has always made.
+
+    ``megatron_p2p_sync`` is the requested ``--megatron-p2p-sync`` value.
+    Above ``pp`` 1 each megatron profile asks every rank for the p2p line
+    its driver prints from the built config, with the ``batch_p2p_sync``
+    token the value implies, so a run that ignored the flag cannot be
+    published under the label it was asked for. It defaults to ``on``,
+    which is stock Megatron and the treatment of every run before the
+    option existed.
     """
     profile = VALIDATION_PROFILES[arm.validation]
     shape = shape_by_name(model_size)
@@ -690,6 +790,11 @@ def validate_arm(
                 f"{parallelism.pp}; the run cannot be published under a mesh "
                 "no rule checked"
             )
+        # The p2p half joins after the refusal above, because an empty
+        # tuple here is honest: a TorchTitan arm never receives the value.
+        parallelism_markers += profile.p2p_markers(
+            parallelism, megatron_p2p_sync
+        )
     if parallelism.world_size > 1 and set(logs) != expected_ranks:
         raise RuntimeError(
             f"{arm.name}: the run declares {parallelism.world_size} ranks and "

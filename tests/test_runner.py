@@ -615,6 +615,37 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
                 self._resume(out_dir, megatron_p2p_sync="off")
 
+    def test_execute_run_hands_the_value_to_validate_arm(self) -> None:
+        """The value the run resolved is the value the gate reads."""
+
+        def fake_process(command, **kwargs):
+            kwargs["stdout"].write("Training completed\n")
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
+            execute_run(
+                RunRequest(
+                    gpu="0,1",
+                    scenario_name="piper1b_megatron",
+                    arm_names=("baseline",),
+                    out_dir=Path(temporary) / "run",
+                    ac_mode="none",
+                    parallelism=self.PP2,
+                    megatron_p2p_sync="off",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": os.environ["PATH"]},
+            )
+        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(validate.call_args.kwargs["megatron_p2p_sync"], "off")
+        self.assertEqual(validate.call_args.kwargs["parallelism"], self.PP2)
+
     def test_the_banner_names_the_value(self) -> None:
         """The banner names every comparability boundary the manifest
         gates, and this value is one."""

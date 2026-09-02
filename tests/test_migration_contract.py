@@ -1929,7 +1929,10 @@ TEST_CENSUS = {
     # profile's markers.
     # +2 with --megatron-p2p-sync: the off argv is exactly its two parts,
     # and the titan arm of the scenario gets no token under it.
-    "test_megatron_stock_launch": 58,
+    # +3 with the p2p half of arm rule 12: the driver's p2p line equal to
+    # the profile's marker at both values, no line asked below a
+    # pipeline, and the tuned line not satisfying this profile.
+    "test_megatron_stock_launch": 61,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2011,7 +2014,8 @@ TEST_CENSUS = {
     # taking the value, and the banner naming it.
     # +2 with the manifest field: a resume inheriting the recorded value
     # and refusing another, and a schema-12 directory reading as on.
-    "test_runner": 74,
+    # +1 that execute_run hands the resolved value to validate_arm.
+    "test_runner": 75,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2140,7 +2144,12 @@ TEST_CENSUS = {
     # engine's pattern names both of its witnesses, that a shard degree
     # counts as data parallelism, that a real pipeline-only log matches
     # neither pattern, and that a double-digit degree is not read as one.
-    "test_parallel_validation": 49,
+    # +5 with the p2p half of arm rule 12: the tuned line pinned to the
+    # driver constant at both values, no line asked below a pipeline, the
+    # titan profile asking for none and still refusing an unknown value, a
+    # pipelined megatron log passing or failing by the requested value, and
+    # one rank with the wrong value failing the arm.
+    "test_parallel_validation": 54,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -2151,7 +2160,7 @@ TEST_CENSUS = {
     # baseline-free multi-arm comparison.
     "test_throughput": 30,
 }
-TEST_CENSUS_TOTAL = 1789
+TEST_CENSUS_TOTAL = 1798
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
