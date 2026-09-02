@@ -474,6 +474,7 @@ def _resolve_run(
             ac_mode,
             model_size,
             parallelism=parallelism,
+            megatron_p2p_sync=megatron_p2p_sync,
         )
         if mismatches:
             raise ValueError(
@@ -539,6 +540,7 @@ def execute_run(
             ac_mode,
             model_size,
             parallelism=parallelism,
+            megatron_p2p_sync=megatron_p2p_sync,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")

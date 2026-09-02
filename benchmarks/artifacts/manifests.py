@@ -27,6 +27,17 @@ carries no such key, so a reader that assumed one would read the absence as
 than a record. The version number is what separates "this run replicated the
 dense parameters" from "this file predates the question".
 
+Schema 13 adds ``megatron_p2p_sync`` as a top-level field beside
+``compile_mode``, ``ac_mode`` and ``model_size``, and gates it the same way:
+an omitted value on resume inherits the recorded one, a different value is
+refused, and a schema-12 manifest, which carries no key, reads as ``on``.
+That reading is a record and not an inference, because no run before this
+schema could turn the sync off: the option did not exist, and stock Megatron
+has no flag for the field. It is its own field and not a key of the
+``parallelism`` block, because it is a treatment of the pipeline messages
+rather than a degree, the way ``compile_mode`` is a treatment of the blocks
+and not a field of the workload.
+
 What *is* split out is everything engine-neutral: output layout and the
 atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
 sample summarization is ``summaries.py``. This module is exactly the part
@@ -86,6 +97,7 @@ from benchmarks.e2e.parallelism import (
     execution_model,
 )
 from benchmarks.e2e.registry import (
+    DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MODEL_SIZE,
     PIPER_1B_REGIONS,
     Workload,
@@ -101,7 +113,7 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 12
+MANIFEST_SCHEMA_VERSION = 13
 
 # What the ``tps`` figure in every step log line, and therefore
 # ``stable_tokens_per_second`` in ``results.json``, counts.
@@ -156,6 +168,10 @@ def manifest_data(
     # single-GPU claim about a job that was not one. Keyword-only because the
     # nine positional parameters above are the schema-9 signature.
     parallelism: ParallelismSpec,
+    # No default, for the reason the two above have none: a writer that
+    # defaulted it would record ``on`` for a run that turned the sync off,
+    # and the two are a comparability boundary.
+    megatron_p2p_sync: str,
 ) -> dict[str, Any]:
     # Recorded canonically, so a fresh manifest never carries a retired name.
     model_size = canonical_size_name(model_size)
@@ -177,6 +193,7 @@ def manifest_data(
         "model_size": model_size,
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
         "parallelism": _parallelism_record(scenario, parallelism),
+        "megatron_p2p_sync": megatron_p2p_sync,
         "throughput_definition": THROUGHPUT_DEFINITION,
         "execution_model": execution_model(parallelism),
     }
@@ -195,6 +212,7 @@ def write_manifest(
     model_size: str,
     *,
     parallelism: ParallelismSpec,
+    megatron_p2p_sync: str,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -209,6 +227,7 @@ def write_manifest(
             ac_mode,
             model_size,
             parallelism=parallelism,
+            megatron_p2p_sync=megatron_p2p_sync,
         ),
     )
 
@@ -235,6 +254,7 @@ def _resume_mismatches(
     model_size: str,
     *,
     parallelism: ParallelismSpec,
+    megatron_p2p_sync: str,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -248,6 +268,15 @@ def _resume_mismatches(
     mismatches = [
         key for key, value in expected.items() if manifest.get(key) != value
     ]
+    # Defaulted lookup: a schema <= 12 manifest carries no key, and every
+    # such run kept stock Megatron's own sync, because nothing before this
+    # schema could turn it off. The value is a comparability boundary, so a
+    # different one refuses the resume in either direction.
+    if (
+        manifest.get("megatron_p2p_sync", DEFAULT_MEGATRON_P2P_SYNC)
+        != megatron_p2p_sync
+    ):
+        mismatches.append("megatron_p2p_sync")
     # Defaulted lookup rather than a generic entry: schema <= 8 output
     # directories predate the axis and are still resumable as the 1B shape.
     # Both sides go through canonical_size_name, because 42 e2e manifests on

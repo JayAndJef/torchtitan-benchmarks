@@ -539,6 +539,82 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         command = resolved[6]["baseline"]
         self.assertEqual(command[-2:], ["--bench-batch-p2p-sync", "off"])
 
+    def _write_manifest(self, out_dir: Path, megatron_p2p_sync: str) -> None:
+        scenario = scenario_by_name("piper1b_megatron")
+        write_manifest(
+            out_dir,
+            scenario,
+            (scenario.arm("baseline"),),
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            {**self.metadata, "cpu_pinning": "none: test"},
+            (),
+            "default",
+            "none",
+            "1b",
+            parallelism=self.PP2,
+            megatron_p2p_sync=megatron_p2p_sync,
+        )
+
+    def _resume(self, out_dir: Path, megatron_p2p_sync: str | None):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0,1",
+                    scenario_name=None,
+                    arm_names=("baseline",),
+                    resume_dir=out_dir,
+                    parallelism=self.PP2,
+                    megatron_p2p_sync=megatron_p2p_sync,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def test_a_resume_inherits_the_recorded_value_and_refuses_another(
+        self,
+    ) -> None:
+        """The gate reads like --compile-mode's: an omitted value inherits
+        the recorded one and rebuilds the same argv, a different value is
+        refused, and the refusal names the field."""
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            out_dir.mkdir()
+            self._write_manifest(out_dir, "off")
+            resolved = self._resume(out_dir, megatron_p2p_sync=None)
+            self.assertEqual(resolved[12], "off")
+            self.assertTrue(resolved[11])
+            self.assertEqual(
+                resolved[6]["baseline"][-3:-1], ["--batch-p2p-sync", "off"]
+            )
+            with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
+                self._resume(out_dir, megatron_p2p_sync="on")
+
+    def test_a_resume_of_a_schema_twelve_directory_reads_as_on(self) -> None:
+        """A directory written before the field exists carries no key, and
+        no such run could have turned the sync off. So it resumes as ``on``
+        with the argv it always had, and a request for ``off`` is refused
+        rather than changing the treatment under the recorded label."""
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            out_dir.mkdir()
+            self._write_manifest(out_dir, "on")
+            manifest_path = out_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            del manifest["megatron_p2p_sync"]
+            manifest["schema_version"] = 12
+            manifest_path.write_text(json.dumps(manifest))
+            resolved = self._resume(out_dir, megatron_p2p_sync=None)
+            self.assertEqual(resolved[12], "on")
+            self.assertEqual(_p2p_flags(resolved[6]["baseline"]), [])
+            with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
+                self._resume(out_dir, megatron_p2p_sync="off")
+
     def test_the_banner_names_the_value(self) -> None:
         """The banner names every comparability boundary the manifest
         gates, and this value is one."""
@@ -1226,13 +1302,15 @@ class ManifestTests(unittest.TestCase):
                 "none",
                 "1b",
                 parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 12)
+        self.assertEqual(manifest["schema_version"], 13)
         self.assertEqual(manifest["compile_mode"], "cuda-graph")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
+        self.assertEqual(manifest["megatron_p2p_sync"], "on")
         self.assertEqual(manifest["model_shape"], PIPER_1B.describe(seq_len=1024))
         self.assertEqual(
             manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
@@ -1304,7 +1382,7 @@ class UncompiledRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 12)
+        self.assertEqual(manifest["schema_version"], 13)
         self.assertEqual(manifest["compile_mode"], "none")
         # Region pooling reads Inductor's compiled-graph annotations, and an
         # eager run emits none. The run says so rather than declare a region

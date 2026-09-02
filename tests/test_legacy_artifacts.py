@@ -330,6 +330,7 @@ class LegacyResumeTests(unittest.TestCase):
             # ``parallelism`` key and is read through the trivial spec's own
             # record. Requesting that spec is what a plain resume does.
             parallelism=TRIVIAL_SPEC,
+            megatron_p2p_sync="on",
         )
 
     def test_the_git_rev_field_is_the_guard(self) -> None:
