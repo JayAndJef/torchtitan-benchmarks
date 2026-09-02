@@ -11,12 +11,13 @@ with **no optimizer-state sharding** whenever the expert degree equals the
 data-parallel degree. Every Megatron bar in the paper's Figure 7 is such a
 run.
 
-**There is a second defect, and on multi-node rows it is the larger one.**
-Piper patched TorchTitan's rank placement and left Megatron on the default,
-so their data-parallel axis crosses the machine boundary and Megatron's does
-not. Every multi-node comparison in the archive measures that difference as
-well as the two engines. Read `references/rank-placement.md` before you cite
-one.
+**There is a second asymmetry, and on multi-node rows it decides the
+winner.** Piper's harness puts one data-parallel replica on each node.
+Piper's own system and its patched TorchTitan obey that layout, so their
+data-parallel axis crosses the machine boundary. Megatron was left on its
+own default, and its data-parallel axis stays inside a node. Every
+multi-node comparison in the archive measures that difference as well as
+the two engines. Read `references/rank-placement.md` before you cite one.
 
 This is read from a checkout outside this repository:
 `/m-coriander/coriander/jayden/piper`, branch `main`, rev `439e960`. The
@@ -56,9 +57,9 @@ on this shared box. **Say where the evidence comes from if you cite it.**
 - `references/comparing-our-numbers.md` -- our stock-Megatron results against
   theirs, the five handicaps on their TorchTitan arm, and the two that run
   the other way. Read it before you cite a Piper figure.
-- `references/rank-placement.md` -- the mesh patch, both engines' rank
-  equations, the flag their own harness defines and never passes, and the
-  measured 2.3 GB/s against 209 GB/s. Read it before you cite a multi-node
-  figure.
+- `references/rank-placement.md` -- the mesh patch, Piper's own layout,
+  both engines' rank equations, the flags neither harness passes, and the
+  measured node rate against NVLink. Verified by four audits on
+  2026-09-02. Read it before you cite a multi-node figure.
 - `reports/20260826-stock-megatron/piper-evidence/` -- 812 result CSVs and
   four decisive logs, with a manifest recording their origin.

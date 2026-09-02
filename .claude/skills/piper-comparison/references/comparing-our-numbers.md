@@ -5,8 +5,11 @@ coverage gap and the handicaps.
 
 ## Two traps that already produced a withdrawn claim
 
-**`ngpu` in Piper's CSVs is GPUs PER NODE, not total.** Verified:
-`pp * dp * ep == nnode * ngpu` holds for 120 rows and `== ngpu` for none. So
+**`ngpu` in Piper's CSVs is GPUs PER NODE, not total.** The driver
+guarantees it: `run_qwen_e2e_eval.py:314` sets `nnode = dp` and every branch
+passes `--ngpu pp`, so `nnode * ngpu == pp * dp` on every row. The expert
+degree is nested inside the data-parallel degree, so `pp * dp * ep` is
+**not** the world size; that product fails on every `ep > 1` row. So
 
     tokens/s per device = global_batch_size * seq_len / (nnode * ngpu) / iter_time_mean
 
@@ -38,8 +41,8 @@ sessions is unaffected, because both arms share the workload.
 **Their single-node cells are a fair engine comparison. Their multi-node
 cells are not**, because Piper puts the two engines on different rank
 layouts. Read `references/rank-placement.md` before you cite any multi-node
-row. It is a defect in their harness, not a coverage gap in ours, and it was
-diagnosed on 2026-08-28.
+row. It is a property of their harness, not a coverage gap in ours. It was
+diagnosed on 2026-08-28 and verified on 2026-09-02.
 
 Piper's AWS layout sets `nnode = dp` (`e2e_eval.py:332-336`), so their
 data-parallel degree **is** their node count. Sorted that way, their April
@@ -112,8 +115,10 @@ gets `NCCL_P2P_DISABLE=1` (`scripts/run_megatron.sh:45`), and Megatron
 alone gets 12 virtual pipeline stages on the interleaved schedule against
 TorchTitan's and Piper's 2.
 
-**A sixth handicap applies to the multi-node rows only**, and it is the
-rank placement. It is larger than the other five together.
+**The multi-node rows carry one more asymmetry, and it is not a handicap
+aimed at TorchTitan.** The harness puts TorchTitan and Piper's own system
+on one rank layout and leaves Megatron on the other. Its effect is larger
+than the five handicaps together. See `rank-placement.md`.
 
 ## What may be said
 
