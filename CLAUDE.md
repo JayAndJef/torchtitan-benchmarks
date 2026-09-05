@@ -659,63 +659,83 @@ dataclasses and are the single source of truth for *both* engines --
 so a size cannot drift between them. That module imports nothing but
 `dataclasses`.
 
-**Six shapes are registered**, in ascending order of the parameter count.
+**Seven shapes are registered**, in ascending order of the parameter count.
 `normal` is the retired name of `1b` and still resolves to it, through
 `MODEL_SIZE_ALIASES`; the manifests of every run before schema 9 record
 `normal`.
 
-| | `1b` | `large` | `9b` | `huge` | `giant` | `48b` |
-|---|---|---|---|---|---|---|
-| real or synthetic | **real** | synthetic | **real** | synthetic | synthetic | **real** |
-| dim | 1024 | 4096 | 2048 | 12288 | 16384 | 4096 |
-| n_layers | 16 | 4 | 24 | 1 | 1 | 32 |
-| n_heads / n_kv_heads | 16 / 8 | 64 / 32 | 32 / 8 | 192 / 96 | 256 / 128 | 32 / 8 |
-| head_dim | 64 | 64 | 64 | 64 | 64 | **128** |
-| MoE inter_dim (3.5x dim) | 3584 | 14336 | 7168 | 43008 | 57344 | 14336 |
-| experts / top_k | 4 / 2 | 4 / 2 | 8 / 2 | 4 / 2 | 4 / 2 | 8 / 2 |
-| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 |
-| param_count | 1,066,241,024 | 4,264,661,504 | 9,330,201,600 | 10,528,837,760 | 17,058,349,184 | 47,685,316,608 |
-| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 1,446,023,680 / 2,818,637,824 / 2,855,375,360 | 874,091,520 / 8,456,110,080 / 2,988,413,952 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 | 5,783,994,496 / 11,274,354,688 / 11,421,204,608 | 2,587,111,424 / 45,098,205,184 / 13,862,449,152 |
-| num_flops_per_token @1024 | 3,551,348,736 | 13,599,599,616 | 16,667,473,920 | 33,096,721,152 | 53,792,637,696 | 81,051,328,512 |
-| per-block regions | yes (80/80) | yes (20/20) | yes (120/120) | **no** | **no** | yes (160/160) |
-| `parity_gate` | 2e-2 | 3e-2 | 2e-2 | 5e-2 | 6e-2 | 3e-2 |
-| measured? | yes | **no** | **no** | yes | **no** | **no** |
+| | `1b` | `large` | `9b` | `huge` | `giant` | `30b-a3b` | `48b` |
+|---|---|---|---|---|---|---|---|
+| real or synthetic | **real** | synthetic | **real** | synthetic | synthetic | **real** | **real** |
+| dim | 1024 | 4096 | 2048 | 12288 | 16384 | 2048 | 4096 |
+| n_layers | 16 | 4 | 24 | 1 | 1 | 48 | 32 |
+| n_heads / n_kv_heads | 16 / 8 | 64 / 32 | 32 / 8 | 192 / 96 | 256 / 128 | **32 / 4** | 32 / 8 |
+| head_dim | 64 | 64 | 64 | 64 | 64 | **128** | **128** |
+| MoE inter_dim (3.5x dim unless written) | 3584 | 14336 | 7168 | 43008 | 57344 | **768** | 14336 |
+| experts / top_k | 4 / 2 | 4 / 2 | 8 / 2 | 4 / 2 | 4 / 2 | **128 / 8** | 8 / 2 |
+| vocab / rope theta | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 | 151936 / 1e6 |
+| param_count | 1,066,241,024 | 4,264,661,504 | 9,330,201,600 | 10,528,837,760 | 17,058,349,184 | 30,532,122,624 | 47,685,316,608 |
+| dense / sparse / active | 361,532,416 / 704,708,608 / 713,919,488 | 1,446,023,680 / 2,818,637,824 / 2,855,375,360 | 874,091,520 / 8,456,110,080 / 2,988,413,952 | 4,187,000,960 / 6,341,836,800 / 7,357,943,936 | 5,783,994,496 / 11,274,354,688 / 11,421,204,608 | 1,528,510,464 / 29,003,612,160 / 3,353,032,704 | 2,587,111,424 / 45,098,205,184 / 13,862,449,152 |
+| num_flops_per_token @1024 | 3,551,348,736 | 13,599,599,616 | 16,667,473,920 | 33,096,721,152 | 53,792,637,696 | 20,667,125,760 | 81,051,328,512 |
+| per-block regions | yes (80/80) | yes (20/20) | yes (120/120) | **no** | **no** | yes (240/240) | yes (160/160) |
+| `parity_gate` | 2e-2 | 3e-2 | 2e-2 | 5e-2 | 6e-2 | 2e-2 | 3e-2 |
+| measured? | yes | **no** | **no** | yes | **no** | **no** | **no** |
 
-**Three of the six are real piper models, and three are benchmark
-inventions.** `1b`, `9b` and `48b` are transcribed field for field from the
-piper checkout's `examples/models/qwen3.py`. `large`, `huge` and `giant` are
-ours: each took a dim and a layer count for a benchmark reason, then applied
-the piper-1B rules to everything else. **A synthetic shape is not piper at
-scale.** Piper holds `n_heads` at 32 and `n_kv_heads` at 8 from 9B up, which
-is 4:1 grouped-query attention; the synthetic shapes pin `head_dim` at 64 and
-derive `n_heads = dim/head_dim`, so `huge` carries 192 query heads over 96 kv
-heads. Real piper never approaches that. `large` and `48b` share a dim and an
-expert width and agree on nothing else, so `large` does not approximate
-`48b`. `benchmarks/models/piper_qwen3/shape.py` is the authority; read its
-module docstring before you cite a shape.
+**Four of the seven are real piper models, and three are benchmark
+inventions.** `1b`, `9b`, `30b-a3b` and `48b` are transcribed field for
+field from the piper checkout's `examples/models/qwen3.py`. `large`, `huge`
+and `giant` are ours: each took a dim and a layer count for a benchmark
+reason, then applied the piper-1B rules to everything else. **A synthetic
+shape is not piper at scale.** Piper holds `n_heads` at 32 and `n_kv_heads`
+at 8 from 9B up, which is 4:1 grouped-query attention; the synthetic shapes
+pin `head_dim` at 64 and take the derived `n_heads = dim/head_dim`, so
+`huge` carries 192 query heads over 96 kv heads. Real piper never approaches
+that. `large` and `48b` share a dim and an expert width and agree on nothing
+else, so `large` does not approximate `48b`.
+`benchmarks/models/piper_qwen3/shape.py` is the authority; read its module
+docstring before you cite a shape.
 
-**Four of the six have never run.** `large`, `9b`, `giant` and `48b` have no
-scenario, no parity check and no `results.json`. Three consequences follow,
-and each is an open question rather than a setting:
+**`30b-a3b` is Qwen3-30B-A3B as Piper's registry declares it, and Piper
+never ran it.** Its geometry is the model's: 32 heads of 128 at dim 2048,
+so `n_heads * head_dim` is twice `dim`; 128 experts of width 768 at top-8,
+where 3.5x dim would be 7168. Those two values are why `n_heads` and
+`moe_hidden_dim` became fields. The numbers in its column are the
+tensor-by-tensor helper's in `tests/test_model_shape.py`, and the
+2026-09-05 selection report's total and active agree with them. **It is
+unmeasured and unparity-checked** -- no e2e scenario, no kernel scenario
+and no `tools/megatron_parity_check.py` run exists at it, so its
+`parity_gate` is the default and not a measurement. **TorchTitan's RoPE
+cache still caps it at seq 2048**: `config_registry.py` sizes
+`CosSinRoPE` from `shape.max_seq_len`, which stays at the 2048 default
+rather than the 262144 Piper declares, and nothing here widens that cache.
+It does not fit one H200 (227.5 GiB of state at titan's 8 B/param). It
+divides evenly at `pp` 4 and `pp` 8, and its experts divide every expert
+degree eight GPUs hold.
 
-- **Three parity gates are unverified.** `large` and `giant` are fitted, not
+**Five of the seven have never run.** `large`, `9b`, `giant`, `30b-a3b` and
+`48b` have no scenario, no parity check and no `results.json`. Three
+consequences follow, and each is an open question rather than a setting:
+
+- **Four parity gates are unverified.** `large` and `giant` are fitted, not
   measured: the two measured shapes fit `rel_l2 = 5.5e-3 * sqrt(dim/1024)` to
   within 7%, and each gate sits above that prediction by the margin `huge`
-  keeps over its own measurement. `9b` and `48b` take the default 2e-2 and
-  3e-2. Run `tools/megatron_parity_check.py --model-size <name>` before any
-  parity claim at any of them.
+  keeps over its own measurement. `9b` and `30b-a3b` take the default 2e-2,
+  and `48b` 3e-2. Run `tools/megatron_parity_check.py --model-size <name>`
+  before any parity claim at any of them.
 - **Validation rule 7 above `1b` is untested and could collide.** Regions are
   derived per shape, so `large` asks for 4 layers x 5 active steps = **20**
-  invocations per window, `9b` asks for 120 and `48b` for 160. The uniqueness
-  argument behind rule 7 was measured on a 16-layer trace, where the forward
-  graphs ran {5, 80, 5} times and the backward graphs {5, 80}; 80 is unique
-  there. Nobody has looked at a 4-layer, a 24-layer or a 32-layer trace. If
-  another same-phase partition runs the same number of times,
-  `pooled_window_metrics` raises and the arm fails rule 7. Treat such a run
-  as unproven on that rule until a trace says otherwise.
+  invocations per window, `9b` asks for 120, `48b` for 160 and `30b-a3b` for
+  240. The uniqueness argument behind rule 7 was measured on a 16-layer
+  trace, where the forward graphs ran {5, 80, 5} times and the backward
+  graphs {5, 80}; 80 is unique there. Nobody has looked at a 4-layer, a
+  24-layer, a 32-layer or a 48-layer trace. If another same-phase partition
+  runs the same number of times, `pooled_window_metrics` raises and the arm
+  fails rule 7. Treat such a run as unproven on that rule until a trace says
+  otherwise.
 - **Memory is unproven above `huge`.** `giant` is declared from a memory
-  estimate, so its first run can run out of memory. `9b` may fit one H200 and
-  `48b` cannot; the `PIPER_48B` constant carries that arithmetic.
+  estimate, so its first run can run out of memory. `9b` may fit one H200;
+  `30b-a3b` and `48b` cannot, and the `PIPER_30B_A3B` and `PIPER_48B`
+  constants carry that arithmetic.
 
 `large` is 4 layers rather than 1 for the reason `huge` is 1 rather than 16,
 applied in the other direction: at dim 4096 the layer-to-table ratio is 1.65,
@@ -726,15 +746,21 @@ parameter split and keeps `supports_block_regions` True. `9b` and `48b` do
 not hold that product, because piper never chose it.
 
 `dim`, `n_layers`, `head_dim`, `n_kv_heads` and `num_experts` are **fields**,
-because the registered shapes disagree about each of them. `top_k`,
-`vocab_size`, `rope_theta` and `max_seq_len` are defaults, because they all
-agree. `n_heads` and `moe_hidden_dim` are derived (`dim/head_dim` and
-`dim*7/2`), and the parameter/flops formulas mirror torchtitan's
-`get_moe_model_nparams_and_flops`. **The three fields that used to be
+because the registered shapes disagree about each of them. `n_heads` and
+`moe_hidden_dim` are **fields with a derived default** since 2026-09-05:
+left unset they take `dim/head_dim` and `dim*7/2`, which every shape
+registered before then satisfies, and `30b-a3b` writes both. `top_k` is a
+default that `30b-a3b` alone writes; `vocab_size`, `rope_theta` and
+`max_seq_len` are defaults, because they all agree (`max_seq_len` is the
+harness ceiling and the RoPE cache size, not a model's context length).
+The parameter/flops formulas mirror torchtitan's
+`get_moe_model_nparams_and_flops`. **The five fields that used to be
 derivations are the ones the real ladder broke**: `n_kv_heads = n_heads // 2`
 returns 16 at `9b` and at `48b` where piper carries 8, `head_dim` is 128 at
-`48b`, and `num_experts` is 8 at both. Each wrong value builds a different
-model and publishes it under the requested name.
+`48b`, `num_experts` is 8 at both, and at `30b-a3b` the derived `n_heads`
+would be 16 against 32 and the derived expert width 7168 against 768. Each
+wrong value builds a different model and publishes it under the requested
+name.
 
 `tests/test_model_shape.py` pins every registered shape's numbers in
 `PINNED_SHAPES` and derives the counts rather than transcribing them: a
@@ -790,9 +816,10 @@ unaffected.
 
 **The four multi-layer shapes above `1b` pass that test arithmetically and
 none has been checked against a trace.** `large` asks for 20 invocations per
-window, `9b` for 120 and `48b` for 160. None of the three is 5, so none hits
-the collision above. Whether each count is *unique* in its own trace is the
-part nobody has measured. See "Six shapes are registered" above.
+window, `9b` for 120, `48b` for 160 and `30b-a3b` for 240. None of the four
+is 5, so none hits the collision above. Whether each count is *unique* in its
+own trace is the part nobody has measured. See "Seven shapes are registered"
+above.
 
 
 Rejected alternatives, for the record: a copy-pasted `_huge` scenario
@@ -1037,8 +1064,8 @@ are not comparable; `--resume` refuses to mix them.
 1. Missing `<arm>.log`, or log lacking the profile's completion marker
    (`Training completed` for both engines).
 2. `[Override]` line count != `arm.overrides_per_block * shape.n_layers`
-   (one per transformer block, so 16 / 4 / 24 / 1 / 1 / 32 across the six
-   shapes).
+   (one per transformer block, so 16 / 4 / 24 / 1 / 1 / 48 / 32 across the
+   seven shapes).
 
 3. A declared `override_imports` entry with no matching `[Override] <path>:` line.
 4. A profile `failure_marker` phrase in the log (`falling back to the
