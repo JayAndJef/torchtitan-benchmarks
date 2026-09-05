@@ -1059,14 +1059,14 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
     def test_every_registered_shape_at_pp_eight(self):
         """The deepest pipeline the budget holds, shape by shape.
 
-        Three shapes divide: 1b (16 layers, 2 a stage), 9b (24, 3) and 48b
-        (32, 4). Three do not: large has 4 layers, huge and giant have 1.
-        Rule 7 is the only rule that reads the layer count, so it is the one
-        that decides which shapes the depth-8 cell can run.
+        Four shapes divide: 1b (16 layers, 2 a stage), 9b (24, 3), 30b-a3b
+        (48, 6) and 48b (32, 4). Three do not: large has 4 layers, huge and
+        giant have 1. Rule 7 is the only rule that reads the layer count, so
+        it is the one that decides which shapes the depth-8 cell can run.
 
         Batch 16 is what rule 12 asks for at eight stages.
         """
-        divides = {"1b", "9b", "48b"}
+        divides = {"1b", "9b", "30b-a3b", "48b"}
         spec = ParallelismSpec(pp=8, pp_schedule="1F1B")
         for name, shape in PIPER_SHAPES.items():
             with self.subTest(model_size=name):

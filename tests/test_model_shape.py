@@ -42,6 +42,7 @@ from benchmarks.models.piper_qwen3.shape import (
     MODEL_SIZE_ALIASES,
     MODEL_SIZE_CHOICES,
     PIPER_1B,
+    PIPER_30B_A3B,
     PIPER_9B,
     PIPER_48B,
     PIPER_SHAPES,
@@ -214,7 +215,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         """
         self.assertEqual(
             tuple(PIPER_SHAPES),
-            ("1b", "large", "9b", "huge", "giant", "48b"),
+            ("1b", "large", "9b", "huge", "giant", "30b-a3b", "48b"),
         )
         counts = [shape.param_count for shape in PIPER_SHAPES.values()]
         self.assertEqual(counts, sorted(counts))
@@ -376,6 +377,34 @@ class ShapeArithmeticTests(unittest.TestCase):
                         name="bad", dim=1024, n_layers=1, head_dim=64,
                         n_kv_heads=1, num_experts=4, **{field: 0},
                     )
+
+    def test_30b_a3b_is_transcribed_and_breaks_both_derivations(self) -> None:
+        """Every geometry field against piper's case '30B-A3B'.
+
+        The two written fields disagree with the derived defaults, which is
+        why they are fields; and the counts are the helper's, which the
+        pinned table records and the selection report agrees with.
+        """
+        shape = PIPER_SHAPES["30b-a3b"]
+        self.assertIs(shape, PIPER_30B_A3B)
+        self.assertEqual(
+            (shape.dim, shape.n_layers, shape.n_heads, shape.n_kv_heads,
+             shape.head_dim, shape.moe_hidden_dim, shape.num_experts,
+             shape.top_k, shape.vocab_size, shape.rope_theta),
+            (2048, 48, 32, 4, 128, 768, 128, 8, 151_936, 1_000_000.0),
+        )
+        self.assertNotEqual(shape.n_heads, shape.dim // shape.head_dim)
+        self.assertNotEqual(shape.moe_hidden_dim, shape.dim * 7 // 2)
+        self.assertEqual(shape.heads_per_group, 8)
+        self.assertEqual(shape.qkv_out_features, 5120)
+        # Not piper's 262144: the harness ceiling and the RoPE cache size.
+        self.assertEqual(shape.max_seq_len, 2048)
+        self.assertTrue(shape.supports_block_regions)
+        self.assertEqual(
+            _counts_from_the_tensor_list(shape),
+            (1_528_510_464, 29_003_612_160, 3_353_032_704),
+        )
+        self.assertEqual(shape.param_count, 30_532_122_624)
 
     def test_describe_is_json_safe(self) -> None:
         for shape in PIPER_SHAPES.values():
@@ -543,6 +572,29 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "nparams_active": 11_421_204_608,
         "num_flops_per_token": 53_792_637_696,
     },
+    # Qwen3-30B-A3B, geometry transcribed from examples/models/qwen3.py case
+    # '30B-A3B'. The five computed values are the tensor-by-tensor helper's,
+    # not the selection report's; the report's total and active agree.
+    "30b-a3b": {
+        "dim": 2048,
+        "n_layers": 48,
+        "n_heads": 32,
+        "n_kv_heads": 4,
+        "head_dim": 128,
+        "moe_hidden_dim": 768,
+        "num_experts": 128,
+        "top_k": 8,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 2048,
+        "supports_block_regions": True,
+        "parity_gate": 2e-2,
+        "param_count": 30_532_122_624,
+        "nparams_dense": 1_528_510_464,
+        "nparams_sparse": 29_003_612_160,
+        "nparams_active": 3_353_032_704,
+        "num_flops_per_token": 20_667_125_760,
+    },
     # Piper 48B, transcribed from examples/models/qwen3.py case '48B'.
     "48b": {
         "dim": 4096,
@@ -668,6 +720,57 @@ class StageParamCountTests(unittest.TestCase):
             shape.stage_param_count(pipeline_degree=2, stage_index=1),
             layers_each * per_layer + table + shape.dim,
         )
+
+    def test_30b_a3b_splits_at_pp_four_and_pp_eight(self) -> None:
+        """48 layers: 12 a stage at pp 4, 6 at pp 8; the tables at the ends.
+
+        The depth-8 pipeline is the deepest eight GPUs hold, and this is
+        the first real shape above 1b that reaches it with more than four
+        layers a stage. Written from the tensor list, as the 1b test is.
+        """
+        shape = PIPER_30B_A3B
+        per_layer = (
+            shape.dim
+            + shape.qkv_out_features * shape.dim
+            + 2 * shape.head_dim
+            + shape.n_heads * shape.head_dim * shape.dim
+            + shape.dim
+            + shape.num_experts * shape.dim
+            + shape.num_experts * 3 * shape.moe_hidden_dim * shape.dim
+        )
+        table = shape.vocab_size * shape.dim
+        for degree, layers_each in ((4, 12), (8, 6)):
+            with self.subTest(pp=degree):
+                self.assertEqual(shape.n_layers // degree, layers_each)
+                stages = [
+                    shape.stage_param_count(
+                        pipeline_degree=degree, stage_index=stage
+                    )
+                    for stage in range(degree)
+                ]
+                self.assertEqual(sum(stages), shape.param_count)
+                self.assertEqual(stages[0], layers_each * per_layer + table)
+                self.assertEqual(
+                    stages[-1], layers_each * per_layer + table + shape.dim
+                )
+                for middle in stages[1:-1]:
+                    self.assertEqual(middle, layers_each * per_layer)
+        # 128 experts divide every expert degree eight GPUs can hold.
+        for expert_degree in (2, 4, 8):
+            with self.subTest(ep=expert_degree):
+                self.assertEqual(
+                    sum(
+                        shape.stage_param_count(
+                            pipeline_degree=8,
+                            stage_index=stage,
+                            expert_degree=expert_degree,
+                        )
+                        for stage in range(8)
+                    ),
+                    shape.nparams_dense
+                    + shape.n_layers
+                    * (shape._router + shape._experts // expert_degree),
+                )
 
     def test_an_uneven_split_raises_rather_than_rounding(self) -> None:
         # HUGE holds one layer, which is why parallelism rule 7 refuses it at

@@ -1964,7 +1964,9 @@ TEST_CENSUS = {
     # between the refusal and pretrain, and four pins against the
     # submodule: the flag's spelling and dest, the loss consumer, the
     # gradient consumer, and that --rerun-mode disabled removes neither.
-    "test_megatron_stock_driver": 129,
+    # +1 with the 30b-a3b shape: the stock argv carries the written head
+    # count and expert width, and the other geometry flags beside them.
+    "test_megatron_stock_driver": 130,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2011,7 +2013,10 @@ TEST_CENSUS = {
     # the derivations on a probe and on every shape registered before them,
     # written values are kept and counted from, and the divisibility guards
     # apply to the derivation alone while a written zero is refused.
-    "test_model_shape": 57,
+    # +2 with the 30b-a3b shape: its geometry against piper's case and its
+    # counts against the tensor list, and its split at pp 4, pp 8 and
+    # every expert degree eight GPUs hold.
+    "test_model_shape": 59,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -2239,7 +2244,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1848
+TEST_CENSUS_TOTAL = 1851
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

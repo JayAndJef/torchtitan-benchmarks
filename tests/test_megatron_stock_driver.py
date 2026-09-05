@@ -327,6 +327,39 @@ class FlagListTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not one of"):
             refuse_unknown_nan_guard("false")
 
+    def test_the_stock_argv_for_30b_a3b_carries_the_written_geometry(
+        self,
+    ) -> None:
+        """The two written fields reach Megatron, not their derivations.
+
+        --num-attention-heads must read 32 where dim // kv-channels is 16,
+        and both expert widths must read 768 where 3.5x dim is 7168. The
+        other seven geometry flags are checked beside them, so a shape that
+        drifted in any field fails here rather than in a GPU cell.
+        """
+        for spec in (TRIVIAL_SPEC, PP4_SPEC):
+            with self.subTest(pp=spec.pp):
+                emitted = flags_for("30b-a3b", spec)
+                expected = {
+                    "--num-layers": "48",
+                    "--hidden-size": "2048",
+                    "--num-attention-heads": "32",
+                    "--num-query-groups": "4",
+                    "--kv-channels": "128",
+                    "--ffn-hidden-size": "768",
+                    "--moe-ffn-hidden-size": "768",
+                    "--num-experts": "128",
+                    "--moe-router-topk": "8",
+                    "--vocab-size": "151936",
+                    "--padded-vocab-size": "151936",
+                }
+                for flag, value in expected.items():
+                    self.assertEqual(value_after(emitted, flag), value, flag)
+                self.assertIn("--group-query-attention", emitted)
+                self.assertEqual(
+                    value_after(emitted, "--bench-model-size"), "30b-a3b"
+                )
+
     def test_no_declined_flag_is_emitted(self) -> None:
         """Every flag the value declines, asserted by name.
 

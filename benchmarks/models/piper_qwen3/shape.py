@@ -10,24 +10,24 @@ Deliberately imports nothing but ``dataclasses``. Modules across
 ``benchmarks/`` and ``tools/`` import this module, several of them in
 processes that must not pull in torch or torchtitan.
 
-Six shapes are registered. The order, smallest to largest by parameter
-count, is ``1b`` < ``large`` < ``9b`` < ``huge`` < ``giant`` < ``48b``. The
-names do not carry that order on their own, so read it here: ``giant`` is
-above ``huge``, and the real ladder interleaves with the synthetic one.
-``PIPER_SHAPES`` lists the shapes in that same order, and
+Seven shapes are registered. The order, smallest to largest by parameter
+count, is ``1b`` < ``large`` < ``9b`` < ``huge`` < ``giant`` < ``30b-a3b``
+< ``48b``. The names do not carry that order on their own, so read it
+here: ``giant`` is above ``huge``, and the real ladder interleaves with the
+synthetic one. ``PIPER_SHAPES`` lists the shapes in that same order, and
 ``tests/test_model_shape.py`` asserts both the order and the ascending
 parameter counts.
 
 ``normal`` is the retired name of ``1b`` and still resolves to it. See
 ``MODEL_SIZE_ALIASES`` below for why it cannot simply be deleted.
 
-**Three of the six are real piper models, and three are benchmark
-inventions. The name says which.** ``1b``, ``9b`` and ``48b`` are
-transcribed field for field from ``examples/models/qwen3.py`` in the piper
-checkout, cases ``'1B'``, ``'9B'`` and ``'48B'``. The absolute path of that
-checkout moves with the host. It is ``/m-coriander/coriander/jayden/piper/``
-today, and the ``/data/zejiaqi/piper/`` that ``config_registry.py`` cites is
-stale.
+**Four of the seven are real piper models, and three are benchmark
+inventions. The name says which.** ``1b``, ``9b``, ``30b-a3b`` and ``48b``
+are transcribed field for field from ``examples/models/qwen3.py`` in the
+piper checkout, cases ``'1B'``, ``'9B'``, ``'30B-A3B'`` and ``'48B'``. The
+absolute path of that checkout moves with the host. It is
+``/m-coriander/coriander/jayden/piper/`` today, and the
+``/data/zejiaqi/piper/`` that ``config_registry.py`` cites is stale.
 
 ``large``, ``huge`` and ``giant`` are ours. Each was built by choosing a dim
 and a layer count for a benchmark reason, and then applying the piper-1B
@@ -99,6 +99,16 @@ shape and not a free choice.
 ``9b`` (real)
     Piper 9B, verbatim: dim 2048, 24 layers, 9,330,201,600 parameters. The
     first registered shape with 4:1 grouped-query attention and 8 experts.
+
+``30b-a3b`` (real)
+    Qwen3-30B-A3B as piper's registry declares it, verbatim: dim 2048, 48
+    layers, 32 heads of 128 over 4 kv heads, 128 experts of width 768 at
+    top-8, 30,532,122,624 parameters of which 3,353,032,704 are active.
+    It is the shape that made ``n_heads`` and ``moe_hidden_dim`` fields:
+    its heads do not tile its dim, and its expert width is 768 against a
+    derived 7168. Piper declares it and never ran it; nothing here has run
+    it either, and no parity check has. See ``PIPER_30B_A3B`` for what its
+    registration does and does not carry.
 
 ``48b`` (real)
     Piper 48B, verbatim: dim 4096, 32 layers, 47,685,316,608 parameters.
@@ -180,9 +190,10 @@ class PiperShape:
     # derived 896, and 30B-A3B reads 768 against a derived 7168, a 9.3x
     # error.
     moe_hidden_dim: int | None = None
-    # The registered shapes agree on these four, so each is one default here
-    # rather than a value repeated per shape. Promote one to a per-shape value
-    # the moment a registered shape disagrees, and not before.
+    # Defaults, written by a shape that disagrees. Six registered shapes
+    # take all four; 30b-a3b writes ``top_k`` 8. ``max_seq_len`` is the
+    # harness's sequence ceiling and TorchTitan's RoPE cache size, not the
+    # model's context length -- see PIPER_30B_A3B.
     top_k: int = 2
     vocab_size: int = 151936
     rope_theta: float = 1_000_000.0
@@ -626,6 +637,50 @@ PIPER_9B = PiperShape(
     parity_gate=2e-2,
 )
 
+# Qwen3-30B-A3B, as examples/models/qwen3.py case '30B-A3B' in the piper
+# checkout declares it (not the '-half' variant, which halves the layers).
+# Every geometry field matches that case. Piper's registry declares this
+# shape and its run archive holds no run of it.
+#
+# The shape that made n_heads and moe_hidden_dim fields. 32 heads of 128 at
+# dim 2048 means n_heads * head_dim is 4096, twice dim: the query projection
+# and wo are [2048, 4096], the fused qkv is (32 + 2*4) * 128 = 5120 wide,
+# and dim // head_dim would have built 16 heads. The expert width is 768,
+# where 3.5x dim would have built 7168, a 9.3x error in every expert tensor.
+# It is also the first registered shape with 128 experts and top-8 routing,
+# and the first with 8 query heads per kv head.
+#
+# WHAT THIS REGISTRATION DOES NOT CARRY. Piper declares max_seq_len 262144
+# and a dense hidden_dim of 6144. The dense width is unused, because every
+# layer is MoE, as it is at every other shape here. The context length is
+# not carried: max_seq_len stays at the 2048 default, which is the harness's
+# sequence ceiling AND the size of the CosSinRoPE cache config_registry.py
+# builds from it. A run above seq 2048 needs that cache widened; nothing
+# here widens it, and kernel-bench's --max-seq-len lifts the ceiling for the
+# kernel side alone.
+#
+# NOTHING HAS RUN THIS SHAPE. No e2e scenario, no kernel scenario and no
+# parity check has executed at it, in either engine. parity_gate is the
+# default 2e-2 because no measurement exists to set it from; run
+# tools/megatron_parity_check.py --model-size 30b-a3b before any parity
+# claim. VALIDATION RULE 7 IS UNTESTED AT 48 LAYERS: the window invocation
+# count is 240 here. THIS SHAPE DOES NOT FIT ONE H200: 30,532,122,624
+# parameters at titan's 8 B/param of state is 227.5 GiB, and at megatron's
+# 10 B/param under graph mode 284.4 GiB, against a 139.81 GiB device, before
+# any activation. It divides evenly at pp 4 (12 layers a stage) and pp 8 (6
+# a stage), and its 128 experts divide every expert degree up to 8.
+PIPER_30B_A3B = PiperShape(
+    name="30b-a3b",
+    dim=2048,
+    n_layers=48,
+    head_dim=128,
+    n_kv_heads=4,
+    num_experts=128,
+    n_heads=32,
+    moe_hidden_dim=768,
+    top_k=8,
+)
+
 # Piper 48B, verbatim. Every field matches examples/models/qwen3.py case
 # '48B' in the piper checkout.
 #
@@ -670,7 +725,9 @@ PIPER_48B = PiperShape(
 # order, so the declaration does.
 PIPER_SHAPES: dict[str, PiperShape] = {
     shape.name: shape
-    for shape in (PIPER_1B, LARGE, PIPER_9B, HUGE, GIANT, PIPER_48B)
+    for shape in (
+        PIPER_1B, LARGE, PIPER_9B, HUGE, GIANT, PIPER_30B_A3B, PIPER_48B
+    )
 }
 
 # Retired ``--model-size`` names, each mapped to the key that replaced it.
