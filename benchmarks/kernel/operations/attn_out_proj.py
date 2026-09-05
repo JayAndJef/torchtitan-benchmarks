@@ -172,9 +172,9 @@ def attn_out_proj_inputs(
     ``in_features`` is ``n_heads * head_dim``, which is what megatron calls
     ``query_projection_size`` (``transformer/attention.py:333``) and what
     ``make_gqa_config`` gives ``wo`` (``models/common/config_utils.py:231``).
-    It equals ``dim`` at every registered shape, because ``PiperShape``
-    derives ``n_heads`` from ``dim // head_dim``; it is spelled out anyway, so
-    a future shape that breaks the equality breaks nothing here.
+    It equals ``dim`` wherever ``n_heads`` takes its derived default,
+    ``dim // head_dim``, and not at a shape that writes its own ``n_heads``;
+    it is spelled out as the product so such a shape breaks nothing here.
     """
     in_features = shape.n_heads * shape.head_dim
     return AttnOutProjInputs(

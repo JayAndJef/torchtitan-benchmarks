@@ -292,6 +292,91 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertNotIn("PiperShape.derived(", source)
         self.assertIn("PIPER_9B = PiperShape(", source)
 
+    def test_the_two_promoted_fields_default_to_their_derivations(self) -> None:
+        """``n_heads`` and ``moe_hidden_dim`` are fields since 2026-09-05.
+
+        Left at ``None`` they take ``dim // head_dim`` and ``dim * 7 // 2``,
+        which is what every shape registered before then satisfied, so no
+        such shape moved a number. ``PINNED_SHAPES`` is what proves that;
+        this pins the default itself, on a probe and on the registry.
+        """
+        probe = PiperShape(
+            name="probe", dim=1024, n_layers=1, head_dim=64, n_kv_heads=8,
+            num_experts=4,
+        )
+        self.assertEqual((probe.n_heads, probe.moe_hidden_dim), (16, 3584))
+        self.assertIsInstance(probe.n_heads, int)
+        self.assertIsInstance(probe.moe_hidden_dim, int)
+        for name in ("1b", "large", "9b", "huge", "giant", "48b"):
+            shape = PIPER_SHAPES[name]
+            with self.subTest(size=name):
+                self.assertEqual(shape.n_heads, shape.dim // shape.head_dim)
+                self.assertEqual(shape.moe_hidden_dim, shape.dim * 7 // 2)
+
+    def test_explicit_values_are_kept_and_counted(self) -> None:
+        """A shape that writes its own values is counted from them.
+
+        The Qwen3 30B-A3B geometry: 32 heads of 128 at dim 2048, so ``wo``
+        is ``[2048, 4096]`` and the fused qkv is ``(32 + 8) * 128`` wide; and
+        an expert width of 768 where the derivation says 7168. Both the
+        closed form and the tensor-by-tensor helper must read the fields.
+        """
+        shape = PiperShape(
+            name="probe", dim=2048, n_layers=1, head_dim=128, n_kv_heads=4,
+            num_experts=128, n_heads=32, moe_hidden_dim=768, top_k=8,
+        )
+        self.assertEqual((shape.n_heads, shape.moe_hidden_dim), (32, 768))
+        self.assertEqual(shape.n_heads * shape.head_dim, 2 * shape.dim)
+        self.assertEqual(shape.qkv_out_features, 40 * 128)
+        self.assertEqual(shape.heads_per_group, 8)
+        dense, sparse, active = _counts_from_the_tensor_list(shape)
+        self.assertEqual(
+            (shape.nparams_dense, shape.nparams_sparse, shape.nparams_active),
+            (dense, sparse, active),
+        )
+        # One expert is 3 * 768 * 2048, not 3 * 7168 * 2048.
+        self.assertEqual(shape._experts, 128 * 3 * 768 * 2048)
+        described = shape.describe(seq_len=1024)
+        self.assertEqual(
+            (described["n_heads"], described["moe_hidden_dim"]), (32, 768)
+        )
+
+    def test_the_divisibility_guards_apply_to_the_derivation_alone(self) -> None:
+        """A written value has no quotient to keep exact.
+
+        The old guards refused any dim that ``head_dim`` does not divide and
+        any odd dim, because the derivations needed both. They still refuse
+        those when the value is derived, and they let a written value
+        through; a written zero is refused on its own.
+        """
+        with self.assertRaisesRegex(ValueError, "multiple of head_dim"):
+            PiperShape(
+                name="bad", dim=1000, n_layers=1, head_dim=64, n_kv_heads=1,
+                num_experts=4,
+            )
+        odd = PiperShape(
+            name="odd", dim=1000, n_layers=1, head_dim=64, n_kv_heads=2,
+            num_experts=4, n_heads=16,
+        )
+        self.assertEqual((odd.n_heads, odd.moe_hidden_dim), (16, 3500))
+        with self.assertRaisesRegex(ValueError, "must be even"):
+            PiperShape(
+                name="bad", dim=1001, n_layers=1, head_dim=7, n_kv_heads=1,
+                num_experts=1,
+            )
+        written = PiperShape(
+            name="odd", dim=1001, n_layers=1, head_dim=7, n_kv_heads=1,
+            num_experts=1, moe_hidden_dim=10,
+        )
+        self.assertEqual((written.n_heads, written.moe_hidden_dim), (143, 10))
+        for field in ("n_heads", "moe_hidden_dim"):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, f"{field} must be >= 1"):
+                    PiperShape(
+                        name="bad", dim=1024, n_layers=1, head_dim=64,
+                        n_kv_heads=1, num_experts=4, **{field: 0},
+                    )
+
     def test_describe_is_json_safe(self) -> None:
         for shape in PIPER_SHAPES.values():
             described = shape.describe(seq_len=1024)

@@ -2007,7 +2007,11 @@ TEST_CENSUS = {
     # model, that the stages sum to it at every degree, that the two end
     # stages carry the tables, and that an uneven split or a stage outside
     # the pipeline raises rather than rounding.
-    "test_model_shape": 54,
+    # +3 with n_heads and moe_hidden_dim as fields: the defaults reproduce
+    # the derivations on a probe and on every shape registered before them,
+    # written values are kept and counted from, and the divisibility guards
+    # apply to the derivation alone while a written zero is refused.
+    "test_model_shape": 57,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -2235,7 +2239,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1845
+TEST_CENSUS_TOTAL = 1848
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

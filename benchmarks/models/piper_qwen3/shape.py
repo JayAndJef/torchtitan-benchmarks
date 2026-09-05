@@ -147,6 +147,16 @@ class PiperShape:
     experts against 1B's 4. Each wrong value builds a different model and
     publishes it under the requested name.
 
+    ``n_heads`` and ``moe_hidden_dim`` are fields with a derived default.
+    Every shape registered before 2026-09-05 satisfies ``n_heads * head_dim
+    == dim`` and ``moe_hidden_dim == dim * 7 // 2``, so ``None`` -- the
+    default -- means "derive it from those rules", and no such shape moved
+    a number when the two became fields. Qwen3 30B-A3B satisfies neither:
+    it carries 32 heads of 128 at dim 2048, and an expert width of 768
+    against a derived 7168. A registered shape that disagrees writes its
+    own value; ``__post_init__`` fills the default, so after construction
+    both are always an ``int``.
+
     ``PiperShape.derived`` applies the piper-1B family rules for a probe or a
     test shape. Never register a shape through it.
     """
@@ -157,6 +167,19 @@ class PiperShape:
     head_dim: int
     n_kv_heads: int
     num_experts: int
+    # Query heads. ``None`` derives ``dim // head_dim``, which every shape
+    # registered before 30b-a3b satisfies and which ``__post_init__`` then
+    # requires to be exact. It is not universal: Qwen3 30B-A3B carries 32
+    # heads of 128 at dim 2048, so ``wo`` is ``[dim, n_heads * head_dim]``
+    # and the two sides differ. Consumers must read this field and never
+    # ``dim // head_dim``.
+    n_heads: int | None = None
+    # Expert width. ``None`` derives 3.5x dim (3584 at dim 1024, piper's
+    # inter_dim), which piper 1B, 9B and 48B and the three synthetic shapes
+    # all satisfy. Three real piper configs do not: 9M reads 128 against a
+    # derived 896, and 30B-A3B reads 768 against a derived 7168, a 9.3x
+    # error.
+    moe_hidden_dim: int | None = None
     # The registered shapes agree on these four, so each is one default here
     # rather than a value repeated per shape. Promote one to a per-shape value
     # the moment a registered shape disagrees, and not before.
@@ -177,16 +200,31 @@ class PiperShape:
             raise ValueError(f"{self.name}: n_layers must be >= 1")
         if self.head_dim < 1:
             raise ValueError(f"{self.name}: head_dim must be >= 1")
-        if self.dim % self.head_dim:
-            raise ValueError(
-                f"{self.name}: dim {self.dim} must be a multiple of head_dim "
-                f"{self.head_dim}, because n_heads is derived from the two"
-            )
-        if self.dim % 2:
-            raise ValueError(
-                f"{self.name}: dim {self.dim} must be even so the 3.5x MoE "
-                "hidden width is integral"
-            )
+        # The two derived defaults. Each divisibility guard applies to the
+        # derivation alone: a shape that writes its own value has no
+        # quotient to keep exact. object.__setattr__ because the dataclass
+        # is frozen; after this block both fields are always an int.
+        if self.n_heads is None:
+            if self.dim % self.head_dim:
+                raise ValueError(
+                    f"{self.name}: dim {self.dim} must be a multiple of "
+                    f"head_dim {self.head_dim}, because n_heads is derived "
+                    "from the two; pass n_heads for a shape whose heads do "
+                    "not tile dim"
+                )
+            object.__setattr__(self, "n_heads", self.dim // self.head_dim)
+        if self.moe_hidden_dim is None:
+            if self.dim % 2:
+                raise ValueError(
+                    f"{self.name}: dim {self.dim} must be even so the 3.5x "
+                    "MoE hidden width is integral; pass moe_hidden_dim for a "
+                    "shape with its own expert width"
+                )
+            object.__setattr__(self, "moe_hidden_dim", self.dim * 7 // 2)
+        if self.n_heads < 1:
+            raise ValueError(f"{self.name}: n_heads must be >= 1")
+        if self.moe_hidden_dim < 1:
+            raise ValueError(f"{self.name}: moe_hidden_dim must be >= 1")
         if self.n_kv_heads < 1:
             raise ValueError(f"{self.name}: n_kv_heads must be >= 1")
         if self.n_heads % self.n_kv_heads:
@@ -213,8 +251,11 @@ class PiperShape:
         """Build a probe shape from the piper-1B family rules.
 
         The rules are ``head_dim`` 64, ``n_kv_heads = n_heads // 2`` and 4
-        experts. They describe piper 1B and no other real piper model: 9B and
-        48B carry 8 kv heads and 8 experts, and 48B carries ``head_dim`` 128.
+        experts, plus the two derived defaults ``n_heads = dim // head_dim``
+        and ``moe_hidden_dim = dim * 7 // 2``, which this constructor never
+        overrides. They describe piper 1B and no other real piper model: 9B
+        and 48B carry 8 kv heads and 8 experts, 48B carries ``head_dim``
+        128, and 30B-A3B breaks both derived defaults.
 
         Use this for a test or a probe shape, whose exact geometry is
         arbitrary and which no run publishes. **Never register a shape through
@@ -260,35 +301,8 @@ class PiperShape:
         return self.n_layers > 1
 
     @property
-    def n_heads(self) -> int:
-        """Query heads: ``dim // head_dim``.
-
-        Derived because every registered shape satisfies
-        ``n_heads * head_dim == dim``, and ``__post_init__`` enforces the
-        divisibility that makes it exact. It is not universal -- Qwen3
-        30B-A3B carries 32 heads of 128 at dim 2048 -- so promote it to a
-        field if such a shape is ever registered.
-        """
-        return self.dim // self.head_dim
-
-    @property
     def heads_per_group(self) -> int:
         return self.n_heads // self.n_kv_heads
-
-    @property
-    def moe_hidden_dim(self) -> int:
-        """Expert width: 3.5x dim (3584 at dim 1024, piper's inter_dim).
-
-        Derived because every registered shape agrees with it: piper 1B 3584,
-        9B 7168 and 48B 14336 are each 3.5x their dim, and the three synthetic
-        shapes were built on the same rule.
-
-        Three real piper configs break it, so registering any of them means
-        promoting this to a field. 9M reads 128 against a derived 896.
-        30B-A3B and 30B-A3B-half read 768 against a derived 7168, which is a
-        9.3x error.
-        """
-        return self.dim * 7 // 2
 
     @property
     def qkv_out_features(self) -> int:
@@ -308,9 +322,10 @@ class PiperShape:
         Written from the tensor widths rather than as ``3*D^2 + 2*D +
         2*head_dim``. That closed form assumes ``qkv_out_features == 2*dim``
         and ``n_heads*head_dim == dim``, which hold only at a 2:1 query-to-kv
-        ratio. Piper 9B and 48B run 4:1, where the fused qkv is
-        ``1.5*dim`` wide, so the closed form overcounts them. The two forms
-        agree exactly on every 2:1 shape.
+        ratio with heads that tile dim. Piper 9B and 48B run 4:1, where the
+        fused qkv is ``1.5*dim`` wide, so the closed form overcounts them;
+        30B-A3B's heads do not tile dim, so ``wo`` is ``2*dim`` wide there.
+        The two forms agree exactly on every 2:1 shape.
         """
         return (
             self.dim * self.qkv_out_features

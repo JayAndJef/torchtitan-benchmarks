@@ -150,12 +150,13 @@ def validate_shape_and_workload(
     """Raise ValueError on a shape/workload pair no scenario can run.
 
     Only constraints that genuinely cross the two live here. The purely
-    geometric ones are already unreachable: ``PiperShape`` derives
-    ``n_heads`` from ``dim`` and ``head_dim`` and rejects a ``n_kv_heads``
-    that does not divide it, so ``n_heads * head_dim == dim`` and
-    ``n_heads % n_kv_heads == 0`` hold by construction and there is nothing
-    to assert. ``n_kv_heads`` is a recorded field rather than a derivation,
-    which is why the second one needs that guard.
+    geometric ones are already unreachable: ``PiperShape`` rejects a
+    ``n_kv_heads`` that does not divide ``n_heads``, so ``n_heads %
+    n_kv_heads == 0`` holds by construction and there is nothing to assert.
+    ``n_heads * head_dim == dim`` is NOT an invariant: ``n_heads`` is a
+    recorded field with ``dim // head_dim`` as its default, and a shape may
+    write its own. Every scenario below therefore spells the projection
+    width as ``n_heads * head_dim`` and never as ``dim``.
     """
     if workload.seq_len > shape.max_seq_len:
         raise ValueError(
@@ -779,10 +780,11 @@ def shape_summary(
         }
     if scenario_name == "attn_out_proj":
         # Spelled as the product rather than as ``shape.dim``. The two are
-        # equal at every representable PiperShape -- ``n_heads`` is
-        # ``dim // head_dim`` -- but megatron calls this quantity
-        # ``query_projection_size`` and titan builds ``wo`` from the same
-        # product, so the manifest records what both engines compute.
+        # equal wherever ``n_heads`` takes its derived default, and they
+        # differ at a shape that writes its own ``n_heads``; megatron calls
+        # this quantity ``query_projection_size`` and titan builds ``wo``
+        # from the same product, so the manifest records what both engines
+        # compute.
         in_features = shape.n_heads * shape.head_dim
         return {
             "x": [batch, seq, in_features],
