@@ -60,6 +60,14 @@ Megatron has no CLI flag for ``batch_p2p_sync``, so ``--bench-batch-p2p-sync
 off`` carries the value and ``train.py`` sets the field on ``args`` before
 Megatron builds its config. The flag is omitted at ``on``, so the default
 argv is the argv every published cell ran.
+
+**``--megatron-nan-guard off`` adds one MEGATRON flag and nothing else.**
+Megatron has its own switch for this field,
+``--no-check-for-nan-in-loss-and-grad``, so the value needs no harness flag:
+the argv carries Megatron's own token, a stock user can type the same one,
+and ``train.py`` prints the value Megatron parsed. The token is omitted at
+``on``, so the default argv does not move here either. See
+``NO_CHECK_FOR_NAN_FLAG``.
 """
 
 from __future__ import annotations
@@ -69,7 +77,9 @@ from benchmarks.e2e.parallelism import (
     ParallelismSpec,
 )
 from benchmarks.e2e.registry import (
+    DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     Workload,
 )
@@ -292,6 +302,42 @@ def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
             f"dense sharding {dense_sharding!r} is not one of "
             + ", ".join(repr(mode) for mode in DENSE_SHARDING_MODES)
         )
+
+
+# Megatron's own switch for ``check_for_nan_in_loss_and_grad``
+# (``arguments.py``: ``action='store_false'``, so the flag turns the field
+# OFF). What the one field gates at Megatron-LM 59b72fa5, and why
+# ``--rerun-mode disabled`` is not enough, is stated once, above
+# ``MEGATRON_NAN_GUARD_MODES`` in ``benchmarks/e2e/registry.py``. A test
+# pins the spelling, the dest and both consumers against the pinned source.
+NO_CHECK_FOR_NAN_FLAG = "--no-check-for-nan-in-loss-and-grad"
+
+
+def refuse_unknown_nan_guard(megatron_nan_guard: str) -> None:
+    """Raise on a NaN-guard value this module cannot build a command line for.
+
+    A silent fall through would send the default argv under the ``off``
+    label, and the run would keep the guard it claims to have removed.
+    """
+    if megatron_nan_guard not in MEGATRON_NAN_GUARD_MODES:
+        raise ValueError(
+            f"megatron nan guard {megatron_nan_guard!r} is not one of "
+            + ", ".join(repr(mode) for mode in MEGATRON_NAN_GUARD_MODES)
+        )
+
+
+def _nan_guard_flags(megatron_nan_guard: str) -> list[str]:
+    """Megatron's own token under ``off``; nothing under ``on``.
+
+    Empty at the default, which is Megatron's own, so no recorded argv
+    moves. The value is legal at every mesh: the loss check runs on the
+    last stage at ``pp`` 1 and the gradient check runs on every rank at
+    ``dp`` 1, so there is no degree at which the field is inert.
+    """
+    refuse_unknown_nan_guard(megatron_nan_guard)
+    if megatron_nan_guard == DEFAULT_MEGATRON_NAN_GUARD:
+        return []
+    return [NO_CHECK_FOR_NAN_FLAG]
 
 
 def refuse_unknown_p2p_sync(megatron_p2p_sync: str) -> None:
@@ -740,6 +786,7 @@ def stock_megatron_flags(
     model_size: str,
     compile_mode: str = SUPPORTED_MODE,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
+    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
 ) -> list[str]:
     """The whole argument list for one stock Megatron-LM arm.
 
@@ -757,11 +804,16 @@ def stock_megatron_flags(
     ``pp`` 1: the field is inert without a pipeline message, and the argv
     would carry a treatment the run did not have.
 
+    ``megatron_nan_guard`` defaults to ``on`` for the same reason. Its
+    ``off`` adds Megatron's own ``--no-check-for-nan-in-loss-and-grad``,
+    ahead of the harness group, and is legal at every mesh.
+
     Raises ``ValueError`` on a request this arm cannot honour. Each refusal
     names the reason, because a caller may build a command line without a
     run and a bare failure names nothing.
     """
     refuse_unknown_p2p_sync(megatron_p2p_sync)
+    refuse_unknown_nan_guard(megatron_nan_guard)
     if spec.pp == 1 and megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
         raise ValueError(
             f"megatron p2p sync {megatron_p2p_sync!r} was requested at pp 1, "
@@ -842,6 +894,7 @@ def stock_megatron_flags(
         *_data_flags(
             shape, workload, profile_step_end=profile_step_end
         ),
+        *_nan_guard_flags(megatron_nan_guard),
         *_bench_flags(
             workload,
             spec,

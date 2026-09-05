@@ -97,6 +97,30 @@ DEFAULT_MODEL_SIZE = "1b"
 MEGATRON_P2P_SYNC_MODES = ("on", "off")
 DEFAULT_MEGATRON_P2P_SYNC = "on"
 
+# Stock Megatron's NaN/Inf guard, selectable per run. One Megatron argument,
+# ``check_for_nan_in_loss_and_grad``, gates two host waits at Megatron-LM
+# 59b72fa5: pretrain_gpt.py's loss_func evaluates the loss twice per
+# microbatch through rerun_state_machine.validate_result, and training.py
+# copies the same field into ddp_config.check_for_nan_in_grad, under which
+# param_and_grad_buffer.py's check_grads evaluates every bucket's gradient
+# norm twice per step. Each evaluation reads a device bool and synchronizes
+# the stream. ``--rerun-mode disabled``, which the stock argv already sends,
+# removes neither: validate_result still evaluates the rejection function
+# under RerunMode.DISABLED and raises when it is set.
+#
+# "on" is stock Megatron, and it is what every published number was
+# measured under. "off" sends Megatron's own
+# --no-check-for-nan-in-loss-and-grad to the stock launcher, so a stock user
+# can reproduce the argv. The tuned driver (benchmarks/e2e/megatron/train.py)
+# never calls validate_result and has no guard to turn off, so "off" is
+# refused whenever it is selected; TorchTitan arms receive nothing. The
+# measured effect is in reports/20260905-host-sync-ab.md. Evaluation refuses
+# a non-finite loss or grad norm on every arm under either value
+# (benchmarks/e2e/results.py's refuse_non_finite_trajectories), which is the
+# guard that has to exist before this one can be turned off.
+MEGATRON_NAN_GUARD_MODES = ("on", "off")
+DEFAULT_MEGATRON_NAN_GUARD = "on"
+
 
 @dataclass(frozen=True)
 class Workload:

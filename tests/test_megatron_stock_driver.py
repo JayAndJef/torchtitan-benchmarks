@@ -51,6 +51,7 @@ from benchmarks.e2e.megatron_stock import (  # noqa: E402
 )
 from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     ALWAYS_OMITTED_FLAGS,
+    BENCH_ARM_DIR,
     BENCH_BATCH_P2P_SYNC,
     BENCH_FLAGS,
     BENCH_FLAGS_OMITTED_BY_DEFAULT,
@@ -62,9 +63,11 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     MEGATRON_FSDP_VERSION,
     MEGATRON_SHARDING_STRATEGY,
     SHARDING_FLAGS,
+    NO_CHECK_FOR_NAN_FLAG,
     SHARDING_STRATEGIES,
     microbatch_geometry,
     omitted_flags,
+    refuse_unknown_nan_guard,
     refuse_unknown_p2p_sync,
     stock_megatron_flags,
 )
@@ -285,6 +288,44 @@ class FlagListTest(unittest.TestCase):
             flags_for("1b", PP4_SPEC, megatron_p2p_sync="maybe")
         with self.assertRaisesRegex(ValueError, "not one of"):
             refuse_unknown_p2p_sync("false")
+
+    def test_the_default_nan_guard_changes_no_argv(self) -> None:
+        """``on`` is Megatron's own default, and every published cell's."""
+        for spec in (TRIVIAL_SPEC, PP4_SPEC, SHARDED_PP4_SPEC):
+            with self.subTest(pp=spec.pp, dense_sharding=spec.dense_sharding):
+                emitted = flags_for("1b", spec)
+                self.assertEqual(
+                    emitted, flags_for("1b", spec, megatron_nan_guard="on")
+                )
+                self.assertNotIn(NO_CHECK_FOR_NAN_FLAG, emitted)
+
+    def test_nan_guard_off_adds_exactly_the_one_megatron_flag(self) -> None:
+        """The off argv is the default argv plus Megatron's own token.
+
+        Legal at every mesh, because the guard runs at every mesh. The
+        token sits ahead of the harness group, whose tail a sibling test
+        pins, and it is a Megatron flag rather than a ``--bench-`` one: a
+        stock user can type the same argv.
+        """
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2), PP4_SPEC, EXPERT_PP4_SPEC):
+            with self.subTest(dp=spec.dp, pp=spec.pp, ep=spec.ep):
+                default = flags_for("1b", spec)
+                off = flags_for("1b", spec, megatron_nan_guard="off")
+                self.assertEqual(off.count(NO_CHECK_FOR_NAN_FLAG), 1)
+                self.assertEqual(
+                    [token for token in off if token != NO_CHECK_FOR_NAN_FLAG],
+                    default,
+                )
+                self.assertLess(
+                    off.index(NO_CHECK_FOR_NAN_FLAG), off.index(BENCH_ARM_DIR)
+                )
+                self.assertFalse(NO_CHECK_FOR_NAN_FLAG.startswith("--bench-"))
+
+    def test_an_unknown_nan_guard_value_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not one of"):
+            flags_for("1b", PP4_SPEC, megatron_nan_guard="maybe")
+        with self.assertRaisesRegex(ValueError, "not one of"):
+            refuse_unknown_nan_guard("false")
 
     def test_no_declined_flag_is_emitted(self) -> None:
         """Every flag the value declines, asserted by name.
@@ -1106,6 +1147,11 @@ PLAN_MODEL_SIZE_LINE = (
 PLAN_P2P_LINE = (
     "Megatron-LM stock p2p: batch_p2p_comm={comm} batch_p2p_sync={sync}"
 )
+# The NaN-guard line, from the value Megatron parsed. The validation profile
+# carries the same string, at every mesh.
+PLAN_NAN_GUARD_LINE = (
+    "Megatron-LM stock nan guard: check_for_nan_in_loss_and_grad={value}"
+)
 
 
 def stock_args(**overrides):
@@ -1114,6 +1160,7 @@ def stock_args(**overrides):
         bench_mode="default",
         bench_pp_schedule=None,
         bench_batch_p2p_sync="on",
+        check_for_nan_in_loss_and_grad=True,
         bench_local_batch_size=32,
         bench_model_size="1b",
         bench_seq_len=1024,
@@ -1382,6 +1429,9 @@ class MarkerStringTest(unittest.TestCase):
     def test_the_p2p_template_matches_the_plan(self) -> None:
         self.assertEqual(train.P2P_LINE, PLAN_P2P_LINE)
 
+    def test_the_nan_guard_template_matches_the_plan(self) -> None:
+        self.assertEqual(train.NAN_GUARD_LINE, PLAN_NAN_GUARD_LINE)
+
     def test_the_model_size_line_carries_a_thousands_separator(self) -> None:
         """Arm rule 11 builds its target with ``f"{param_count:,}"``."""
         for name, shape in PIPER_SHAPES.items():
@@ -1602,6 +1652,113 @@ class P2pSyncMappingTest(unittest.TestCase):
         self.assertLess(mapping, build)
         self.assertLess(build, printed)
         self.assertLess(printed, source.index("\n    pretrain(\n"))
+
+
+class NanGuardLineTest(unittest.TestCase):
+    """The driver prints Megatron's PARSED value, and nothing sets it here.
+
+    ``--megatron-nan-guard off`` reaches the argv as Megatron's own
+    ``--no-check-for-nan-in-loss-and-grad``. The driver reads no harness
+    value for it; the line is an observation of what Megatron resolved.
+    """
+
+    def test_the_line_reads_the_parsed_value(self) -> None:
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    train.nan_guard_line(
+                        stock_args(check_for_nan_in_loss_and_grad=value)
+                    ),
+                    "Megatron-LM stock nan guard: "
+                    f"check_for_nan_in_loss_and_grad={value}",
+                )
+
+    def test_main_prints_it_after_the_refusal_and_before_pretrain(
+        self,
+    ) -> None:
+        """Read off the source, as the p2p order is: parsed, refused, then
+        printed on every rank beside the mode line."""
+        import inspect
+
+        source = inspect.getsource(train.main)
+        parsed = source.index("parse_and_validate_args(")
+        refusal = source.index("refuse_unsupported_run(args)")
+        printed = source.index("print(nan_guard_line(args), flush=True)")
+        self.assertLess(parsed, refusal)
+        self.assertLess(refusal, printed)
+        self.assertLess(printed, source.index("\n    pretrain(\n"))
+        # Unconditional: the print sits at the body's own indentation, so
+        # no rank check and no mesh check guards it.
+        line_start = source.rindex("\n", 0, printed) + 1
+        self.assertEqual(source[line_start:printed], "    ")
+
+
+def _megatron_source(relative: str) -> str:
+    from benchmarks.models.piper_qwen3.megatron_bootstrap import megatron_dir
+
+    return (megatron_dir() / relative).read_text()
+
+
+class MegatronNanGuardSourceTest(unittest.TestCase):
+    """What the one Megatron field gates, pinned against the submodule.
+
+    The registry comment above ``MEGATRON_NAN_GUARD_MODES`` states these
+    four facts about Megatron-LM 59b72fa5. A submodule bump that moves any
+    of them must fail here rather than leave the option gating something
+    else under the same name.
+    """
+
+    def test_the_flag_spelling_and_its_dest_are_megatron_s_own(self) -> None:
+        """A misspelt flag fails at parse time; a moved dest parses and
+        gates nothing, which is the case this test exists for."""
+        source = _megatron_source("megatron/training/arguments.py")
+        self.assertIn(f"'{NO_CHECK_FOR_NAN_FLAG}'", source)
+        flag_at = source.index(f"'{NO_CHECK_FOR_NAN_FLAG}'")
+        declaration = source[flag_at : flag_at + 300]
+        self.assertIn("action='store_false'", declaration)
+        self.assertIn("dest='check_for_nan_in_loss_and_grad'", declaration)
+
+    def test_the_loss_check_reads_the_field_directly(self) -> None:
+        """pretrain_gpt.py's loss_func gates both validate_result calls."""
+        source = _megatron_source("pretrain_gpt.py")
+        gate = source.index("if args.check_for_nan_in_loss_and_grad:")
+        block = source[gate : gate + 600]
+        self.assertEqual(block.count("rerun_state_machine.validate_result("), 2)
+        self.assertIn("rejection_func=torch.isnan", block)
+        self.assertIn("rejection_func=torch.isinf", block)
+
+    def test_the_gradient_check_descends_from_the_same_field(self) -> None:
+        """training.py copies it into ddp_config, and check_grads reads
+        that copy for every bucket."""
+        self.assertIn(
+            'kwargs["check_for_nan_in_grad"] = '
+            "args.check_for_nan_in_loss_and_grad",
+            _megatron_source("megatron/training/training.py"),
+        )
+        buffer = _megatron_source(
+            "megatron/core/distributed/param_and_grad_buffer.py"
+        )
+        self.assertIn("if self.ddp_config.check_for_nan_in_grad or", buffer)
+        self.assertIn(
+            "check_for_nan_or_inf=self.ddp_config.check_for_nan_in_grad",
+            buffer,
+        )
+        self.assertIn("def check_grads(self, check_for_nan_or_inf", buffer)
+
+    def test_rerun_mode_disabled_still_evaluates_the_rejection(self) -> None:
+        """``--rerun-mode disabled``, which the argv sends, removes neither
+        check: validate_result evaluates rejection_func under DISABLED and
+        raises when fatal. Only the field above skips the calls."""
+        self.assertIn("disabled", flags_for("1b", TRIVIAL_SPEC))
+        source = _megatron_source("megatron/core/rerun_state_machine.py")
+        start = source.index("def validate_result(")
+        # The next method at the class's own indentation. The docstring
+        # holds an example ``def train_step`` at a deeper one.
+        body = source[start : source.index("\n    def ", start + 10)]
+        disabled = body.index("if self.mode == RerunMode.DISABLED:")
+        branch = body[disabled : disabled + 800]
+        self.assertIn("result_rejected: bool = rejection_func(result)", branch)
+        self.assertIn("raise RuntimeError(full_message)", branch)
 
 
 class RendezvousDefaultsTest(unittest.TestCase):

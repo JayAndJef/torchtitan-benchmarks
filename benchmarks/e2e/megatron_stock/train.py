@@ -30,6 +30,14 @@ name is a config field, so the value reaches ``TransformerConfig`` through
 Megatron's own path. The driver then prints a ``Megatron-LM stock p2p:``
 line from the config it really built, on every rank.
 
+**One Megatron field is printed back, so the log records the guard.**
+``--megatron-nan-guard off`` reaches this driver as Megatron's own
+``--no-check-for-nan-in-loss-and-grad``, and nothing here reads the harness
+value. ``nan_guard_line`` prints ``args.check_for_nan_in_loss_and_grad`` as
+Megatron PARSED it, on every rank, so a run whose argv lost the token, or
+whose Megatron turned the field off by itself, prints a value the requested
+one does not match. Arm rule 12 reads the line at every mesh.
+
 **This arm is not plain bf16.** ``--bf16`` alone keeps fp32 master
 parameters, fp32 optimizer moments and an fp32 gradient reduction, which is
 about 18 bytes of state per parameter against TorchTitan's 8. The arm keeps
@@ -159,6 +167,19 @@ P2P_LINE = (
     "Megatron-LM stock p2p: batch_p2p_comm={comm} batch_p2p_sync={sync}"
 )
 
+# Stock Megatron's NaN/Inf guard, printed on every rank at every mesh from
+# the value Megatron's parser resolved. The field is a bool, so ``on`` reads
+# True and ``off`` reads False. It is read off ``args`` and not off a built
+# config, because Megatron copies it into two places -- pretrain_gpt.py's
+# loss_func reads ``args`` directly, and training.py copies it into
+# ddp_config.check_for_nan_in_grad -- and ``args`` is the one value both
+# consumers descend from. Megatron itself sets the field False under fp16
+# with dynamic loss scaling and under a fake process group
+# (arguments.py); this arm runs neither, and the line would show it.
+NAN_GUARD_LINE = (
+    "Megatron-LM stock nan guard: check_for_nan_in_loss_and_grad={value}"
+)
+
 # Arm rule 1. Megatron's own completion line is rank 0 only
 # (training.py's "after training is done"), and the rule runs per rank.
 TRAINING_COMPLETED = "Training completed"
@@ -278,6 +299,15 @@ def p2p_line(model_cfg: Any) -> str:
     return P2P_LINE.format(
         comm=transformer.batch_p2p_comm, sync=transformer.batch_p2p_sync
     )
+
+
+def nan_guard_line(args: Any) -> str:
+    """The NaN-guard line, from the value Megatron parsed.
+
+    ``args`` is what ``parse_and_validate_args`` returned, after every
+    adjustment Megatron's own validation makes to the field.
+    """
+    return NAN_GUARD_LINE.format(value=args.check_for_nan_in_loss_and_grad)
 
 
 def refuse_unsupported_run(args: Any) -> None:
@@ -792,6 +822,9 @@ def main(argv: list[str] | None = None) -> int:
     # data-parallel degree it derived from WORLD_SIZE.
     microbatches = get_num_microbatches()
     print(mode_line(args), flush=True)
+    # From the parsed value, on every rank. Arm rule 12 reads it at every
+    # mesh, against the requested --megatron-nan-guard value.
+    print(nan_guard_line(args), flush=True)
     for line in parallelism_lines(args, microbatches=microbatches):
         print(line, flush=True)
 
