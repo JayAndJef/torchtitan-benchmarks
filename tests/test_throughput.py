@@ -33,6 +33,7 @@ from benchmarks.e2e.results import (  # noqa: E402
     evaluate_run,
     loss_visible_rank,
     per_rank_training_metrics,
+    refuse_non_finite_trajectories,
     render_evaluation,
     training_metrics,
 )
@@ -434,6 +435,100 @@ class ARankWithNoSampleDoesNotWinTests(unittest.TestCase):
         self.assertEqual(training.stable_tokens_per_second, 1000)
         self.assertEqual(training.ranks, (0, 1))
         self.assertIsNone(training.per_rank[1].stable_tokens_per_second)
+
+
+class NonFiniteTrajectoryTests(unittest.TestCase):
+    """A ``nan`` or an ``inf`` on a step line fails the arm before publication.
+
+    The step-line patterns read both words on purpose. This is the guard
+    the 2026-08-30 report asked for before anyone turns stock Megatron's
+    own NaN check off: it runs on every arm, whatever the engine's guard
+    did, and it names the rank and the step.
+    """
+
+    def _lines(self, *, loss: str = "1.0", grad_norm: str = "2.0", at: int = 3):
+        lines = []
+        for step in range(2, 6):
+            value_loss = loss if step == at else "1.0"
+            value_norm = grad_norm if step == at else "2.0"
+            lines.append(
+                f"step: {step} loss: {value_loss} grad_norm: {value_norm} "
+                "memory: 3.00GiB tps: 1000\n"
+            )
+        return "".join(lines)
+
+    def _evaluate(self, logs: dict[str, str], parallelism=None, ranks=(0,)):
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(out_dir, logs, parallelism, ranks=ranks)
+            evaluate_run(out_dir)
+            self.assertFalse((out_dir / "results.json").exists())
+
+    def test_a_nan_loss_fails_the_arm_and_names_the_step(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, r"baseline: rank 0 logged a non-finite loss at step 3"
+        ):
+            self._evaluate({"baseline": self._lines(loss="nan")})
+
+    def test_an_inf_grad_norm_fails_the_arm_and_names_the_step(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            r"optimized: rank 0 logged a non-finite grad_norm at step 4",
+        ):
+            self._evaluate(
+                {
+                    "baseline": self._lines(),
+                    "optimized": self._lines(grad_norm="inf", at=4),
+                }
+            )
+
+    def test_a_negative_inf_is_not_finite_either(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"step 5 \(-inf\)"):
+            self._evaluate({"baseline": self._lines(loss="-inf", at=5)})
+
+    def test_every_rank_is_read_and_the_failure_names_the_rank(self) -> None:
+        """The published trajectory is one rank's; the guard reads all of
+        them, because no rank prints a non-finite value on purpose."""
+        with self.assertRaisesRegex(
+            ValueError, r"baseline: rank 1 logged a non-finite loss at step 3"
+        ):
+            self._evaluate(
+                {
+                    "baseline": _prefixed(self._lines(), 0)
+                    + _prefixed(self._lines(loss="nan"), 1)
+                },
+                {"world_size": 2, "pp": 2},
+                ranks=(0, 1),
+            )
+
+    def test_the_titan_sentinel_is_finite_and_passes(self) -> None:
+        """A rank without the loss prints ``-1.0``, which is a number."""
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {
+                    "baseline": _prefixed(self._lines(loss="-1.00000"), 0)
+                    + _prefixed(self._lines(), 1)
+                },
+                {"world_size": 2, "pp": 2},
+                ranks=(0, 1),
+            )
+            result = evaluate_run(out_dir)
+        self.assertEqual(result.losses["baseline"][1], (3, 1.0))
+
+    def test_the_guard_reads_a_bare_log_directly(self) -> None:
+        """Callable on its own, so a reader of an old directory can ask."""
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "baseline.log"
+            log.write_text(self._lines())
+            refuse_non_finite_trajectories("baseline", log)
+            log.write_text(self._lines(grad_norm="nan", at=2))
+            with self.assertRaisesRegex(ValueError, r"grad_norm at step 2"):
+                refuse_non_finite_trajectories("baseline", log)
+            log.unlink()
+            # A missing log is a validation failure, not this guard's.
+            refuse_non_finite_trajectories("baseline", log)
 
 
 if __name__ == "__main__":

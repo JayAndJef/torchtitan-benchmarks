@@ -472,7 +472,9 @@ class ComparisonTests(unittest.TestCase):
                     [89.0, 90.0, 91.0, 90.0],
                     [7.0, 8.0, 9.0, 8.0],
                     1200,
-                    "nan",
+                    # Finite: evaluate_run refuses a non-finite trajectory
+                    # before it publishes anything (test_throughput pins it).
+                    "0.9",
                 ),
             ):
                 write_trace(
@@ -530,14 +532,13 @@ class ComparisonTests(unittest.TestCase):
         )
         self.assertFalse(methodology["independence_assumption_met"])
         self.assertEqual(methodology["sample_unit"], "compiled_region_invocation")
-        self.assertIsNone(machine["losses"]["optimized"][0]["value"])
+        self.assertEqual(machine["losses"]["optimized"][0]["value"], 0.9)
         self.assertIn("stable tokens/s", report)
         self.assertIn("gpu kernel time", report)
         self.assertIn("kernel ms/step", report)
         self.assertIn("Welch p", report)
         self.assertIn("MWU p", report)
         self.assertIn("not inference from", report)
-        self.assertIn("NON-FINITE LOSS", report)
 
 
 if __name__ == "__main__":

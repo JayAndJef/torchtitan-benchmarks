@@ -60,9 +60,12 @@ from benchmarks.traces.schema import Region
 STEP_METRICS = re.compile(
     r"step:\s*(\d+).*?memory:\s*([0-9.]+)GiB.*?tps:\s*([0-9,]+)"
 )
-LOSS_METRIC = re.compile(r"step:\s*(\d+).*?loss:\s*([0-9.eE+-]+|nan|inf)")
+# The words before the digits, because the alternation is leftmost-first: a
+# ``-inf`` read by the digit class alone yields ``-``, and ``float`` then
+# raises where refuse_non_finite_trajectories should name the step.
+LOSS_METRIC = re.compile(r"step:\s*(\d+).*?loss:\s*(nan|-?inf|[0-9.eE+-]+)")
 GRAD_NORM_METRIC = re.compile(
-    r"step:\s*(\d+).*?grad_norm:\s*([0-9.eE+-]+|nan|inf)"
+    r"step:\s*(\d+).*?grad_norm:\s*(nan|-?inf|[0-9.eE+-]+)"
 )
 SIGNIFICANCE_METHODOLOGY = {
     "interpretation": "invocation_distribution_diagnostic",
@@ -374,6 +377,55 @@ def loss_visible_rank(*, world_size: int, pp: int) -> int:
 
 def losses(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
     return _trajectory(_log_by_rank(log_path).get(rank, ""), LOSS_METRIC)
+
+
+# The two trajectories a step line carries, by the name a failure prints.
+_TRAJECTORY_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("loss", LOSS_METRIC),
+    ("grad_norm", GRAD_NORM_METRIC),
+)
+
+
+def refuse_non_finite_trajectories(arm: str, log_path: Path) -> None:
+    """Fail an arm whose step lines carry a ``nan`` or an ``inf``.
+
+    ``LOSS_METRIC`` and ``GRAD_NORM_METRIC`` accept both words on purpose,
+    so a diverged run is read rather than dropped. Reading it is not
+    publishing it: a tokens/s figure taken over steps whose loss is not a
+    number is the throughput of a run that trained nothing, and every other
+    figure in ``results.json`` would then sit under a healthy label.
+
+    Every rank is read, not only the rank whose trajectory is published.
+    No rank prints a non-finite value on purpose: TorchTitan's rank without
+    the loss prints the ``-1.0`` sentinel, and the stock megatron driver
+    omits the field. So a ``nan`` on any rank is a process that diverged,
+    and the rule reads per rank the way the validation rules do.
+
+    One printed ``nan`` is deliberate and still refused, and that is the
+    safe direction. The stock driver's step shim prints ``grad_norm: nan``
+    on a step Megatron skipped, which is a step that applied no update. No
+    honest run here reaches it: the arm runs ``--bf16`` with no
+    ``--loss-scale``, so ``get_megatron_optimizer`` builds no grad scaler,
+    ``prepare_grads`` returns False, and ``train_step`` never sets
+    ``skipped_iter``. A run that did skip a step trained fewer steps than
+    it claims, and its throughput is not the throughput of the workload.
+
+    This is the one non-finite check the harness owns. Stock Megatron
+    carries its own, ``check_for_nan_in_loss_and_grad``, and it is
+    Megatron's to turn off; TorchTitan and the tuned megatron driver carry
+    none. The check therefore runs on every arm, whatever the engine's own
+    guard did, and it names the rank and the first step that failed.
+    """
+    for rank, text in sorted(_log_by_rank(log_path).items()):
+        for metric, pattern in _TRAJECTORY_METRICS:
+            for step, value in _trajectory(text, pattern):
+                if not math.isfinite(value):
+                    raise ValueError(
+                        f"{arm}: rank {rank} logged a non-finite {metric} at "
+                        f"step {step} ({value}); a run that diverged cannot "
+                        "publish a throughput, so no results.json is written "
+                        f"for it (see {log_path})"
+                    )
 
 
 def grad_norms(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
@@ -756,6 +808,10 @@ def evaluate_run(
     trajectory_rank = loss_visible_rank(
         world_size=world_size, pp=int(recorded_parallelism.get("pp", 1))
     )
+    # Before anything is published. Every rank's lines, not only the
+    # published rank's; see refuse_non_finite_trajectories.
+    for arm in arms:
+        refuse_non_finite_trajectories(arm, out_dir / f"{arm}.log")
     return EvaluationResult(
         output_dir=str(out_dir),
         scenario=manifest.get("scenario", "unknown"),
@@ -790,6 +846,8 @@ def _render_trajectory(values: list[tuple[int, float]], nonfinite_label: str) ->
         return "(no log)"
     picks = [values[0]] + [values[i] for i in (9, 19, 29, 39) if i < len(values)]
     rendered = "  ".join(f"s{step}:{value:.5f}" for step, value in picks)
+    # evaluate_run refuses a non-finite trajectory before it builds a
+    # result, so this label is reached only by a result built by hand.
     if not all(math.isfinite(value) for _, value in values):
         rendered += f"   NON-FINITE {nonfinite_label}"
     return rendered

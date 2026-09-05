@@ -2158,9 +2158,13 @@ TEST_CENSUS = {
     # the caption on baseline_kernel_ratio.
     # +2 for baseline-free singleton absolutes and the retained refusal of a
     # baseline-free multi-arm comparison.
-    "test_throughput": 30,
+    # +6 with the non-finite guard: a nan loss and an inf grad norm each
+    # fail the arm and name the step, a negative inf is read rather than
+    # crashing the parser, every rank is read and the failure names the
+    # rank, the titan sentinel passes, and the guard reads a bare log.
+    "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1798
+TEST_CENSUS_TOTAL = 1804
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
