@@ -60,7 +60,9 @@ from benchmarks.e2e.parallelism import (
 )
 from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
+    DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
@@ -180,6 +182,17 @@ class ValidationProfile:
     the mesh and a TorchTitan arm never receives it. An empty tuple here is
     therefore not a refusal: the titan profile returns one at every mesh,
     and ``validate_arm`` reads only the mesh markers for that.
+
+    ``nan_guard_markers`` is the ``--megatron-nan-guard`` half of the same
+    rule. It takes the requested value alone, because the guard runs at
+    every mesh: the loss check runs on the last stage at ``pp`` 1 and the
+    gradient check runs on every rank at ``dp`` 1, so there is no spec
+    below which the line is not asked. The stock profile returns the line
+    its driver prints from the value Megatron parsed. The titan profile
+    returns nothing, because the option never reaches it. The tuned
+    megatron profile returns nothing at ``on`` and REFUSES ``off``: that
+    driver has no guard, so no line of its log can prove the treatment,
+    and ``_resolve_run`` refuses the combination before a GPU is claimed.
     """
 
     completion_marker: str
@@ -194,6 +207,7 @@ class ValidationProfile:
     pipelined_pattern: re.Pattern[str]
     data_parallel_pattern: re.Pattern[str]
     p2p_markers: Callable[[ParallelismSpec, str], tuple[str, ...]]
+    nan_guard_markers: Callable[[str], tuple[str, ...]]
 
 
 def _titan_parallelism_markers(
@@ -490,6 +504,70 @@ def _megatron_stock_p2p_markers(
     )
 
 
+def _nan_guard_token(megatron_nan_guard: str) -> str:
+    """The ``check_for_nan_in_loss_and_grad`` token a parsed value prints.
+
+    The stock driver formats Megatron's own bool with ``str``, so ``on``
+    reads ``True`` and ``off`` reads ``False``. An unknown value is refused
+    here, before it becomes a marker no log can carry.
+    """
+    if megatron_nan_guard not in MEGATRON_NAN_GUARD_MODES:
+        raise ValueError(
+            f"unknown megatron nan guard {megatron_nan_guard!r}. Available: "
+            f"{', '.join(MEGATRON_NAN_GUARD_MODES)}"
+        )
+    return str(megatron_nan_guard == "on")
+
+
+def _no_nan_guard_markers(megatron_nan_guard: str) -> tuple[str, ...]:
+    """TorchTitan has no Megatron NaN guard to prove.
+
+    The value reaches the stock megatron launcher alone, and a TorchTitan
+    argv is the same under either value. The value is still checked, so
+    an unknown one does not pass through a titan arm unseen.
+    """
+    _nan_guard_token(megatron_nan_guard)
+    return ()
+
+
+def _tuned_megatron_nan_guard_markers(
+    megatron_nan_guard: str,
+) -> tuple[str, ...]:
+    """The tuned driver has no NaN guard, under either value.
+
+    ``benchmarks/e2e/megatron/train.py`` never calls ``validate_result``
+    and builds no ``check_for_nan_in_grad``, so it prints no line at
+    ``on`` and nothing in its log could prove ``off``. ``_resolve_run``
+    refuses ``off`` beside this arm before a GPU is claimed; a validator
+    reached with it anyway refuses too, rather than publishing a run under
+    a treatment its engine cannot state.
+    """
+    if _nan_guard_token(megatron_nan_guard) == "False":
+        raise ValueError(
+            f"megatron nan guard {megatron_nan_guard!r} cannot be proved for "
+            "the tuned megatron driver, which has no NaN guard to turn off"
+        )
+    return ()
+
+
+def _megatron_stock_nan_guard_markers(
+    megatron_nan_guard: str,
+) -> tuple[str, ...]:
+    """``benchmarks.e2e.megatron_stock.train``'s nan guard line. Keep in sync.
+
+    The driver prints ``args.check_for_nan_in_loss_and_grad`` as Megatron
+    parsed it, on every rank at every mesh, and nothing in the driver sets
+    the field. So a run whose argv lost the token prints ``True`` under an
+    ``off`` label, and a run whose Megatron turned the field off by itself
+    prints ``False`` under ``on``; either fails here.
+    """
+    token = _nan_guard_token(megatron_nan_guard)
+    return (
+        "Megatron-LM stock nan guard: "
+        f"check_for_nan_in_loss_and_grad={token}",
+    )
+
+
 VALIDATION_PROFILES = {
     "torchtitan": ValidationProfile(
         completion_marker="Training completed",
@@ -522,6 +600,8 @@ VALIDATION_PROFILES = {
         ),
         # The option never reaches a TorchTitan arm.
         p2p_markers=_no_p2p_markers,
+        # Nor does this one.
+        nan_guard_markers=_no_nan_guard_markers,
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -551,6 +631,8 @@ VALIDATION_PROFILES = {
         ),
         # The driver's own p2p line, read off the built config.
         p2p_markers=_megatron_p2p_markers,
+        # No guard in this driver: nothing at on, a refusal at off.
+        nan_guard_markers=_tuned_megatron_nan_guard_markers,
     ),
     # The stock arm of piper_megatron_stock. It runs megatron.training's own
     # pretrain() through pretrain_gpt's providers, so nothing here may assume
@@ -588,6 +670,8 @@ VALIDATION_PROFILES = {
         ),
         # The stock driver's own p2p line, and it carries the word "stock".
         p2p_markers=_megatron_stock_p2p_markers,
+        # The stock driver's nan guard line, from the value Megatron parsed.
+        nan_guard_markers=_megatron_stock_nan_guard_markers,
     ),
 }
 
@@ -619,6 +703,7 @@ def _validate_log(
     parallelism_markers: tuple[str, ...] = (),
     spec_pp: int = 1,
     spec_dp: int = 1,
+    nan_guard_markers: tuple[str, ...] = (),
 ) -> None:
     """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
 
@@ -711,6 +796,14 @@ def _validate_log(
                 f"{arm.name}: the requested parallelism did not apply; the "
                 f"engine never logged {marker!r}{where}"
             )
+    # The --megatron-nan-guard half of arm rule 12, asked at every mesh.
+    # Empty for an engine the value never reaches.
+    for marker in nan_guard_markers:
+        if marker not in log:
+            raise RuntimeError(
+                f"{arm.name}: the requested megatron nan guard did not "
+                f"apply; the engine never logged {marker!r}{where}"
+            )
     # The other half of arm rule 12. A positive marker cannot speak for a
     # spec that asked for nothing, so the trivial spec asks the question the
     # other way round: this log must not show a pipeline nobody requested.
@@ -748,6 +841,7 @@ def validate_arm(
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
+    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
 ) -> None:
     """Reject partial or wrongly configured runs before analysis.
 
@@ -766,9 +860,18 @@ def validate_arm(
     published under the label it was asked for. It defaults to ``on``,
     which is stock Megatron and the treatment of every run before the
     option existed.
+
+    ``megatron_nan_guard`` is the requested ``--megatron-nan-guard`` value,
+    and it defaults to ``on`` for the same reason. The stock profile asks
+    every rank, at every mesh, for the line its driver prints from the
+    value Megatron parsed; the tuned profile refuses ``off`` outright.
     """
     profile = VALIDATION_PROFILES[arm.validation]
     shape = shape_by_name(model_size)
+    # At every world size, unlike the mesh markers below: the guard runs
+    # at pp 1 and at dp 1. Resolved before any log is read, so an unknown
+    # value or the tuned driver's refusal lands first.
+    nan_guard_markers = profile.nan_guard_markers(megatron_nan_guard)
     if not log_path.is_file():
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     logs = logs_by_rank(log_path.read_text(errors="replace"))
@@ -816,6 +919,7 @@ def validate_arm(
             parallelism_markers=parallelism_markers,
             spec_pp=parallelism.pp,
             spec_dp=parallelism.dp,
+            nan_guard_markers=nan_guard_markers,
         )
 
     # Arm rules 5 and 7 are per rank. Every rank runs the same number of

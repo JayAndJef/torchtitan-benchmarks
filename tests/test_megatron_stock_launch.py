@@ -148,6 +148,9 @@ STOCK_LOG_FRAGMENTS = (
     # contract test below pins it per value.
     "Megatron-LM stock p2p: batch_p2p_comm=",
     " batch_p2p_sync=",
+    # The nan guard line, printed from the parsed value on every rank at
+    # every mesh. The VALUE moves with --megatron-nan-guard.
+    "Megatron-LM stock nan guard: check_for_nan_in_loss_and_grad=",
 )
 
 # The wrapper class name is the half of the data-parallel line that moves
@@ -1147,6 +1150,8 @@ def _driver_lines() -> list[str]:
         train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
         train.P2P_LINE.format(comm=True, sync=True),
         train.P2P_LINE.format(comm=True, sync=False),
+        train.NAN_GUARD_LINE.format(value=True),
+        train.NAN_GUARD_LINE.format(value=False),
     ]
 
 
@@ -1174,6 +1179,7 @@ class StockMarkerContractTests(unittest.TestCase):
             self.profile.mode_line("default"),
             *self.profile.parallelism_markers(MESH, self.workload),
             *self.profile.p2p_markers(MESH, "on"),
+            *self.profile.nan_guard_markers("on"),
         ]
         for fragment in STOCK_LOG_FRAGMENTS:
             with self.subTest(fragment=fragment):
@@ -1298,6 +1304,36 @@ class StockMarkerContractTests(unittest.TestCase):
             for value in ("on", "off"):
                 with self.subTest(spec=spec, value=value):
                     self.assertEqual(self.profile.p2p_markers(spec, value), ())
+
+    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
+    def test_the_driver_nan_guard_line_equals_this_profile_marker(
+        self,
+    ) -> None:
+        """The nan guard half of arm rule 12, character for character.
+
+        The driver formats Megatron's own bool, so the two tokens are
+        ``True`` and ``False``.
+        """
+        from benchmarks.e2e.megatron_stock import train
+
+        for value, parsed in (("on", True), ("off", False)):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.profile.nan_guard_markers(value),
+                    (train.NAN_GUARD_LINE.format(value=parsed),),
+                )
+
+    def test_the_nan_guard_line_is_asked_at_every_mesh(self) -> None:
+        """Unlike the p2p line: the guard runs at pp 1 and at dp 1, so the
+        callable takes no spec and the same line is asked everywhere. The
+        tuned profile asks for none and refuses off."""
+        (line,) = self.profile.nan_guard_markers("on")
+        self.assertIn("stock", line)
+        tuned = VALIDATION_PROFILES["megatron"]
+        self.assertEqual(tuned.nan_guard_markers("on"), ())
+        with self.assertRaises(ValueError):
+            tuned.nan_guard_markers("off")
+        self.assertEqual(VALIDATION_PROFILES["torchtitan"].nan_guard_markers("off"), ())
 
     def test_the_tuned_p2p_line_does_not_satisfy_this_profile(self) -> None:
         """The two drivers must not satisfy each other's p2p rule."""

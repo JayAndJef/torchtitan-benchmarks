@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import logs_by_rank
 from benchmarks.e2e.megatron import train
+from benchmarks.e2e.megatron_stock import train as stock_train
 from benchmarks.e2e.parallelism import (
     ParallelismSpec,
     TRIVIAL_SPEC,
@@ -1052,6 +1053,163 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
                     model_size="1b",
                     parallelism=PP2,
                     megatron_p2p_sync="off",
+                )
+
+
+def _stock_log(spec: ParallelismSpec, nan_guard_line: str | None) -> str:
+    """One rank's stock-driver output: every line the rules read.
+
+    The mesh lines and the p2p line come from the profile the validator
+    uses; the nan guard line is the argument, so a test can give a rank
+    the wrong value or no line at all.
+    """
+    profile = VALIDATION_PROFILES["megatron_stock"]
+    workload = scenario_by_name("piper_megatron_stock").workload
+    lines = [
+        profile.mode_line("default"),
+        _SIZE_LINE.rstrip("\n"),
+        *profile.parallelism_markers(spec, workload),
+        *profile.p2p_markers(spec, "on"),
+    ]
+    if nan_guard_line is not None:
+        lines.append(nan_guard_line)
+    lines.append("Training completed")
+    return "\n".join(lines)
+
+
+class ArmRuleTwelveNanGuardTests(unittest.TestCase):
+    """The ``--megatron-nan-guard`` half of arm rule 12.
+
+    The stock driver prints ``check_for_nan_in_loss_and_grad`` as Megatron
+    parsed it, on every rank at every mesh. The profile asks for that line
+    with the token the requested value implies, so a run whose argv lost
+    the token cannot be published under the label it was asked for.
+    """
+
+    ON_LINE = stock_train.NAN_GUARD_LINE.format(value=True)
+    OFF_LINE = stock_train.NAN_GUARD_LINE.format(value=False)
+
+    def test_the_stock_line_is_pinned_to_the_driver_constant(self) -> None:
+        """The validator and the driver state one line in two places, and
+        the line is asked at every mesh."""
+        profile = VALIDATION_PROFILES["megatron_stock"]
+        for value, line in (("on", self.ON_LINE), ("off", self.OFF_LINE)):
+            with self.subTest(value=value):
+                self.assertEqual(profile.nan_guard_markers(value), (line,))
+
+    def test_the_titan_profile_asks_for_no_line_and_still_checks_the_value(
+        self,
+    ) -> None:
+        titan = VALIDATION_PROFILES["torchtitan"]
+        for value in ("on", "off"):
+            self.assertEqual(titan.nan_guard_markers(value), ())
+        for name in ("megatron", "megatron_stock", "torchtitan"):
+            with self.subTest(profile=name):
+                with self.assertRaisesRegex(ValueError, "unknown megatron nan"):
+                    VALIDATION_PROFILES[name].nan_guard_markers("sometimes")
+
+    def test_the_tuned_profile_asks_for_nothing_at_on_and_refuses_off(
+        self,
+    ) -> None:
+        """No guard in that driver: nothing to prove at ``on``, and no line
+        of its log could prove ``off``."""
+        tuned = VALIDATION_PROFILES["megatron"]
+        self.assertEqual(tuned.nan_guard_markers("on"), ())
+        with self.assertRaisesRegex(ValueError, "no NaN guard"):
+            tuned.nan_guard_markers("off")
+        scenario = scenario_by_name("piper1b_megatron")
+        arm = scenario.arm("baseline")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(
+                Path(temporary), ranks=(0,), markers=arm.trace_kernel_markers
+            )
+            fixture.write({0: _megatron_log(TRIVIAL_SPEC, None)})
+            keywords = dict(compile_mode="default", ac_mode="none")
+            validate_arm(arm, fixture.root, fixture.log, scenario.workload, **keywords)
+            with self.assertRaisesRegex(ValueError, "no NaN guard"):
+                validate_arm(
+                    arm,
+                    fixture.root,
+                    fixture.log,
+                    scenario.workload,
+                    megatron_nan_guard="off",
+                    **keywords,
+                )
+
+    def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
+        self,
+    ) -> None:
+        """Asked at the trivial spec, where the mesh markers ask nothing.
+
+        A log at ``True`` passes the default and fails ``off``; a log at
+        ``False`` passes ``off`` and fails ``on``; a log with no line fails
+        both. The failure names the token the log lacked.
+        """
+        scenario = scenario_by_name("piper_megatron_stock")
+        arm = scenario.arm("baseline")
+        cases = (
+            (self.ON_LINE, "on", None),
+            (self.ON_LINE, "off", "check_for_nan_in_loss_and_grad=False"),
+            (self.OFF_LINE, "off", None),
+            (self.OFF_LINE, "on", "check_for_nan_in_loss_and_grad=True"),
+            (None, "on", "check_for_nan_in_loss_and_grad=True"),
+            (None, "off", "check_for_nan_in_loss_and_grad=False"),
+        )
+        for nan_guard_line, value, refused in cases:
+            with self.subTest(line=nan_guard_line, value=value):
+                with tempfile.TemporaryDirectory() as temporary:
+                    fixture = _ArmFixture(
+                        Path(temporary),
+                        ranks=(0,),
+                        markers=arm.trace_kernel_markers,
+                    )
+                    fixture.write({0: _stock_log(TRIVIAL_SPEC, nan_guard_line)})
+                    keywords = dict(
+                        compile_mode="default",
+                        ac_mode="none",
+                        megatron_nan_guard=value,
+                    )
+                    if refused is None:
+                        validate_arm(
+                            arm,
+                            fixture.root,
+                            fixture.log,
+                            scenario.workload,
+                            **keywords,
+                        )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, refused):
+                            validate_arm(
+                                arm,
+                                fixture.root,
+                                fixture.log,
+                                scenario.workload,
+                                **keywords,
+                            )
+
+    def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
+        """The rule runs per rank, so a stage that kept the guard under an
+        ``off`` label is caught even when the other stage dropped it."""
+        scenario = scenario_by_name("piper_megatron_stock")
+        arm = scenario.arm("baseline")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(
+                Path(temporary), markers=arm.trace_kernel_markers
+            )
+            fixture.write({
+                0: _stock_log(PP2, self.OFF_LINE),
+                1: _stock_log(PP2, self.ON_LINE),
+            })
+            with self.assertRaisesRegex(RuntimeError, "on rank 1"):
+                validate_arm(
+                    arm,
+                    fixture.root,
+                    fixture.log,
+                    scenario.workload,
+                    compile_mode="default",
+                    ac_mode="none",
+                    parallelism=PP2,
+                    megatron_nan_guard="off",
                 )
 
 

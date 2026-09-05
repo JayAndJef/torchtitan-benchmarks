@@ -1979,7 +1979,10 @@ TEST_CENSUS = {
     # pipeline, and the tuned line not satisfying this profile.
     # +2 with --megatron-nan-guard: the off argv is exactly its two parts
     # at the trivial spec and at the mesh, and the titan arm gets no token.
-    "test_megatron_stock_launch": 63,
+    # +2 with the nan guard half of arm rule 12: the driver's line equal to
+    # the profile's marker at both values, and the line asked at every
+    # mesh while the tuned profile asks for none and refuses off.
+    "test_megatron_stock_launch": 65,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2069,7 +2072,8 @@ TEST_CENSUS = {
     # banner naming it.
     # +2 with the manifest field: a resume inheriting the recorded value
     # and refusing another, and a schema-13 directory reading as on.
-    "test_runner": 84,
+    # +1 that execute_run hands the NaN-guard value to validate_arm.
+    "test_runner": 85,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2210,7 +2214,13 @@ TEST_CENSUS = {
     # titan profile asking for none and still refusing an unknown value, a
     # pipelined megatron log passing or failing by the requested value, and
     # one rank with the wrong value failing the arm.
-    "test_parallel_validation": 54,
+    # +5 with the nan guard half of arm rule 12: the stock line pinned to
+    # the driver constant at both values, the titan profile asking for
+    # none and still refusing an unknown value, the tuned profile asking
+    # for nothing at on and refusing off, a one-rank stock log passing or
+    # failing by the requested value, and one rank with the wrong value
+    # failing the arm.
+    "test_parallel_validation": 59,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -2225,7 +2235,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1837
+TEST_CENSUS_TOTAL = 1845
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

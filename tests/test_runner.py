@@ -856,6 +856,36 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 )
         self.assertIn("megatron nan guard: off", events)
 
+    def test_execute_run_hands_the_value_to_validate_arm(self) -> None:
+        """The value the run resolved is the value the gate reads."""
+
+        def fake_process(command, **kwargs):
+            kwargs["stdout"].write("Training completed\n")
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
+            execute_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name="piper_megatron_stock",
+                    arm_names=("baseline",),
+                    out_dir=Path(temporary) / "run",
+                    ac_mode="none",
+                    megatron_nan_guard="off",
+                ),
+                process_runner=fake_process,
+                environment={"PATH": os.environ["PATH"]},
+            )
+        self.assertEqual(validate.call_count, 1)
+        self.assertEqual(validate.call_args.kwargs["megatron_nan_guard"], "off")
+        self.assertEqual(validate.call_args.kwargs["megatron_p2p_sync"], "on")
+
     def _write_manifest(self, out_dir: Path, megatron_nan_guard: str) -> None:
         scenario = scenario_by_name("piper_megatron_stock")
         write_manifest(
