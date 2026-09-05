@@ -3,7 +3,7 @@
 Ports /data/zejiaqi/piper/examples/models/qwen3.py case '1B' onto current
 torchtitan (dim=1024, n_layers=16, n_heads=16, n_kv_heads=8, head_dim=64,
 MoE with 4 experts / top_k=2 / inter_dim=3584, qk_norm, rope theta 1e6,
-max_seq_len 2048, no weight tying, vocab 151936, load_balance_coeff=None).
+max_seq_len 4096, no weight tying, vocab 151936, load_balance_coeff=None).
 
 Every geometry knob comes from
 ``benchmarks.models.piper_qwen3.shape.PiperShape`` -- the same object

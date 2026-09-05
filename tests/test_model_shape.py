@@ -398,7 +398,7 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(shape.heads_per_group, 8)
         self.assertEqual(shape.qkv_out_features, 5120)
         # Not piper's 262144: the harness ceiling and the RoPE cache size.
-        self.assertEqual(shape.max_seq_len, 2048)
+        self.assertEqual(shape.max_seq_len, 4096)
         self.assertTrue(shape.supports_block_regions)
         self.assertEqual(
             _counts_from_the_tensor_list(shape),
@@ -482,7 +482,7 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "top_k": 2,
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
-        "max_seq_len": 2048,
+        "max_seq_len": 4096,
         "supports_block_regions": True,
         "parity_gate": 2e-2,
         "param_count": 1_066_241_024,
@@ -502,7 +502,7 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "top_k": 2,
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
-        "max_seq_len": 2048,
+        "max_seq_len": 4096,
         "supports_block_regions": True,
         "parity_gate": 3e-2,
         "param_count": 4_264_661_504,
@@ -523,7 +523,7 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "top_k": 2,
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
-        "max_seq_len": 2048,
+        "max_seq_len": 4096,
         "supports_block_regions": True,
         "parity_gate": 2e-2,
         "param_count": 9_330_201_600,
@@ -543,7 +543,7 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "top_k": 2,
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
-        "max_seq_len": 2048,
+        "max_seq_len": 4096,
         "supports_block_regions": False,
         "parity_gate": 5e-2,
         "param_count": 10_528_837_760,
@@ -563,7 +563,7 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "top_k": 2,
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
-        "max_seq_len": 2048,
+        "max_seq_len": 4096,
         "supports_block_regions": False,
         "parity_gate": 6e-2,
         "param_count": 17_058_349_184,
@@ -586,7 +586,7 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "top_k": 8,
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
-        "max_seq_len": 2048,
+        "max_seq_len": 4096,
         "supports_block_regions": True,
         "parity_gate": 2e-2,
         "param_count": 30_532_122_624,
@@ -607,7 +607,7 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "top_k": 2,
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
-        "max_seq_len": 2048,
+        "max_seq_len": 4096,
         "supports_block_regions": True,
         "parity_gate": 3e-2,
         "param_count": 47_685_316_608,

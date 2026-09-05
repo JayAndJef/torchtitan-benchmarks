@@ -197,7 +197,10 @@ class PiperShape:
     top_k: int = 2
     vocab_size: int = 151936
     rope_theta: float = 1_000_000.0
-    max_seq_len: int = 2048
+    # Size of the precomputed CosSinRoPE cache, and the workload's sequence
+    # ceiling. A longer sequence fails the eager bounds check; under compile
+    # that check is dropped and the read goes out of bounds silently.
+    max_seq_len: int = 4096
     # Logit rel_l2 ceiling for tools/megatron_parity_check.py. bf16-scaled:
     # rel_l2 grows roughly with the square root of the reduction length, so a
     # wider shape legitimately needs a wider gate. Never widen one without the
@@ -653,9 +656,9 @@ PIPER_9B = PiperShape(
 # WHAT THIS REGISTRATION DOES NOT CARRY. Piper declares max_seq_len 262144
 # and a dense hidden_dim of 6144. The dense width is unused, because every
 # layer is MoE, as it is at every other shape here. The context length is
-# not carried: max_seq_len stays at the 2048 default, which is the harness's
+# not carried: max_seq_len stays at the 4096 default, which is the harness's
 # sequence ceiling AND the size of the CosSinRoPE cache config_registry.py
-# builds from it. A run above seq 2048 needs that cache widened; nothing
+# builds from it. A run above seq 4096 needs that cache widened; nothing
 # here widens it, and kernel-bench's --max-seq-len lifts the ceiling for the
 # kernel side alone.
 #

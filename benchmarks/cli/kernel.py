@@ -173,8 +173,8 @@ from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
     "--max-seq-len",
     type=int,
     help=(
-        "Raise the shape's max_seq_len ceiling (default 2048); needed to "
-        "sweep attention_core past 2048. Also sizes the RoPE cos/sin "
+        "Raise the shape's max_seq_len ceiling (default 4096); needed to "
+        "sweep attention_core past 4096. Also sizes the RoPE cos/sin "
         "tables."
     ),
 )

@@ -403,7 +403,7 @@ class ShapeAndWorkloadTests(unittest.TestCase):
 
     def test_seq_len_is_bounded_by_the_shapes_ceiling(self) -> None:
         with self.assertRaisesRegex(ValueError, "exceeds max_seq_len"):
-            resolve_shape_and_workload(seq_len=4096)
+            resolve_shape_and_workload(seq_len=8192)
 
     def test_max_seq_len_override_replaces_the_shape_before_the_check(
         self,
@@ -411,16 +411,16 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         """Ordering is load-bearing: the attention_core sweep raises the
         ceiling precisely so it can then set seq_len above the old one."""
         shape, workload = resolve_shape_and_workload(
-            seq_len=4096, max_seq_len=4096
+            seq_len=8192, max_seq_len=8192
         )
-        self.assertEqual(shape.max_seq_len, 4096)
-        self.assertEqual(workload.seq_len, 4096)
+        self.assertEqual(shape.max_seq_len, 8192)
+        self.assertEqual(workload.seq_len, 8192)
         # replace() on the registered shape, not a mutation of it.
         self.assertEqual(shape.name, "1b")
-        self.assertEqual(resolve_shape_and_workload()[0].max_seq_len, 2048)
+        self.assertEqual(resolve_shape_and_workload()[0].max_seq_len, 4096)
         self.assertEqual(
             shape_summary("attention_core", shape, workload)["max_seq_len"],
-            4096,
+            8192,
         )
 
     def test_routing_needs_an_even_row_count(self) -> None:

@@ -705,8 +705,8 @@ tensor-by-tensor helper's in `tests/test_model_shape.py`, and the
 unmeasured and unparity-checked** -- no e2e scenario, no kernel scenario
 and no `tools/megatron_parity_check.py` run exists at it, so its
 `parity_gate` is the default and not a measurement. **TorchTitan's RoPE
-cache still caps it at seq 2048**: `config_registry.py` sizes
-`CosSinRoPE` from `shape.max_seq_len`, which stays at the 2048 default
+cache still caps it at seq 4096**: `config_registry.py` sizes
+`CosSinRoPE` from `shape.max_seq_len`, which stays at the 4096 default
 rather than the 262144 Piper declares, and nothing here widens that cache.
 It does not fit one H200 (227.5 GiB of state at titan's 8 B/param). It
 divides evenly at `pp` 4 and `pp` 8, and its experts divide every expert
@@ -2797,7 +2797,7 @@ import-light and Torch-free.
 
 `qwen3_piper_1b`: dim 1024, 16 layers, 16 heads / 8 KV heads, head_dim 64, flex
 attention, qk_norm; MoE on every layer with 4 experts, top_k 2, inter_dim 3584,
-`load_balance_coeff=None`; RoPE theta 1e6, max_seq_len 2048; vocab 151936, no
+`load_balance_coeff=None`; RoPE theta 1e6, max_seq_len 4096; vocab 151936, no
 weight tying. Trains on `c4_test` (tokenizer vocab 2020) against the full
 151936-row embedding, so **losses are not comparable to real Qwen3 training** --
 they are a convergence sanity check only.
