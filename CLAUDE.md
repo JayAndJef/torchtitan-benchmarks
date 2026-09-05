@@ -304,6 +304,7 @@ Shared options, with env equivalents:
 | `--pp-microbatch-size` | -- | 1 |
 | `--dense-sharding` | -- | `replicate` |
 | `--megatron-p2p-sync` | -- | `on` |
+| `--megatron-nan-guard` | -- | `on` |
 
 **The six parallelism options take no environment variable, and the three
 axes above them do.** Each parallelism value has to agree with the `<gpu>`
@@ -311,10 +312,11 @@ positional, and a positional has no environment form; an exported `PP=2`
 would make a plain `run 0 --scenario X` fail its own world-size check. The
 degrees, the schedule registry and the seventeen rules that refuse an illegal
 set live in `benchmarks/e2e/parallelism.py`; read that module, not this
-table, for what a combination means. `--megatron-p2p-sync` has no
-environment variable for a different reason: it changes a Megatron
-treatment, and an exported value would reach every megatron cell of a shell
-session and move a recorded fact without a flag on the command line.
+table, for what a combination means. `--megatron-p2p-sync` and
+`--megatron-nan-guard` have no environment variable for a different
+reason: each changes a Megatron treatment, and an exported value would
+reach every megatron cell of a shell session and move a recorded fact
+without a flag on the command line.
 
 **The budget is `MAX_WORLD_SIZE = 8` and `MAX_PP = 8`**
 (`benchmarks/e2e/parallelism.py`). `MAX_WORLD_SIZE` went from 4 to 8 for
@@ -486,6 +488,48 @@ of the pipeline messages, not a degree. **Every number this repo has
 published was measured at `on`.** The measured effect of `off`, and the
 caveats that go with it, live in `reports/20260901-p2p-sync-ab.md`; read
 that report before you cite a number taken under `off`.
+
+**`--megatron-nan-guard {on,off}` names whether stock Megatron checks
+every loss and every gradient bucket for NaN and Inf.** It maps to
+Megatron's own `check_for_nan_in_loss_and_grad`. `on` is stock Megatron,
+and the field defaults to `True`. `off` sends Megatron's own
+`--no-check-for-nan-in-loss-and-grad` to the stock launcher, so a stock
+user can type the same argv; there is no `--bench-` flag for it. At
+Megatron-LM 59b72fa5 that one field gates two host waits: `pretrain_gpt.py`'s
+`loss_func` evaluates the loss twice per microbatch through
+`rerun_state_machine.validate_result`, and `training.py` copies the field
+into `ddp_config.check_for_nan_in_grad`, under which
+`param_and_grad_buffer.py`'s `check_grads` evaluates every bucket's
+gradient norm twice per step. Each evaluation reads a device bool and
+synchronizes the stream. `--rerun-mode disabled`, which the stock argv
+already sends, removes neither: `validate_result` still evaluates the
+rejection function under `RerunMode.DISABLED`. Four tests pin those facts
+against the submodule source.
+
+The value reaches the stock megatron launcher alone. The tuned driver
+(`benchmarks/e2e/megatron/train.py`) never calls `validate_result` and
+has no guard under either value, so `off` is refused whenever that arm is
+selected; a run with no stock megatron arm is refused too, because the
+value would reach nothing. Both refusals land in `_resolve_run` before
+any host probe, each names its repair, and `run-all --all-scenarios`
+prints the same reason and skips the scenario. Unlike the p2p option it is
+legal at every mesh, because the guard runs at `pp` 1 and at `dp` 1. The
+manifest records the value as `megatron_nan_guard` (schema 14), `--resume`
+gates it, and schema <= 13 directories read as `on`. It is not part of
+`execution_model` and not a field of `ParallelismSpec`.
+
+**Every number this repo has published was measured at `on`.** The effect
+of `off` was measured on 2026-09-05 (`reports/20260905-host-sync-ab.md`)
+at the `1b` shape, `--dp 1 --pp 4`, batch 32, four H200s, with the p2p
+sync already off: the NaN guard alone is worth **+12.1% in tokens/s** on
+the stock megatron arm (condition D against C, two clean cells each), and
+it is almost the whole of the +12.9% the report's headline condition gives.
+**A stock arm under `off` is "stock minus the NaN detector", and a report
+must say so beside every such number**: it is a fifth deliberate
+difference on top of the four in "The stock Megatron arm". The 2026-08-30
+report refused to send the flag until a validation rule caught a NaN loss;
+that rule now exists on the evaluation side and runs under both values --
+see "Evaluation" below.
 
 **`--scenario` has no default, and an omitted one fails the run.** A default
 scenario can only be reached by an omission, and it would then measure one
@@ -910,7 +954,7 @@ sets `replay_dataloader=True` and `command_for_arm` delivers
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 13: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism (with dense_sharding), megatron_p2p_sync, throughput_definition, execution_model, hardware_metadata
+  manifest.json     # schema 14: workload, regions, arms, commands, compile_mode, ac_mode, model_size, model_shape, parallelism (with dense_sharding), megatron_p2p_sync, megatron_nan_guard, throughput_definition, execution_model, hardware_metadata
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 5: throughput (per rank), memory, gpu_time, region stats, significance
   <arm>.log         # training stdout+stderr
@@ -924,8 +968,8 @@ out/<timestamp>/<scenario>/<hardware>/
 `cudnn_loader_resolves`. Always cite `torchtitan_git_rev`,
 `torch_version`, `compile_mode`, and `ac_mode` when reporting numbers --
 plus `megatron_git_rev`, `te_version` and the two cuDNN fields for the
-megatron scenario, and `megatron_p2p_sync` beside any megatron number taken
-above `pp` 1.
+megatron scenario, `megatron_p2p_sync` beside any megatron number taken
+above `pp` 1, and `megatron_nan_guard` beside any stock megatron number.
 
 ### Which cuDNN a megatron arm runs is a host property
 
@@ -1069,6 +1113,19 @@ are not comparable; `--resume` refuses to mix them.
     returns an empty tuple at every mesh, because the option never reaches
     it; that empty tuple is not the refusal above, which reads the mesh
     markers alone.
+
+    The stock profile also asks every rank, **at every mesh**, for its
+    driver's nan guard line against the requested `--megatron-nan-guard`
+    value: `Megatron-LM stock nan guard:
+    check_for_nan_in_loss_and_grad=<bool>`, printed from the value
+    Megatron PARSED. Nothing in the driver sets the field, so a run whose
+    argv lost the token prints `True` under an `off` label and a run whose
+    Megatron turned the field off by itself prints `False` under `on`;
+    either fails. The callable, `nan_guard_markers`, takes the value alone
+    and no spec, because the guard runs at `pp` 1 and at `dp` 1. The
+    TorchTitan profile returns an empty tuple. The tuned megatron profile
+    returns an empty tuple at `on` and **refuses** `off`, because that
+    driver has no guard and no line of its log could prove the treatment.
 13. A rank of a `dp > 1` run whose traces carry no all-reduce kernel
     (`ncclDevKernel_AllReduce`). **Two ranks that never reduce their
     gradients train two models and report roughly twice the true
@@ -1280,19 +1337,22 @@ skips those that already pass, archives partial artifacts under `attempts/`,
 and re-runs the rest. It aborts if any of these changed since the manifest was
 written: scenario, workload, selected arms, hardware label, extra TorchTitan
 args, `compile_mode`, `ac_mode`, `model_size`, `parallelism`,
-`megatron_p2p_sync`, `nvidia_smi`, `cpu_pinning`, `torchtitan_git_rev`,
-`benchmarks_git_rev`, `megatron_git_rev`. A different GPU or a different
-commit will not resume -- that is intentional. Omitting `--compile-mode`,
-`--ac`, `--model-size` or `--megatron-p2p-sync` on a resume inherits the
+`megatron_p2p_sync`, `megatron_nan_guard`, `nvidia_smi`, `cpu_pinning`,
+`torchtitan_git_rev`, `benchmarks_git_rev`, `megatron_git_rev`. A
+different GPU or a different commit will not resume -- that is
+intentional. Omitting `--compile-mode`, `--ac`, `--model-size`,
+`--megatron-p2p-sync` or `--megatron-nan-guard` on a resume inherits the
 recorded value; passing a different one is refused. Schema <= 12 manifests
 carry no `megatron_p2p_sync` and resume as `on`, because no run before
-schema 13 could turn the sync off. Schema <= 8 manifests carry no
+schema 13 could turn the sync off; schema <= 13 manifests carry no
+`megatron_nan_guard` and resume as `on` for the same reason. Schema <= 8
+manifests carry no
 `model_size` and resume as `normal`; schema <= 7 manifests cannot be
 resumed by this code at all (they record pre-rename mode names and imply
 `ac=sac`).
 
 **`parallelism` does not inherit, and the asymmetry is deliberate.** The
-four values above are single strings, so a resume can read one back and
+five values above are single strings, so a resume can read one back and
 rebuild the run from it. A spec is six fields that together decide every
 arm's command line, and `--resume` compares no command line -- so a
 reconstruction that dropped one field would relaunch the arms differently
@@ -1525,7 +1585,16 @@ claim can be made about a cuda-graph cell.
   The workload is host-bound at benchmark sizes, so tokens/s tracks this, not
   kernel quality. Evaluation warns when it spreads more than 1.15x across
   arms: that run's tokens/s and span comparisons are contaminated.
-- loss and grad-norm trajectories, as a sanity check only.
+- loss and grad-norm trajectories, as a sanity check only. **A `nan` or an
+  `inf` on any rank's step line fails the arm before anything is
+  published**, and the message names the rank and the step
+  (`refuse_non_finite_trajectories` in `benchmarks/e2e/results.py`). It
+  reads every rank, not only the published one, because no rank prints a
+  non-finite value on purpose: TorchTitan's rank without the loss prints
+  the `-1.0` sentinel, the stock driver omits the field, and the stock
+  driver's `grad_norm: nan` on a skipped step is unreachable for a bf16
+  run with no grad scaler. It is the one non-finite check the harness
+  owns, and it runs on every arm under both `--megatron-nan-guard` values.
 
 The significance numbers are **distribution diagnostics within a single run**,
 not independent repeated-run tests: invocations share steps and layer structure.
@@ -3098,6 +3167,13 @@ number, and **the report must state all four beside every number**:
    defaults `--moe-permute-fusion` off. The arm therefore does **not** pin
    `_permute_kernel` as a trace marker, where the tuned arm does.
 
+**`--megatron-nan-guard off` adds a fifth difference, and it is not a
+default.** Under `off` the stock arm runs without Megatron's NaN/Inf
+checks, which is "stock minus the NaN detector", and the manifest's
+`megatron_nan_guard` says so. State it beside the four above whenever a
+number was taken under `off`; every published number of this scenario
+was taken at `on`.
+
 **`execution_model` says `plain-bf16` and describes the other arm.** The
 field is composed from the parallelism spec, and
 `single-gpu-plain-bf16-no-fsdp` is a fixed point every manifest since schema
@@ -3484,9 +3560,9 @@ trainer's LM-head handoff to the `LossWithLMHead` protocol. Only
 - Use at least 40 steps. The runner enforces this; do not try to route around it.
 - Numbers are only comparable within one `torch_version`, one
   `torchtitan_git_rev`, one `benchmarks_git_rev`, one `compile_mode`, one
-  `ac_mode`, one `model_size`, one `parallelism` record and one `megatron_p2p_sync`
-  value (plus one `megatron_git_rev`/`te_version` for either megatron
-  scenario). A pipelined
+  `ac_mode`, one `model_size`, one `parallelism` record, one
+  `megatron_p2p_sync` value and one `megatron_nan_guard` value (plus one
+  `megatron_git_rev`/`te_version` for either megatron scenario). A pipelined
   run also declares no regions, so it carries no `forward_block` or
   `backward_block` row a single-GPU run could be compared against.
   `cudnn_loader_resolves` is a **speed** axis only: the version changes no value, measured, so cite it beside a timing
