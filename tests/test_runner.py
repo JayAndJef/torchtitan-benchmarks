@@ -682,6 +682,180 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         self.assertIn("megatron p2p sync: off", events)
 
 
+NO_NAN_CHECK = "--no-check-for-nan-in-loss-and-grad"
+
+
+class MegatronNanGuardResolutionTests(unittest.TestCase):
+    """What ``_resolve_run`` does with ``--megatron-nan-guard``.
+
+    Both refusals are parent-side and land before any host probe. The value
+    reaches the stock megatron command alone; the tuned driver has no guard
+    and refuses ``off``; a TorchTitan argv is untouched under either value.
+    Legal at every mesh, so every case here is the trivial spec.
+    """
+
+    def setUp(self) -> None:
+        self.metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+            "megatron_git_rev": "mcore-rev",
+        }
+
+    def _resolve(
+        self,
+        names: tuple[str, ...],
+        *,
+        megatron_nan_guard: str | None = "off",
+        scenario_name: str = "piper_megatron_stock",
+    ):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name=scenario_name,
+                    arm_names=names,
+                    out_dir=Path("/tmp/nan-guard-test"),
+                    ac_mode="none",
+                    megatron_nan_guard=megatron_nan_guard,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def _refused_before_any_probe(
+        self, pattern: str, scenario_name: str, **keywords
+    ) -> None:
+        def never(*args, **kwargs):
+            raise AssertionError("a host probe ran for a refused request")
+
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
+        ):
+            with self.assertRaisesRegex(ValueError, pattern):
+                _resolve_run(
+                    RunRequest(
+                        gpu="0",
+                        scenario_name=scenario_name,
+                        out_dir=Path("/tmp/nan-guard-test"),
+                        ac_mode="none",
+                        **keywords,
+                    ),
+                    {"PATH": os.environ["PATH"]},
+                )
+
+    def test_off_without_a_stock_megatron_arm_is_refused_before_any_probe(
+        self,
+    ) -> None:
+        """A TorchTitan-only run gives the value nothing to reach."""
+        for scenario_name, names in (
+            ("piper1b_rope", ("baseline",)),
+            ("piper_megatron_stock", ("titan_stock",)),
+        ):
+            with self.subTest(scenario=scenario_name):
+                self._refused_before_any_probe(
+                    "reaches no arm",
+                    scenario_name,
+                    arm_names=names,
+                    megatron_nan_guard="off",
+                )
+
+    def test_off_with_the_tuned_megatron_arm_is_refused_before_any_probe(
+        self,
+    ) -> None:
+        """The tuned driver has no guard to turn off, so a run holding it
+        would record ``off`` for an arm the value never reached. Its
+        refusal names the arm and the repair, and it wins over the
+        no-arm refusal when both would apply."""
+        for names in (("baseline",), ("baseline", "titan_stock"), ()):
+            with self.subTest(arms=names):
+                self._refused_before_any_probe(
+                    r"requested with baseline, whose driver "
+                    r"benchmarks/e2e/megatron/train.py has no NaN guard",
+                    "piper1b_megatron",
+                    arm_names=names,
+                    megatron_nan_guard="off",
+                )
+
+    def test_an_unknown_value_is_refused(self) -> None:
+        self._refused_before_any_probe(
+            "unknown megatron nan guard",
+            "piper_megatron_stock",
+            arm_names=("baseline",),
+            megatron_nan_guard="false",
+        )
+
+    def test_off_reaches_the_stock_command_and_not_the_titan_one(self) -> None:
+        """A mixed selection is legal: the stock arm gets Megatron's own
+        token, once, ahead of the harness group, and the titan arm gets
+        nothing."""
+        resolved = self._resolve(("baseline", "titan_stock"))
+        self.assertEqual(resolved[13], "off")
+        commands = resolved[6]
+        stock = commands["baseline"]
+        self.assertEqual(stock.count(NO_NAN_CHECK), 1)
+        self.assertLess(stock.index(NO_NAN_CHECK), stock.index("--bench-arm-dir"))
+        self.assertNotIn(NO_NAN_CHECK, commands["titan_stock"])
+
+    def test_a_stock_only_subset_passes(self) -> None:
+        resolved = self._resolve(("baseline",))
+        self.assertEqual([arm.name for arm in resolved[2]], ["baseline"])
+        self.assertEqual(resolved[13], "off")
+
+    def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
+        for requested in (None, "on"):
+            with self.subTest(requested=requested):
+                resolved = self._resolve(
+                    ("baseline", "titan_stock"), megatron_nan_guard=requested
+                )
+                self.assertEqual(resolved[13], "on")
+                for name, command in resolved[6].items():
+                    self.assertNotIn(NO_NAN_CHECK, command, name)
+
+    def test_the_banner_names_the_value(self) -> None:
+        """The banner names every comparability boundary, and this value
+        is one."""
+        events: list[str] = []
+
+        def failing_process(command, **kwargs):
+            kwargs["stdout"].write("nothing trained\n")
+            return SimpleNamespace(returncode=1)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            with self.assertRaises(RuntimeError):
+                execute_run(
+                    RunRequest(
+                        gpu="0",
+                        scenario_name="piper_megatron_stock",
+                        arm_names=("baseline",),
+                        out_dir=Path(temporary) / "run",
+                        ac_mode="none",
+                        megatron_nan_guard="off",
+                    ),
+                    event_handler=lambda event: events.append(
+                        event.message if event.kind == "summary" else ""
+                    ),
+                    process_runner=failing_process,
+                    environment={"PATH": os.environ["PATH"]},
+                )
+        self.assertIn("megatron nan guard: off", events)
+
+
 class ParallelizeTests(unittest.TestCase):
     def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
         for factory in (

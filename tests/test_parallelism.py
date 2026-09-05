@@ -35,6 +35,7 @@ from benchmarks.e2e.parallelism import (
     MAX_WORLD_SIZE,
     MEGATRON_FSDP_LAUNCHERS,
     MEGATRON_LAUNCHERS,
+    NAN_GUARD_LAUNCHERS,
     REPLICATE_ONLY_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
@@ -938,6 +939,24 @@ class MegatronLauncherSetTest(unittest.TestCase):
 
     def test_the_set_does_not_hold_the_titan_launcher(self):
         self.assertNotIn("torchtitan", MEGATRON_LAUNCHERS)
+
+    def test_the_nan_guard_set_names_the_stock_launcher_alone(self):
+        """``--megatron-nan-guard`` reaches these launchers and no other.
+
+        A subset of the Megatron set, because the guard is Megatron's; and
+        the tuned driver is not in it, because it never calls
+        ``validate_result`` and has no guard under either value. A launcher
+        the registry does not declare would be a stale name here.
+        """
+        self.assertEqual(NAN_GUARD_LAUNCHERS, frozenset({"megatron_stock"}))
+        self.assertTrue(NAN_GUARD_LAUNCHERS <= MEGATRON_LAUNCHERS)
+        self.assertNotIn("megatron", NAN_GUARD_LAUNCHERS)
+        launchers = {
+            arm.launcher
+            for scenario in SCENARIOS.values()
+            for arm in scenario.arms
+        }
+        self.assertEqual(NAN_GUARD_LAUNCHERS - launchers, set())
 
     def test_rule_five_reads_every_member_of_the_set(self):
         """Each Megatron-LM launcher alone must trip rule 5.

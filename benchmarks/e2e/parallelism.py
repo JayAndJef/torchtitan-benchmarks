@@ -202,6 +202,23 @@ MEGATRON_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
 REPLICATE_ONLY_LAUNCHERS = frozenset({"megatron"})
 
 
+# The ``Arm.launcher`` values whose driver runs stock Megatron's NaN/Inf
+# guard, ``check_for_nan_in_loss_and_grad``. ``--megatron-nan-guard`` reaches
+# these alone, and ``off`` is refused for a run that selects any other
+# megatron launcher.
+#
+# ``megatron_stock`` hands the run to Megatron's own ``pretrain``, whose
+# ``loss_func`` and ``DistributedDataParallel`` both read the field. The
+# tuned driver, ``benchmarks/e2e/megatron/train.py``, never calls
+# ``validate_result`` and builds no such check, so it has no guard under
+# either value: a run that recorded ``off`` for it would name a treatment
+# the arm never had.
+#
+# **Declared one by one, for the reason MEGATRON_LAUNCHERS is.** A new
+# launcher is an edit here rather than a silent classification.
+NAN_GUARD_LAUNCHERS = frozenset({"megatron_stock"})
+
+
 # The ``Arm.launcher`` values whose sharded parity goes through
 # Megatron-FSDP. Rule 17 reads this set.
 #

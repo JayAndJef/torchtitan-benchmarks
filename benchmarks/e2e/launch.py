@@ -25,6 +25,7 @@ from benchmarks.e2e.parallelism import (
 )
 from benchmarks.e2e.registry import (
     DEFAULT_COMPILE_MODE,
+    DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
@@ -177,12 +178,13 @@ def command_for_arm(
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
+    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
 ) -> list[str]:
     """Build the training command for one arm, dispatching on its launcher.
 
-    ``model_size``, ``parallelism`` and ``megatron_p2p_sync`` are
-    keyword-only: the six positional parameters are the historical
-    signature and callers pass them positionally.
+    ``model_size``, ``parallelism``, ``megatron_p2p_sync`` and
+    ``megatron_nan_guard`` are keyword-only: the six positional parameters
+    are the historical signature and callers pass them positionally.
 
     ``parallelism`` defaults to ``TRIVIAL_SPEC`` rather than being required,
     and the asymmetry with ``manifest_data`` -- which takes its parallelism
@@ -199,6 +201,11 @@ def command_for_arm(
     pipeline message through Megatron, so its argv is untouched under
     either value; ``_resolve_run`` is what refuses ``off`` for a run that
     holds no megatron arm.
+
+    ``megatron_nan_guard`` defaults to ``on`` for the same reason, and it
+    reaches the stock megatron command alone. The tuned driver has no NaN
+    guard, so ``_megatron_command`` refuses ``off`` outright, and a
+    TorchTitan argv is untouched under either value.
     """
     if arm.launcher == "megatron":
         return _megatron_command(
@@ -211,6 +218,7 @@ def command_for_arm(
             model_size,
             parallelism,
             megatron_p2p_sync,
+            megatron_nan_guard,
         )
     if arm.launcher == "megatron_stock":
         return _megatron_stock_command(
@@ -223,6 +231,7 @@ def command_for_arm(
             model_size,
             parallelism,
             megatron_p2p_sync,
+            megatron_nan_guard,
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
@@ -344,6 +353,7 @@ def _megatron_command(
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
+    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
 ) -> list[str]:
     """Launch command for the Megatron baseline driver.
 
@@ -363,6 +373,11 @@ def _megatron_command(
     under ``out/`` records, and it is refused at ``pp`` 1, where there is no
     pipeline message. ``_resolve_run`` refuses that first; it is restated
     here for a caller that builds a command line without a run.
+
+    ``megatron_nan_guard`` sends nothing at either value, and ``off`` is
+    refused: this driver never calls ``validate_result`` and has no NaN
+    guard, so an argv built under ``off`` would be the ``on`` argv under a
+    label the run did not earn. ``_resolve_run`` refuses it first too.
 
     Above one rank the driver reads ``RANK``, ``WORLD_SIZE`` and
     ``LOCAL_RANK`` from torchrun, passes ``pipeline_model_parallel_size`` to
@@ -402,6 +417,12 @@ def _megatron_command(
             f"{arm.name}: megatron p2p sync {megatron_p2p_sync!r} was "
             "requested at pp 1, where there is no pipeline message to "
             "synchronize"
+        )
+    if megatron_nan_guard != DEFAULT_MEGATRON_NAN_GUARD:
+        raise ValueError(
+            f"{arm.name}: megatron nan guard {megatron_nan_guard!r} was "
+            "requested for the tuned driver, which has no NaN guard to turn "
+            "off; the argv would carry a treatment the run did not have"
         )
     args = [
         *_megatron_launcher(parallelism),
@@ -466,11 +487,12 @@ def _megatron_stock_command(
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
+    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
 ) -> list[str]:
     """Launch command for the stock Megatron-LM driver.
 
     This function owns three things and no more: the launcher, the ``python
-    -m`` target, and the four values ``stock_megatron_flags`` cannot read
+    -m`` target, and the five values ``stock_megatron_flags`` cannot read
     off a workload. ``benchmarks/e2e/megatron_stock/flags.py`` builds every
     flag, both the Megatron group Megatron's own parser reads and the
     ``--bench-*`` group the driver adds through Megatron's
@@ -558,5 +580,8 @@ def _megatron_stock_command(
             # own messages; a run never reaches either, because
             # _resolve_run refuses both first.
             megatron_p2p_sync=megatron_p2p_sync,
+            # Megatron's own token under off, nothing under on; flags.py
+            # refuses an unknown value with its own message.
+            megatron_nan_guard=megatron_nan_guard,
         ),
     ]

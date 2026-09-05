@@ -1329,6 +1329,40 @@ class GoldenCommandTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no pipeline message"):
             self._p2p_command("off")
 
+    def _nan_guard_command(self, megatron_nan_guard: str, parallelism=None):
+        scenario = scenario_by_name(GOLDEN_MEGATRON_ARM[0])
+        extra = {} if parallelism is None else {"parallelism": parallelism}
+        return command_for_arm(
+            scenario.workload,
+            scenario.arm(GOLDEN_MEGATRON_ARM[1]),
+            Path("/tmp/arm-dir"),
+            (),
+            "default",
+            "none",
+            model_size="normal",
+            megatron_nan_guard=megatron_nan_guard,
+            **extra,
+        )
+
+    def test_the_default_nan_guard_is_the_pre_option_tuned_argv(self) -> None:
+        """``on`` by name builds the argv a caller that passes nothing
+        builds, at the trivial spec and at pp 2. The tuned driver takes no
+        token at either value."""
+        self.assertEqual(
+            self._nan_guard_command("on")[1:], _golden_megatron_tail("normal")
+        )
+        self.assertEqual(
+            self._nan_guard_command("on", GOLDEN_TITAN_PP2_SPEC)[1:],
+            _golden_megatron_pp2_tail("normal"),
+        )
+
+    def test_the_nan_guard_off_is_refused_for_the_tuned_driver(self) -> None:
+        """It has no guard to turn off, at any mesh."""
+        for parallelism in (None, GOLDEN_TITAN_PP2_SPEC):
+            with self.subTest(pp=1 if parallelism is None else parallelism.pp):
+                with self.assertRaisesRegex(ValueError, "no NaN guard"):
+                    self._nan_guard_command("off", parallelism)
+
     def test_both_engines_are_told_the_same_pipeline(self) -> None:
         """One spec, two spellings, and they must not drift apart.
 
@@ -1568,7 +1602,11 @@ TEST_CENSUS = {
     # +5 with --megatron-p2p-sync: it reaches the request, defaults to
     # unrequested, refuses an unknown value, takes no environment variable,
     # and the sweep skips a scenario with no megatron arm under off.
-    "test_cli": 25,
+    # +5 with --megatron-nan-guard, the same five: it reaches the request,
+    # defaults to unrequested, refuses an unknown value, takes no
+    # environment variable, and the sweep runs the stock scenario alone
+    # under off, printing each skipped scenario's own refusal.
+    "test_cli": 30,
     # 19 pre-fix, +2 for the two halves of the correctness verdict: a failed
     # gate fragment beside a clean exit code, and a timing worker that dies
     # after it writes. +2 more for the arm that measured nothing, as a
@@ -1939,7 +1977,9 @@ TEST_CENSUS = {
     # +3 with the p2p half of arm rule 12: the driver's p2p line equal to
     # the profile's marker at both values, no line asked below a
     # pipeline, and the tuned line not satisfying this profile.
-    "test_megatron_stock_launch": 61,
+    # +2 with --megatron-nan-guard: the off argv is exactly its two parts
+    # at the trivial spec and at the mesh, and the titan arm gets no token.
+    "test_megatron_stock_launch": 63,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2022,7 +2062,12 @@ TEST_CENSUS = {
     # +2 with the manifest field: a resume inheriting the recorded value
     # and refusing another, and a schema-12 directory reading as on.
     # +1 that execute_run hands the resolved value to validate_arm.
-    "test_runner": 75,
+    # +7 with --megatron-nan-guard: off refused without a stock arm and
+    # beside the tuned arm before any host probe, an unknown value
+    # refused, off reaching the stock command and not the titan one, a
+    # stock-only subset passing, the default adding no token, and the
+    # banner naming it.
+    "test_runner": 82,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2092,7 +2137,9 @@ TEST_CENSUS = {
     # +1 for the planned sharded cell at expert degree 1, whose mesh an
     # implementation that read ep rather than the parity would get wrong
     # while every other sharded row still passed.
-    "test_parallelism": 154,
+    # +1 with NAN_GUARD_LAUNCHERS: it names the stock launcher alone, sits
+    # inside MEGATRON_LAUNCHERS, and names no launcher the registry lacks.
+    "test_parallelism": 155,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the six CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -2171,7 +2218,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1814
+TEST_CENSUS_TOTAL = 1829
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

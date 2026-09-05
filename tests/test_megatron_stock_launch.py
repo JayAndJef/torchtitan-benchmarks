@@ -235,6 +235,7 @@ def _command(
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     local_batch_size: int | None = None,
     megatron_p2p_sync: str = "on",
+    megatron_nan_guard: str = "on",
 ) -> list[str]:
     scenario = scenario_by_name(SCENARIO_NAME)
     workload = scenario.workload
@@ -250,6 +251,7 @@ def _command(
         model_size=model_size,
         parallelism=parallelism,
         megatron_p2p_sync=megatron_p2p_sync,
+        megatron_nan_guard=megatron_nan_guard,
     )
 
 
@@ -453,6 +455,7 @@ class StockArgvTests(unittest.TestCase):
         model_size="1b",
         compile_mode="default",
         megatron_p2p_sync="on",
+        megatron_nan_guard="on",
     ):
         from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
@@ -468,7 +471,41 @@ class StockArgvTests(unittest.TestCase):
                 model_size=model_size,
                 compile_mode=compile_mode,
                 megatron_p2p_sync=megatron_p2p_sync,
+                megatron_nan_guard=megatron_nan_guard,
             )
+        )
+
+    def test_the_nan_guard_off_argv_is_exactly_its_two_parts(self) -> None:
+        """The value crosses ``launch.py`` untouched into ``flags.py``, at
+        the trivial spec and at the mesh: the guard runs at every mesh."""
+        for parallelism, local_batch_size in ((TRIVIAL_SPEC, None), (MESH, 32)):
+            with self.subTest(pp=parallelism.pp):
+                command = _command(
+                    _stock_arm(),
+                    parallelism=parallelism,
+                    local_batch_size=local_batch_size,
+                    megatron_nan_guard="off",
+                )
+                head = command[: command.index(STOCK_MEGATRON_DRIVER_MODULE) + 1]
+                self.assertEqual(
+                    command,
+                    head
+                    + self._flags(
+                        parallelism,
+                        local_batch_size=local_batch_size,
+                        megatron_nan_guard="off",
+                    ),
+                )
+                self.assertEqual(
+                    command.count("--no-check-for-nan-in-loss-and-grad"), 1
+                )
+                self.assertNotIn("--no-check-for-nan-in-loss-and-grad", head)
+
+    def test_the_titan_arm_gets_no_token_under_nan_guard_off(self) -> None:
+        """TorchTitan has no Megatron NaN guard."""
+        self.assertEqual(
+            _command(_titan_arm(), megatron_nan_guard="off"),
+            _command(_titan_arm()),
         )
 
     def test_the_p2p_sync_off_argv_is_exactly_its_two_parts(self) -> None:

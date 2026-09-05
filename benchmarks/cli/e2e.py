@@ -69,12 +69,19 @@ from benchmarks.e2e.registry import (
     COMPILE_MODES,
     DEFAULT_AC_MODE,
     DEFAULT_COMPILE_MODE,
+    DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     SCENARIOS,
 )
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
-from benchmarks.e2e.runner import RunRequest, RunResult, execute_run
+from benchmarks.e2e.runner import (
+    RunRequest,
+    RunResult,
+    execute_run,
+    megatron_nan_guard_refusal,
+)
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
 
@@ -118,6 +125,12 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     never passed. It defaults to ``None`` for the reason ``--compile-mode``
     does: a resume inherits the recorded value, and a fresh run takes
     ``on``.
+
+    ``--megatron-nan-guard`` takes no environment variable for the same
+    reason. Its ``off`` value is legal beside a stock megatron arm alone,
+    so it has to agree with ``--scenario`` and with ``--arm``, and an
+    exported value would fail a plain titan run on a flag nobody passed.
+    It defaults to ``None`` as the option above does.
     """
     options = [
         click.option(
@@ -261,6 +274,21 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "on is stock Megatron. off needs --pp above 1 and a "
                 "megatron arm; TorchTitan arms receive nothing. Results "
                 "are only comparable within one value."
+            ),
+        ),
+        # No envvar; the docstring above gives the reason.
+        click.option(
+            "--megatron-nan-guard",
+            "megatron_nan_guard",
+            type=click.Choice(MEGATRON_NAN_GUARD_MODES),
+            help=(
+                "Whether stock Megatron checks every loss and gradient for "
+                f"NaN and Inf [default: {DEFAULT_MEGATRON_NAN_GUARD}]. on "
+                "is stock Megatron. off sends Megatron's own "
+                "--no-check-for-nan-in-loss-and-grad to the stock megatron "
+                "arm; it is refused beside the tuned megatron arm, which "
+                "has no such guard, and TorchTitan arms receive nothing. "
+                "Results are only comparable within one value."
             ),
         ),
     ]
@@ -448,6 +476,9 @@ def run_all_command(
     megatron_p2p_sync = (
         options.get("megatron_p2p_sync") or DEFAULT_MEGATRON_P2P_SYNC
     )
+    megatron_nan_guard = (
+        options.get("megatron_nan_guard") or DEFAULT_MEGATRON_NAN_GUARD
+    )
     for name, scenario in SCENARIOS.items():
         # A sweep skips a scenario that declines either global axis, rather
         # than aborting: the axis restriction is a declaration, not a fault.
@@ -477,6 +508,13 @@ def run_all_command(
                 "reaches no arm of this scenario (every arm runs on "
                 "TorchTitan)"
             )
+            continue
+        # The NaN-guard value reaches the stock megatron arm alone, and
+        # _resolve_run would refuse a scenario it cannot reach. The sweep
+        # prints that same reason and skips, as it does above.
+        refusal = megatron_nan_guard_refusal(scenario.arms, megatron_nan_guard)
+        if refusal is not None:
+            click.echo(f"\n===== scenario: {name} =====\nskipped: {refusal}")
             continue
         click.echo(f"\n===== scenario: {name} =====")
         scenario_options: dict[str, Any] = {**options, "scenario": name}

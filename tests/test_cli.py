@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.cli.e2e import run_all_command, run_command
 from benchmarks.cli.main import cli
-from benchmarks.e2e.parallelism import MEGATRON_LAUNCHERS
+from benchmarks.e2e.parallelism import MEGATRON_LAUNCHERS, NAN_GUARD_LAUNCHERS
 from benchmarks.e2e.registry import PIPER_1B_ROPE, SCENARIOS
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
@@ -528,6 +528,106 @@ class CliTests(unittest.TestCase):
         )
         self.assertIn(
             "skipped: --megatron-p2p-sync 'off' reaches no arm", result.output
+        )
+
+    def test_megatron_nan_guard_reaches_the_request(self) -> None:
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(
+                cli, ["run", "2", "--megatron-nan-guard", "off"]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_args.args[0].megatron_nan_guard, "off")
+
+    def test_megatron_nan_guard_defaults_to_unrequested(self) -> None:
+        """``None`` is what lets a resume inherit the recorded value."""
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(cli, ["run", "2"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(execute.call_args.args[0].megatron_nan_guard)
+
+    def test_an_unknown_megatron_nan_guard_value_is_rejected(self) -> None:
+        result = self.runner.invoke(
+            cli, ["run", "2", "--megatron-nan-guard", "false"]
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Invalid value", result.output)
+
+    def test_megatron_nan_guard_takes_no_environment_variable(self) -> None:
+        """Its ``off`` value has to agree with ``--scenario`` and ``--arm``.
+
+        An exported value would make a plain titan run fail a refusal
+        naming a flag the operator never passed.
+        """
+        for command in (run_command, run_all_command):
+            parameters = {
+                option: parameter
+                for parameter in command.params
+                for option in parameter.opts
+            }
+            with self.subTest(command=command.name):
+                self.assertIsNone(parameters["--megatron-nan-guard"].envvar)
+
+    def test_all_scenarios_at_nan_guard_off_runs_the_stock_scenario_alone(
+        self,
+    ) -> None:
+        """The value reaches the stock megatron arm alone.
+
+        ``_resolve_run`` refuses ``off`` for a run with no such arm, and for
+        a run holding the tuned arm, so the sweep would abort at its first
+        titan-only entry. It skips both kinds with the refusal's own
+        reason instead, as it skips a scenario that declines a mode.
+        """
+        holds_stock = [
+            name
+            for name, scenario in SCENARIOS.items()
+            if any(arm.launcher in NAN_GUARD_LAUNCHERS for arm in scenario.arms)
+        ]
+        self.assertEqual(holds_stock, ["piper_megatron_stock"])
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(
+                    cli,
+                    [
+                        "run-all",
+                        "0",
+                        "--all-scenarios",
+                        "--ac",
+                        "none",
+                        "--megatron-nan-guard",
+                        "off",
+                    ],
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            [request.scenario_name for request in requests], holds_stock
+        )
+        self.assertEqual(
+            {request.megatron_nan_guard for request in requests}, {"off"}
+        )
+        # Both refusals appear, each on the scenario it names.
+        self.assertIn(
+            "skipped: --megatron-nan-guard 'off' reaches no arm", result.output
+        )
+        self.assertIn(
+            "skipped: --megatron-nan-guard 'off' was requested with baseline, "
+            "whose driver benchmarks/e2e/megatron/train.py has no NaN guard",
+            result.output,
         )
 
     def test_run_all_records_evaluation_failure_for_resume(self) -> None:

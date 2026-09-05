@@ -8,7 +8,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from benchmarks.artifacts.layout import _default_output_dir, archive_incomplete_arm
 from benchmarks.artifacts.manifests import (
@@ -25,6 +25,7 @@ from benchmarks.artifacts.run_state import (
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
+    NAN_GUARD_LAUNCHERS,
     ParallelismSpec,
     TRIVIAL_SPEC,
     validate_parallelism,
@@ -34,8 +35,10 @@ from benchmarks.e2e.registry import (
     COMPILE_MODES,
     DEFAULT_AC_MODE,
     DEFAULT_COMPILE_MODE,
+    DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MODEL_SIZE,
+    MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     SCENARIOS,
     UNCOMPILED_COMPILE_MODES,
@@ -119,6 +122,10 @@ class RunRequest:
     # the way ``compile_mode`` is a treatment of the blocks, and
     # ``execution_model`` names degrees rather than mechanisms.
     megatron_p2p_sync: str | None = None
+    # Stock Megatron's NaN/Inf guard. ``None`` means "not requested", as
+    # above: a resume inherits the recorded value and a fresh run takes
+    # ``on``. It reaches the stock megatron launcher alone.
+    megatron_nan_guard: str | None = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +207,7 @@ def _resolve_run(
     ParallelismSpec,
     bool,
     str,
+    str,
 ]:
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
@@ -269,6 +277,17 @@ def _resolve_run(
             if request.megatron_p2p_sync is None
             else request.megatron_p2p_sync
         )
+        # Schema <= 13 manifests predate the NaN-guard axis, and every one
+        # of them ran stock Megatron's own guard.
+        megatron_nan_guard = (
+            str(
+                existing_manifest.get(
+                    "megatron_nan_guard", DEFAULT_MEGATRON_NAN_GUARD
+                )
+            )
+            if request.megatron_nan_guard is None
+            else request.megatron_nan_guard
+        )
     else:
         workload = workload_with_overrides(
             scenario,
@@ -284,10 +303,18 @@ def _resolve_run(
         megatron_p2p_sync = (
             request.megatron_p2p_sync or DEFAULT_MEGATRON_P2P_SYNC
         )
+        megatron_nan_guard = (
+            request.megatron_nan_guard or DEFAULT_MEGATRON_NAN_GUARD
+        )
     if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
         raise ValueError(
             f"unknown megatron p2p sync {megatron_p2p_sync!r}. Available: "
             f"{', '.join(MEGATRON_P2P_SYNC_MODES)}"
+        )
+    if megatron_nan_guard not in MEGATRON_NAN_GUARD_MODES:
+        raise ValueError(
+            f"unknown megatron nan guard {megatron_nan_guard!r}. Available: "
+            f"{', '.join(MEGATRON_NAN_GUARD_MODES)}"
         )
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
@@ -386,6 +413,14 @@ def _resolve_run(
                 f"{DEFAULT_MEGATRON_P2P_SYNC!r}"
             )
 
+    # The NaN-guard treatment, refused parent-side through the helper the
+    # --all-scenarios sweep reads too, so a skipped scenario and a refused
+    # run state one reason. Legal at every mesh; what decides it is which
+    # launchers the selection holds.
+    refusal = megatron_nan_guard_refusal(arms, megatron_nan_guard)
+    if refusal is not None:
+        raise ValueError(refusal)
+
     if scenario.regions:
         # A regioned scenario declares the per-block regions of the model it
         # actually runs. Three runs declare none instead. A shape whose block
@@ -445,6 +480,7 @@ def _resolve_run(
             model_size=model_size,
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
+            megatron_nan_guard=megatron_nan_guard,
         )
         for arm in arms
     }
@@ -495,7 +531,52 @@ def _resolve_run(
         parallelism,
         resumed,
         megatron_p2p_sync,
+        megatron_nan_guard,
     )
+
+
+def megatron_nan_guard_refusal(
+    arms: Iterable[Arm], megatron_nan_guard: str
+) -> str | None:
+    """Why ``--megatron-nan-guard off`` cannot reach ``arms``, or ``None``.
+
+    Two refusals, each naming its repair, and the first is checked first
+    because it is the narrower fact. A tuned megatron arm has no guard to
+    turn off, so a run holding one would record ``off`` for an arm the
+    value never reached; ``run --arm`` narrows the selection past it. A
+    run with no stock megatron arm at all gives the value nothing to
+    reach, which is the ``--megatron-p2p-sync`` refusal with a smaller
+    launcher set. ``_resolve_run`` raises the string, and the
+    ``--all-scenarios`` sweep prints it and skips the scenario.
+
+    ``on`` is refused nowhere: it is stock Megatron, and every arm's argv
+    is what it was before the option existed.
+    """
+    if megatron_nan_guard == DEFAULT_MEGATRON_NAN_GUARD:
+        return None
+    arms = tuple(arms)
+    without_guard = [
+        arm.name
+        for arm in arms
+        if arm.launcher in MEGATRON_LAUNCHERS
+        and arm.launcher not in NAN_GUARD_LAUNCHERS
+    ]
+    if without_guard:
+        return (
+            f"--megatron-nan-guard {megatron_nan_guard!r} was requested with "
+            f"{', '.join(without_guard)}, whose driver "
+            "benchmarks/e2e/megatron/train.py has no NaN guard to turn off; "
+            "select a run without it (run --arm ...), or leave the option "
+            f"at {DEFAULT_MEGATRON_NAN_GUARD!r}"
+        )
+    if not any(arm.launcher in NAN_GUARD_LAUNCHERS for arm in arms):
+        return (
+            f"--megatron-nan-guard {megatron_nan_guard!r} reaches no arm of "
+            f"this run: {', '.join(arm.name for arm in arms)} run on "
+            "TorchTitan, which has no Megatron NaN guard; select the stock "
+            f"megatron arm, or leave the option at {DEFAULT_MEGATRON_NAN_GUARD!r}"
+        )
+    return None
 
 
 def execute_run(
@@ -521,6 +602,7 @@ def execute_run(
         parallelism,
         resumed,
         megatron_p2p_sync,
+        megatron_nan_guard,
     ) = _resolve_run(request, host_environment)
 
     if resumed:
@@ -569,6 +651,9 @@ def execute_run(
         f"dense sharding {parallelism.dense_sharding})",
     )
     _emit(event_handler, "summary", f"megatron p2p sync: {megatron_p2p_sync}")
+    _emit(
+        event_handler, "summary", f"megatron nan guard: {megatron_nan_guard}"
+    )
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
