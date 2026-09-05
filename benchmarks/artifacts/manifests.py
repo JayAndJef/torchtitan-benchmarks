@@ -38,6 +38,16 @@ has no flag for the field. It is its own field and not a key of the
 rather than a degree, the way ``compile_mode`` is a treatment of the blocks
 and not a field of the workload.
 
+Schema 14 adds ``megatron_nan_guard`` beside it, gated the same way: an
+omitted value on resume inherits the recorded one, a different value is
+refused, and a schema-13 manifest, which carries no key, reads as ``on``.
+That reading is a record too: no run before this schema could turn stock
+Megatron's ``check_for_nan_in_loss_and_grad`` off through the harness. It
+is its own field for the reason the field above is one -- a treatment of
+the stock engine's loss and gradient checks, not a degree -- and it is a
+comparability boundary because the 2026-09-05 A/B measured it at +12% in
+tokens/s on the stock arm.
+
 What *is* split out is everything engine-neutral: output layout and the
 atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
 sample summarization is ``summaries.py``. This module is exactly the part
@@ -97,6 +107,7 @@ from benchmarks.e2e.parallelism import (
     execution_model,
 )
 from benchmarks.e2e.registry import (
+    DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MODEL_SIZE,
     PIPER_1B_REGIONS,
@@ -113,7 +124,7 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 13
+MANIFEST_SCHEMA_VERSION = 14
 
 # What the ``tps`` figure in every step log line, and therefore
 # ``stable_tokens_per_second`` in ``results.json``, counts.
@@ -172,6 +183,8 @@ def manifest_data(
     # defaulted it would record ``on`` for a run that turned the sync off,
     # and the two are a comparability boundary.
     megatron_p2p_sync: str,
+    # No default, for the same reason again.
+    megatron_nan_guard: str,
 ) -> dict[str, Any]:
     # Recorded canonically, so a fresh manifest never carries a retired name.
     model_size = canonical_size_name(model_size)
@@ -194,6 +207,7 @@ def manifest_data(
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
         "parallelism": _parallelism_record(scenario, parallelism),
         "megatron_p2p_sync": megatron_p2p_sync,
+        "megatron_nan_guard": megatron_nan_guard,
         "throughput_definition": THROUGHPUT_DEFINITION,
         "execution_model": execution_model(parallelism),
     }
@@ -213,6 +227,7 @@ def write_manifest(
     *,
     parallelism: ParallelismSpec,
     megatron_p2p_sync: str,
+    megatron_nan_guard: str,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -228,6 +243,7 @@ def write_manifest(
             model_size,
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
+            megatron_nan_guard=megatron_nan_guard,
         ),
     )
 
@@ -255,6 +271,7 @@ def _resume_mismatches(
     *,
     parallelism: ParallelismSpec,
     megatron_p2p_sync: str,
+    megatron_nan_guard: str,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -277,6 +294,13 @@ def _resume_mismatches(
         != megatron_p2p_sync
     ):
         mismatches.append("megatron_p2p_sync")
+    # The same defaulted lookup: a schema <= 13 manifest carries no key,
+    # and every such run kept stock Megatron's own NaN guard.
+    if (
+        manifest.get("megatron_nan_guard", DEFAULT_MEGATRON_NAN_GUARD)
+        != megatron_nan_guard
+    ):
+        mismatches.append("megatron_nan_guard")
     # Defaulted lookup rather than a generic entry: schema <= 8 output
     # directories predate the axis and are still resumable as the 1B shape.
     # Both sides go through canonical_size_name, because 42 e2e manifests on

@@ -747,6 +747,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             "normal",
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
+            megatron_nan_guard="on",
         )
         self.assertEqual(recorded["model_size"], "1b")
         self.assertEqual(recorded["model_shape"]["name"], "1b")
@@ -781,6 +782,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                     "1b",
                     parallelism=TRIVIAL_SPEC,
                     megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
                 )
                 # Written by hand, because manifest_data canonicalises: an
                 # on-disk manifest from before the rename says "normal".
@@ -798,6 +800,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                         requested,
                         parallelism=TRIVIAL_SPEC,
                         megatron_p2p_sync="on",
+                        megatron_nan_guard="on",
                     ),
                     [],
                 )
@@ -814,6 +817,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             "normal",
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
+            megatron_nan_guard="on",
         )
         self.assertEqual(
             _resume_mismatches(
@@ -828,6 +832,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                 "huge",
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
+                megatron_nan_guard="on",
             ),
             ["model_size"],
         )
@@ -1224,7 +1229,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 13)
+        self.assertEqual(manifest["schema_version"], 14)
         self.assertEqual(manifest["model_size"], "huge")
         self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=1024))
         # Rule 7's structural matcher cannot identify a 1-layer block graph,
@@ -1309,6 +1314,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                 "normal",
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
+                megatron_nan_guard="on",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             del manifest["model_size"]
@@ -1331,6 +1337,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                     "normal",
                     parallelism=TRIVIAL_SPEC,
                     megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
                 ),
                 [],
             )
@@ -1348,6 +1355,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                     "huge",
                     parallelism=TRIVIAL_SPEC,
                     megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
                 ),
             )
 

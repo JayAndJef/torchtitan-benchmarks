@@ -2067,7 +2067,9 @@ TEST_CENSUS = {
     # refused, off reaching the stock command and not the titan one, a
     # stock-only subset passing, the default adding no token, and the
     # banner naming it.
-    "test_runner": 82,
+    # +2 with the manifest field: a resume inheriting the recorded value
+    # and refusing another, and a schema-13 directory reading as on.
+    "test_runner": 84,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2169,7 +2171,12 @@ TEST_CENSUS = {
     # TypeError, the same value resuming and a different one refused both
     # ways, the value alone refusing a resume, and a schema-12 directory
     # reading as on.
-    "test_parallelism_plumbing": 71,
+    # +6 with manifest schema 14: the NaN-guard default recorded rather
+    # than left out, the value round-tripping through JSON, an omitted
+    # value a TypeError, the same value resuming and a different one
+    # refused both ways, the value alone refusing a resume, and a
+    # schema-13 directory reading as on.
+    "test_parallelism_plumbing": 77,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2218,7 +2225,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1829
+TEST_CENSUS_TOTAL = 1837
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

@@ -4,7 +4,7 @@
 schedules and the seventeen validator rules. This module covers the path the
 value takes: the ``<gpu>`` positional read as a device set, the six CLI
 options, ``RunRequest``, ``_resolve_run``, the child environment, the
-provenance query, the NUMA walk, and manifest schema 13.
+provenance query, the NUMA walk, and manifest schema 14.
 
 **The properties under test are mostly negative.** At the trivial spec every
 recorded fact and every environment variable has to be the one this repo has
@@ -473,9 +473,12 @@ class AffinityDeviceTests(unittest.TestCase):
         )
 
 
-class ManifestSchemaThirteenTests(unittest.TestCase):
+class ManifestSchemaFourteenTests(unittest.TestCase):
     def _manifest(
-        self, parallelism: ParallelismSpec, megatron_p2p_sync: str = "on"
+        self,
+        parallelism: ParallelismSpec,
+        megatron_p2p_sync: str = "on",
+        megatron_nan_guard: str = "on",
     ) -> dict:
         scenario = scenario_by_name("piper1b_rope")
         return manifest_data(
@@ -490,11 +493,12 @@ class ManifestSchemaThirteenTests(unittest.TestCase):
             "1b",
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
+            megatron_nan_guard=megatron_nan_guard,
         )
 
-    def test_the_schema_is_thirteen(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 13)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 13)
+    def test_the_schema_is_fourteen(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 14)
+        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 14)
 
     def test_the_trivial_spec_round_trips_through_json(self) -> None:
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
@@ -597,6 +601,49 @@ class ManifestSchemaThirteenTests(unittest.TestCase):
                 parallelism=TRIVIAL_SPEC,
             )
 
+    def test_the_nan_guard_default_is_recorded_rather_than_left_out(
+        self,
+    ) -> None:
+        """A key that appears only under ``off`` would make a schema-14 run
+        at ``on`` and a schema-13 run look the same."""
+        recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
+        self.assertEqual(recorded["megatron_nan_guard"], "on")
+        # Its own field, not a key of the parallelism block: a treatment
+        # of the stock engine's checks, not a degree.
+        self.assertNotIn("megatron_nan_guard", recorded["parallelism"])
+
+    def test_the_nan_guard_value_round_trips_through_json(self) -> None:
+        recorded = json.loads(
+            json.dumps(self._manifest(TRIVIAL_SPEC, megatron_nan_guard="off"))
+        )
+        self.assertEqual(recorded["megatron_nan_guard"], "off")
+        self.assertEqual(recorded["megatron_p2p_sync"], "on")
+        # Not part of the execution model, so two runs of one mesh under
+        # the two values record the same string there.
+        self.assertEqual(
+            recorded["execution_model"],
+            self._manifest(TRIVIAL_SPEC)["execution_model"],
+        )
+
+    def test_an_omitted_nan_guard_is_a_type_error(self) -> None:
+        """A writer that defaulted it would record ``on`` for a run that
+        turned the guard off, and the two are a comparability boundary."""
+        scenario = scenario_by_name("piper1b_rope")
+        with self.assertRaises(TypeError):
+            manifest_data(
+                scenario,
+                (scenario.arm("baseline"),),
+                {"baseline": ["cmd"]},
+                "test-gpu",
+                _METADATA,
+                (),
+                "default",
+                "sac",
+                "1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+            )
+
 
 class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
     """The manifest describes the run it recorded, not a constant.
@@ -621,6 +668,7 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
             "1b",
             parallelism=parallelism,
             megatron_p2p_sync="on",
+            megatron_nan_guard="on",
         )
 
     def test_the_trivial_spec_records_the_string_it_always_recorded(self) -> None:
@@ -677,6 +725,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "1b",
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
+            megatron_nan_guard="on",
         )
         manifest["execution_model"] = "something-else-entirely"
         self.assertEqual(
@@ -692,6 +741,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "1b",
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
+                megatron_nan_guard="on",
             ),
             [],
         )
@@ -709,6 +759,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "1b",
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
+            megatron_nan_guard="on",
         )
         self.assertIn(
             "parallelism",
@@ -724,6 +775,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "1b",
                 parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
                 megatron_p2p_sync="on",
+                megatron_nan_guard="on",
             ),
         )
 
@@ -746,6 +798,7 @@ class ResumeParallelismTests(unittest.TestCase):
             "1b",
             parallelism=parallelism,
             megatron_p2p_sync="on",
+            megatron_nan_guard="on",
         )
 
     def _mismatches(self, manifest: dict, parallelism: ParallelismSpec):
@@ -761,6 +814,7 @@ class ResumeParallelismTests(unittest.TestCase):
             "1b",
             parallelism=parallelism,
             megatron_p2p_sync="on",
+            megatron_nan_guard="on",
         )
 
     def test_a_schema_nine_directory_still_resumes_as_single_gpu(self) -> None:
@@ -865,6 +919,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "1b",
             parallelism=self.PP2,
             megatron_p2p_sync=megatron_p2p_sync,
+            megatron_nan_guard="on",
         )
 
     def _mismatches(self, manifest: dict, megatron_p2p_sync: str) -> list[str]:
@@ -880,6 +935,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "1b",
             parallelism=self.PP2,
             megatron_p2p_sync=megatron_p2p_sync,
+            megatron_nan_guard="on",
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -912,6 +968,78 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
         manifest["schema_version"] = 12
         self.assertEqual(self._mismatches(manifest, "on"), [])
         self.assertIn("megatron_p2p_sync", self._mismatches(manifest, "off"))
+
+
+class ResumeMegatronNanGuardTests(unittest.TestCase):
+    """``--resume`` gates ``megatron_nan_guard`` the way it gates the p2p
+    value: the same value resumes, a different one is refused in either
+    direction, and a directory that predates the field reads as ``on``.
+    """
+
+    def setUp(self) -> None:
+        self.scenario = scenario_by_name("piper_megatron_stock")
+        self.arms = (self.scenario.arm("baseline"),)
+
+    def _manifest(self, megatron_nan_guard: str) -> dict:
+        return manifest_data(
+            self.scenario,
+            self.arms,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "none",
+            "1b",
+            parallelism=TRIVIAL_SPEC,
+            megatron_p2p_sync="on",
+            megatron_nan_guard=megatron_nan_guard,
+        )
+
+    def _mismatches(self, manifest: dict, megatron_nan_guard: str) -> list[str]:
+        return _resume_mismatches(
+            manifest,
+            self.scenario,
+            self.arms,
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "none",
+            "1b",
+            parallelism=TRIVIAL_SPEC,
+            megatron_p2p_sync="on",
+            megatron_nan_guard=megatron_nan_guard,
+        )
+
+    def test_the_same_value_resumes_and_a_different_one_is_refused(
+        self,
+    ) -> None:
+        for recorded, requested in (("on", "off"), ("off", "on")):
+            with self.subTest(recorded=recorded, requested=requested):
+                manifest = self._manifest(recorded)
+                self.assertEqual(self._mismatches(manifest, recorded), [])
+                self.assertIn(
+                    "megatron_nan_guard", self._mismatches(manifest, requested)
+                )
+
+    def test_the_value_alone_refuses_a_resume(self) -> None:
+        """Toggling only the value toggles only that mismatch, so the
+        refusal names the field and not something that co-varies with it."""
+        manifest = self._manifest("off")
+        refused = self._mismatches(manifest, "on")
+        self.assertEqual(refused, ["megatron_nan_guard"])
+
+    def test_a_schema_thirteen_directory_reads_as_on(self) -> None:
+        """No run before schema 14 could turn the guard off through the
+        harness, so the absent key is a record of ``on``. A request for
+        ``off`` against such a directory is refused rather than silently
+        changing the treatment under the recorded label."""
+        manifest = self._manifest("on")
+        del manifest["megatron_nan_guard"]
+        manifest["schema_version"] = 13
+        self.assertEqual(self._mismatches(manifest, "on"), [])
+        self.assertIn("megatron_nan_guard", self._mismatches(manifest, "off"))
 
 
 class ResolveRunTests(unittest.TestCase):
