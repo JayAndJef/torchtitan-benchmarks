@@ -1523,7 +1523,14 @@ class TitanModuleResolutionTests(unittest.TestCase):
 
 # Files that identify the repository root, independently of any module's
 # nesting depth.
-ROOT_MARKERS = ("run_bench.sh", "pyproject.toml", "CLAUDE.md")
+#
+# Every marker is a file this repository owns. The agent guide is not one:
+# its name is a tool convention rather than a property of this tree, it has
+# moved once already (CLAUDE.md -> AGENTS.md, with CLAUDE.md kept as a
+# symlink), and the next tool to arrive can move it again. A marker that
+# moves turns the walk below into an AssertionError in a test about
+# BENCH_DIR, which says nothing true about BENCH_DIR.
+ROOT_MARKERS = ("run_bench.sh", "pyproject.toml", "sync.sh")
 
 
 def _repo_root_from_here() -> Path:
