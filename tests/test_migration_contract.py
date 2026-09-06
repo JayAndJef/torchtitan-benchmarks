@@ -2094,7 +2094,7 @@ TEST_CENSUS = {
     # Added by the restructure: the sweep that asserts no retired module
     # path survives anywhere git would ship. Censused like the rest so it
     # cannot quietly stop being discovered.
-    "test_retired_paths": 15,
+    "test_retired_paths": 16,
     # New with build_model's blank_parts: 2 that pin the argument's default
     # and the two callers that must never take it, 9 that exercise the spec
     # edit against megatron's own TransformerLayerSubmodules, 5 that pin
@@ -2244,7 +2244,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1851
+TEST_CENSUS_TOTAL = 1852
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

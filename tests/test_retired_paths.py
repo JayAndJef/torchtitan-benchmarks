@@ -52,12 +52,12 @@ Two design rules, both learned the hard way, both load-bearing:
 
 Markdown *is* in scope, with one scoped exemption. Documentation is where a
 stale path is most likely to survive unnoticed, so the sweep reads it. The
-exception is CLAUDE.md's "Provenance boundary" section, which legitimately
+exception is AGENTS.md's "Provenance boundary" section, which legitimately
 names the retired paths as *history* -- it is what tells a future reader why
 ~197 manifests under ``out/`` still decode. Every retired name in that file
 was deliberately consolidated into that one section so a single scoped
 exclusion suffices, and the exclusion keys on the *heading*, not the
-filename: a stale path introduced anywhere else in CLAUDE.md still fails.
+filename: a stale path introduced anywhere else in AGENTS.md still fails.
 """
 
 import ast
@@ -80,7 +80,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Preferred over a whole-file allowlist wherever a file has exactly one
 # legitimate region: the rest of the file stays guarded.
 #
-# CLAUDE.md's "Provenance boundary" section states, and must keep stating,
+# AGENTS.md's "Provenance boundary" section states, and must keep stating,
 # that ~197 manifests under out/ record `--module piper1b`,
 # `benchmarks.kernel_arms:<builder>` and `python -m megatron_baseline.train`
 # as inert data. Naming those strings is the section's entire job. Run
@@ -90,7 +90,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # reason. Delete this entry only if the section itself goes away.
 SECTION_EXEMPTIONS: tuple[tuple[str, str, str], ...] = (
     (
-        "CLAUDE.md",
+        "AGENTS.md",
         "### Provenance boundary: artifacts written before the restructure",
         "documents the retired names as history so pre-flag-day artifacts "
         "stay interpretable; deleting the hit deletes the explanation",
@@ -316,8 +316,22 @@ def is_draft(path: str, cached: frozenset[str]) -> bool:
 
 
 def scanned_files() -> tuple[str, ...]:
+    """Every path the sweep reads, and each file exactly once.
+
+    git lists a symlink as a path of its own, so an alias of a file already
+    in the candidate set would be read twice. ``CLAUDE.md`` is the live
+    case: it points at ``AGENTS.md``, and Claude Code reads only the former
+    name while the repository documents the latter. A second read reports
+    every hit twice, and the second copy arrives under a path no section
+    exemption keys on -- so the "Provenance boundary" section would fail
+    the audit through its alias while passing under its own name.
+
+    A symlink whose target is *not* a candidate is still read. Nothing else
+    here delivers that content, so dropping it would lose coverage rather
+    than remove a duplicate.
+    """
     cached = cached_files()
-    return tuple(
+    candidates = tuple(
         path
         for path in tracked_files()
         # third_party/ entries are gitlinks: git lists the submodule path
@@ -326,6 +340,19 @@ def scanned_files() -> tuple[str, ...]:
         and not is_allowlisted(path)
         and not is_draft(path, cached)
         and (REPO_ROOT / path).is_file()
+    )
+    # Real files only: a symlink must not put its own target in the set it
+    # is tested against, or every symlink would look like a duplicate.
+    real = {
+        (REPO_ROOT / path).resolve()
+        for path in candidates
+        if not (REPO_ROOT / path).is_symlink()
+    }
+    return tuple(
+        path
+        for path in candidates
+        if not (REPO_ROOT / path).is_symlink()
+        or (REPO_ROOT / path).resolve() not in real
     )
 
 
@@ -373,10 +400,35 @@ class RetiredPathAuditTests(unittest.TestCase):
             "tests/test_runner.py",
             "run_bench.sh",
             "pyproject.toml",
-            "CLAUDE.md",
+            "AGENTS.md",
             ".claude/skills/piper-comparison/SKILL.md",
         ):
             self.assertIn(anchor, scanned)
+
+    def test_an_alias_is_not_scanned_beside_its_target(self) -> None:
+        """One file, one read, however many names point at it.
+
+        ``CLAUDE.md`` is a symlink to ``AGENTS.md`` and git tracks both, so
+        the enumerator returns both. See ``scanned_files`` for why reading
+        the second one would fail the audit on an exempt section.
+        """
+        scanned = scanned_files()
+        real = {
+            (REPO_ROOT / path).resolve()
+            for path in scanned
+            if not (REPO_ROOT / path).is_symlink()
+        }
+        for path in scanned:
+            candidate = REPO_ROOT / path
+            if not candidate.is_symlink():
+                continue
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    candidate.resolve(),
+                    real,
+                    f"{path} aliases a file the sweep already reads under "
+                    "its own name",
+                )
 
     def test_no_retired_dotted_or_path_form_survives(self) -> None:
         found: list[str] = []
@@ -491,7 +543,7 @@ class SectionExemptionTests(unittest.TestCase):
             "## After\n"
             "from benchmarks.scenarios import SCENARIOS\n"
         )
-        masked = _mask_exempt_sections("CLAUDE.md", sample)
+        masked = _mask_exempt_sections("AGENTS.md", sample)
         self.assertNotIn("megatron_baseline", masked)
         self.assertIn("benchmarks.scenarios", masked)
         self.assertIn("## Keep", masked)
