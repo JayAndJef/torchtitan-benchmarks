@@ -3428,7 +3428,7 @@ evidence, and the rules for what may be said.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The last full run at this rev discovered 1813 tests and skipped 11. Re-derive
+The last full run at this rev discovered 1947 tests and skipped 11. Re-derive
 those counts rather than quoting them; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
