@@ -40,6 +40,7 @@ PIN_RE = re.compile(
 TERM_RE = re.compile(r"^- \*\*(?P<term>[^*]+)\*\*: (?P<sentence>.+)$")
 LINK_RE = re.compile(r"\]\((?P<target>[^)#\s]+\.md)(?:#[^)]*)?\)")
 IDENT_RE = re.compile(r"^[\w.]+$")
+PLAIN_WORD_RE = re.compile(r"^[a-z]+$")
 VERSION_RE = re.compile(r"__version__\s*=\s*['\"]([^'\"]+)")
 
 
@@ -212,7 +213,14 @@ def check_terms(file: Path, text: str, glossary: dict[str, str], findings: list[
     for term in glossary:
         if term in declared:
             continue
-        if re.search(r"(?<![\w])" + re.escape(term) + r"(?![\w])", body):
+        # A term that is also a plain English word (``order``, ``replicate``)
+        # counts as used only inside a code span; every other term counts
+        # as a whole word anywhere.
+        if PLAIN_WORD_RE.match(term):
+            used = f"`{term}`" in body
+        else:
+            used = bool(re.search(r"(?<![\w])" + re.escape(term) + r"(?![\w])", body))
+        if used:
             findings.append(Finding(file, 1, "W-TERM-UNDECLARED", f"`{term}` is used but not declared in Terms"))
 
 
