@@ -1614,6 +1614,10 @@ TEST_CENSUS = {
     # environment variable, and the sweep runs the stock scenario alone
     # under off, printing each skipped scenario's own refusal.
     "test_cli": 30,
+    # The knowledge base under database/: one test runs its checker and one
+    # builds its document. Both skip, per method, where the gitignored
+    # directory is absent, so the count holds on every checkout.
+    "test_database": 2,
     # 19 pre-fix, +2 for the two halves of the correctness verdict: a failed
     # gate fragment beside a clean exit code, and a timing worker that dies
     # after it writes. +2 more for the arm that measured nothing, as a
@@ -2251,7 +2255,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1852
+TEST_CENSUS_TOTAL = 1854
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
