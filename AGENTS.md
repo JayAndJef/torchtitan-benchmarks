@@ -133,12 +133,13 @@ their names are listed once, in the provenance note below, and nowhere else.
 | `benchmarks/traces/` | `schema.py` (the `Region` declaration) and `extraction.py` (trace parsing, window and region pooling) |
 | `benchmarks/artifacts/` | On-disk artifacts: `layout.py` (output layout, `trace_files`, `atomic_write_json` -- the only JSON writer), `manifests.py` (the manifest schema and the resume predicate; the one module here coupled to `e2e/`), `run_state.py` (the per-arm ledger) and `summaries.py` (`SampleSummary`, shared by both systems) |
 | `benchmarks/execution/` | Subprocess execution: `paths.py` (`BENCH_DIR`/`TITAN_DIR`, `RuntimePaths`), `devices.py` (`parse_devices`, the `<gpu>` positional read as a device set), `environment.py` (the child's env vars), `affinity.py` (NUMA pinning, one node per device), `provenance.py` (`hardware_metadata`, including the two cuDNN fields -- see "Which cuDNN a megatron arm runs"), `events.py` (`RunEvent`, `ProcessRunner`) |
-| `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), and the two argv-driven trace diagnostics `analyze.py` and `per_block.py` |
+| `tools/` | `megatron_parity_check.py` (GPU logit-parity gate between the engines, `--model-size` aware); `run_matrix.sh` (shared-box matrix supervisor), `collect_matrix.py` (merges a matrix tree into one JSON), `test_watchdog_attribution.sh` (proves the supervisor's process-ancestry check), the two argv-driven trace diagnostics `analyze.py` and `per_block.py`, and the knowledge base's `db_check.py` and `db_build_doc.py` |
 | `tests/` | CPU + GPU unit tests. Deliberately **flat** -- every module does `sys.path.insert(0, <repo root>)` at a fixed depth, and `unittest discover -s tests` needs no `__init__.py` |
 | `third_party/torchtitan/` | Pinned submodule (our fork) |
 | `third_party/Megatron-LM/` | Pinned submodule (upstream NVIDIA, sys.path only) |
 | `out/` | Run outputs (gitignored) |
 | `reports/` | Local investigation notes (gitignored). Put conclusions here, not in docs. |
+| `database/` | The engine knowledge base (gitignored): terse human-facing files on how TorchTitan, Megatron-LM and Piper each work, every claim traced to code at a pinned rev. `tools/db_check.py` verifies the refs, terms and index; `tools/db_build_doc.py` builds the Google Doc; `tests/test_database.py` runs both and skips where the directory is absent |
 
 ### Provenance boundary: artifacts written before the restructure
 
@@ -3428,7 +3429,7 @@ evidence, and the rules for what may be said.
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The last full run at this rev discovered 1947 tests and skipped 11. Re-derive
+The last full run at this rev discovered 1949 tests and skipped 11. Re-derive
 those counts rather than quoting them; `tests/test_migration_contract.py`
 carries `TEST_CENSUS` and `TEST_CENSUS_TOTAL`, and the total is the **sum of
 the dict**, recomputed at every commit that changes a count. Never add
