@@ -8,8 +8,9 @@ Three checks, and nothing else:
    ``:lo-hi``), optionally followed by a second code span that names a
    symbol. The roots and their pins are the table in
    ``database/00-overview.md``. The file is read at the pin
-   (``git show pin:path``; a root under ``.venv/`` is read from the tree),
-   and the symbol must appear within ``--window`` lines of the cited line.
+   (``git show pin:path``; a root under ``.venv/`` is read from the tree,
+   and its pin is the version in ``version.py`` or in its dist-info), and
+   the symbol must appear within ``--window`` lines of the cited line.
 2. Every ``## Terms`` entry matches ``database/GLOSSARY.md`` byte for byte.
 3. Every content file appears in ``database/INDEX.md`` exactly once.
 
@@ -132,6 +133,19 @@ class Source:
             text=True,
         )
         return done.stdout.splitlines() if done.returncode == 0 else None
+
+
+def tree_version(root: Root) -> str | None:
+    """The version a tree root carries: ``version.py``, else its dist-info."""
+    version_file = root.path / "version.py"
+    if version_file.is_file():
+        found = VERSION_RE.search(version_file.read_text())
+        return found.group(1) if found else None
+    for metadata in sorted(root.path.parent.glob(f"{root.path.name}-*.dist-info/METADATA")):
+        for line in metadata.read_text().splitlines():
+            if line.startswith("Version:"):
+                return line.split(":", 1)[1].strip()
+    return None
 
 
 def symbol_matcher(symbol: str):
@@ -257,11 +271,9 @@ def main(argv: list[str] | None = None) -> int:
         findings.append(Finding(DATABASE / GLOSSARY, lineno, "E-TERM-DUP", f"`{term}` is defined twice"))
     for root in roots.values():
         if root.from_tree:
-            version_file = root.path / "version.py"
-            found = VERSION_RE.search(version_file.read_text()) if version_file.is_file() else None
-            if found is None or found.group(1) != root.pin:
-                seen = found.group(1) if found else "absent"
-                findings.append(Finding(DATABASE / OVERVIEW, 1, "E-ROOT-PIN", f"{root.name} tree is {seen}; pin is {root.pin}"))
+            seen = tree_version(root)
+            if seen != root.pin:
+                findings.append(Finding(DATABASE / OVERVIEW, 1, "E-ROOT-PIN", f"{root.name} tree is {seen or 'absent'}; pin is {root.pin}"))
 
     source = Source()
     files = content_files()
