@@ -438,13 +438,14 @@ reads the optimizer `setup_model_and_optimizer` returned and prints its
 class name on the data-parallel line, so arm rule 12 fails a run that lost
 the flag rather than publishing ZeRO-0 memory under a ZeRO-1 label.
 
-**That class sits inside a `ChainedOptimizer` on every shape here.**
-Megatron builds one optimizer for each `(optimizer_name, is_expert)`
-bucket and chains them above one bucket, and every registered shape is a
-mixture of experts. The line therefore reads
-`ChainedOptimizer[DistributedOptimizer]` under `zero1`, and the chain's
-own name separates no value. Read "The stock data-parallel line observes
-the wrapper" below before you cite this field.
+**Under `zero1` that class sits inside a `ChainedOptimizer`.**
+`get_megatron_optimizer` ends its standard path with an unconditional
+`ChainedOptimizer(optimizers)`, so `replicate` and `zero1` both carry one
+and the chain's own name separates neither. The line reads
+`ChainedOptimizer[DistributedOptimizer]` under `zero1`. `zero3` takes the
+Megatron-FSDP branch and reads a bare `DistributedOptimizer`. Read "The
+stock data-parallel line observes the wrapper" below before you cite this
+field.
 
 **That line prints above `dp` 1 alone, so a `dp 1 x pp 8` cell proves no
 ZeRO level.** `install_data_parallel_marker` returns early at a
@@ -1251,12 +1252,12 @@ are not comparable; `--resume` refuses to mix them.
     when that optimizer is absent, exactly as it raises for an absent
     wrapper.
 
-    **A mixture of experts holds that class inside a `ChainedOptimizer`,
-    and the line names the members.** Megatron builds one optimizer for
-    each `(optimizer_name, is_expert)` bucket, so every shape here carries
-    two. The outer class is the same under every dense-sharding value, so
-    the members are what separate them. The shape decides whether there is
-    a chain, which is why `parallelism_markers` takes one.
+    **`replicate` and `zero1` hold that class inside a `ChainedOptimizer`,
+    and the line names the members.** The standard path of
+    `get_megatron_optimizer` always chains, and both chained values carry
+    the same outer class, so the members are what separate them. `zero3`
+    reads a bare `DistributedOptimizer`, because Megatron-FSDP returns its
+    single optimizer without a chain.
 
     **`grad_reduce_in_fp32` in that line moves with
     `--megatron-precision`**, because `lean` sends `--main-grads-dtype
@@ -1443,16 +1444,18 @@ scenario declines every uncompiled mode. Its two mesh lines are the
 ```
 Megatron-LM stock training loop (mode=<mode>, main_params_dtype=..., main_grads_dtype=..., use_precision_aware_optimizer=..., exp_avg_dtype=..., exp_avg_sq_dtype=..., ...)
 Megatron-LM stock parallelism: dp=<dp> pp=<pp> ep=<ep> schedule=1F1B microbatches=<m> stages=<pp>
-Megatron-LM stock data parallel: <wrapper> over <dp> ranks (overlap_grad_reduce=..., grad_reduce_in_fp32=..., sharding_strategy=..., expert_parallel=<ep>, optimizer=ChainedOptimizer[<class>])
+Megatron-LM stock data parallel: <wrapper> over <dp> ranks (overlap_grad_reduce=..., grad_reduce_in_fp32=..., sharding_strategy=..., expert_parallel=<ep>, optimizer=<class or chain>)
 ```
 
-**Every shape in `PIPER_SHAPES` is a mixture of experts, so the optimizer
-field of a real run is a chain.** Megatron builds one optimizer for each
-`(optimizer_name, is_expert)` bucket and chains them above one bucket, so
-the field reads `ChainedOptimizer[DistributedOptimizer]` under `zero1` and
-`zero3`, and `ChainedOptimizer[Float16OptimizerWithFloat16Params]` under
-`replicate`. A bare class name is what a dense model would print, and no
-registered shape is dense.
+**The optimizer field is a chain under two of the three dense-sharding
+values, and the value is what decides it.** `get_megatron_optimizer` ends
+its standard path with an unconditional `ChainedOptimizer(optimizers)`, so
+`replicate` reads `ChainedOptimizer[Float16OptimizerWithFloat16Params]`
+and `zero1` reads `ChainedOptimizer[DistributedOptimizer]`. `zero3` takes
+the Megatron-FSDP branch, which builds one optimizer and returns it bare,
+so it reads `DistributedOptimizer`. **The model shape decides none of
+this.** The chain holds a second member only above expert degree 1, and
+both members carry one class, so the printed string does not move.
 
 **The microbatch count in that line is `microbatch_geometry`'s, not
 `n_microbatches`'s, and it is 1 at `pp` 1.** One Megatron sample is one
@@ -1498,16 +1501,18 @@ into:**
   `DistributedOptimizer` under `--use-distributed-optimizer`, and
   `Float16OptimizerWithFloat16Params` without it. It raises when that
   optimizer is absent, exactly as it raises for an absent wrapper.
-- **That class name sits INSIDE a chain, and the chain's own name proves
-  nothing.** Megatron builds one optimizer for each
-  `(optimizer_name, is_expert)` bucket and returns a `ChainedOptimizer`
-  above one bucket. Every expert weight carries `allreduce=False`, which
-  is the flag that key reads, so every shape here takes the chain. A chain
-  of `Float16OptimizerWithFloat16Params` is ZeRO-0 and a chain of
+- **Under `replicate` and `zero1` that class name sits INSIDE a chain, and
+  the chain's own name proves nothing.** `get_megatron_optimizer` ends its
+  standard path with an unconditional `ChainedOptimizer(optimizers)`, so
+  both values carry a chain. A chain of
+  `Float16OptimizerWithFloat16Params` is ZeRO-0 and a chain of
   `DistributedOptimizer` is ZeRO-1, and both print `ChainedOptimizer`. The
   shim therefore names the members, deduplicated and sorted:
   `ChainedOptimizer[DistributedOptimizer]` where they agree, and
   `ChainedOptimizer[A+B]` where they do not. It raises on an empty chain.
+  **`zero3` is the exception**: it takes the Megatron-FSDP branch, which
+  builds one optimizer and returns it bare, so that value alone reads a
+  plain `DistributedOptimizer`.
   **A real eight-GPU `30b-a3b` cell failed arm rule 12 on 2026-09-16,
   because the line said `ChainedOptimizer` alone.**
 - **`grad_reduce_in_fp32` MOVES with `--megatron-precision`, and the marker
