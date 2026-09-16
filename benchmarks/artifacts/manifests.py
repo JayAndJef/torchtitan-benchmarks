@@ -53,11 +53,11 @@ Schema 15 is a RENAME inside the ``parallelism`` block, and it adds no key.
 ``replicate``, ``zero1`` and ``zero3``, and ``zero3`` is the new spelling of
 ``shard``. **The rename is not a redefinition.** A run recorded as ``shard``
 really did hold the ZeRO-3 parity, so no number on disk changes meaning.
-The bump exists because the READER cannot tell the two vocabularies apart
-without it: ``shard`` is a legal string in both, and a schema-14 directory
+The bump exists for the READER, who cannot tell the two vocabularies apart
+without it. ``shard`` is a legal string in both. A schema-14 directory
 resumed under schema 15 would compare a retired spelling against a current
-one and print a bare ``parallelism`` mismatch. ``_resume_mismatches`` names
-the rename instead. Three published cells on disk carry ``shard``, and they
+one, and would print a bare ``parallelism`` mismatch. ``_resume_mismatches``
+names the rename instead. Three published cells on disk carry ``shard``, and they
 stay readable exactly as they are.
 
 Schema 16 adds ``megatron_precision`` beside the two fields above, gated the
@@ -65,10 +65,10 @@ same way: an omitted value on resume inherits the recorded one, a different
 value is refused, and a schema <= 15 manifest, which carries no key, reads
 as ``stock``. That reading is a record and not an inference, because no run
 before this schema could ask for the lean optimizer recipe: the option did
-not exist. It is its own field for the reason the two above are -- a
-treatment of the stock engine's optimizer state rather than a degree -- and
-it is a comparability boundary because ``lean`` holds 10 bytes for each
-parameter where ``stock`` holds 18.
+not exist. It is its own field for the reason the two above are: it is a
+treatment of the stock engine's optimizer state rather than a degree. It is
+also a comparability boundary. ``lean`` holds 10 bytes for each parameter,
+and ``stock`` holds 18.
 
 What *is* split out is everything engine-neutral: output layout and the
 atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,

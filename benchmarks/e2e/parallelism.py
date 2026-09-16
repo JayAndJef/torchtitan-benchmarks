@@ -615,8 +615,8 @@ def dense_sharding_warnings(spec: ParallelismSpec) -> tuple[str, ...]:
     reads the cell wrongly.
 
     **Nothing is emitted above ``dp`` 1 and above ``pp`` 1.** That is the
-    configuration this axis exists to run. A warning that fires on the
-    intended cell teaches an operator to ignore warnings.
+    configuration this axis exists to run. A warning on the intended cell is
+    noise. An operator then ignores every warning.
 
     ``benchmarks/e2e/runner.py`` emits these when it resolves a run, and
     ``benchmarks/e2e/results.py`` appends them to ``results.json``, so the
@@ -1193,8 +1193,8 @@ def validate_parallelism(
     #     shards under a pipeline through ``fully_shard`` and is unaffected,
     #     so ``run --arm`` selecting the TorchTitan arms alone passes it.
     #
-    #     **``zero1`` ESCAPES this rule, and the reason is the argv.** The
-    #     rule refuses ``zero3`` alone. ``zero1`` sends
+    #     **Rule 17 does not refuse ``zero1``, and the reason is the
+    #     argv.** The rule refuses ``zero3`` alone. ``zero1`` sends
     #     ``--use-distributed-optimizer`` and no ``--use-megatron-fsdp``, so
     #     Megatron takes the plain ``DistributedDataParallel`` branch and
     #     calls neither mesh builder. Nothing factors the world size, so the

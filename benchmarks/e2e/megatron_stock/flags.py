@@ -194,7 +194,7 @@ DATA_PARALLEL_OVERLAP: dict[str, bool] = {
 
 # The optimizer class Megatron builds for each value.
 #
-# **This table is load-bearing, because the wrapper table above no longer
+# **This table is necessary, because the wrapper table above no longer
 # separates every value.** ``replicate`` and ``zero1`` both build a plain
 # ``DistributedDataParallel``, so the wrapper class alone cannot say which
 # of the two ran. The optimizer can:

@@ -1,10 +1,10 @@
 """The parallelism axis threaded through the harness, without leaving one GPU.
 
 ``tests/test_parallelism.py`` covers the axis itself -- the degrees, the
-schedules and the seventeen validator rules. This module covers the path the
+schedules and the sixteen validator rules. This module covers the path the
 value takes: the ``<gpu>`` positional read as a device set, the six CLI
 options, ``RunRequest``, ``_resolve_run``, the child environment, the
-provenance query, the NUMA walk, and manifest schema 14.
+provenance query, the NUMA walk, and manifest schema 16.
 
 **The properties under test are mostly negative.** At the trivial spec every
 recorded fact and every environment variable has to be the one this repo has
@@ -1428,6 +1428,22 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
                     self._environment(value),
                     parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
                 )
+
+    def test_a_zero1_run_is_untouched_by_the_variable(self) -> None:
+        """``zero1`` shards through the optimizer, not through Megatron-FSDP.
+
+        The argv carries ``--use-distributed-optimizer`` and no
+        ``--use-megatron-fsdp``, so Megatron runs no assert on the variable
+        and the refusal goes inert on its own. The test reads both flags,
+        because a refusal that fired here would refuse a legal cell.
+        """
+        resolved = self._resolve(
+            self._environment("1"),
+            parallelism=ParallelismSpec(dp=2, dense_sharding="zero1"),
+        )
+        argv = resolved[6]["baseline"]
+        self.assertIn("--use-distributed-optimizer", argv)
+        self.assertNotIn("--use-megatron-fsdp", argv)
 
     def test_a_replicated_run_is_untouched_by_the_variable(self) -> None:
         """A replicated stock run sends no ``--use-megatron-fsdp``, so the

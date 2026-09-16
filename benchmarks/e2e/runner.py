@@ -130,14 +130,11 @@ class RunRequest:
     # above: a resume inherits the recorded value and a fresh run takes
     # ``on``. It reaches the stock megatron launcher alone.
     megatron_nan_guard: str | None = None
-    # Stock Megatron's optimizer precision. ``None`` means "not requested"
-    # and a fresh run takes ``stock``. It reaches the stock megatron
-    # launcher alone, and ``lean`` needs a sharded dense value.
-    #
-    # **A resume does not inherit it yet**, because no manifest records it
-    # yet. The schema bump that adds the key is what adds the inheritance
-    # and the gate, in one commit, for the reason
-    # ``benchmarks/artifacts/manifests.py`` gives.
+    # Stock Megatron's optimizer precision. ``None`` means "not requested",
+    # as above: a resume inherits the recorded value and a fresh run takes
+    # ``stock``. A schema <= 15 manifest carries no key, and it reads as
+    # ``stock``. The value reaches the stock megatron launcher alone, and
+    # ``lean`` needs a sharded dense value.
     megatron_precision: str | None = None
 
 

@@ -2196,7 +2196,7 @@ TEST_CENSUS = {
     # reach GPTModel.
     "test_megatron_model": 29,
     # The parallelism run axis, landed before anything imports it. Every one
-    # of the seventeen validator rules in both directions, the two
+    # of the sixteen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
     # guard, the four derivations, and the schedule registry checked against
     # the PyTorch classes it names.
@@ -2293,7 +2293,9 @@ TEST_CENSUS = {
     # TypeError, the resume gate in both directions, a schema-15 directory
     # reading as stock, and the two halves of the rename -- a retired
     # 'shard' record names it, and a current 'zero3' record resumes.
-    "test_parallelism_plumbing": 87,
+    # +1 with the review repair: a zero1 stock run passes the connection
+    # limit precondition, because its argv sends no --use-megatron-fsdp.
+    "test_parallelism_plumbing": 88,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2355,7 +2357,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1915
+TEST_CENSUS_TOTAL = 1916
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

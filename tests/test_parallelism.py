@@ -2,7 +2,7 @@
 
 ``benchmarks/e2e/parallelism.py`` owns the axis itself, while the CLI and
 runner thread it through the harness. This file checks the module-level
-contract: every one of the seventeen validator rules is exercised in both
+contract: every one of the sixteen validator rules is exercised in both
 directions, the four derivations are pinned, and the schedule registry is
 checked against the PyTorch classes it names. Plumbing and runtime validation
 have their own test modules.
@@ -146,7 +146,7 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(fields & {"tp", "cp"}, set())
 
     def test_a_degree_below_one_is_refused_at_construction(self):
-        """The precondition the seventeen rules assume.
+        """The precondition the sixteen rules assume.
 
         Without it ``dp=-1, pp=-1`` has world size 1 and walks past rule 1
         on a one-GPU box, which is exactly the illegal mesh the rules exist
