@@ -173,6 +173,15 @@ PARALLELISM_LINE = (
 # from zero1, and this field can. Megatron picks the class in
 # megatron/core/optimizer/__init__.py: DistributedOptimizer under the
 # distributed optimizer, and Float16OptimizerWithFloat16Params without it.
+#
+# **replicate and zero1 get a CHAIN, and the chain's own name proves no
+# ZeRO level.** get_megatron_optimizer ends its standard path with an
+# unconditional ChainedOptimizer(optimizers), so both values carry one.
+# zero3 takes the Megatron-FSDP branch instead, which builds one optimizer
+# and returns it bare. A chain of Float16OptimizerWithFloat16Params and a
+# chain of DistributedOptimizer print the same word, so
+# optimizer_class_name names the members. A real eight-GPU run failed this
+# rule on 2026-09-16, because the line said "ChainedOptimizer" alone.
 DATA_PARALLEL_LINE = (
     "Megatron-LM stock data parallel: {wrapper} over {dp} "
     "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
@@ -630,6 +639,56 @@ def install_step_log_shim(
     return uninstall
 
 
+# Megatron's own attribute for the members of a chain
+# (megatron/core/optimizer/optimizer.py: ChainedOptimizer.__init__ sets
+# self.chained_optimizers). The name is read off Megatron rather than
+# guessed. A submodule bump that renames it makes a chained run print the
+# outer class alone. Arm rule 12 then refuses the run, because the
+# expected string names the members.
+CHAINED_OPTIMIZERS_ATTRIBUTE = "chained_optimizers"
+
+
+def optimizer_class_name(optimizer: Any) -> str:
+    """The optimizer name the data-parallel line states.
+
+    A bare optimizer states its own class. The Megatron-FSDP branch
+    returns one: it builds a single optimizer and returns it without a
+    chain (``megatron/core/optimizer/__init__.py``).
+
+    **A chain states its members too.** The standard path ends with an
+    unconditional ``ChainedOptimizer(optimizers)``, so ``replicate`` and
+    ``zero1`` both reach this function with a chain. That path always
+    holds the dense optimizer. It adds a second member for the experts
+    only where an expert group exists, which needs an expert degree above
+    1. Every member takes ``DistributedOptimizer`` under
+    ``use_distributed_optimizer`` and
+    ``Float16OptimizerWithFloat16Params`` without it, because that flag is
+    one value for the whole run. So a ZeRO-0 chain and a ZeRO-1 chain
+    carry the same outer class, and the members are what separate them.
+
+    The member names are deduplicated and sorted, so one string covers
+    both cases: ``ChainedOptimizer[DistributedOptimizer]`` where every
+    member agrees, and ``ChainedOptimizer[A+B]`` where they do not.
+
+    **An empty chain raises.** ``ChainedOptimizer`` accepts an empty list,
+    for a rank that holds no trainable parameter. No path in this arm
+    builds one. Such a chain names no class, so the line would state a
+    ZeRO level nothing observed.
+    """
+    name = type(optimizer).__name__
+    members = getattr(optimizer, CHAINED_OPTIMIZERS_ATTRIBUTE, None)
+    if members is None:
+        return name
+    if not members:
+        raise RuntimeError(
+            f"megatron returned a {name} with no member optimizer, so no "
+            "line can name the class that holds the optimizer state; the "
+            "run would record a ZeRO level it did not have"
+        )
+    inner = "+".join(sorted({type(member).__name__ for member in members}))
+    return f"{name}[{inner}]"
+
+
 def install_data_parallel_marker(
     *, data_parallel_size: int, expert_parallel_size: int = 1
 ) -> None:
@@ -690,6 +749,11 @@ def install_data_parallel_marker(
     A run that lost ``--use-distributed-optimizer`` builds
     ``Float16OptimizerWithFloat16Params`` and fails arm rule 12 here,
     rather than publishing ZeRO-0 memory under a ZeRO-1 label.
+
+    **A mixture of experts gets a ``ChainedOptimizer``, and the line names
+    its members.** ``optimizer_class_name`` does that. The outer class is
+    the same under every dense-sharding value, so the chain's own name
+    separates none of them.
     """
     if data_parallel_size <= 1:
         return
@@ -752,7 +816,7 @@ def install_data_parallel_marker(
                     else "no_shard"
                 ),
                 expert=built_expert_size,
-                optimizer=type(optimizer).__name__,
+                optimizer=optimizer_class_name(optimizer),
             ),
             flush=True,
         )

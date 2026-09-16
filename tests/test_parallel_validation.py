@@ -212,7 +212,7 @@ def _titan_log(spec: ParallelismSpec = PP2) -> str:
     """
     markers = "\n".join(
         VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            spec, PIPER_1B_ROPE.workload
+            spec, PIPER_1B_ROPE.workload, "stock"
         )
     )
     return (
@@ -642,7 +642,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
 
     def test_the_titan_markers_name_the_degrees_and_the_schedule(self) -> None:
         markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            PP2, PIPER_1B_ROPE.workload
+            PP2, PIPER_1B_ROPE.workload, "stock"
         )
         self.assertEqual(
             markers,
@@ -669,7 +669,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         )
 
         markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            DP2, PIPER_1B_ROPE.workload
+            DP2, PIPER_1B_ROPE.workload, "stock"
         )
         self.assertIn(
             DATA_PARALLEL_LINE.format(replicate=2, shard=1), markers
@@ -685,7 +685,9 @@ class ArmRuleTwelveTests(unittest.TestCase):
             with self.subTest(spec=spec):
                 markers = VALIDATION_PROFILES[
                     "torchtitan"
-                ].parallelism_markers(spec, PIPER_1B_ROPE.workload)
+                ].parallelism_markers(
+                    spec, PIPER_1B_ROPE.workload, "stock"
+                )
                 self.assertEqual(
                     [m for m in markers if "data parallel" in m], []
                 )
@@ -857,7 +859,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     VALIDATION_PROFILES["megatron"].parallelism_markers(
-                        spec, PIPER_1B_ROPE.workload
+                        spec, PIPER_1B_ROPE.workload, "stock"
                     ),
                     tuple(printed),
                 )
@@ -892,7 +894,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         """
         silent = replace(
             VALIDATION_PROFILES["torchtitan"],
-            parallelism_markers=lambda spec, workload: (),
+            parallelism_markers=lambda spec, workload, precision: (),
         )
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary))
@@ -922,7 +924,9 @@ def _megatron_log(spec: ParallelismSpec, p2p_line: str | None) -> str:
     lines = [
         "Megatron-LM training loop (mode=default, graphs=none)",
         _SIZE_LINE.rstrip("\n"),
-        *profile.parallelism_markers(spec, PIPER_1B_ROPE.workload),
+        *profile.parallelism_markers(
+            spec, PIPER_1B_ROPE.workload, "stock"
+        ),
     ]
     if p2p_line is not None:
         lines.append(p2p_line)
@@ -1080,7 +1084,9 @@ def _stock_log(
         # Megatron resolved.
         ", ".join(profile.precision_markers(megatron_precision)),
         _SIZE_LINE.rstrip("\n"),
-        *profile.parallelism_markers(spec, workload),
+        *profile.parallelism_markers(
+            spec, workload, megatron_precision
+        ),
         *profile.p2p_markers(spec, "on"),
     ]
     if nan_guard_line is not None:

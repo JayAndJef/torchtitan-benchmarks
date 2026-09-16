@@ -215,6 +215,17 @@ DATA_PARALLEL_OPTIMIZERS: dict[str, str] = {
     "zero3": "DistributedOptimizer",
 }
 
+# The outer class Megatron returns for a chain of optimizers
+# (``megatron/core/optimizer/optimizer.py``).
+#
+# **The table above names a class, and two of the three values print it
+# inside a chain.** ``get_megatron_optimizer`` ends its standard path with
+# an unconditional ``ChainedOptimizer(optimizers)``. ``zero3`` alone takes
+# the Megatron-FSDP branch, which returns its single optimizer bare.
+# ``data_parallel_optimizer`` below is what a marker must read; the raw
+# table cannot state the line.
+CHAINED_OPTIMIZER = "ChainedOptimizer"
+
 # TorchTitan's own optimizer values, replicated flag for flag. The source is
 # benchmarks/e2e/megatron/train.py, which replicates the TorchTitan trainer.
 LEARNING_RATE = "8e-4"
@@ -339,13 +350,19 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
 # pipeline where zero3 cannot.
 ZERO1_FLAGS: tuple[str, ...] = ("--use-distributed-optimizer",)
 
+# The flag that takes Megatron into its Megatron-FSDP branch. That branch
+# builds one optimizer for the whole model and returns it without a chain,
+# so this flag also decides the optimizer field of the data-parallel line.
+# ``data_parallel_optimizer`` reads it there.
+MEGATRON_FSDP_FLAG = "--use-megatron-fsdp"
+
 # **zero3 is five flags, and --use-distributed-optimizer is one of them.**
 # Megatron-FSDP v1 turns that one on itself and warns (arguments.py), so an
 # argv that omitted it would deny a fact the run has. Two of the other four
 # restate a Megatron default on purpose, so a submodule bump that moves
 # either default changes a recorded argv rather than a silent run.
 ZERO3_FLAGS: tuple[str, ...] = (
-    "--use-megatron-fsdp",
+    MEGATRON_FSDP_FLAG,
     "--megatron-fsdp-version",
     "--data-parallel-sharding-strategy",
     "--use-distributed-optimizer",
@@ -379,6 +396,10 @@ LEAN_PRECISION_FLAGS: tuple[str, ...] = (
 # apart and a reader meets the recipe as one fact.
 LEAN_PRECISION_DTYPE = "bf16"
 
+# Megatron's own default for ``--main-grads-dtype`` (``arguments.py``). The
+# stock recipe sends no dtype flag, so it runs this one.
+MEGATRON_MAIN_GRADS_DTYPE_DEFAULT = "fp32"
+
 
 def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
     """Raise on a value this module cannot build a command line for.
@@ -393,6 +414,38 @@ def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
             f"dense sharding {dense_sharding!r} is not one of "
             + ", ".join(repr(mode) for mode in DENSE_SHARDING_MODES)
         )
+
+
+def data_parallel_optimizer(dense_sharding: str) -> str:
+    """The optimizer name the data-parallel line must carry.
+
+    ``DATA_PARALLEL_OPTIMIZERS`` names the class Megatron builds for this
+    value. This function says whether the line names that class bare or
+    inside a chain, and the dense-sharding value is what decides it.
+
+    **The standard path always chains.** ``get_megatron_optimizer`` ends it
+    with an unconditional ``ChainedOptimizer(optimizers)``
+    (``megatron/core/optimizer/__init__.py``), so ``replicate`` and
+    ``zero1`` both print a chain. That chain always holds the dense
+    optimizer. It holds a second member for the experts only above expert
+    degree 1, because TransformerEngine marks an expert weight for the
+    expert process groups only there. Both members carry one class,
+    because ``use_distributed_optimizer`` is one value for the whole run,
+    so the printed string does not move with the expert degree.
+
+    **``zero3`` is the exception.** ``--use-megatron-fsdp`` takes Megatron
+    into a branch that builds one optimizer for the whole model and
+    returns it without a chain, so the line names the class bare.
+
+    **The model shape decides none of this.** An earlier version of this
+    function branched on ``shape.num_experts``, which made ``zero3`` expect
+    a chain Megatron never builds.
+    """
+    refuse_unknown_dense_sharding(dense_sharding)
+    inner = DATA_PARALLEL_OPTIMIZERS[dense_sharding]
+    if MEGATRON_FSDP_FLAG in SHARDING_FLAGS_BY_VALUE[dense_sharding]:
+        return inner
+    return f"{CHAINED_OPTIMIZER}[{inner}]"
 
 
 # Megatron's own switch for ``check_for_nan_in_loss_and_grad``
@@ -501,6 +554,39 @@ def _precision_flags(
         "--exp-avg-sq-dtype",
         LEAN_PRECISION_DTYPE,
     ]
+
+
+def main_grads_dtype(megatron_precision: str) -> str:
+    """The ``--main-grads-dtype`` value this precision runs.
+
+    ``stock`` sends no dtype flag, so it runs Megatron's own default.
+    ``lean`` sends ``LEAN_PRECISION_DTYPE``.
+    """
+    refuse_unknown_megatron_precision(megatron_precision)
+    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+        return MEGATRON_MAIN_GRADS_DTYPE_DEFAULT
+    return LEAN_PRECISION_DTYPE
+
+
+def grad_reduce_in_fp32(megatron_precision: str) -> bool:
+    """Whether Megatron reduces the gradients in fp32 at this precision.
+
+    **This field moves with the precision axis, and a marker once pinned
+    it to True.** Under ``--bf16`` Megatron turns
+    ``accumulate_allreduce_grads_in_fp32`` on only where the main-grad
+    dtype is fp32 (``arguments.py``), and ``get_megatron_ddp_config``
+    copies that field into ``ddp_config.grad_reduce_in_fp32``. So the
+    stock recipe reduces in fp32 and the lean recipe does not. A real
+    eight-GPU run failed arm rule 12 on 2026-09-16 for that reason.
+
+    The value is DERIVED from the dtype the recipe sends. A hand-written
+    table would keep saying True after somebody moved
+    ``LEAN_PRECISION_DTYPE``.
+    """
+    return (
+        main_grads_dtype(megatron_precision)
+        == MEGATRON_MAIN_GRADS_DTYPE_DEFAULT
+    )
 
 
 def omitted_flags(dense_sharding: str) -> tuple[str, ...]:

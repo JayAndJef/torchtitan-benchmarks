@@ -438,6 +438,15 @@ reads the optimizer `setup_model_and_optimizer` returned and prints its
 class name on the data-parallel line, so arm rule 12 fails a run that lost
 the flag rather than publishing ZeRO-0 memory under a ZeRO-1 label.
 
+**Under `zero1` that class sits inside a `ChainedOptimizer`.**
+`get_megatron_optimizer` ends its standard path with an unconditional
+`ChainedOptimizer(optimizers)`, so `replicate` and `zero1` both carry one
+and the chain's own name separates neither. The line reads
+`ChainedOptimizer[DistributedOptimizer]` under `zero1`. `zero3` takes the
+Megatron-FSDP branch and reads a bare `DistributedOptimizer`. Read "The
+stock data-parallel line observes the wrapper" below before you cite this
+field.
+
 **That line prints above `dp` 1 alone, so a `dp 1 x pp 8` cell proves no
 ZeRO level.** `install_data_parallel_marker` returns early at a
 data-parallel size of 1, and arm rule 12 asks for the line only above `dp`
@@ -1243,6 +1252,18 @@ are not comparable; `--resume` refuses to mix them.
     when that optimizer is absent, exactly as it raises for an absent
     wrapper.
 
+    **`replicate` and `zero1` hold that class inside a `ChainedOptimizer`,
+    and the line names the members.** The standard path of
+    `get_megatron_optimizer` always chains, and both chained values carry
+    the same outer class, so the members are what separate them. `zero3`
+    reads a bare `DistributedOptimizer`, because Megatron-FSDP returns its
+    single optimizer without a chain.
+
+    **`grad_reduce_in_fp32` in that line moves with
+    `--megatron-precision`**, because `lean` sends `--main-grads-dtype
+    bf16` and Megatron then leaves `accumulate_allreduce_grads_in_fp32`
+    off. `parallelism_markers` takes the requested value for that reason.
+
     Above `pp` 1 each megatron profile also asks every rank for its
     driver's p2p line, against the requested `--megatron-p2p-sync` value.
     The tuned driver prints `Megatron-LM p2p: batch_p2p_comm=True
@@ -1423,8 +1444,18 @@ scenario declines every uncompiled mode. Its two mesh lines are the
 ```
 Megatron-LM stock training loop (mode=<mode>, main_params_dtype=..., main_grads_dtype=..., use_precision_aware_optimizer=..., exp_avg_dtype=..., exp_avg_sq_dtype=..., ...)
 Megatron-LM stock parallelism: dp=<dp> pp=<pp> ep=<ep> schedule=1F1B microbatches=<m> stages=<pp>
-Megatron-LM stock data parallel: <wrapper> over <dp> ranks (overlap_grad_reduce=..., grad_reduce_in_fp32=..., sharding_strategy=..., expert_parallel=<ep>, optimizer=<class>)
+Megatron-LM stock data parallel: <wrapper> over <dp> ranks (overlap_grad_reduce=..., grad_reduce_in_fp32=..., sharding_strategy=..., expert_parallel=<ep>, optimizer=<class or chain>)
 ```
+
+**The optimizer field is a chain under two of the three dense-sharding
+values, and the value is what decides it.** `get_megatron_optimizer` ends
+its standard path with an unconditional `ChainedOptimizer(optimizers)`, so
+`replicate` reads `ChainedOptimizer[Float16OptimizerWithFloat16Params]`
+and `zero1` reads `ChainedOptimizer[DistributedOptimizer]`. `zero3` takes
+the Megatron-FSDP branch, which builds one optimizer and returns it bare,
+so it reads `DistributedOptimizer`. **The model shape decides none of
+this.** The chain holds a second member only above expert degree 1, and
+both members carry one class, so the printed string does not move.
 
 **The microbatch count in that line is `microbatch_geometry`'s, not
 `n_microbatches`'s, and it is 1 at `pp` 1.** One Megatron sample is one
@@ -1448,7 +1479,7 @@ enforce. Arm rule 13 cannot make up that difference here, because stock
 Megatron all-reduces the reported loss over the data-parallel group on every
 step.
 
-**Six things about that line, and each is a trap somebody already fell
+**Eight things about that line, and each is a trap somebody already fell
 into:**
 
 - **The isinstance is `_BaseDataParallel`, not `DistributedDataParallel`.**
@@ -1470,6 +1501,28 @@ into:**
   `DistributedOptimizer` under `--use-distributed-optimizer`, and
   `Float16OptimizerWithFloat16Params` without it. It raises when that
   optimizer is absent, exactly as it raises for an absent wrapper.
+- **Under `replicate` and `zero1` that class name sits INSIDE a chain, and
+  the chain's own name proves nothing.** `get_megatron_optimizer` ends its
+  standard path with an unconditional `ChainedOptimizer(optimizers)`, so
+  both values carry a chain. A chain of
+  `Float16OptimizerWithFloat16Params` is ZeRO-0 and a chain of
+  `DistributedOptimizer` is ZeRO-1, and both print `ChainedOptimizer`. The
+  shim therefore names the members, deduplicated and sorted:
+  `ChainedOptimizer[DistributedOptimizer]` where they agree, and
+  `ChainedOptimizer[A+B]` where they do not. It raises on an empty chain.
+  **`zero3` is the exception**: it takes the Megatron-FSDP branch, which
+  builds one optimizer and returns it bare, so that value alone reads a
+  plain `DistributedOptimizer`.
+  **A real eight-GPU `30b-a3b` cell failed arm rule 12 on 2026-09-16,
+  because the line said `ChainedOptimizer` alone.**
+- **`grad_reduce_in_fp32` MOVES with `--megatron-precision`, and the marker
+  once pinned it True.** Megatron turns
+  `accumulate_allreduce_grads_in_fp32` on only where the main-grad dtype is
+  fp32, and copies that field into `ddp_config.grad_reduce_in_fp32`. So
+  `stock` reads True and `lean`, which sends `--main-grads-dtype bf16`,
+  reads False. That is the second field the 2026-09-16 cell failed on.
+  `grad_reduce_in_fp32` in `flags.py` derives it from the dtype the recipe
+  sends, so a hand-written table cannot drift from it.
 - **`sharding_strategy` is the strategy the run ACTS on, not the raw
   field.** Megatron's argparse defaults `data_parallel_sharding_strategy` to
   `optim_grads_params` and copies it into every `ddp_config`, but
