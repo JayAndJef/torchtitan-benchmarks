@@ -2052,7 +2052,9 @@ TEST_CENSUS = {
     # replicated optimizer that must read differently, members that
     # disagree, an empty chain that raises, and a bare optimizer that keeps
     # its own name.
-    "test_megatron_stock_driver": 148,
+    # +1 that a chain of one member and a chain of two read alike, so the
+    # expert degree does not move the expected string.
+    "test_megatron_stock_driver": 149,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2366,7 +2368,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1925
+TEST_CENSUS_TOTAL = 1926
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

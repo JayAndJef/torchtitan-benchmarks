@@ -2481,7 +2481,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         self.assertIn("no member optimizer", str(caught.exception))
 
     def test_a_bare_optimizer_keeps_its_own_name(self) -> None:
-        """Megatron returns one where it builds one bucket.
+        """The Megatron-FSDP branch returns one, so ``zero3`` reads it.
 
         This needs no megatron, because it reads the function alone.
         """
@@ -2491,6 +2491,33 @@ class DataParallelMarkerTest(unittest.TestCase):
             ),
             "DistributedOptimizer",
         )
+
+    def test_one_member_and_two_members_read_alike(self) -> None:
+        """The expert degree must not move the printed string.
+
+        ``get_megatron_optimizer`` appends a second member only where the
+        model carries expert parameter groups, which needs an expert
+        degree above 1. So a dense shape gives a chain of one and
+        ``30b-a3b`` at ``ep`` 2 gives a chain of two. Deduplication
+        collapses both to one name, so one expected string covers every
+        shape.
+
+        This needs no megatron, because it reads the function alone.
+        """
+        from benchmarks.e2e.megatron_stock.flags import (
+            data_parallel_optimizer,
+        )
+
+        def chain(count):
+            optimizer = type("ChainedOptimizer", (), {})()
+            optimizer.chained_optimizers = [
+                type("DistributedOptimizer", (), {})()
+                for _ in range(count)
+            ]
+            return train.optimizer_class_name(optimizer)
+
+        self.assertEqual(chain(1), chain(2))
+        self.assertEqual(chain(1), data_parallel_optimizer("zero1"))
 
     def test_the_megatron_fsdp_wrapper_is_accepted_and_named(self) -> None:
         """The repair, stated as one assertion.
