@@ -2047,7 +2047,12 @@ TEST_CENSUS = {
     # shim reads from setup_model_and_optimizer, its refusal when the
     # optimizer is absent, the lean mode line, and that line against the
     # profile's own precision markers.
-    "test_megatron_stock_driver": 143,
+    # +5 that the data-parallel line names the members of a
+    # ChainedOptimizer: a chain of distributed optimizers, a chain of the
+    # replicated optimizer that must read differently, members that
+    # disagree, an empty chain that raises, and a bare optimizer that keeps
+    # its own name.
+    "test_megatron_stock_driver": 148,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2067,7 +2072,10 @@ TEST_CENSUS = {
     # mesh while the tuned profile asks for none and refuses off.
     # +2 with the precision value: the lean argv equal to its two parts,
     # and the titan arm untouched under lean.
-    "test_megatron_stock_launch": 67,
+    # +3 that arm rule 12's stock marker names the members of a
+    # ChainedOptimizer, refuses a replicated chain under a zero1 label, and
+    # follows --megatron-precision on the gradient reduction.
+    "test_megatron_stock_launch": 70,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2357,7 +2365,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1916
+TEST_CENSUS_TOTAL = 1924
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

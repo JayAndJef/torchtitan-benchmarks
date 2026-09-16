@@ -45,10 +45,11 @@ from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.megatron_stock.flags import (
-    DATA_PARALLEL_OPTIMIZERS,
     DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     SHARDING_STRATEGIES,
+    data_parallel_optimizer,
+    grad_reduce_in_fp32,
     microbatch_geometry,
     refuse_unknown_dense_sharding,
 )
@@ -72,7 +73,7 @@ from benchmarks.e2e.registry import (
     Arm,
     Workload,
 )
-from benchmarks.models.piper_qwen3.shape import shape_by_name
+from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 from benchmarks.traces.extraction import per_rank_pooled_metrics
 from benchmarks.traces.schema import Region
 
@@ -142,10 +143,18 @@ class ValidationProfile:
 
     ``parallelism_markers`` is arm rule 12: the log lines that prove this
     engine really ran the requested mesh. It is a callable rather than a
-    string because every value in those lines comes from the spec and the
-    workload. An empty tuple means this engine logs nothing that proves this
-    spec, and ``validate_arm`` then refuses the run rather than publishing a
-    mesh nothing checked -- the same shape as ``compiled_marker`` above.
+    string because every value in those lines comes from the spec, the
+    workload, the shape and the precision. An empty tuple means this engine
+    logs nothing that proves this spec, and ``validate_arm`` then refuses
+    the run rather than publishing a mesh nothing checked -- the same shape
+    as ``compiled_marker`` above.
+
+    **It takes the shape and the precision because two fields of the stock
+    data-parallel line move with them, and a real run proved it.** The
+    shape decides whether Megatron chains two optimizers, and
+    ``--megatron-precision`` decides whether Megatron reduces the gradients
+    in fp32. Both reach every profile, because one call site serves all
+    three; the two TorchTitan-facing profiles read neither.
 
     ``pipelined_pattern`` is the other half of arm rule 12, and it reads the
     other way. ``parallelism_markers`` proves the engine built the mesh that
@@ -218,7 +227,7 @@ class ValidationProfile:
     check_ac_line: bool
     check_regions: bool
     parallelism_markers: Callable[
-        [ParallelismSpec, Workload], tuple[str, ...]
+        [ParallelismSpec, Workload, PiperShape, str], tuple[str, ...]
     ]
     pipelined_pattern: re.Pattern[str]
     data_parallel_pattern: re.Pattern[str]
@@ -228,9 +237,17 @@ class ValidationProfile:
 
 
 def _titan_parallelism_markers(
-    spec: ParallelismSpec, workload: Workload
+    spec: ParallelismSpec,
+    workload: Workload,
+    shape: PiperShape,
+    megatron_precision: str,
 ) -> tuple[str, ...]:
     """What TorchTitan logs about the mesh it really built.
+
+    ``shape`` and ``megatron_precision`` reach every profile, because one
+    call site serves all three. This one reads neither: TorchTitan's mesh
+    line carries no model geometry, and no Megatron optimizer holds its
+    state.
 
     The first line comes from ``ParallelDims``, which TorchTitan builds from
     the command line it was given, so it states the degrees that took effect
@@ -287,9 +304,17 @@ def _titan_parallelism_markers(
 
 
 def _megatron_parallelism_markers(
-    spec: ParallelismSpec, workload: Workload
+    spec: ParallelismSpec,
+    workload: Workload,
+    shape: PiperShape,
+    megatron_precision: str,
 ) -> tuple[str, ...]:
     """``benchmarks.e2e.megatron.train``'s two lines. Keep in sync.
+
+    ``shape`` and ``megatron_precision`` reach every profile, and this one
+    reads neither. The tuned driver builds a plain torch AdamW on every
+    parameter, so it chains no optimizer and it holds one precision;
+    ``_tuned_megatron_precision_markers`` refuses ``lean`` outright.
 
     The driver prints what it resolved: the degrees from its own arguments,
     checked against what ``initialize_model_parallel`` gave it, and the
@@ -330,7 +355,10 @@ def _megatron_parallelism_markers(
 
 
 def _megatron_stock_parallelism_markers(
-    spec: ParallelismSpec, workload: Workload
+    spec: ParallelismSpec,
+    workload: Workload,
+    shape: PiperShape,
+    megatron_precision: str,
 ) -> tuple[str, ...]:
     """``benchmarks.e2e.megatron_stock.train``'s two lines. Keep in sync.
 
@@ -418,13 +446,27 @@ def _megatron_stock_parallelism_markers(
     sharded run prints True. ``DATA_PARALLEL_OVERLAP`` is the table, and it
     lives beside the flags for the reason the other two tables do.
 
-    ``grad_reduce_in_fp32`` is pinned and does not move: ``--bf16`` with
-    the default ``--main-grads-dtype fp32`` sets
-    ``accumulate_allreduce_grads_in_fp32``, which
-    ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``, and no
-    wrapper touches that field. A Megatron bump that moves either value
-    fails this rule rather than publishing a precision the log does not
-    state.
+    **``grad_reduce_in_fp32`` moves with ``--megatron-precision``, and this
+    rule once pinned it True.** ``--bf16`` with the default
+    ``--main-grads-dtype fp32`` sets ``accumulate_allreduce_grads_in_fp32``,
+    which ``get_megatron_ddp_config`` copies into ``grad_reduce_in_fp32``,
+    and no wrapper touches that field after that. ``--megatron-precision
+    lean`` sends ``--main-grads-dtype bf16``, so the field reads False
+    there. A real eight-GPU run failed this rule on 2026-09-16 for that
+    reason. ``grad_reduce_in_fp32`` in ``flags.py`` is the one statement of
+    the derivation, and the driver prints what the wrapper really carries.
+
+    **The optimizer field names the members of a CHAIN, and the shape is
+    what decides there is one.** Megatron builds one optimizer for each
+    ``(optimizer_name, is_expert)`` bucket and chains them above one
+    bucket, so every mixture of experts gets a ``ChainedOptimizer``. The
+    outer class is the same under every dense-sharding value, so a marker
+    that read it alone would let a ZeRO-0 chain pass under a ZeRO-1 label.
+    ``data_parallel_optimizer`` is the one statement of that string, and it
+    takes the shape for this reason.
+
+    A Megatron bump that moves any of these values fails this rule rather
+    than publishing a treatment the log does not state.
 
     **Arm rule 13 cannot carry this axis alone.** Stock Megatron
     all-reduces the reported loss over the data-parallel group on every
@@ -454,10 +496,12 @@ def _megatron_stock_parallelism_markers(
             f"{DATA_PARALLEL_WRAPPERS[spec.dense_sharding]} over "
             f"{spec.dp} ranks (overlap_grad_reduce="
             f"{DATA_PARALLEL_OVERLAP[spec.dense_sharding]}, "
-            "grad_reduce_in_fp32=True, sharding_strategy="
+            "grad_reduce_in_fp32="
+            f"{grad_reduce_in_fp32(megatron_precision)}, "
+            "sharding_strategy="
             f"{SHARDING_STRATEGIES[spec.dense_sharding]}, "
-            f"expert_parallel={spec.ep}, "
-            f"optimizer={DATA_PARALLEL_OPTIMIZERS[spec.dense_sharding]})"
+            f"expert_parallel={spec.ep}, optimizer="
+            f"{data_parallel_optimizer(spec.dense_sharding, shape)})"
         )
     return tuple(markers)
 
@@ -1014,7 +1058,7 @@ def validate_arm(
     parallelism_markers: tuple[str, ...] = ()
     if parallelism.world_size > 1:
         parallelism_markers = profile.parallelism_markers(
-            parallelism, workload
+            parallelism, workload, shape, megatron_precision
         )
         if not parallelism_markers:
             raise RuntimeError(

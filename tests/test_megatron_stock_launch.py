@@ -55,6 +55,11 @@ from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 
+# The shape arm rule 12's markers are built for. Every call site states it,
+# because the stock data-parallel line names a chained optimizer only where
+# the model is a mixture of experts, and the shape is what says so.
+MARKER_SHAPE = shape_by_name("1b")
+
 SCENARIO_NAME = "piper_megatron_stock"
 STOCK_PACKAGE = "benchmarks.e2e.megatron_stock"
 STOCK_FLAGS_MODULE = f"{STOCK_PACKAGE}.flags"
@@ -707,7 +712,9 @@ class StockArgvTests(unittest.TestCase):
                 workload = scenario.workload
                 if batch is not None:
                     workload = replace(workload, local_batch_size=batch)
-                marker = profile.parallelism_markers(spec, workload)[0]
+                marker = profile.parallelism_markers(
+                    spec, workload, MARKER_SHAPE, "stock"
+                )[0]
                 self.assertIn(f"microbatches={megatron} ", marker)
 
     def test_the_argv_carries_no_torchtitan_parallelism_token(self) -> None:
@@ -852,7 +859,9 @@ class StockValidationProfileTests(unittest.TestCase):
     # -- arm rule 12 ----------------------------------------------------
 
     def test_the_markers_interpolate_the_spec(self) -> None:
-        markers = _megatron_stock_parallelism_markers(MESH, self.workload)
+        markers = _megatron_stock_parallelism_markers(
+            MESH, self.workload, MARKER_SHAPE, "stock"
+        )
         self.assertEqual(
             markers[0],
             "Megatron-LM stock parallelism: dp=2 pp=4 ep=1 schedule=1F1B "
@@ -863,7 +872,7 @@ class StockValidationProfileTests(unittest.TestCase):
             "Megatron-LM stock data parallel: DistributedDataParallel over "
             "2 ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True, "
             "sharding_strategy=no_shard, expert_parallel=1, "
-            "optimizer=Float16OptimizerWithFloat16Params)",
+            "optimizer=ChainedOptimizer[Float16OptimizerWithFloat16Params])",
         )
 
     def test_the_sharded_markers_name_the_other_wrapper(self) -> None:
@@ -875,7 +884,7 @@ class StockValidationProfileTests(unittest.TestCase):
         the replicated line and fails arm rule 12, which is the point.
         """
         markers = _megatron_stock_parallelism_markers(
-            SHARDED_MESH, self.workload
+            SHARDED_MESH, self.workload, MARKER_SHAPE, "stock"
         )
         self.assertEqual(
             markers[0],
@@ -888,7 +897,7 @@ class StockValidationProfileTests(unittest.TestCase):
             "over 2 ranks (overlap_grad_reduce=True, "
             "grad_reduce_in_fp32=True, "
             "sharding_strategy=optim_grads_params, expert_parallel=2, "
-            "optimizer=DistributedOptimizer)",
+            "optimizer=ChainedOptimizer[DistributedOptimizer])",
         )
 
     def test_the_two_values_share_no_data_parallel_marker(self) -> None:
@@ -899,14 +908,74 @@ class StockValidationProfileTests(unittest.TestCase):
         publish under the sharded label.
         """
         replicated = _megatron_stock_parallelism_markers(
-            MESH, self.workload
+            MESH, self.workload, MARKER_SHAPE, "stock"
         )[1]
         sharded = _megatron_stock_parallelism_markers(
-            SHARDED_MESH, self.workload
+            SHARDED_MESH, self.workload, MARKER_SHAPE, "stock"
         )[1]
         self.assertNotEqual(replicated, sharded)
         self.assertNotIn(replicated, sharded)
         self.assertNotIn(sharded, replicated)
+
+    def test_the_marker_names_the_members_of_the_chain(self) -> None:
+        """A mixture of experts gets a chain, and this marker reads it.
+
+        Megatron builds one optimizer for each
+        ``(optimizer_name, is_expert)`` bucket, so every registered shape
+        carries two. The ``30b-a3b`` cell of 2026-09-16 printed the outer
+        class alone, and arm rule 12 refused it.
+        """
+        line = _megatron_stock_parallelism_markers(
+            SHARDED_MESH, self.workload, MARKER_SHAPE, "stock"
+        )[1]
+        self.assertIn(
+            "optimizer=ChainedOptimizer[DistributedOptimizer])", line
+        )
+
+    def test_a_replicated_chain_cannot_satisfy_a_zero1_marker(self) -> None:
+        """The hazard: ZeRO-0 must not publish under a ZeRO-1 label.
+
+        Megatron keeps ``DistributedDataParallel`` under both values, so
+        the wrapper separates neither, and both chains carry the same
+        outer class. A chain of ``Float16OptimizerWithFloat16Params`` is
+        what a run that lost ``--use-distributed-optimizer`` builds.
+        """
+        zero1 = _megatron_stock_parallelism_markers(
+            replace(MESH, dense_sharding="zero1"),
+            self.workload,
+            MARKER_SHAPE,
+            "stock",
+        )[1]
+        replicated = _megatron_stock_parallelism_markers(
+            MESH, self.workload, MARKER_SHAPE, "stock"
+        )[1]
+        self.assertIn(
+            "optimizer=ChainedOptimizer[DistributedOptimizer])", zero1
+        )
+        self.assertIn(
+            "optimizer=ChainedOptimizer["
+            "Float16OptimizerWithFloat16Params])",
+            replicated,
+        )
+        self.assertNotEqual(zero1, replicated)
+
+    def test_the_gradient_reduction_follows_the_precision(self) -> None:
+        """``--megatron-precision lean`` sends ``--main-grads-dtype bf16``.
+
+        Megatron then leaves ``accumulate_allreduce_grads_in_fp32`` off,
+        and the wrapper carries ``grad_reduce_in_fp32=False``. This marker
+        pinned True before 2026-09-16, and the real cell failed on it.
+        """
+        sharded = replace(MESH, dense_sharding="zero1")
+        stock = _megatron_stock_parallelism_markers(
+            sharded, self.workload, MARKER_SHAPE, "stock"
+        )[1]
+        lean = _megatron_stock_parallelism_markers(
+            sharded, self.workload, MARKER_SHAPE, "lean"
+        )[1]
+        self.assertIn("grad_reduce_in_fp32=True", stock)
+        self.assertIn("grad_reduce_in_fp32=False", lean)
+        self.assertNotEqual(stock, lean)
 
     def test_the_markers_are_non_empty_above_world_size_one(self) -> None:
         """An empty tuple would make ``validate_arm`` refuse the run.
@@ -921,7 +990,9 @@ class StockValidationProfileTests(unittest.TestCase):
             ParallelismSpec(dp=8),
         ):
             with self.subTest(spec=spec):
-                markers = self.profile.parallelism_markers(spec, self.workload)
+                markers = self.profile.parallelism_markers(
+                    spec, self.workload, MARKER_SHAPE, "stock"
+                )
                 self.assertTrue(markers)
                 self.assertIn(
                     f"dp={spec.dp} pp={spec.pp} ep={spec.ep}", markers[0]
@@ -931,9 +1002,13 @@ class StockValidationProfileTests(unittest.TestCase):
         pipeline_only = self.profile.parallelism_markers(
             ParallelismSpec(pp=4, pp_schedule="1F1B", pp_microbatch_size=4),
             self.workload,
+            MARKER_SHAPE,
+            "stock",
         )
         self.assertEqual(len(pipeline_only), 1)
-        with_dp = self.profile.parallelism_markers(MESH, self.workload)
+        with_dp = self.profile.parallelism_markers(
+            MESH, self.workload, MARKER_SHAPE, "stock"
+        )
         self.assertEqual(len(with_dp), 2)
 
     def test_the_microbatch_count_is_megatrons_own_arithmetic(self) -> None:
@@ -968,7 +1043,9 @@ class StockValidationProfileTests(unittest.TestCase):
                 workload = replace(
                     self.workload, local_batch_size=local_batch_size
                 )
-                marker = self.profile.parallelism_markers(spec, workload)[0]
+                marker = self.profile.parallelism_markers(
+                    spec, workload, MARKER_SHAPE, "stock"
+                )[0]
                 self.assertIn(f"microbatches={megatron} ", marker)
                 if spec.pp == 1:
                     self.assertEqual(megatron, 1)
@@ -979,7 +1056,7 @@ class StockValidationProfileTests(unittest.TestCase):
         self,
     ) -> None:
         line = self.profile.parallelism_markers(
-            ParallelismSpec(dp=2), self.workload
+            ParallelismSpec(dp=2), self.workload, MARKER_SHAPE, "stock"
         )[0]
         self.assertIn("pp=1", line)
         self.assertIsNone(self.profile.pipelined_pattern.search(line))
@@ -991,7 +1068,9 @@ class StockValidationProfileTests(unittest.TestCase):
             ParallelismSpec(pp=4, pp_schedule="1F1B", pp_microbatch_size=4),
         ):
             with self.subTest(spec=spec):
-                line = self.profile.parallelism_markers(spec, self.workload)[0]
+                line = self.profile.parallelism_markers(
+                    spec, self.workload, MARKER_SHAPE, "stock"
+                )[0]
                 self.assertIsNotNone(
                     self.profile.pipelined_pattern.search(line)
                 )
@@ -1010,7 +1089,7 @@ class StockValidationProfileTests(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 for line in self.profile.parallelism_markers(
-                    spec, self.workload
+                    spec, self.workload, MARKER_SHAPE, "stock"
                 ):
                     self.assertIsNone(
                         self.profile.data_parallel_pattern.search(line),
@@ -1035,7 +1114,7 @@ class StockValidationProfileTests(unittest.TestCase):
         for spec in (MESH, SHARDED_MESH):
             with self.subTest(dense_sharding=spec.dense_sharding):
                 line = self.profile.parallelism_markers(
-                    spec, self.workload
+                    spec, self.workload, MARKER_SHAPE, "stock"
                 )[1]
                 self.assertIsNotNone(
                     self.profile.data_parallel_pattern.search(line)
@@ -1051,7 +1130,7 @@ class StockValidationProfileTests(unittest.TestCase):
         for spec in (MESH, SHARDED_MESH):
             with self.subTest(dense_sharding=spec.dense_sharding):
                 line = self.profile.parallelism_markers(
-                    spec, self.workload
+                    spec, self.workload, MARKER_SHAPE, "stock"
                 )[1]
                 other = (
                     "zero3" if spec.dense_sharding == "replicate"
@@ -1070,7 +1149,9 @@ class StockValidationProfileTests(unittest.TestCase):
         engine configuration under the other's label.
         """
         tuned = VALIDATION_PROFILES["megatron"]
-        tuned_lines = tuned.parallelism_markers(MESH, self.workload)
+        tuned_lines = tuned.parallelism_markers(
+            MESH, self.workload, MARKER_SHAPE, "stock"
+        )
         for line in tuned_lines:
             with self.subTest(line=line):
                 self.assertIsNone(
@@ -1079,7 +1160,9 @@ class StockValidationProfileTests(unittest.TestCase):
                 self.assertIsNone(
                     self.profile.data_parallel_pattern.search(line), line
                 )
-        for line in self.profile.parallelism_markers(MESH, self.workload):
+        for line in self.profile.parallelism_markers(
+            MESH, self.workload, MARKER_SHAPE, "stock"
+        ):
             with self.subTest(line=line):
                 self.assertIsNone(tuned.pipelined_pattern.search(line), line)
                 self.assertIsNone(
@@ -1092,8 +1175,12 @@ class StockValidationProfileTests(unittest.TestCase):
             tuned.mode_line("default"), self.profile.mode_line("default")
         )
         self.assertEqual(
-            set(tuned.parallelism_markers(MESH, self.workload))
-            & set(self.profile.parallelism_markers(MESH, self.workload)),
+            set(tuned.parallelism_markers(
+                MESH, self.workload, MARKER_SHAPE, "stock"
+            ))
+            & set(self.profile.parallelism_markers(
+                MESH, self.workload, MARKER_SHAPE, "stock"
+            )),
             set(),
         )
 
@@ -1155,30 +1242,42 @@ def _geometry(workload, spec):
     return microbatch_geometry(workload, spec)
 
 
-def _driver_data_parallel_line(dense_sharding: str, *, dp: int, ep: int) -> str:
+def _driver_data_parallel_line(
+    dense_sharding: str,
+    *,
+    dp: int,
+    ep: int,
+    megatron_precision: str = "stock",
+) -> str:
     """The driver's data-parallel line for one dense-sharding value.
 
     ``install_data_parallel_marker`` fills these five fields from the
     wrapper, the optimizer and the expert group. This helper states the
     values Megatron resolves for each ``--dense-sharding`` value, so the
     diff below reads the driver's own template.
+
+    **The optimizer field names a chain**, because Megatron builds one
+    optimizer for each ``(optimizer_name, is_expert)`` bucket and every
+    registered shape is a mixture of experts. ``grad_reduce_in_fp32``
+    follows ``--megatron-precision``, and neither value is written here.
     """
     from benchmarks.e2e.megatron_stock import train
     from benchmarks.e2e.megatron_stock.flags import (
-        DATA_PARALLEL_OPTIMIZERS,
         DATA_PARALLEL_OVERLAP,
         DATA_PARALLEL_WRAPPERS,
         SHARDING_STRATEGIES,
+        data_parallel_optimizer,
+        grad_reduce_in_fp32,
     )
 
     return train.DATA_PARALLEL_LINE.format(
         wrapper=DATA_PARALLEL_WRAPPERS[dense_sharding],
         dp=dp,
         overlap=DATA_PARALLEL_OVERLAP[dense_sharding],
-        fp32=True,
+        fp32=grad_reduce_in_fp32(megatron_precision),
         sharding=SHARDING_STRATEGIES[dense_sharding],
         expert=ep,
-        optimizer=DATA_PARALLEL_OPTIMIZERS[dense_sharding],
+        optimizer=data_parallel_optimizer(dense_sharding, MARKER_SHAPE),
     )
 
 
@@ -1234,7 +1333,9 @@ class StockMarkerContractTests(unittest.TestCase):
         built = [
             self.profile.completion_marker,
             self.profile.mode_line("default"),
-            *self.profile.parallelism_markers(MESH, self.workload),
+            *self.profile.parallelism_markers(
+                MESH, self.workload, MARKER_SHAPE, "stock"
+            ),
             *self.profile.p2p_markers(MESH, "on"),
             *self.profile.nan_guard_markers("on"),
         ]
@@ -1293,7 +1394,9 @@ class StockMarkerContractTests(unittest.TestCase):
                 printed = train.parallelism_lines(
                     _StockArgs(spec), microbatches=microbatches
                 )
-                markers = profile.parallelism_markers(spec, workload)
+                markers = profile.parallelism_markers(
+                    spec, workload, MARKER_SHAPE, "stock"
+                )
                 self.assertEqual(printed[0], markers[0])
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
@@ -1333,7 +1436,9 @@ class StockMarkerContractTests(unittest.TestCase):
                 printed = _driver_data_parallel_line(
                     spec.dense_sharding, dp=spec.dp, ep=spec.ep
                 )
-                markers = self.profile.parallelism_markers(spec, workload)
+                markers = self.profile.parallelism_markers(
+                    spec, workload, MARKER_SHAPE, "stock"
+                )
                 self.assertEqual(printed, markers[1])
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)

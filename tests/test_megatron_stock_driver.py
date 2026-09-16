@@ -2287,18 +2287,29 @@ class DataParallelMarkerTest(unittest.TestCase):
         ep=1,
         built_ep=None,
         optimizer="DistributedOptimizer",
+        members=None,
     ):
         """Install the shim over a stub and return what it printed.
 
         ``optimizer`` is the class NAME the stub optimizer carries, because
-        the shim prints ``type(optimizer).__name__``. Megatron builds
+        the shim reads ``type(optimizer).__name__``. Megatron builds
         ``DistributedOptimizer`` under ``--use-distributed-optimizer`` and
         ``Float16OptimizerWithFloat16Params`` without it, and that class is
         the one observation that separates ``zero1`` from ``replicate``.
+
+        ``members`` gives the stub Megatron's own ``chained_optimizers``
+        attribute, which is what makes it a chain. A mixture of experts
+        gets one, because Megatron builds one optimizer for each
+        ``(optimizer_name, is_expert)`` bucket. ``None`` leaves the
+        attribute absent, which is the bare optimizer of one bucket.
         """
         megatron_training, _ = self.megatron_symbols()
         original = megatron_training.setup_model_and_optimizer
         built_optimizer = type(optimizer, (), {})()
+        if members is not None:
+            built_optimizer.chained_optimizers = [
+                type(member, (), {})() for member in members
+            ]
         megatron_training.setup_model_and_optimizer = (
             lambda *args, **keywords: ([chunk], built_optimizer, None)
         )
@@ -2385,6 +2396,100 @@ class DataParallelMarkerTest(unittest.TestCase):
                 expert=1,
                 optimizer="DistributedOptimizer",
             ),
+        )
+
+    def test_a_chain_names_its_members(self) -> None:
+        """A mixture of experts gets a chain, and the line names it.
+
+        Megatron builds one optimizer for each
+        ``(optimizer_name, is_expert)`` bucket, so every shape this suite
+        runs has two. The ``30b-a3b`` cell of 2026-09-16 printed the outer
+        class alone, and arm rule 12 refused it.
+        """
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config()
+        printed = self.run_shim(
+            chunk,
+            optimizer="ChainedOptimizer",
+            members=("DistributedOptimizer", "DistributedOptimizer"),
+        )
+        self.assertIn(
+            "optimizer=ChainedOptimizer[DistributedOptimizer])", printed
+        )
+
+    def test_a_chain_of_the_replicated_optimizer_reads_differently(
+        self,
+    ) -> None:
+        """The hazard: ZeRO-0 must not pass under a ZeRO-1 label.
+
+        A chain of ``Float16OptimizerWithFloat16Params`` is ZeRO-0. It
+        carries the same outer class as a ZeRO-1 chain, so the members are
+        what refuse it.
+        """
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config()
+        zero0 = self.run_shim(
+            chunk,
+            optimizer="ChainedOptimizer",
+            members=("Float16OptimizerWithFloat16Params",) * 2,
+        )
+        zero1 = self.run_shim(
+            chunk,
+            optimizer="ChainedOptimizer",
+            members=("DistributedOptimizer",) * 2,
+        )
+        self.assertIn(
+            "optimizer=ChainedOptimizer[Float16OptimizerWithFloat16Params])",
+            zero0,
+        )
+        self.assertNotEqual(zero0, zero1)
+        self.assertNotIn("ChainedOptimizer[DistributedOptimizer]", zero0)
+
+    def test_members_that_disagree_are_sorted_and_joined(self) -> None:
+        """One dense shape covers both cases, and the order is stable."""
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config()
+        printed = self.run_shim(
+            chunk,
+            optimizer="ChainedOptimizer",
+            members=(
+                "Float16OptimizerWithFloat16Params",
+                "DistributedOptimizer",
+            ),
+        )
+        self.assertIn(
+            "optimizer=ChainedOptimizer[DistributedOptimizer+"
+            "Float16OptimizerWithFloat16Params])",
+            printed,
+        )
+
+    def test_an_empty_chain_raises(self) -> None:
+        """A chain with no member names no class.
+
+        ``ChainedOptimizer`` accepts an empty list, for a rank that holds
+        no trainable parameter. The line would then state a ZeRO level
+        nothing observed.
+        """
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config()
+        with self.assertRaises(RuntimeError) as caught:
+            self.run_shim(chunk, optimizer="ChainedOptimizer", members=())
+        self.assertIn("no member optimizer", str(caught.exception))
+
+    def test_a_bare_optimizer_keeps_its_own_name(self) -> None:
+        """Megatron returns one where it builds one bucket.
+
+        This needs no megatron, because it reads the function alone.
+        """
+        self.assertEqual(
+            train.optimizer_class_name(
+                type("DistributedOptimizer", (), {})()
+            ),
+            "DistributedOptimizer",
         )
 
     def test_the_megatron_fsdp_wrapper_is_accepted_and_named(self) -> None:
@@ -2524,36 +2629,67 @@ class DataParallelMarkerTest(unittest.TestCase):
     def test_the_matching_profile_marker_is_the_line_the_shim_prints(
         self,
     ) -> None:
-        """The character-for-character diff, for both values.
+        """The character-for-character diff, for every value.
 
         A one-character difference fails a real eight-GPU run at arm rule
-        12, hours after it started.
+        12, hours after it started. The ``30b-a3b`` cell of 2026-09-16
+        failed on two fields at once, so this loop covers the precision
+        axis beside the dense-sharding one.
+
+        **The stub optimizer is a CHAIN.** Megatron builds one optimizer
+        for each ``(optimizer_name, is_expert)`` bucket, and every shape
+        this suite runs is a mixture of experts, so a real run carries a
+        chain of two.
         """
         from benchmarks.e2e.megatron_stock.flags import (
+            CHAINED_OPTIMIZER,
             DATA_PARALLEL_OPTIMIZERS,
+            grad_reduce_in_fp32,
         )
         from benchmarks.e2e.validation import VALIDATION_PROFILES
+        from benchmarks.models.piper_qwen3.shape import shape_by_name
 
         profile = VALIDATION_PROFILES["megatron_stock"]
+        shape = shape_by_name("1b")
         ddp_cls, fsdp_cls = self.wrapper_classes()
         for spec, cls in (
             (PP4_SPEC, ddp_cls),
             (SHARDED_PP4_SPEC, fsdp_cls),
             (EXPERT_PP4_SPEC, fsdp_cls),
         ):
-            with self.subTest(
-                dense_sharding=spec.dense_sharding, ep=spec.ep
-            ):
-                chunk = object.__new__(cls)
-                chunk.ddp_config = self.ddp_config(spec.dense_sharding)
-                printed = self.run_shim(
-                    chunk,
-                    dp=spec.dp,
+            # ``lean`` needs a sharded dense value: Megatron asserts
+            # use_distributed_optimizer under the precision-aware
+            # optimizer, and ``_resolve_run`` refuses the other pair.
+            precisions = (
+                ("stock",)
+                if spec.dense_sharding == "replicate"
+                else ("stock", "lean")
+            )
+            for precision in precisions:
+                with self.subTest(
+                    dense_sharding=spec.dense_sharding,
                     ep=spec.ep,
-                    optimizer=DATA_PARALLEL_OPTIMIZERS[spec.dense_sharding],
-                )
-                markers = profile.parallelism_markers(spec, BATCH_32)
-                self.assertEqual(printed, markers[1])
+                    precision=precision,
+                ):
+                    chunk = object.__new__(cls)
+                    chunk.ddp_config = self.ddp_config(
+                        spec.dense_sharding,
+                        grad_reduce_in_fp32=grad_reduce_in_fp32(precision),
+                    )
+                    printed = self.run_shim(
+                        chunk,
+                        dp=spec.dp,
+                        ep=spec.ep,
+                        optimizer=CHAINED_OPTIMIZER,
+                        members=(
+                            DATA_PARALLEL_OPTIMIZERS[spec.dense_sharding],
+                        )
+                        * 2,
+                    )
+                    markers = profile.parallelism_markers(
+                        spec, BATCH_32, shape, precision
+                    )
+                    self.assertEqual(printed, markers[1])
 
     def test_an_expert_group_that_does_not_exist_raises(self) -> None:
         """``get_expert_model_parallel_world_size`` returns 0 without a
