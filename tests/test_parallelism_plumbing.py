@@ -1323,6 +1323,47 @@ class RunBannerTests(unittest.TestCase):
             lines,
         )
 
+    def _warnings(self, spec: ParallelismSpec, gpu: str) -> list[str]:
+        return [
+            line
+            for line in self._summaries(spec, gpu)
+            if line.startswith("WARNING: ")
+        ]
+
+    def test_a_zero1_run_at_dp_one_carries_both_warnings(self) -> None:
+        """Legal, and a reader must not take the value at face value. The
+        shard degree is 1 there, and one microbatch puts the gradient
+        reduce-scatter inside the only backward pass."""
+        warnings = self._warnings(ParallelismSpec(dense_sharding="zero1"), "0")
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any("at dp 1" in line for line in warnings))
+        self.assertTrue(any("ZeRO-2" in line for line in warnings))
+
+    def test_the_warnings_land_before_the_banner(self) -> None:
+        """``_resolve_run`` emits them before it probes the host, so they
+        reach the operator before the run claims a GPU. The banner is
+        filled in by that probe, so it is the marker to sort against."""
+        lines = self._summaries(ParallelismSpec(dense_sharding="zero1"), "0")
+        first_warning = min(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("WARNING: ")
+        )
+        banner = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("GPU (PCI index):")
+        )
+        self.assertLess(first_warning, banner)
+
+    def test_the_intended_mesh_carries_no_warning(self) -> None:
+        """A warning that fired on the configuration this axis exists to run
+        would teach an operator to ignore warnings."""
+        self.assertEqual(
+            self._warnings(ParallelismSpec(dp=2, dense_sharding="zero3"), "0,1"),
+            [],
+        )
+
     def test_the_sharded_parity_reaches_the_banner(self) -> None:
         """The line has to MOVE with the value.
 

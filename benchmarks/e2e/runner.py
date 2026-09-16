@@ -28,6 +28,7 @@ from benchmarks.e2e.parallelism import (
     NAN_GUARD_LAUNCHERS,
     ParallelismSpec,
     TRIVIAL_SPEC,
+    dense_sharding_warnings,
     validate_parallelism,
 )
 from benchmarks.e2e.registry import (
@@ -193,6 +194,8 @@ def workload_with_overrides(
 def _resolve_run(
     request: RunRequest,
     environment: Mapping[str, str],
+    *,
+    event_handler: EventHandler | None = None,
 ) -> tuple[
     RuntimePaths,
     Scenario,
@@ -387,6 +390,20 @@ def _resolve_run(
     # replicates and shards at once, and the Megatron driver refuses a
     # schedule it does not implement. Each failure lands on the module that
     # owns the missing work.
+
+    # Two legal meshes a reader can misread, said where the operator meets
+    # them. Neither refuses anything, so each is a warning and not a rule.
+    #
+    # **This lands before any host probe**, which is the line below that
+    # calls ``hardware_metadata``. So the operator reads the warning before
+    # the run claims a GPU, and a run that dies later still printed it.
+    #
+    # ``dense_sharding_warnings`` is the one statement of both facts, and
+    # ``benchmarks/e2e/results.py`` appends the same strings to
+    # ``results.json``. A second copy of the text here could drift from the
+    # copy the artifact carries.
+    for warning in dense_sharding_warnings(parallelism):
+        _emit(event_handler, "summary", f"WARNING: {warning}")
 
     # The p2p sync treatment, refused parent-side for two reasons that each
     # name their own cause. Without a pipeline there is no message to
@@ -604,7 +621,7 @@ def execute_run(
         resumed,
         megatron_p2p_sync,
         megatron_nan_guard,
-    ) = _resolve_run(request, host_environment)
+    ) = _resolve_run(request, host_environment, event_handler=event_handler)
 
     if resumed:
         state = load_run_state(out_dir, arms)

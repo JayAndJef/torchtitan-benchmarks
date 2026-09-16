@@ -2209,7 +2209,10 @@ TEST_CENSUS = {
     # value a TypeError, the same value resuming and a different one
     # refused both ways, the value alone refusing a resume, and a
     # schema-13 directory reading as on.
-    "test_parallelism_plumbing": 77,
+    # +3 with the dense-sharding warnings: both reach the run summary, they
+    # land before the banner the host probe fills in, and the mesh this axis
+    # exists to run carries none.
+    "test_parallelism_plumbing": 80,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2262,9 +2265,12 @@ TEST_CENSUS = {
     # fail the arm and name the step, a negative inf is read rather than
     # crashing the parser, every rank is read and the failure names the
     # rank, the titan sentinel passes, and the guard reads a bare log.
-    "test_throughput": 36,
+    # +3 that the same two warnings reach results.json: both under zero1 at
+    # dp 1, none under replicate, and a directory written before the rename
+    # still evaluates rather than failing on a value the axis retired.
+    "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1869
+TEST_CENSUS_TOTAL = 1875
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

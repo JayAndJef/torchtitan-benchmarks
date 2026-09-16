@@ -53,6 +53,11 @@ from benchmarks.artifacts.summaries import (
     describe,
     summarize,
 )
+from benchmarks.e2e.parallelism import (
+    DEFAULT_DENSE_SHARDING,
+    ParallelismSpec,
+    dense_sharding_warnings,
+)
 from benchmarks.traces.extraction import PooledMetrics, per_rank_pooled_metrics
 from benchmarks.traces.schema import Region
 
@@ -711,6 +716,33 @@ def evaluate_run(
     # carry no record and every one of them ran on one GPU.
     recorded_parallelism = manifest.get("parallelism", {})
     world_size = int(recorded_parallelism.get("world_size", 1))
+    # The two dense-sharding warnings reach the artifact as well as the
+    # console. The runner says them when the run starts, and a reader of
+    # results.json was not there. The file is what a report quotes.
+    #
+    # ``dense_sharding_warnings`` reads a spec, so the record becomes a spec
+    # again. Only the fields that function reads are rebuilt: a record also
+    # carries keys the spec derives for itself, such as ``world_size``.
+    #
+    # **A directory written before the rename records ``shard``, which this
+    # axis no longer declares, so the rebuild refuses it.** Three published
+    # cells are in that state. They predate the question these warnings ask,
+    # so they earn none -- and evaluating them must not fail here.
+    try:
+        recorded_spec = ParallelismSpec(
+            dp=int(recorded_parallelism.get("dp", 1)),
+            pp=int(recorded_parallelism.get("pp", 1)),
+            ep=int(recorded_parallelism.get("ep", 1)),
+            dense_sharding=str(
+                recorded_parallelism.get(
+                    "dense_sharding", DEFAULT_DENSE_SHARDING
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        recorded_spec = None
+    if recorded_spec is not None:
+        warnings.extend(dense_sharding_warnings(recorded_spec))
     raw_training = {
         arm: per_rank_training_metrics(out_dir / f"{arm}.log") for arm in arms
     }
