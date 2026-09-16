@@ -93,7 +93,7 @@ PP4_SPEC = ParallelismSpec(
 # The same mesh with the dense parameters sharded on both engines, and then
 # with the expert split that value makes legal. Named rather than numbered:
 # two run matrices use overlapping cell numbers for different cells.
-SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, dense_sharding="shard")
+SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, dense_sharding="zero3")
 EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
 BATCH_32 = dataclasses.replace(PIPER_1B_MEGATRON_WORKLOAD, local_batch_size=32)
 
@@ -367,7 +367,7 @@ class FlagListTest(unittest.TestCase):
         emitted one would change what the arm measures without changing
         anything the manifest records. The roster is a function of the
         dense-sharding value, because all five sharding flags move from
-        declined to required under ``shard``.
+        declined to required under ``zero3``.
         """
         for size in ("1b", "9b"):
             for spec in (
@@ -407,7 +407,7 @@ class FlagListTest(unittest.TestCase):
         v1 turns it on itself, so an argv that omitted it would deny a fact
         the run has.
         """
-        self.assertEqual(omitted_flags("shard"), ALWAYS_OMITTED_FLAGS)
+        self.assertEqual(omitted_flags("zero3"), ALWAYS_OMITTED_FLAGS)
         for spec in (SHARDED_PP4_SPEC, EXPERT_PP4_SPEC):
             emitted = flags_for("1b", spec)
             for flag in SHARDING_FLAGS:
@@ -436,7 +436,7 @@ class FlagListTest(unittest.TestCase):
         """
         self.assertEqual(MEGATRON_FSDP_VERSION, "1")
         self.assertEqual(
-            DATA_PARALLEL_WRAPPERS["shard"], "FullyShardedDataParallelV1"
+            DATA_PARALLEL_WRAPPERS["zero3"], "FullyShardedDataParallelV1"
         )
 
     def test_the_expert_degree_reaches_the_argv(self) -> None:
@@ -480,19 +480,43 @@ class FlagListTest(unittest.TestCase):
         A replicated expert row would compare two memory strategies, which
         is two changes rather than one.
         """
-        with self.assertRaisesRegex(ValueError, "--dense-sharding shard"):
+        with self.assertRaisesRegex(ValueError, "--dense-sharding zero3"):
             flags_for("1b", dataclasses.replace(PP4_SPEC, ep=2))
 
     def test_an_unknown_dense_sharding_value_is_refused(self) -> None:
         """A silent fall through would send the replicated argv under the
         other label.
+
+        ``shard`` is the retired spelling of ``zero3``. It is not a declared
+        value any more, so this module must refuse it rather than build the
+        sharded argv for it.
         """
         with self.assertRaisesRegex(ValueError, "dense sharding"):
             flags_for(
-                "1b", dataclasses.replace(PP4_SPEC, dense_sharding="zero3")
+                "1b", dataclasses.replace(PP4_SPEC, dense_sharding="shard")
             )
         with self.assertRaisesRegex(ValueError, "dense sharding"):
-            omitted_flags("zero3")
+            omitted_flags("shard")
+
+    def test_zero1_has_no_command_line_yet(self) -> None:
+        """A declared value this module cannot build an argv for.
+
+        ``_sharding_flags`` returns the five sharded flags under ``zero3``
+        and an empty list under ``replicate``, so a silent fall through
+        would send the replicated argv under the ``zero1`` label. The three
+        tables would raise a bare ``KeyError``, which names neither the
+        value nor the missing work.
+        """
+        with self.assertRaisesRegex(
+            ValueError, "no stock megatron command line yet"
+        ):
+            omitted_flags("zero1")
+        with self.assertRaisesRegex(
+            ValueError, "no stock megatron command line yet"
+        ):
+            flags_for(
+                "1b", dataclasses.replace(PP4_SPEC, dense_sharding="zero1")
+            )
 
     def test_the_sharding_strategy_table_reads_no_shard_under_replicate(
         self,
@@ -507,7 +531,7 @@ class FlagListTest(unittest.TestCase):
         """
         self.assertEqual(SHARDING_STRATEGIES["replicate"], "no_shard")
         self.assertEqual(
-            SHARDING_STRATEGIES["shard"], MEGATRON_SHARDING_STRATEGY
+            SHARDING_STRATEGIES["zero3"], MEGATRON_SHARDING_STRATEGY
         )
 
     def test_geometry_comes_from_the_shape(self) -> None:
@@ -2070,9 +2094,9 @@ class DataParallelMarkerTest(unittest.TestCase):
         ``test_a_replicated_run_reports_no_shard``.
         """
         base = dict(
-            overlap_grad_reduce=(dense_sharding == "shard"),
+            overlap_grad_reduce=(dense_sharding == "zero3"),
             grad_reduce_in_fp32=True,
-            use_megatron_fsdp=(dense_sharding == "shard"),
+            use_megatron_fsdp=(dense_sharding == "zero3"),
             data_parallel_sharding_strategy="optim_grads_params",
         )
         base.update(overrides)
@@ -2134,7 +2158,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         """
         _, fsdp_cls = self.wrapper_classes()
         chunk = object.__new__(fsdp_cls)
-        chunk.ddp_config = self.ddp_config("shard")
+        chunk.ddp_config = self.ddp_config("zero3")
         printed = self.run_shim(chunk, ep=2)
         self.assertIn(
             "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
@@ -2355,7 +2379,7 @@ class DataParallelMarkerTest(unittest.TestCase):
                     DATA_PARALLEL_OVERLAP[value],
                     strategy in MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES,
                 )
-        self.assertTrue(DATA_PARALLEL_OVERLAP["shard"])
+        self.assertTrue(DATA_PARALLEL_OVERLAP["zero3"])
         # False for two reasons: no_shard is not in the guard's list, and
         # no Megatron-FSDP wrapper exists under this value at all.
         self.assertFalse(DATA_PARALLEL_OVERLAP["replicate"])

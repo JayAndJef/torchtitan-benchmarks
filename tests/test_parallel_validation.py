@@ -1305,7 +1305,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         self.assertIn("data_parallel_shard_degree=-1", str(caught.exception))
 
     def test_a_stated_shard_degree_runs(self) -> None:
-        """``--dense-sharding shard`` asks for exactly this mesh.
+        """``--dense-sharding zero3`` asks for exactly this mesh.
 
         The old guard refused every mesh with a shard degree above 1, so it
         would refuse an honest sharded run. This is the behaviour change.
@@ -1329,7 +1329,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         """No dense-sharding value names HSDP.
 
         ``titan_mesh`` returns ``(dp, 1)`` under ``replicate`` and
-        ``(1, dp)`` under ``shard``, so a passthrough flag is the only way
+        ``(1, dp)`` under a sharded value, so a passthrough flag is the only way
         to build this mesh and the manifest could not record it.
         """
         with self.assertRaisesRegex(

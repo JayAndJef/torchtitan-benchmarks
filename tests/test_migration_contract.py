@@ -1118,7 +1118,7 @@ class GoldenCommandTests(unittest.TestCase):
             "normal",
             "default",
             "none",
-            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
         )
         self.assertEqual(
             command[
@@ -1162,7 +1162,7 @@ class GoldenCommandTests(unittest.TestCase):
         """
         for mode, replicate, shard in (
             ("replicate", "2", "1"),
-            ("shard", "1", "2"),
+            ("zero3", "1", "2"),
         ):
             with self.subTest(dense_sharding=mode):
                 command = self._command(
@@ -1221,7 +1221,7 @@ class GoldenCommandTests(unittest.TestCase):
             "normal",
             "default",
             "none",
-            ParallelismSpec(dp=4, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="zero3"),
         )
         self.assertEqual(
             command[
@@ -1977,7 +1977,9 @@ TEST_CENSUS = {
     # gradient consumer, and that --rerun-mode disabled removes neither.
     # +1 with the 30b-a3b shape: the stock argv carries the written head
     # count and expert width, and the other geometry flags beside them.
-    "test_megatron_stock_driver": 130,
+    # +1 that zero1 has no stock megatron command line yet, so the value is
+    # refused by name rather than falling through to the replicated argv.
+    "test_megatron_stock_driver": 131,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2149,10 +2151,11 @@ TEST_CENSUS = {
     # to 8 whose verdict moved from the cap to rule 7.
     # +8 when rule 14 stopped refusing every expert degree: rules 8 and 9
     # reachable under the sharded parity and still refusing an illegal count
-    # under either, every expert split passing under shard and refused under
-    # replicate with a message that names the flag, and rule 15 refusing
-    # shard at dp 1 -- including the depth-8 cell, which fills the budget and
-    # is therefore replicated by arithmetic rather than by choice.
+    # under either, every expert split passing under a sharded value and
+    # refused under replicate with a message that names the flag, and rule
+    # 15 refusing a sharded value at dp 1 -- including the depth-8 cell,
+    # which fills the budget. Rule 15 is deleted now; the cases stayed and
+    # they assert the other verdict.
     # +8 for rule 16, which refuses both to the tuned megatron driver: the
     # launcher set naming that driver alone, every registry launcher
     # classified, each half refusing under its own message, the expert half
@@ -2165,7 +2168,13 @@ TEST_CENSUS = {
     # while every other sharded row still passed.
     # +1 with NAN_GUARD_LAUNCHERS: it names the stock launcher alone, sits
     # inside MEGATRON_LAUNCHERS, and names no launcher the registry lacks.
-    "test_parallelism": 155,
+    # +14 with the zero1/zero3 axis: the three-value roster, the two sharded
+    # values sharing one mesh and the branch that names replicate rather
+    # than them, three cases for titan_reshard_after_forward, six for
+    # dense_sharding_warnings, and two for rule 17, which holds a pipeline
+    # under zero1 and names it as a repair. Rule 15 is gone and its class
+    # now proves the removal, which adds one case to it.
+    "test_parallelism": 169,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the six CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -2255,7 +2264,7 @@ TEST_CENSUS = {
     # rank, the titan sentinel passes, and the guard reads a bare log.
     "test_throughput": 36,
 }
-TEST_CENSUS_TOTAL = 1854
+TEST_CENSUS_TOTAL = 1869
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

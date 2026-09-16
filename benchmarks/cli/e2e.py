@@ -232,8 +232,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.IntRange(min=1),
             help=(
                 "Expert-parallel degree [default: 1]. Needs "
-                "--dense-sharding shard, because TorchTitan cannot split "
-                "the experts and keep the dense parameters replicated. "
+                "--dense-sharding zero1 or zero3, because TorchTitan cannot "
+                "split the experts and keep the dense parameters replicated. "
                 "ep takes its ranks out of the dp axis."
             ),
         ),
@@ -258,9 +258,11 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.Choice(DENSE_SHARDING_MODES),
             help=(
                 "How the run holds the dense parameters [default: "
-                f"{DEFAULT_DENSE_SHARDING}]. The shard value needs --dp "
-                "above 1. An expert degree needs the shard value. Results "
-                "are only comparable within one value."
+                f"{DEFAULT_DENSE_SHARDING}]. replicate keeps a whole copy on "
+                "every rank. zero1 shards the optimizer states. zero3 shards "
+                "the parameters, the gradients and the optimizer states. An "
+                "expert degree needs zero1 or zero3. Results are only "
+                "comparable within one value."
             ),
         ),
         # No envvar; the docstring above gives the reason.

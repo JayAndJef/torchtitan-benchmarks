@@ -131,7 +131,7 @@ PARALLELISM_LINE = (
 # Each of the three derives directly from _BaseDataParallel. None of them
 # derives from another. So the class name is what says which memory
 # strategy ran. The word "DistributedDataParallel" cannot be hardcoded
-# here, because it is wrong under --dense-sharding shard.
+# here, because it is wrong under --dense-sharding zero3.
 #
 # **{sharding} is the strategy the run acts on, not the raw field.**
 # Megatron's argparse defaults data_parallel_sharding_strategy to

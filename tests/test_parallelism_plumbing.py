@@ -209,11 +209,11 @@ class RequestTests(unittest.TestCase):
             "--dp",
             "2",
             "--dense-sharding",
-            "shard",
+            "zero3",
         )
         self.assertEqual(
             request.parallelism,
-            ParallelismSpec(dp=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, dense_sharding="zero3"),
         )
 
     def test_the_dense_sharding_option_refuses_an_undeclared_value(
@@ -222,12 +222,17 @@ class RequestTests(unittest.TestCase):
         """**Click refuses it, and the exit code is what says so.**
 
         A nonzero exit proves nothing here: a legal ``--dense-sharding
-        shard`` also exits nonzero, because the run then starts and fails on
+        zero3`` also exits nonzero, because the run then starts and fails on
         this host for its own reasons. Click's usage error is exit 2, and
         it names the roster. Without the ``click.Choice`` the string would
         reach ``ParallelismSpec.__post_init__``, raise, and exit 1 -- a
         refusal in the right direction under the wrong code, which this
         assertion separates.
+
+        **The value under test is ``shard``, which is the RETIRED
+        spelling.** Three recorded cells carry it, so an operator who reads
+        an old manifest can type it. It must reach the roster message rather
+        than the new ``zero3`` behaviour.
         """
         result = CliRunner().invoke(
             cli,
@@ -239,11 +244,11 @@ class RequestTests(unittest.TestCase):
                 "--dp",
                 "2",
                 "--dense-sharding",
-                "zero3",
+                "shard",
             ],
         )
         self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("'replicate', 'shard'", result.output)
+        self.assertIn("'replicate', 'zero1', 'zero3'", result.output)
 
     def test_the_pipeline_options_build_one_spec(self) -> None:
         request = self._request(
@@ -529,16 +534,16 @@ class ManifestSchemaFourteenTests(unittest.TestCase):
     def test_a_sharded_spec_round_trips_through_json(self) -> None:
         """Both halves reach the file: the parity the operator asked for,
         and the TorchTitan mesh it resolves to."""
-        spec = ParallelismSpec(dp=2, dense_sharding="shard")
+        spec = ParallelismSpec(dp=2, dense_sharding="zero3")
         recorded = json.loads(json.dumps(self._manifest(spec)))
         self.assertEqual(
             recorded["parallelism"], describe(spec, local_batch_size=4)
         )
-        self.assertEqual(recorded["parallelism"]["dense_sharding"], "shard")
+        self.assertEqual(recorded["parallelism"]["dense_sharding"], "zero3")
         self.assertEqual(recorded["parallelism"]["dp_replicate"], 1)
         self.assertEqual(recorded["parallelism"]["dp_shard"], 2)
         self.assertEqual(
-            recorded["execution_model"], "2-gpu-plain-bf16-dp2-shard"
+            recorded["execution_model"], "2-gpu-plain-bf16-dp2-zero3"
         )
 
     def test_an_omitted_parallelism_is_a_type_error(self) -> None:
@@ -863,7 +868,7 @@ class ResumeParallelismTests(unittest.TestCase):
         the moment ``describe`` records it.
         """
         recorded = ParallelismSpec(dp=2)
-        requested = ParallelismSpec(dp=2, dense_sharding="shard")
+        requested = ParallelismSpec(dp=2, dense_sharding="zero3")
         self.assertIn(
             "parallelism", self._mismatches(self._manifest(recorded), requested)
         )
@@ -1080,9 +1085,9 @@ class ResolveRunTests(unittest.TestCase):
         degree, so the subprocess no longer refuses the selected arm -- but
         no sharded arm has run on a GPU, so the rule is all this checks.
         """
-        sharded = ParallelismSpec(dp=2, dense_sharding="shard")
+        sharded = ParallelismSpec(dp=2, dense_sharding="zero3")
         with self.assertRaisesRegex(
-            ValueError, r"--dense-sharding shard is not implemented"
+            ValueError, r"--dense-sharding zero3 is not implemented"
         ):
             self._resolve(
                 scenario_name="piper1b_megatron",
@@ -1229,7 +1234,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         """The premise of every case below."""
         resolved = self._resolve(
             self._environment(None),
-            parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+            parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
         )
         self.assertIn("--use-megatron-fsdp", resolved[6]["baseline"])
 
@@ -1239,7 +1244,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         ) as raised:
             self._resolve(
                 self._environment("1"),
-                parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+                parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
             )
         # The refusal names its own repair, as every other refusal here does.
         self.assertIn("Unset CUDA_DEVICE_MAX_CONNECTIONS", str(raised.exception))
@@ -1251,7 +1256,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
             with self.subTest(value=value):
                 self._resolve(
                     self._environment(value),
-                    parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+                    parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
                 )
 
     def test_a_replicated_run_is_untouched_by_the_variable(self) -> None:
@@ -1325,11 +1330,11 @@ class RunBannerTests(unittest.TestCase):
         would pass the test above and tell the operator nothing.
         """
         lines = self._summaries(
-            ParallelismSpec(dp=2, dense_sharding="shard"), "0,1"
+            ParallelismSpec(dp=2, dense_sharding="zero3"), "0,1"
         )
         self.assertIn(
             "parallelism: dp 2 x pp 1 (ep 1, world size 2, "
-            "dense sharding shard)",
+            "dense sharding zero3)",
             lines,
         )
 

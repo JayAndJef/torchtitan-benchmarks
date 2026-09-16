@@ -75,7 +75,7 @@ SHARDED_MESH = ParallelismSpec(
     ep=2,
     pp_schedule="1F1B",
     pp_microbatch_size=4,
-    dense_sharding="shard",
+    dense_sharding="zero3",
 )
 
 # Every mesh the argv checks below sweep, with the batch each needs.
@@ -160,7 +160,7 @@ STOCK_LOG_FRAGMENTS = (
 # says which memory strategy ran.
 STOCK_WRAPPER_FRAGMENTS = {
     "replicate": "Megatron-LM stock data parallel: DistributedDataParallel ",
-    "shard": (
+    "zero3": (
         "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
     ),
 }
@@ -173,7 +173,7 @@ STOCK_WRAPPER_FRAGMENTS = {
 # follows it.
 STOCK_OVERLAP_FRAGMENTS = {
     "replicate": "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
-    "shard": "(overlap_grad_reduce=True, grad_reduce_in_fp32=True,",
+    "zero3": "(overlap_grad_reduce=True, grad_reduce_in_fp32=True,",
 }
 
 # The rest of the mode line. ``ValidationProfile.mode_line`` stops at the
@@ -816,7 +816,7 @@ class StockValidationProfileTests(unittest.TestCase):
         )
 
     def test_the_sharded_markers_name_the_other_wrapper(self) -> None:
-        """``--dense-sharding shard`` moves three fields of two lines.
+        """``--dense-sharding zero3`` moves three fields of two lines.
 
         Megatron picks ``FullyShardedDataParallelV1`` from
         ``--use-megatron-fsdp`` alone, and the strategy it then acts on is
@@ -1002,7 +1002,7 @@ class StockValidationProfileTests(unittest.TestCase):
                     spec, self.workload
                 )[1]
                 other = (
-                    "shard" if spec.dense_sharding == "replicate"
+                    "zero3" if spec.dense_sharding == "replicate"
                     else "replicate"
                 )
                 for roster in (
@@ -1084,10 +1084,10 @@ STOCK_MESH_CASES = (
     # The dense-sharding control cell of the matrix, and the expert split
     # it makes legal. Both lines carry a field that moves between the two
     # values, so a diff over the replicated cells alone proves half of it.
-    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"), 32),
+    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero3"), 32),
     (
         ParallelismSpec(
-            dp=2, pp=4, ep=2, pp_schedule="1F1B", dense_sharding="shard"
+            dp=2, pp=4, ep=2, pp_schedule="1F1B", dense_sharding="zero3"
         ),
         32,
     ),
@@ -1145,7 +1145,7 @@ def _driver_lines() -> list[str]:
         ),
         *train.parallelism_lines(_StockArgs(spec), microbatches=8),
         _driver_data_parallel_line("replicate", dp=2, ep=1),
-        _driver_data_parallel_line("shard", dp=2, ep=2),
+        _driver_data_parallel_line("zero3", dp=2, ep=2),
         train.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
         train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
         train.P2P_LINE.format(comm=True, sync=True),
