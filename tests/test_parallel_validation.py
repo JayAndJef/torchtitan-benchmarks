@@ -1056,17 +1056,29 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
                 )
 
 
-def _stock_log(spec: ParallelismSpec, nan_guard_line: str | None) -> str:
+def _stock_log(
+    spec: ParallelismSpec,
+    nan_guard_line: str | None,
+    *,
+    megatron_precision: str = "stock",
+) -> str:
     """One rank's stock-driver output: every line the rules read.
 
-    The mesh lines and the p2p line come from the profile the validator
-    uses; the nan guard line is the argument, so a test can give a rank
-    the wrong value or no line at all.
+    The mesh lines, the p2p line and the precision fields come from the
+    profile the validator uses; the nan guard line is the argument, so a
+    test can give a rank the wrong value or no line at all.
+
+    ``megatron_precision`` builds the precision fields for a value. The
+    profile asks for them under BOTH values, so a fixture that omitted
+    them would fail every stock arm.
     """
     profile = VALIDATION_PROFILES["megatron_stock"]
     workload = scenario_by_name("piper_megatron_stock").workload
     lines = [
         profile.mode_line("default"),
+        # The driver prints these on its own mode line, off the arguments
+        # Megatron resolved.
+        ", ".join(profile.precision_markers(megatron_precision)),
         _SIZE_LINE.rstrip("\n"),
         *profile.parallelism_markers(spec, workload),
         *profile.p2p_markers(spec, "on"),
@@ -1210,6 +1222,145 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
                     ac_mode="none",
                     parallelism=PP2,
                     megatron_nan_guard="off",
+                )
+
+
+class ArmRuleTwelvePrecisionTests(unittest.TestCase):
+    """The ``--megatron-precision`` half of arm rule 12.
+
+    The stock driver prints the four precision fields off the arguments
+    Megatron resolved, on every rank at every mesh. The profile asks for
+    them under BOTH values: a ``stock`` label is a claim about the
+    optimizer state exactly as a ``lean`` label is, so a run that gained
+    the lean flags must fail a stock label as surely as a run that lost
+    them fails a lean one.
+    """
+
+    NAN_GUARD_ON = stock_train.NAN_GUARD_LINE.format(value=True)
+
+    def test_the_stock_markers_are_the_four_resolved_fields(self) -> None:
+        """Megatron maps each dtype to a ``torch.dtype``, so the markers
+        carry the torch spelling rather than the flag's."""
+        profile = VALIDATION_PROFILES["megatron_stock"]
+        self.assertEqual(
+            profile.precision_markers("stock"),
+            (
+                "use_precision_aware_optimizer=False",
+                "main_grads_dtype=torch.float32",
+                "exp_avg_dtype=torch.float32",
+                "exp_avg_sq_dtype=torch.float32",
+            ),
+        )
+        self.assertEqual(
+            profile.precision_markers("lean"),
+            (
+                "use_precision_aware_optimizer=True",
+                "main_grads_dtype=torch.bfloat16",
+                "exp_avg_dtype=torch.bfloat16",
+                "exp_avg_sq_dtype=torch.bfloat16",
+            ),
+        )
+
+    def test_the_titan_profile_asks_for_no_field_and_checks_the_value(
+        self,
+    ) -> None:
+        titan = VALIDATION_PROFILES["torchtitan"]
+        for value in ("stock", "lean"):
+            self.assertEqual(titan.precision_markers(value), ())
+        for name in ("megatron", "megatron_stock", "torchtitan"):
+            with self.subTest(profile=name):
+                with self.assertRaisesRegex(
+                    ValueError, "unknown megatron precision"
+                ):
+                    VALIDATION_PROFILES[name].precision_markers("bf16")
+
+    def test_the_tuned_profile_asks_for_nothing_and_refuses_lean(
+        self,
+    ) -> None:
+        """That driver builds a plain torch AdamW, so no line of its log
+        could prove the treatment."""
+        tuned = VALIDATION_PROFILES["megatron"]
+        self.assertEqual(tuned.precision_markers("stock"), ())
+        with self.assertRaisesRegex(ValueError, "plain torch AdamW"):
+            tuned.precision_markers("lean")
+
+    def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
+        self,
+    ) -> None:
+        """Asked at the trivial spec, where the mesh markers ask nothing."""
+        scenario = scenario_by_name("piper_megatron_stock")
+        arm = scenario.arm("baseline")
+        cases = (
+            ("stock", "stock", None),
+            ("stock", "lean", "use_precision_aware_optimizer=True"),
+            ("lean", "lean", None),
+            ("lean", "stock", "use_precision_aware_optimizer=False"),
+        )
+        for logged, requested, refused in cases:
+            with self.subTest(logged=logged, requested=requested):
+                with tempfile.TemporaryDirectory() as temporary:
+                    fixture = _ArmFixture(
+                        Path(temporary),
+                        ranks=(0,),
+                        markers=arm.trace_kernel_markers,
+                    )
+                    fixture.write({
+                        0: _stock_log(
+                            TRIVIAL_SPEC,
+                            self.NAN_GUARD_ON,
+                            megatron_precision=logged,
+                        )
+                    })
+                    keywords = dict(
+                        compile_mode="default",
+                        ac_mode="none",
+                        megatron_precision=requested,
+                    )
+                    if refused is None:
+                        validate_arm(
+                            arm,
+                            fixture.root,
+                            fixture.log,
+                            scenario.workload,
+                            **keywords,
+                        )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, refused):
+                            validate_arm(
+                                arm,
+                                fixture.root,
+                                fixture.log,
+                                scenario.workload,
+                                **keywords,
+                            )
+
+    def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
+        """The rule runs per rank, so a stage that kept the stock optimizer
+        under a ``lean`` label is caught."""
+        scenario = scenario_by_name("piper_megatron_stock")
+        arm = scenario.arm("baseline")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(
+                Path(temporary), markers=arm.trace_kernel_markers
+            )
+            fixture.write({
+                0: _stock_log(
+                    PP2, self.NAN_GUARD_ON, megatron_precision="lean"
+                ),
+                1: _stock_log(
+                    PP2, self.NAN_GUARD_ON, megatron_precision="stock"
+                ),
+            })
+            with self.assertRaisesRegex(RuntimeError, "on rank 1"):
+                validate_arm(
+                    arm,
+                    fixture.root,
+                    fixture.log,
+                    scenario.workload,
+                    compile_mode="default",
+                    ac_mode="none",
+                    parallelism=PP2,
+                    megatron_precision="lean",
                 )
 
 

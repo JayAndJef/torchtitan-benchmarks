@@ -92,10 +92,26 @@ from benchmarks.e2e.registry import (
 # --------------------------------------------------------------------------
 
 # Arm rule 8. The profile matches the prefix up to the first comma.
+#
+# **The four precision fields are the --megatron-precision half of arm rule
+# 12.** Megatron resolves every one of them before it builds the optimizer,
+# and it maps each dtype string to a torch.dtype (arguments.py's dtype_map),
+# so this line prints "torch.bfloat16" where the flag says "bf16". The
+# profile asks for the four under both values: a run whose argv lost the
+# lean flags prints fp32 under a lean label, and a run that gained them
+# prints bf16 under a stock label. Either fails.
+#
+# main_params_dtype stays torch.float32 under both values on purpose. The
+# recipe never sends --main-params-dtype, which Megatron restricts to fp32
+# and fp16, and store_param_remainders already holds the master copy at 2
+# bytes for each parameter.
 MODE_LINE = (
     "Megatron-LM stock training loop (mode={mode}, "
     "main_params_dtype={main_params_dtype}, "
     "main_grads_dtype={main_grads_dtype}, "
+    "use_precision_aware_optimizer={precision_aware}, "
+    "exp_avg_dtype={exp_avg_dtype}, "
+    "exp_avg_sq_dtype={exp_avg_sq_dtype}, "
     "accumulate_allreduce_grads_in_fp32={accumulate}, "
     "cross_entropy_loss_fusion={cross_entropy_loss_fusion}, "
     "moe_token_dispatcher_type={dispatcher})"
@@ -150,10 +166,18 @@ PARALLELISM_LINE = (
 # data-parallel group on every last-stage rank every step (training.py's
 # train_step), so ncclDevKernel_AllReduce appears whether or not a gradient
 # was reduced.
+# **{optimizer} is the optimizer class Megatron really built**, and it is
+# what separates the two sharded values. --use-distributed-optimizer alone
+# gives ZeRO-1, where the wrapper stays DistributedDataParallel exactly as
+# it is under replicate; the wrapper class therefore cannot tell replicate
+# from zero1, and this field can. Megatron picks the class in
+# megatron/core/optimizer/__init__.py: DistributedOptimizer under the
+# distributed optimizer, and Float16OptimizerWithFloat16Params without it.
 DATA_PARALLEL_LINE = (
     "Megatron-LM stock data parallel: {wrapper} over {dp} "
     "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
-    "sharding_strategy={sharding}, expert_parallel={expert})"
+    "sharding_strategy={sharding}, expert_parallel={expert}, "
+    "optimizer={optimizer})"
 )
 
 # The pipeline point-to-point sync treatment, printed on every rank at every
@@ -377,14 +401,19 @@ def refuse_unsupported_run(args: Any) -> None:
 def mode_line(args: Any) -> str:
     """The line arm rule 8 matches, plus the precision this arm really runs.
 
-    The five fields after the mode are what makes the arm a configured
+    The eight fields after the mode are what makes the arm a configured
     engine rather than a plain-bf16 one. They are read from the resolved
-    arguments, so the log records what Megatron built.
+    arguments, so the log records what Megatron built. Four of them carry
+    the --megatron-precision treatment, and the validation profile asks
+    for those four under both values.
     """
     return MODE_LINE.format(
         mode=args.bench_mode,
         main_params_dtype=args.main_params_dtype,
         main_grads_dtype=args.main_grads_dtype,
+        precision_aware=args.use_precision_aware_optimizer,
+        exp_avg_dtype=args.exp_avg_dtype,
+        exp_avg_sq_dtype=args.exp_avg_sq_dtype,
         accumulate=args.accumulate_allreduce_grads_in_fp32,
         cross_entropy_loss_fusion=args.cross_entropy_loss_fusion,
         dispatcher=args.moe_token_dispatcher_type,
@@ -652,6 +681,15 @@ def install_data_parallel_marker(
 
     ``overlap_grad_reduce`` and ``grad_reduce_in_fp32`` come from the
     wrapper's own ``ddp_config``, not from the arguments.
+
+    **The optimizer class is read here too, and it raises when it is
+    absent.** ``setup_model_and_optimizer`` returns the optimizer beside
+    the model, and its class is the one observation that separates
+    ``zero1`` from ``replicate``: both keep the ``DistributedDataParallel``
+    wrapper, so the wrapper name proves nothing about the optimizer state.
+    A run that lost ``--use-distributed-optimizer`` builds
+    ``Float16OptimizerWithFloat16Params`` and fails arm rule 12 here,
+    rather than publishing ZeRO-0 memory under a ZeRO-1 label.
     """
     if data_parallel_size <= 1:
         return
@@ -679,6 +717,20 @@ def install_data_parallel_marker(
                 "models and report about "
                 f"{data_parallel_size}x the true throughput"
             )
+        # The optimizer Megatron really built, beside the model. Its class
+        # is the one observation that separates zero1 from replicate: both
+        # keep the DistributedDataParallel wrapper, so the wrapper name
+        # cannot tell them apart. An absent optimizer leaves the line
+        # unable to name the class, so it raises rather than printing a
+        # ZeRO level nothing observed.
+        optimizer = result[1] if len(result) > 1 else None
+        if optimizer is None:
+            raise RuntimeError(
+                "megatron returned no optimizer from "
+                "setup_model_and_optimizer, so no line can name the class "
+                "that holds the optimizer state; the run would record a "
+                "ZeRO level it did not have"
+            )
         config = wrapped[0].ddp_config
         built_expert_size = mpu.get_expert_model_parallel_world_size()
         if built_expert_size != expert_parallel_size:
@@ -700,6 +752,7 @@ def install_data_parallel_marker(
                     else "no_shard"
                 ),
                 expert=built_expert_size,
+                optimizer=type(optimizer).__name__,
             ),
             flush=True,
         )

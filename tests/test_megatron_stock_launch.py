@@ -143,6 +143,10 @@ STOCK_LOG_FRAGMENTS = (
     # roster still says which token sits between the two above.
     "sharding_strategy=",
     "expert_parallel=",
+    # The optimizer class. It is what separates zero1 from replicate,
+    # because both keep the DistributedDataParallel wrapper. The VALUE
+    # moves with --dense-sharding, so only the field name sits here.
+    "optimizer=",
     # The p2p line, printed off the built config on every rank. The sync
     # VALUE is not here: it moves with --megatron-p2p-sync, and the
     # contract test below pins it per value.
@@ -177,16 +181,24 @@ STOCK_OVERLAP_FRAGMENTS = {
 }
 
 # The rest of the mode line. ``ValidationProfile.mode_line`` stops at the
-# comma after the mode, so no run-time rule reads these five fields; the
-# plan puts them on the line so the log records the treatment per run.
+# comma after the mode, so arm rule 8 reads none of these fields.
+#
+# **Four of them carry a run-time rule now.** ``precision_markers`` is the
+# ``--megatron-precision`` half of arm rule 12, and it asks every rank for
+# ``use_precision_aware_optimizer``, ``main_grads_dtype``,
+# ``exp_avg_dtype`` and ``exp_avg_sq_dtype`` under both values. The other
+# four fields record the treatment for the reader alone.
 #
 # **Only the field names are pinned, never the values.** Every one of the
-# five is a documented reversal target: turning cross-entropy fusion on, or
-# moving the reduction to bf16, changes a value here and must stay a
+# eight is a documented reversal target: turning cross-entropy fusion on,
+# or moving the reduction to bf16, changes a value here and must stay a
 # one-line edit in ``flags.py``.
 STOCK_MODE_LINE_FIELDS = (
     "main_params_dtype=",
     "main_grads_dtype=",
+    "use_precision_aware_optimizer=",
+    "exp_avg_dtype=",
+    "exp_avg_sq_dtype=",
     "accumulate_allreduce_grads_in_fp32=",
     "cross_entropy_loss_fusion=",
     "moe_token_dispatcher_type=",
@@ -850,7 +862,8 @@ class StockValidationProfileTests(unittest.TestCase):
             markers[1],
             "Megatron-LM stock data parallel: DistributedDataParallel over "
             "2 ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True, "
-            "sharding_strategy=no_shard, expert_parallel=1)",
+            "sharding_strategy=no_shard, expert_parallel=1, "
+            "optimizer=Float16OptimizerWithFloat16Params)",
         )
 
     def test_the_sharded_markers_name_the_other_wrapper(self) -> None:
@@ -874,7 +887,8 @@ class StockValidationProfileTests(unittest.TestCase):
             "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
             "over 2 ranks (overlap_grad_reduce=True, "
             "grad_reduce_in_fp32=True, "
-            "sharding_strategy=optim_grads_params, expert_parallel=2)",
+            "sharding_strategy=optim_grads_params, expert_parallel=2, "
+            "optimizer=DistributedOptimizer)",
         )
 
     def test_the_two_values_share_no_data_parallel_marker(self) -> None:
@@ -1144,13 +1158,14 @@ def _geometry(workload, spec):
 def _driver_data_parallel_line(dense_sharding: str, *, dp: int, ep: int) -> str:
     """The driver's data-parallel line for one dense-sharding value.
 
-    ``install_data_parallel_marker`` fills these four fields from the
-    wrapper and the expert group. This helper states the values Megatron
-    resolves for each ``--dense-sharding`` value, so the diff below reads
-    the driver's own template.
+    ``install_data_parallel_marker`` fills these five fields from the
+    wrapper, the optimizer and the expert group. This helper states the
+    values Megatron resolves for each ``--dense-sharding`` value, so the
+    diff below reads the driver's own template.
     """
     from benchmarks.e2e.megatron_stock import train
     from benchmarks.e2e.megatron_stock.flags import (
+        DATA_PARALLEL_OPTIMIZERS,
         DATA_PARALLEL_OVERLAP,
         DATA_PARALLEL_WRAPPERS,
         SHARDING_STRATEGIES,
@@ -1163,6 +1178,7 @@ def _driver_data_parallel_line(dense_sharding: str, *, dp: int, ep: int) -> str:
         fp32=True,
         sharding=SHARDING_STRATEGIES[dense_sharding],
         expert=ep,
+        optimizer=DATA_PARALLEL_OPTIMIZERS[dense_sharding],
     )
 
 
@@ -1177,6 +1193,9 @@ def _driver_lines() -> list[str]:
             mode="default",
             main_params_dtype="torch.float32",
             main_grads_dtype="torch.float32",
+            precision_aware=False,
+            exp_avg_dtype="torch.float32",
+            exp_avg_sq_dtype="torch.float32",
             accumulate=True,
             cross_entropy_loss_fusion=False,
             dispatcher="alltoall",
@@ -1396,6 +1415,9 @@ class StockMarkerContractTests(unittest.TestCase):
             mode="default",
             main_params_dtype="torch.float32",
             main_grads_dtype="torch.float32",
+            precision_aware=False,
+            exp_avg_dtype="torch.float32",
+            exp_avg_sq_dtype="torch.float32",
             accumulate=True,
             cross_entropy_loss_fusion=False,
             dispatcher="alltoall",

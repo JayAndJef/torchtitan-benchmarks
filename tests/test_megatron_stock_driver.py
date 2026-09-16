@@ -1353,7 +1353,8 @@ PLAN_PARALLELISM_LINE = (
 PLAN_DATA_PARALLEL_LINE = (
     "Megatron-LM stock data parallel: {wrapper} over {dp} "
     "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
-    "sharding_strategy={sharding}, expert_parallel={expert})"
+    "sharding_strategy={sharding}, expert_parallel={expert}, "
+    "optimizer={optimizer})"
 )
 PLAN_STAGE_SIZE_LINE = (
     "stock-megatron stage {stage}/{stages} local size: {count} parameters"
@@ -1395,6 +1396,12 @@ def stock_args(**overrides):
         world_size=1,
         main_params_dtype=torch.float32,
         main_grads_dtype=torch.float32,
+        # Megatron maps every dtype string to a torch.dtype before the
+        # optimizer exists, so the resolved arguments carry these and the
+        # log prints "torch.float32" where the flag says "fp32".
+        use_precision_aware_optimizer=False,
+        exp_avg_dtype=torch.float32,
+        exp_avg_sq_dtype=torch.float32,
         accumulate_allreduce_grads_in_fp32=True,
         cross_entropy_loss_fusion=False,
         moe_token_dispatcher_type="alltoall",
@@ -1626,6 +1633,9 @@ class MarkerStringTest(unittest.TestCase):
         for field in (
             "main_params_dtype=torch.float32",
             "main_grads_dtype=torch.float32",
+            "use_precision_aware_optimizer=False",
+            "exp_avg_dtype=torch.float32",
+            "exp_avg_sq_dtype=torch.float32",
             "accumulate_allreduce_grads_in_fp32=True",
             "cross_entropy_loss_fusion=False",
             "moe_token_dispatcher_type=alltoall",
@@ -1633,6 +1643,56 @@ class MarkerStringTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertIn(field, line)
         self.assertEqual(line.count("\n"), 0)
+
+    def test_the_mode_line_carries_the_lean_precision(self) -> None:
+        """The four fields at the other value.
+
+        Megatron maps every dtype string to a ``torch.dtype`` before the
+        optimizer exists, so the line prints ``torch.bfloat16`` where the
+        flag says ``bf16``.
+        """
+        line = train.mode_line(
+            stock_args(
+                use_precision_aware_optimizer=True,
+                main_grads_dtype=torch.bfloat16,
+                exp_avg_dtype=torch.bfloat16,
+                exp_avg_sq_dtype=torch.bfloat16,
+            )
+        )
+        for field in (
+            "use_precision_aware_optimizer=True",
+            "main_grads_dtype=torch.bfloat16",
+            "exp_avg_dtype=torch.bfloat16",
+            "exp_avg_sq_dtype=torch.bfloat16",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, line)
+        # The master copy stays fp32 under both values, because the recipe
+        # never sends --main-params-dtype.
+        self.assertIn("main_params_dtype=torch.float32", line)
+
+    def test_the_precision_fields_are_the_profile_markers(self) -> None:
+        """The driver's line against the profile's markers, both values.
+
+        A one-character difference fails a real run at arm rule 12.
+        """
+        from benchmarks.e2e.validation import VALIDATION_PROFILES
+
+        profile = VALIDATION_PROFILES["megatron_stock"]
+        cases = {
+            "stock": stock_args(),
+            "lean": stock_args(
+                use_precision_aware_optimizer=True,
+                main_grads_dtype=torch.bfloat16,
+                exp_avg_dtype=torch.bfloat16,
+                exp_avg_sq_dtype=torch.bfloat16,
+            ),
+        }
+        for value, args in cases.items():
+            line = train.mode_line(args)
+            for marker in profile.precision_markers(value):
+                with self.subTest(value=value, marker=marker):
+                    self.assertIn(marker, line)
 
     def test_the_parallelism_templates_match_the_plan(self) -> None:
         self.assertEqual(train.PARALLELISM_LINE, PLAN_PARALLELISM_LINE)
@@ -2219,12 +2279,28 @@ class DataParallelMarkerTest(unittest.TestCase):
         finally:
             mpu.set_expert_model_parallel_world_size(original or None)
 
-    def run_shim(self, chunk, *, dp=2, ep=1, built_ep=None):
-        """Install the shim over a stub and return what it printed."""
+    def run_shim(
+        self,
+        chunk,
+        *,
+        dp=2,
+        ep=1,
+        built_ep=None,
+        optimizer="DistributedOptimizer",
+    ):
+        """Install the shim over a stub and return what it printed.
+
+        ``optimizer`` is the class NAME the stub optimizer carries, because
+        the shim prints ``type(optimizer).__name__``. Megatron builds
+        ``DistributedOptimizer`` under ``--use-distributed-optimizer`` and
+        ``Float16OptimizerWithFloat16Params`` without it, and that class is
+        the one observation that separates ``zero1`` from ``replicate``.
+        """
         megatron_training, _ = self.megatron_symbols()
         original = megatron_training.setup_model_and_optimizer
+        built_optimizer = type(optimizer, (), {})()
         megatron_training.setup_model_and_optimizer = (
-            lambda *args, **keywords: ([chunk], None, None)
+            lambda *args, **keywords: ([chunk], built_optimizer, None)
         )
         stream = io.StringIO()
         try:
@@ -2307,6 +2383,7 @@ class DataParallelMarkerTest(unittest.TestCase):
                 fp32=True,
                 sharding="no_shard",
                 expert=1,
+                optimizer="DistributedOptimizer",
             ),
         )
 
@@ -2371,6 +2448,61 @@ class DataParallelMarkerTest(unittest.TestCase):
         self.assertIn("sharding_strategy=no_shard", printed)
         self.assertNotIn("optim_grads_params", printed)
 
+    def test_the_line_names_the_optimizer_class_megatron_built(self) -> None:
+        """The field that separates ``zero1`` from ``replicate``.
+
+        ``--use-distributed-optimizer`` alone gives ZeRO-1, and it leaves
+        the wrapper at ``DistributedDataParallel``. So the two values share
+        a wrapper name, and only the optimizer class tells them apart.
+        """
+        from benchmarks.e2e.megatron_stock.flags import (
+            DATA_PARALLEL_OPTIMIZERS,
+            DATA_PARALLEL_WRAPPERS,
+        )
+
+        self.assertEqual(
+            DATA_PARALLEL_WRAPPERS["zero1"],
+            DATA_PARALLEL_WRAPPERS["replicate"],
+        )
+        self.assertNotEqual(
+            DATA_PARALLEL_OPTIMIZERS["zero1"],
+            DATA_PARALLEL_OPTIMIZERS["replicate"],
+        )
+        ddp_cls, _ = self.wrapper_classes()
+        for value in ("replicate", "zero1"):
+            with self.subTest(dense_sharding=value):
+                chunk = object.__new__(ddp_cls)
+                chunk.ddp_config = self.ddp_config(value)
+                printed = self.run_shim(
+                    chunk, optimizer=DATA_PARALLEL_OPTIMIZERS[value]
+                )
+                self.assertIn(
+                    f"optimizer={DATA_PARALLEL_OPTIMIZERS[value]}", printed
+                )
+
+    def test_a_missing_optimizer_raises(self) -> None:
+        """An absent optimizer is no observation of the ZeRO level.
+
+        The line would then name no class, and the run would record a ZeRO
+        level nothing observed. It raises instead, exactly as the absent
+        wrapper does.
+        """
+        ddp_cls, _ = self.wrapper_classes()
+        chunk = object.__new__(ddp_cls)
+        chunk.ddp_config = self.ddp_config()
+        megatron_training, _ = self.megatron_symbols()
+        original = megatron_training.setup_model_and_optimizer
+        megatron_training.setup_model_and_optimizer = (
+            lambda *args, **keywords: ([chunk], None, None)
+        )
+        try:
+            train.install_data_parallel_marker(data_parallel_size=2)
+            with self.assertRaises(RuntimeError) as caught:
+                megatron_training.setup_model_and_optimizer()
+        finally:
+            megatron_training.setup_model_and_optimizer = original
+        self.assertIn("no line can name the class", str(caught.exception))
+
     def test_an_expert_group_that_contradicts_the_arguments_raises(
         self,
     ) -> None:
@@ -2397,6 +2529,9 @@ class DataParallelMarkerTest(unittest.TestCase):
         A one-character difference fails a real eight-GPU run at arm rule
         12, hours after it started.
         """
+        from benchmarks.e2e.megatron_stock.flags import (
+            DATA_PARALLEL_OPTIMIZERS,
+        )
         from benchmarks.e2e.validation import VALIDATION_PROFILES
 
         profile = VALIDATION_PROFILES["megatron_stock"]
@@ -2411,7 +2546,12 @@ class DataParallelMarkerTest(unittest.TestCase):
             ):
                 chunk = object.__new__(cls)
                 chunk.ddp_config = self.ddp_config(spec.dense_sharding)
-                printed = self.run_shim(chunk, dp=spec.dp, ep=spec.ep)
+                printed = self.run_shim(
+                    chunk,
+                    dp=spec.dp,
+                    ep=spec.ep,
+                    optimizer=DATA_PARALLEL_OPTIMIZERS[spec.dense_sharding],
+                )
                 markers = profile.parallelism_markers(spec, BATCH_32)
                 self.assertEqual(printed, markers[1])
 
@@ -2562,7 +2702,14 @@ class DataParallelMarkerTest(unittest.TestCase):
         chunk.ddp_config = self.ddp_config(
             overlap_grad_reduce=True, grad_reduce_in_fp32=False
         )
-        stub = lambda *args, **keywords: ([chunk], None, None)  # noqa: E731
+        # The shim reads the optimizer beside the model and refuses an
+        # absent one, so the stub returns the class Megatron would build.
+        optimizer = type("DistributedOptimizer", (), {})()
+        stub = lambda *args, **keywords: (  # noqa: E731
+            [chunk],
+            optimizer,
+            None,
+        )
         original = megatron_training.setup_model_and_optimizer
         megatron_training.setup_model_and_optimizer = stub
         try:

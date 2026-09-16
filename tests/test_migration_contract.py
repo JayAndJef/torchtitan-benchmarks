@@ -2043,7 +2043,11 @@ TEST_CENSUS = {
     # +5 with the lean precision recipe: the four flags and their bf16
     # tokens, no flag at all under stock, the refusal under replicate, an
     # unknown value refused, and the two flags the recipe never sends.
-    "test_megatron_stock_driver": 139,
+    # +4 with the two observations of commit 6: the optimizer class the
+    # shim reads from setup_model_and_optimizer, its refusal when the
+    # optimizer is absent, the lean mode line, and that line against the
+    # profile's own precision markers.
+    "test_megatron_stock_driver": 143,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2321,7 +2325,11 @@ TEST_CENSUS = {
     # for nothing at on and refusing off, a one-rank stock log passing or
     # failing by the requested value, and one rank with the wrong value
     # failing the arm.
-    "test_parallel_validation": 59,
+    # +5 with the --megatron-precision half of arm rule 12: the four
+    # fields per value, the titan profile's silence, the tuned profile's
+    # refusal of lean, a log that must carry the requested value, and one
+    # rank of a pipeline that carries the other one.
+    "test_parallel_validation": 64,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -2339,7 +2347,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1897
+TEST_CENSUS_TOTAL = 1906
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

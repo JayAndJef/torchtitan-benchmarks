@@ -45,6 +45,7 @@ from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.megatron_stock.flags import (
+    DATA_PARALLEL_OPTIMIZERS,
     DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     SHARDING_STRATEGIES,
@@ -62,8 +63,10 @@ from benchmarks.e2e.registry import (
     CUDAGRAPH_COMPILE_MODES,
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    DEFAULT_MEGATRON_PRECISION,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
+    MEGATRON_PRECISION_MODES,
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
@@ -193,6 +196,19 @@ class ValidationProfile:
     megatron profile returns nothing at ``on`` and REFUSES ``off``: that
     driver has no guard, so no line of its log can prove the treatment,
     and ``_resolve_run`` refuses the combination before a GPU is claimed.
+
+    ``precision_markers`` is the ``--megatron-precision`` half of the same
+    rule, and it takes the requested value alone for the reason
+    ``nan_guard_markers`` does: the optimizer state has a precision at
+    every mesh. The stock profile asks for the four fields its driver
+    prints from the arguments Megatron resolved, under BOTH values. A
+    ``stock`` label is a claim about the precision exactly as a ``lean``
+    label is, so a run that gained the lean flags must fail a stock label
+    as surely as a run that lost them fails a lean one. The titan profile
+    returns nothing, because the option never reaches it. The tuned
+    megatron profile returns nothing at ``stock`` and REFUSES ``lean``:
+    that driver builds a plain torch AdamW, so no line of its log could
+    prove the treatment.
     """
 
     completion_marker: str
@@ -208,6 +224,7 @@ class ValidationProfile:
     data_parallel_pattern: re.Pattern[str]
     p2p_markers: Callable[[ParallelismSpec, str], tuple[str, ...]]
     nan_guard_markers: Callable[[str], tuple[str, ...]]
+    precision_markers: Callable[[str], tuple[str, ...]]
 
 
 def _titan_parallelism_markers(
@@ -365,6 +382,18 @@ def _megatron_stock_parallelism_markers(
     rule. ``DATA_PARALLEL_WRAPPERS`` is the table, and it lives beside the
     flags that produce it so the two cannot drift.
 
+    **The optimizer class is what proves ``zero1``, and the wrapper class
+    cannot.** ``--use-distributed-optimizer`` alone gives ZeRO-1, and it
+    leaves the wrapper at ``DistributedDataParallel`` -- the same class
+    ``replicate`` gets. So the two values print the same wrapper name, and
+    only the optimizer separates them: Megatron builds
+    ``DistributedOptimizer`` under that flag and
+    ``Float16OptimizerWithFloat16Params`` without it
+    (``megatron/core/optimizer/__init__.py``). The driver reads the
+    optimizer ``setup_model_and_optimizer`` returned, so a run that lost
+    the flag fails this rule rather than publishing ZeRO-0 memory under a
+    ZeRO-1 label. ``DATA_PARALLEL_OPTIMIZERS`` is the table.
+
     **The sharding strategy is the value the run acts on**, which is not
     the raw argument. Megatron defaults
     ``data_parallel_sharding_strategy`` to ``optim_grads_params`` and
@@ -427,7 +456,8 @@ def _megatron_stock_parallelism_markers(
             f"{DATA_PARALLEL_OVERLAP[spec.dense_sharding]}, "
             "grad_reduce_in_fp32=True, sharding_strategy="
             f"{SHARDING_STRATEGIES[spec.dense_sharding]}, "
-            f"expert_parallel={spec.ep})"
+            f"expert_parallel={spec.ep}, "
+            f"optimizer={DATA_PARALLEL_OPTIMIZERS[spec.dense_sharding]})"
         )
     return tuple(markers)
 
@@ -568,6 +598,82 @@ def _megatron_stock_nan_guard_markers(
     )
 
 
+def _precision_tokens(megatron_precision: str) -> tuple[str, str]:
+    """The two tokens the resolved arguments print for a value.
+
+    Megatron maps every dtype string to a ``torch.dtype`` before it builds
+    the optimizer (``arguments.py``'s ``dtype_map``), so the log prints
+    ``torch.bfloat16`` where the flag says ``bf16``. The first token is the
+    ``use_precision_aware_optimizer`` bool and the second is the dtype the
+    three precision fields carry. An unknown value is refused here, before
+    it becomes a marker no log can carry.
+    """
+    if megatron_precision not in MEGATRON_PRECISION_MODES:
+        raise ValueError(
+            f"unknown megatron precision {megatron_precision!r}. Available: "
+            f"{', '.join(MEGATRON_PRECISION_MODES)}"
+        )
+    lean = megatron_precision == "lean"
+    return str(lean), "torch.bfloat16" if lean else "torch.float32"
+
+
+def _no_precision_markers(megatron_precision: str) -> tuple[str, ...]:
+    """TorchTitan has no Megatron optimizer precision to prove.
+
+    The value reaches the stock megatron launcher alone, and a TorchTitan
+    argv is the same under either value. The value is still checked, so an
+    unknown one does not pass through a titan arm unseen.
+    """
+    _precision_tokens(megatron_precision)
+    return ()
+
+
+def _tuned_megatron_precision_markers(
+    megatron_precision: str,
+) -> tuple[str, ...]:
+    """The tuned driver has no precision-aware optimizer, under either value.
+
+    ``benchmarks/e2e/megatron/train.py`` builds a plain torch AdamW on
+    every parameter, so it prints no precision field at ``stock`` and
+    nothing in its log could prove ``lean``. ``_resolve_run`` refuses
+    ``lean`` beside this arm before a GPU is claimed; a validator reached
+    with it anyway refuses too, rather than publishing a run under a
+    treatment its engine cannot state.
+    """
+    if _precision_tokens(megatron_precision)[0] == "True":
+        raise ValueError(
+            f"megatron precision {megatron_precision!r} cannot be proved for "
+            "the tuned megatron driver, which builds a plain torch AdamW "
+            "and has no precision-aware optimizer"
+        )
+    return ()
+
+
+def _megatron_stock_precision_markers(
+    megatron_precision: str,
+) -> tuple[str, ...]:
+    """``benchmarks.e2e.megatron_stock.train``'s precision fields. Keep in sync.
+
+    The driver prints all four off the arguments Megatron resolved, on
+    every rank at every mesh, and nothing in the driver sets one. So a run
+    whose argv lost the lean flags prints ``torch.float32`` under a
+    ``lean`` label, and a run that gained them prints ``torch.bfloat16``
+    under a ``stock`` label; either fails. Each field is its own marker, so
+    a failure names the field that disagreed.
+
+    ``main_params_dtype`` is deliberately absent. The recipe never sends
+    ``--main-params-dtype``, so it reads ``torch.float32`` under both
+    values and could separate neither.
+    """
+    precision_aware, dtype = _precision_tokens(megatron_precision)
+    return (
+        f"use_precision_aware_optimizer={precision_aware}",
+        f"main_grads_dtype={dtype}",
+        f"exp_avg_dtype={dtype}",
+        f"exp_avg_sq_dtype={dtype}",
+    )
+
+
 VALIDATION_PROFILES = {
     "torchtitan": ValidationProfile(
         completion_marker="Training completed",
@@ -602,6 +708,7 @@ VALIDATION_PROFILES = {
         p2p_markers=_no_p2p_markers,
         # Nor does this one.
         nan_guard_markers=_no_nan_guard_markers,
+        precision_markers=_no_precision_markers,
     ),
     "megatron": ValidationProfile(
         completion_marker="Training completed",
@@ -633,6 +740,7 @@ VALIDATION_PROFILES = {
         p2p_markers=_megatron_p2p_markers,
         # No guard in this driver: nothing at on, a refusal at off.
         nan_guard_markers=_tuned_megatron_nan_guard_markers,
+        precision_markers=_tuned_megatron_precision_markers,
     ),
     # The stock arm of piper_megatron_stock. It runs megatron.training's own
     # pretrain() through pretrain_gpt's providers, so nothing here may assume
@@ -672,6 +780,7 @@ VALIDATION_PROFILES = {
         p2p_markers=_megatron_stock_p2p_markers,
         # The stock driver's nan guard line, from the value Megatron parsed.
         nan_guard_markers=_megatron_stock_nan_guard_markers,
+        precision_markers=_megatron_stock_precision_markers,
     ),
 }
 
@@ -704,6 +813,7 @@ def _validate_log(
     spec_pp: int = 1,
     spec_dp: int = 1,
     nan_guard_markers: tuple[str, ...] = (),
+    precision_markers: tuple[str, ...] = (),
 ) -> None:
     """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
 
@@ -804,6 +914,14 @@ def _validate_log(
                 f"{arm.name}: the requested megatron nan guard did not "
                 f"apply; the engine never logged {marker!r}{where}"
             )
+    # The --megatron-precision half of arm rule 12, asked at every mesh and
+    # under both values. Empty for an engine the value never reaches.
+    for marker in precision_markers:
+        if marker not in log:
+            raise RuntimeError(
+                f"{arm.name}: the requested megatron precision did not "
+                f"apply; the engine never logged {marker!r}{where}"
+            )
     # The other half of arm rule 12. A positive marker cannot speak for a
     # spec that asked for nothing, so the trivial spec asks the question the
     # other way round: this log must not show a pipeline nobody requested.
@@ -842,6 +960,7 @@ def validate_arm(
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
+    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
 ) -> None:
     """Reject partial or wrongly configured runs before analysis.
 
@@ -865,6 +984,13 @@ def validate_arm(
     and it defaults to ``on`` for the same reason. The stock profile asks
     every rank, at every mesh, for the line its driver prints from the
     value Megatron parsed; the tuned profile refuses ``off`` outright.
+
+    ``megatron_precision`` is the requested ``--megatron-precision`` value,
+    and it defaults to ``stock``, which every published number of this
+    scenario was measured under. The stock profile asks every rank, at
+    every mesh, for the four precision fields its driver prints from the
+    arguments Megatron resolved, under both values; the tuned profile
+    refuses ``lean`` outright.
     """
     profile = VALIDATION_PROFILES[arm.validation]
     shape = shape_by_name(model_size)
@@ -872,6 +998,10 @@ def validate_arm(
     # at pp 1 and at dp 1. Resolved before any log is read, so an unknown
     # value or the tuned driver's refusal lands first.
     nan_guard_markers = profile.nan_guard_markers(megatron_nan_guard)
+    # The optimizer state has a precision at every mesh too, and both
+    # values are a claim the log must carry. Resolved here for the reason
+    # above: the tuned driver's refusal lands before any log is read.
+    precision_markers = profile.precision_markers(megatron_precision)
     if not log_path.is_file():
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     logs = logs_by_rank(log_path.read_text(errors="replace"))
@@ -920,6 +1050,7 @@ def validate_arm(
             spec_pp=parallelism.pp,
             spec_dp=parallelism.dp,
             nan_guard_markers=nan_guard_markers,
+            precision_markers=precision_markers,
         )
 
     # Arm rules 5 and 7 are per rank. Every rank runs the same number of
