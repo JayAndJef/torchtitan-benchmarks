@@ -94,6 +94,7 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def test_the_manifest_names_what_a_tokens_per_second_figure_counts(self) -> None:
@@ -103,8 +104,8 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
         self.assertEqual(THROUGHPUT_DEFINITION, "tokens_per_second_per_device")
 
     def test_the_schema_moved_with_the_new_key(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 14)
-        self.assertEqual(self._manifest()["schema_version"], 14)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 16)
+        self.assertEqual(self._manifest()["schema_version"], 16)
 
 
 class PerRankLogParsingTests(unittest.TestCase):

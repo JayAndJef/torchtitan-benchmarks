@@ -555,6 +555,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             parallelism=self.PP2,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def _resume(self, out_dir: Path, megatron_p2p_sync: str | None):
@@ -902,6 +903,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision="stock",
         )
 
     def _resume(self, out_dir: Path, megatron_nan_guard: str | None):
@@ -1115,6 +1117,103 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 for name, command in resolved[6].items():
                     for flag in self.LEAN_FLAGS:
                         self.assertNotIn(flag, command, name)
+
+    def _write_manifest(
+        self,
+        out_dir: Path,
+        *,
+        megatron_precision: str,
+        parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    ) -> None:
+        scenario = scenario_by_name("piper_megatron_stock")
+        write_manifest(
+            out_dir,
+            scenario,
+            (scenario.arm("baseline"),),
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            {**self.metadata, "cpu_pinning": "none: test"},
+            (),
+            "default",
+            "none",
+            "1b",
+            parallelism=parallelism,
+            megatron_p2p_sync="on",
+            megatron_nan_guard="on",
+            megatron_precision=megatron_precision,
+        )
+
+    def _resume(
+        self,
+        out_dir: Path,
+        *,
+        megatron_precision: str | None = None,
+        parallelism: ParallelismSpec | None = None,
+    ):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name=None,
+                    arm_names=("baseline",),
+                    resume_dir=out_dir,
+                    parallelism=parallelism,
+                    megatron_precision=megatron_precision,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def test_a_resume_inherits_the_recorded_precision(self) -> None:
+        """Schema 16 records the value, so an omitted one reads back and
+        rebuilds the same argv; a different one is refused, and the
+        refusal names the field.
+
+        The recorded mesh is sharded, because an inherited ``lean`` under
+        ``replicate`` would meet the parent-side refusal before this gate.
+        """
+        spec = ParallelismSpec(dp=1, dense_sharding="zero1")
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            out_dir.mkdir()
+            self._write_manifest(
+                out_dir, megatron_precision="lean", parallelism=spec
+            )
+            resolved = self._resume(out_dir, parallelism=spec)
+            self.assertEqual(resolved[14], "lean")
+            self.assertIn(
+                "--use-precision-aware-optimizer", resolved[6]["baseline"]
+            )
+            with self.assertRaisesRegex(ValueError, "megatron_precision"):
+                self._resume(
+                    out_dir, megatron_precision="stock", parallelism=spec
+                )
+
+    def test_a_resume_of_a_schema_fifteen_directory_reads_as_stock(
+        self,
+    ) -> None:
+        """A directory written before the field exists carries no key, and
+        no such run could ask for the lean recipe. So it resumes as
+        ``stock`` with the argv it always had."""
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            out_dir.mkdir()
+            self._write_manifest(out_dir, megatron_precision="stock")
+            manifest_path = out_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            del manifest["megatron_precision"]
+            manifest["schema_version"] = 15
+            manifest_path.write_text(json.dumps(manifest))
+            resolved = self._resume(out_dir)
+            self.assertEqual(resolved[14], "stock")
+            self.assertNotIn(
+                "--use-precision-aware-optimizer", resolved[6]["baseline"]
+            )
 
 
 class ParallelizeTests(unittest.TestCase):
@@ -1770,10 +1869,11 @@ class ManifestTests(unittest.TestCase):
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
                 megatron_nan_guard="on",
+                megatron_precision="stock",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 14)
+        self.assertEqual(manifest["schema_version"], 16)
         self.assertEqual(manifest["compile_mode"], "cuda-graph")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
@@ -1850,7 +1950,7 @@ class UncompiledRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 14)
+        self.assertEqual(manifest["schema_version"], 16)
         self.assertEqual(manifest["compile_mode"], "none")
         # Region pooling reads Inductor's compiled-graph annotations, and an
         # eager run emits none. The run says so rather than declare a region

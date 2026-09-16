@@ -304,6 +304,17 @@ def _resolve_run(
             if request.megatron_nan_guard is None
             else request.megatron_nan_guard
         )
+        # Schema <= 15 manifests predate the precision axis, and every one
+        # of them held stock Megatron's own fp32 optimizer state.
+        megatron_precision = (
+            str(
+                existing_manifest.get(
+                    "megatron_precision", DEFAULT_MEGATRON_PRECISION
+                )
+            )
+            if request.megatron_precision is None
+            else request.megatron_precision
+        )
     else:
         workload = workload_with_overrides(
             scenario,
@@ -322,6 +333,9 @@ def _resolve_run(
         megatron_nan_guard = (
             request.megatron_nan_guard or DEFAULT_MEGATRON_NAN_GUARD
         )
+        megatron_precision = (
+            request.megatron_precision or DEFAULT_MEGATRON_PRECISION
+        )
     if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
         raise ValueError(
             f"unknown megatron p2p sync {megatron_p2p_sync!r}. Available: "
@@ -332,12 +346,6 @@ def _resolve_run(
             f"unknown megatron nan guard {megatron_nan_guard!r}. Available: "
             f"{', '.join(MEGATRON_NAN_GUARD_MODES)}"
         )
-    # Resolved in both branches rather than inherited, because no manifest
-    # records this value yet. The schema bump adds the key, the inheritance
-    # and the gate together.
-    megatron_precision = (
-        request.megatron_precision or DEFAULT_MEGATRON_PRECISION
-    )
     if megatron_precision not in MEGATRON_PRECISION_MODES:
         raise ValueError(
             f"unknown megatron precision {megatron_precision!r}. Available: "
@@ -563,6 +571,7 @@ def _resolve_run(
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
         if mismatches:
             raise ValueError(
@@ -737,6 +746,7 @@ def execute_run(
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")

@@ -2168,7 +2168,10 @@ TEST_CENSUS = {
     # +6 with --megatron-precision: the three refusals before any host
     # probe, an unknown value refused, lean reaching the stock command
     # and not the titan one, and the default adding no flag.
-    "test_runner": 91,
+    # +2 with the schema-16 field: a resume inheriting the recorded
+    # precision and refusing another, and a schema-15 directory reading as
+    # stock.
+    "test_runner": 93,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2285,7 +2288,12 @@ TEST_CENSUS = {
     # +3 with the dense-sharding warnings: both reach the run summary, they
     # land before the banner the host probe fills in, and the mesh this axis
     # exists to run carries none.
-    "test_parallelism_plumbing": 80,
+    # +7 with the two schema bumps: the precision value round-tripping
+    # through JSON, its default being recorded, an omitted one raising a
+    # TypeError, the resume gate in both directions, a schema-15 directory
+    # reading as stock, and the two halves of the rename -- a retired
+    # 'shard' record names it, and a current 'zero3' record resumes.
+    "test_parallelism_plumbing": 87,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2347,7 +2355,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1906
+TEST_CENSUS_TOTAL = 1915
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

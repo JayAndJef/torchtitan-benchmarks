@@ -332,6 +332,7 @@ class LegacyResumeTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def test_the_git_rev_field_is_the_guard(self) -> None:

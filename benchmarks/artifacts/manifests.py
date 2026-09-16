@@ -48,6 +48,28 @@ the stock engine's loss and gradient checks, not a degree -- and it is a
 comparability boundary because the 2026-09-05 A/B measured it at +12% in
 tokens/s on the stock arm.
 
+Schema 15 is a RENAME inside the ``parallelism`` block, and it adds no key.
+``dense_sharding`` took the values ``replicate`` and ``shard``; it now takes
+``replicate``, ``zero1`` and ``zero3``, and ``zero3`` is the new spelling of
+``shard``. **The rename is not a redefinition.** A run recorded as ``shard``
+really did hold the ZeRO-3 parity, so no number on disk changes meaning.
+The bump exists because the READER cannot tell the two vocabularies apart
+without it: ``shard`` is a legal string in both, and a schema-14 directory
+resumed under schema 15 would compare a retired spelling against a current
+one and print a bare ``parallelism`` mismatch. ``_resume_mismatches`` names
+the rename instead. Three published cells on disk carry ``shard``, and they
+stay readable exactly as they are.
+
+Schema 16 adds ``megatron_precision`` beside the two fields above, gated the
+same way: an omitted value on resume inherits the recorded one, a different
+value is refused, and a schema <= 15 manifest, which carries no key, reads
+as ``stock``. That reading is a record and not an inference, because no run
+before this schema could ask for the lean optimizer recipe: the option did
+not exist. It is its own field for the reason the two above are -- a
+treatment of the stock engine's optimizer state rather than a degree -- and
+it is a comparability boundary because ``lean`` holds 10 bytes for each
+parameter where ``stock`` holds 18.
+
 What *is* split out is everything engine-neutral: output layout and the
 atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
 sample summarization is ``summaries.py``. This module is exactly the part
@@ -109,6 +131,7 @@ from benchmarks.e2e.parallelism import (
 from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
     PIPER_1B_REGIONS,
     Workload,
@@ -124,7 +147,12 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 14
+MANIFEST_SCHEMA_VERSION = 16
+
+# The retired spelling of ``zero3`` inside the ``parallelism`` block. Schema
+# 15 renamed it. A manifest that carries it predates the rename, and the
+# resume gate names the rename rather than printing a bare key.
+RETIRED_DENSE_SHARDING = "shard"
 
 # What the ``tps`` figure in every step log line, and therefore
 # ``stable_tokens_per_second`` in ``results.json``, counts.
@@ -185,6 +213,10 @@ def manifest_data(
     megatron_p2p_sync: str,
     # No default, for the same reason again.
     megatron_nan_guard: str,
+    # No default, for the same reason once more: a writer that defaulted it
+    # would record ``stock`` for a run that held 10 bytes for each
+    # parameter rather than 18.
+    megatron_precision: str,
 ) -> dict[str, Any]:
     # Recorded canonically, so a fresh manifest never carries a retired name.
     model_size = canonical_size_name(model_size)
@@ -208,6 +240,7 @@ def manifest_data(
         "parallelism": _parallelism_record(scenario, parallelism),
         "megatron_p2p_sync": megatron_p2p_sync,
         "megatron_nan_guard": megatron_nan_guard,
+        "megatron_precision": megatron_precision,
         "throughput_definition": THROUGHPUT_DEFINITION,
         "execution_model": execution_model(parallelism),
     }
@@ -228,6 +261,7 @@ def write_manifest(
     parallelism: ParallelismSpec,
     megatron_p2p_sync: str,
     megatron_nan_guard: str,
+    megatron_precision: str,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -244,6 +278,7 @@ def write_manifest(
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         ),
     )
 
@@ -272,6 +307,7 @@ def _resume_mismatches(
     parallelism: ParallelismSpec,
     megatron_p2p_sync: str,
     megatron_nan_guard: str,
+    megatron_precision: str,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -301,6 +337,14 @@ def _resume_mismatches(
         != megatron_nan_guard
     ):
         mismatches.append("megatron_nan_guard")
+    # The same defaulted lookup: a schema <= 15 manifest carries no key,
+    # and every such run held stock Megatron's own fp32 optimizer state,
+    # because the lean recipe did not exist.
+    if (
+        manifest.get("megatron_precision", DEFAULT_MEGATRON_PRECISION)
+        != megatron_precision
+    ):
+        mismatches.append("megatron_precision")
     # Defaulted lookup rather than a generic entry: schema <= 8 output
     # directories predate the axis and are still resumable as the 1B shape.
     # Both sides go through canonical_size_name, because 42 e2e manifests on
@@ -322,7 +366,24 @@ def _resume_mismatches(
         "parallelism", _parallelism_record(scenario, TRIVIAL_SPEC)
     )
     if recorded_parallelism != _parallelism_record(scenario, parallelism):
-        mismatches.append("parallelism")
+        # A schema <= 14 manifest can record the retired spelling "shard",
+        # which schema 15 renamed to "zero3". The run really held that
+        # parity, so the rename takes no number away -- but this gate
+        # compares two vocabularies, and a bare "parallelism" would send
+        # the operator looking for a degree that did not move. The message
+        # names the rename instead.
+        if (
+            isinstance(recorded_parallelism, dict)
+            and str(recorded_parallelism.get("dense_sharding"))
+            == RETIRED_DENSE_SHARDING
+        ):
+            mismatches.append(
+                "parallelism (the recorded dense_sharding 'shard' is the "
+                "retired spelling of 'zero3'; schema 15 renamed it, and "
+                "this directory predates the rename)"
+            )
+        else:
+            mismatches.append("parallelism")
     existing_metadata = manifest.get("hardware_metadata", {})
     for key in (
         "nvidia_smi",
