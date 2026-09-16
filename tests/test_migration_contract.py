@@ -2072,10 +2072,11 @@ TEST_CENSUS = {
     # mesh while the tuned profile asks for none and refuses off.
     # +2 with the precision value: the lean argv equal to its two parts,
     # and the titan arm untouched under lean.
-    # +3 that arm rule 12's stock marker names the members of a
-    # ChainedOptimizer, refuses a replicated chain under a zero1 label, and
-    # follows --megatron-precision on the gradient reduction.
-    "test_megatron_stock_launch": 70,
+    # +4 that arm rule 12's stock marker names the members of a
+    # ChainedOptimizer, reads a bare optimizer under zero3, refuses a
+    # replicated chain under a zero1 label, and follows
+    # --megatron-precision on the gradient reduction.
+    "test_megatron_stock_launch": 71,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2365,7 +2366,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1924
+TEST_CENSUS_TOTAL = 1925
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

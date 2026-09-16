@@ -73,7 +73,7 @@ from benchmarks.e2e.registry import (
     Arm,
     Workload,
 )
-from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
+from benchmarks.models.piper_qwen3.shape import shape_by_name
 from benchmarks.traces.extraction import per_rank_pooled_metrics
 from benchmarks.traces.schema import Region
 
@@ -144,17 +144,17 @@ class ValidationProfile:
     ``parallelism_markers`` is arm rule 12: the log lines that prove this
     engine really ran the requested mesh. It is a callable rather than a
     string because every value in those lines comes from the spec, the
-    workload, the shape and the precision. An empty tuple means this engine
-    logs nothing that proves this spec, and ``validate_arm`` then refuses
-    the run rather than publishing a mesh nothing checked -- the same shape
-    as ``compiled_marker`` above.
+    workload and the precision. An empty tuple means this engine logs
+    nothing that proves this spec, and ``validate_arm`` then refuses the
+    run rather than publishing a mesh nothing checked -- the same shape as
+    ``compiled_marker`` above.
 
-    **It takes the shape and the precision because two fields of the stock
-    data-parallel line move with them, and a real run proved it.** The
-    shape decides whether Megatron chains two optimizers, and
-    ``--megatron-precision`` decides whether Megatron reduces the gradients
-    in fp32. Both reach every profile, because one call site serves all
-    three; the two TorchTitan-facing profiles read neither.
+    **It takes the precision because one field of the stock data-parallel
+    line moves with it, and a real run proved it.**
+    ``--megatron-precision lean`` sends ``--main-grads-dtype bf16``, so
+    Megatron reduces the gradients in bf16 and the wrapper reports it. The
+    value reaches every profile, because one call site serves all three.
+    The other two profiles read it and state nothing for it.
 
     ``pipelined_pattern`` is the other half of arm rule 12, and it reads the
     other way. ``parallelism_markers`` proves the engine built the mesh that
@@ -227,7 +227,7 @@ class ValidationProfile:
     check_ac_line: bool
     check_regions: bool
     parallelism_markers: Callable[
-        [ParallelismSpec, Workload, PiperShape, str], tuple[str, ...]
+        [ParallelismSpec, Workload, str], tuple[str, ...]
     ]
     pipelined_pattern: re.Pattern[str]
     data_parallel_pattern: re.Pattern[str]
@@ -239,15 +239,13 @@ class ValidationProfile:
 def _titan_parallelism_markers(
     spec: ParallelismSpec,
     workload: Workload,
-    shape: PiperShape,
     megatron_precision: str,
 ) -> tuple[str, ...]:
     """What TorchTitan logs about the mesh it really built.
 
-    ``shape`` and ``megatron_precision`` reach every profile, because one
-    call site serves all three. This one reads neither: TorchTitan's mesh
-    line carries no model geometry, and no Megatron optimizer holds its
-    state.
+    ``megatron_precision`` reaches every profile, because one call site
+    serves all three. This one reads it and states nothing for it: no
+    Megatron optimizer holds a TorchTitan arm's state.
 
     The first line comes from ``ParallelDims``, which TorchTitan builds from
     the command line it was given, so it states the degrees that took effect
@@ -306,14 +304,13 @@ def _titan_parallelism_markers(
 def _megatron_parallelism_markers(
     spec: ParallelismSpec,
     workload: Workload,
-    shape: PiperShape,
     megatron_precision: str,
 ) -> tuple[str, ...]:
     """``benchmarks.e2e.megatron.train``'s two lines. Keep in sync.
 
-    ``shape`` and ``megatron_precision`` reach every profile, and this one
-    reads neither. The tuned driver builds a plain torch AdamW on every
-    parameter, so it chains no optimizer and it holds one precision;
+    ``megatron_precision`` reaches every profile, and this one states
+    nothing for it. The tuned driver builds a plain torch AdamW on every
+    parameter, so it holds one precision, and
     ``_tuned_megatron_precision_markers`` refuses ``lean`` outright.
 
     The driver prints what it resolved: the degrees from its own arguments,
@@ -357,7 +354,6 @@ def _megatron_parallelism_markers(
 def _megatron_stock_parallelism_markers(
     spec: ParallelismSpec,
     workload: Workload,
-    shape: PiperShape,
     megatron_precision: str,
 ) -> tuple[str, ...]:
     """``benchmarks.e2e.megatron_stock.train``'s two lines. Keep in sync.
@@ -456,14 +452,15 @@ def _megatron_stock_parallelism_markers(
     reason. ``grad_reduce_in_fp32`` in ``flags.py`` is the one statement of
     the derivation, and the driver prints what the wrapper really carries.
 
-    **The optimizer field names the members of a CHAIN, and the shape is
-    what decides there is one.** Megatron builds one optimizer for each
-    ``(optimizer_name, is_expert)`` bucket and chains them above one
-    bucket, so every mixture of experts gets a ``ChainedOptimizer``. The
-    outer class is the same under every dense-sharding value, so a marker
-    that read it alone would let a ZeRO-0 chain pass under a ZeRO-1 label.
-    ``data_parallel_optimizer`` is the one statement of that string, and it
-    takes the shape for this reason.
+    **The optimizer field names the members of a CHAIN under two of the
+    three values, and the dense-sharding value is what decides it.**
+    ``get_megatron_optimizer`` ends its standard path with an unconditional
+    ``ChainedOptimizer(optimizers)``, so ``replicate`` and ``zero1`` always
+    chain. ``zero3`` takes the Megatron-FSDP branch instead, which builds
+    one optimizer and returns it bare. A chain's own name proves no ZeRO
+    level, because both chained values carry it, so the marker names the
+    members. ``data_parallel_optimizer`` is the one statement of that
+    string.
 
     A Megatron bump that moves any of these values fails this rule rather
     than publishing a treatment the log does not state.
@@ -501,7 +498,7 @@ def _megatron_stock_parallelism_markers(
             "sharding_strategy="
             f"{SHARDING_STRATEGIES[spec.dense_sharding]}, "
             f"expert_parallel={spec.ep}, optimizer="
-            f"{data_parallel_optimizer(spec.dense_sharding, shape)})"
+            f"{data_parallel_optimizer(spec.dense_sharding)})"
         )
     return tuple(markers)
 
@@ -1058,7 +1055,7 @@ def validate_arm(
     parallelism_markers: tuple[str, ...] = ()
     if parallelism.world_size > 1:
         parallelism_markers = profile.parallelism_markers(
-            parallelism, workload, shape, megatron_precision
+            parallelism, workload, megatron_precision
         )
         if not parallelism_markers:
             raise RuntimeError(

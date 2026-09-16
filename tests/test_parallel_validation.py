@@ -46,19 +46,12 @@ from benchmarks.e2e.validation import (
 from benchmarks.execution.environment import LOG_RANK_TEMPLATE
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.environment import runtime_environment
-from benchmarks.models.piper_qwen3.shape import shape_by_name
 from tests.test_runner import (
     PIPER_OPTIMIZED_SWIGLU_OVERRIDE,
     _SAC_LINE,
     _SIZE_LINE,
     _compiled_line,
 )
-
-
-# The shape arm rule 12's markers are built for. Every call site states it,
-# because the stock data-parallel line names a chained optimizer only where
-# the model is a mixture of experts, and the shape is what says so.
-MARKER_SHAPE = shape_by_name("1b")
 
 
 PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
@@ -219,7 +212,7 @@ def _titan_log(spec: ParallelismSpec = PP2) -> str:
     """
     markers = "\n".join(
         VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            spec, PIPER_1B_ROPE.workload, MARKER_SHAPE, "stock"
+            spec, PIPER_1B_ROPE.workload, "stock"
         )
     )
     return (
@@ -649,7 +642,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
 
     def test_the_titan_markers_name_the_degrees_and_the_schedule(self) -> None:
         markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            PP2, PIPER_1B_ROPE.workload, MARKER_SHAPE, "stock"
+            PP2, PIPER_1B_ROPE.workload, "stock"
         )
         self.assertEqual(
             markers,
@@ -676,7 +669,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         )
 
         markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            DP2, PIPER_1B_ROPE.workload, MARKER_SHAPE, "stock"
+            DP2, PIPER_1B_ROPE.workload, "stock"
         )
         self.assertIn(
             DATA_PARALLEL_LINE.format(replicate=2, shard=1), markers
@@ -693,7 +686,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
                 markers = VALIDATION_PROFILES[
                     "torchtitan"
                 ].parallelism_markers(
-                    spec, PIPER_1B_ROPE.workload, MARKER_SHAPE, "stock"
+                    spec, PIPER_1B_ROPE.workload, "stock"
                 )
                 self.assertEqual(
                     [m for m in markers if "data parallel" in m], []
@@ -866,7 +859,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     VALIDATION_PROFILES["megatron"].parallelism_markers(
-                        spec, PIPER_1B_ROPE.workload, MARKER_SHAPE, "stock"
+                        spec, PIPER_1B_ROPE.workload, "stock"
                     ),
                     tuple(printed),
                 )
@@ -901,7 +894,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         """
         silent = replace(
             VALIDATION_PROFILES["torchtitan"],
-            parallelism_markers=lambda spec, workload, shape, precision: (),
+            parallelism_markers=lambda spec, workload, precision: (),
         )
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary))
@@ -932,7 +925,7 @@ def _megatron_log(spec: ParallelismSpec, p2p_line: str | None) -> str:
         "Megatron-LM training loop (mode=default, graphs=none)",
         _SIZE_LINE.rstrip("\n"),
         *profile.parallelism_markers(
-            spec, PIPER_1B_ROPE.workload, MARKER_SHAPE, "stock"
+            spec, PIPER_1B_ROPE.workload, "stock"
         ),
     ]
     if p2p_line is not None:
@@ -1092,7 +1085,7 @@ def _stock_log(
         ", ".join(profile.precision_markers(megatron_precision)),
         _SIZE_LINE.rstrip("\n"),
         *profile.parallelism_markers(
-            spec, workload, MARKER_SHAPE, megatron_precision
+            spec, workload, megatron_precision
         ),
         *profile.p2p_markers(spec, "on"),
     ]

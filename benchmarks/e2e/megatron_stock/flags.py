@@ -218,11 +218,12 @@ DATA_PARALLEL_OPTIMIZERS: dict[str, str] = {
 # The outer class Megatron returns for a chain of optimizers
 # (``megatron/core/optimizer/optimizer.py``).
 #
-# **The table above names the class of ONE bucket, and a real run has
-# two.** Megatron builds one optimizer for each
-# ``(optimizer_name, is_expert)`` bucket and chains them above one bucket,
-# so a mixture of experts prints the chain. ``data_parallel_optimizer``
-# below is what a marker must read; the raw table cannot state the line.
+# **The table above names a class, and two of the three values print it
+# inside a chain.** ``get_megatron_optimizer`` ends its standard path with
+# an unconditional ``ChainedOptimizer(optimizers)``. ``zero3`` alone takes
+# the Megatron-FSDP branch, which returns its single optimizer bare.
+# ``data_parallel_optimizer`` below is what a marker must read; the raw
+# table cannot state the line.
 CHAINED_OPTIMIZER = "ChainedOptimizer"
 
 # TorchTitan's own optimizer values, replicated flag for flag. The source is
@@ -349,13 +350,19 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
 # pipeline where zero3 cannot.
 ZERO1_FLAGS: tuple[str, ...] = ("--use-distributed-optimizer",)
 
+# The flag that takes Megatron into its Megatron-FSDP branch. That branch
+# builds one optimizer for the whole model and returns it without a chain,
+# so this flag also decides the optimizer field of the data-parallel line.
+# ``data_parallel_optimizer`` reads it there.
+MEGATRON_FSDP_FLAG = "--use-megatron-fsdp"
+
 # **zero3 is five flags, and --use-distributed-optimizer is one of them.**
 # Megatron-FSDP v1 turns that one on itself and warns (arguments.py), so an
 # argv that omitted it would deny a fact the run has. Two of the other four
 # restate a Megatron default on purpose, so a submodule bump that moves
 # either default changes a recorded argv rather than a silent run.
 ZERO3_FLAGS: tuple[str, ...] = (
-    "--use-megatron-fsdp",
+    MEGATRON_FSDP_FLAG,
     "--megatron-fsdp-version",
     "--data-parallel-sharding-strategy",
     "--use-distributed-optimizer",
@@ -409,29 +416,34 @@ def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
         )
 
 
-def data_parallel_optimizer(dense_sharding: str, shape: PiperShape) -> str:
+def data_parallel_optimizer(dense_sharding: str) -> str:
     """The optimizer name the data-parallel line must carry.
 
-    ``DATA_PARALLEL_OPTIMIZERS`` names the class of one bucket.
-    **Megatron builds one optimizer for each
-    ``(optimizer_name, is_expert)`` bucket, and it chains them above one
-    bucket** (``megatron/core/optimizer/__init__.py``). A mixture of
-    experts therefore gets a chain: every expert weight carries
-    ``allreduce=False``, which is the flag that key reads, so the dense
-    bucket and the expert bucket both exist on every rank.
+    ``DATA_PARALLEL_OPTIMIZERS`` names the class Megatron builds for this
+    value. This function says whether the line names that class bare or
+    inside a chain, and the dense-sharding value is what decides it.
 
-    Both buckets take the same branch, because ``use_distributed_optimizer``
-    is one value for the whole run. So the members agree, and the string
-    names one class inside the brackets.
+    **The standard path always chains.** ``get_megatron_optimizer`` ends it
+    with an unconditional ``ChainedOptimizer(optimizers)``
+    (``megatron/core/optimizer/__init__.py``), so ``replicate`` and
+    ``zero1`` both print a chain. That chain always holds the dense
+    optimizer. It holds a second member for the experts only above expert
+    degree 1, because TransformerEngine marks an expert weight for the
+    expert process groups only there. Both members carry one class,
+    because ``use_distributed_optimizer`` is one value for the whole run,
+    so the printed string does not move with the expert degree.
 
-    ``shape.num_experts`` is what decides the chain. Every registered shape
-    is a mixture of experts, because ``PiperShape`` refuses a count below
-    1, so no shape takes the bare branch today. The branch stays, because
-    the chain is a property of the model rather than of this suite.
+    **``zero3`` is the exception.** ``--use-megatron-fsdp`` takes Megatron
+    into a branch that builds one optimizer for the whole model and
+    returns it without a chain, so the line names the class bare.
+
+    **The model shape decides none of this.** An earlier version of this
+    function branched on ``shape.num_experts``, which made ``zero3`` expect
+    a chain Megatron never builds.
     """
     refuse_unknown_dense_sharding(dense_sharding)
     inner = DATA_PARALLEL_OPTIMIZERS[dense_sharding]
-    if shape.num_experts < 1:
+    if MEGATRON_FSDP_FLAG in SHARDING_FLAGS_BY_VALUE[dense_sharding]:
         return inner
     return f"{CHAINED_OPTIMIZER}[{inner}]"
 

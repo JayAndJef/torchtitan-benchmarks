@@ -174,15 +174,14 @@ PARALLELISM_LINE = (
 # megatron/core/optimizer/__init__.py: DistributedOptimizer under the
 # distributed optimizer, and Float16OptimizerWithFloat16Params without it.
 #
-# **A mixture of experts gets a CHAIN, and the chain's own name proves no
-# ZeRO level.** Megatron builds one optimizer for each
-# (optimizer_name, is_expert) bucket and returns a ChainedOptimizer above
-# one bucket. Every expert weight carries allreduce=False, which is what
-# puts the second bucket there, so every shape this suite runs takes the
-# chain. A chain of Float16OptimizerWithFloat16Params and a chain of
-# DistributedOptimizer then print the same word. optimizer_class_name
-# names the members for that reason. A real eight-GPU run failed this rule
-# on 2026-09-16, because the line said "ChainedOptimizer" alone.
+# **replicate and zero1 get a CHAIN, and the chain's own name proves no
+# ZeRO level.** get_megatron_optimizer ends its standard path with an
+# unconditional ChainedOptimizer(optimizers), so both values carry one.
+# zero3 takes the Megatron-FSDP branch instead, which builds one optimizer
+# and returns it bare. A chain of Float16OptimizerWithFloat16Params and a
+# chain of DistributedOptimizer print the same word, so
+# optimizer_class_name names the members. A real eight-GPU run failed this
+# rule on 2026-09-16, because the line said "ChainedOptimizer" alone.
 DATA_PARALLEL_LINE = (
     "Megatron-LM stock data parallel: {wrapper} over {dp} "
     "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
@@ -644,7 +643,7 @@ def install_step_log_shim(
 # (megatron/core/optimizer/optimizer.py: ChainedOptimizer.__init__ sets
 # self.chained_optimizers). The name is read off Megatron rather than
 # guessed. A submodule bump that renames it makes a chained run print the
-# outer class alone, and arm rule 12 then refuses the run, because the
+# outer class alone. Arm rule 12 then refuses the run, because the
 # expected string names the members.
 CHAINED_OPTIMIZERS_ATTRIBUTE = "chained_optimizers"
 
@@ -652,25 +651,29 @@ CHAINED_OPTIMIZERS_ATTRIBUTE = "chained_optimizers"
 def optimizer_class_name(optimizer: Any) -> str:
     """The optimizer name the data-parallel line states.
 
-    A bare optimizer states its own class. Megatron returns one when it
-    builds one bucket (``megatron/core/optimizer/__init__.py``).
+    A bare optimizer states its own class. The Megatron-FSDP branch
+    returns one: it builds a single optimizer and returns it without a
+    chain (``megatron/core/optimizer/__init__.py``).
 
-    **A chain states its members too.** Megatron builds one optimizer for
-    each ``(optimizer_name, is_expert)`` bucket, and a mixture of experts
-    has two of them: every expert weight carries ``allreduce=False``,
-    which is the flag that key reads. Each bucket takes
-    ``DistributedOptimizer`` under ``use_distributed_optimizer`` and
-    ``Float16OptimizerWithFloat16Params`` without it. So a ZeRO-0 chain
-    and a ZeRO-1 chain print the same outer class, and the members are
-    what separate them.
+    **A chain states its members too.** The standard path ends with an
+    unconditional ``ChainedOptimizer(optimizers)``, so ``replicate`` and
+    ``zero1`` both reach this function with a chain. That path always
+    holds the dense optimizer. It adds a second member for the experts
+    only where an expert group exists, which needs an expert degree above
+    1. Every member takes ``DistributedOptimizer`` under
+    ``use_distributed_optimizer`` and
+    ``Float16OptimizerWithFloat16Params`` without it, because that flag is
+    one value for the whole run. So a ZeRO-0 chain and a ZeRO-1 chain
+    carry the same outer class, and the members are what separate them.
 
-    The member names are deduplicated and sorted, so one shape covers both
-    cases: ``ChainedOptimizer[DistributedOptimizer]`` where every member
-    agrees, and ``ChainedOptimizer[A+B]`` where they do not.
+    The member names are deduplicated and sorted, so one string covers
+    both cases: ``ChainedOptimizer[DistributedOptimizer]`` where every
+    member agrees, and ``ChainedOptimizer[A+B]`` where they do not.
 
     **An empty chain raises.** ``ChainedOptimizer`` accepts an empty list,
-    for a rank that holds no trainable parameter. Such a chain names no
-    class, so the line would state a ZeRO level nothing observed.
+    for a rank that holds no trainable parameter. No path in this arm
+    builds one. Such a chain names no class, so the line would state a
+    ZeRO level nothing observed.
     """
     name = type(optimizer).__name__
     members = getattr(optimizer, CHAINED_OPTIMIZERS_ATTRIBUTE, None)

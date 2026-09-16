@@ -2636,10 +2636,11 @@ class DataParallelMarkerTest(unittest.TestCase):
         failed on two fields at once, so this loop covers the precision
         axis beside the dense-sharding one.
 
-        **The stub optimizer is a CHAIN.** Megatron builds one optimizer
-        for each ``(optimizer_name, is_expert)`` bucket, and every shape
-        this suite runs is a mixture of experts, so a real run carries a
-        chain of two.
+        **The stub optimizer follows the dense-sharding value.**
+        ``get_megatron_optimizer`` ends its standard path with an
+        unconditional ``ChainedOptimizer(optimizers)``, and ``replicate``
+        and ``zero1`` take that path. ``zero3`` takes the Megatron-FSDP
+        branch, which builds one optimizer and returns it bare.
         """
         from benchmarks.e2e.megatron_stock.flags import (
             CHAINED_OPTIMIZER,
@@ -2647,10 +2648,8 @@ class DataParallelMarkerTest(unittest.TestCase):
             grad_reduce_in_fp32,
         )
         from benchmarks.e2e.validation import VALIDATION_PROFILES
-        from benchmarks.models.piper_qwen3.shape import shape_by_name
 
         profile = VALIDATION_PROFILES["megatron_stock"]
-        shape = shape_by_name("1b")
         ddp_cls, fsdp_cls = self.wrapper_classes()
         for spec, cls in (
             (PP4_SPEC, ddp_cls),
@@ -2665,6 +2664,10 @@ class DataParallelMarkerTest(unittest.TestCase):
                 if spec.dense_sharding == "replicate"
                 else ("stock", "lean")
             )
+            # Megatron-FSDP returns its single optimizer bare. Every other
+            # value reaches the standard path, which always chains.
+            chained = spec.dense_sharding != "zero3"
+            inner = DATA_PARALLEL_OPTIMIZERS[spec.dense_sharding]
             for precision in precisions:
                 with self.subTest(
                     dense_sharding=spec.dense_sharding,
@@ -2680,14 +2683,11 @@ class DataParallelMarkerTest(unittest.TestCase):
                         chunk,
                         dp=spec.dp,
                         ep=spec.ep,
-                        optimizer=CHAINED_OPTIMIZER,
-                        members=(
-                            DATA_PARALLEL_OPTIMIZERS[spec.dense_sharding],
-                        )
-                        * 2,
+                        optimizer=CHAINED_OPTIMIZER if chained else inner,
+                        members=(inner, inner) if chained else None,
                     )
                     markers = profile.parallelism_markers(
-                        spec, BATCH_32, shape, precision
+                        spec, BATCH_32, precision
                     )
                     self.assertEqual(printed, markers[1])
 
