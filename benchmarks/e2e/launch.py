@@ -22,6 +22,7 @@ from benchmarks.e2e.parallelism import (
     ParallelismSpec,
     TRIVIAL_SPEC,
     titan_mesh,
+    titan_reshard_after_forward,
 )
 from benchmarks.e2e.registry import (
     DEFAULT_COMPILE_MODE,
@@ -68,7 +69,23 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     sharded run no shard degree at all -- which is the silent ZeRO-3
     substitution this whole paragraph exists to prevent. Gating on the mesh
     also keeps the trivial spec's argv empty, because ``titan_mesh`` returns
-    ``(1, 1)`` there under both values.
+    ``(1, 1)`` there under every value.
+
+    **``--parallelism.fsdp-reshard-after-forward`` is what makes ``zero1``
+    ZeRO-1 here.** ``titan_mesh`` gives ``zero1`` and ``zero3`` the same
+    pair, so the mesh flags alone would build ZeRO-3 under both. The fork
+    types the field as ``Literal["default", "always", "never"]`` on its
+    ``ParallelismConfig`` (``config/configs.py``), and
+    ``get_fsdp_reshard_after_forward_policy`` reads it. Under ``never``
+    FSDP2 gathers the parameters at the first microbatch forward and holds
+    them for the whole step, which shards the optimizer states and keeps
+    whole parameters.
+
+    **The token is sent only when ``titan_reshard_after_forward`` returns a
+    value.** Every other spec sends nothing, so TorchTitan keeps its own
+    default and no recorded argv moves. That one function decides it, so
+    this argv and the tests cannot disagree about which value forces the
+    policy.
 
     **``--parallelism.expert-parallel-degree`` needs no gate of its own.**
     Spec rule 14 refuses ``ep > 1`` under ``replicate``, so every spec that
@@ -122,6 +139,14 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
                 str(replicate),
                 "--parallelism.data-parallel-shard-degree",
                 str(shard),
+            )
+        )
+    reshard_after_forward = titan_reshard_after_forward(spec)
+    if reshard_after_forward is not None:
+        flags.extend(
+            (
+                "--parallelism.fsdp-reshard-after-forward",
+                reshard_after_forward,
             )
         )
     if spec.ep > 1:

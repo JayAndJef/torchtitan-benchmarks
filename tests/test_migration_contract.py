@@ -1204,6 +1204,58 @@ class GoldenCommandTests(unittest.TestCase):
                     "--parallelism.expert-parallel-degree", command
                 )
 
+    def test_the_reshard_policy_reaches_the_argv_under_zero1(self) -> None:
+        """The token that makes ``zero1`` ZeRO-1 on this engine.
+
+        ``titan_mesh`` gives ``zero1`` and ``zero3`` the same pair, so the
+        mesh flags alone would build ZeRO-3 under both. Under ``never``
+        FSDP2 gathers the parameters at the first microbatch forward and
+        holds them for the whole step. The fork types the field as
+        ``Literal["default", "always", "never"]`` on its
+        ``ParallelismConfig``, so this is one of the three values it takes.
+        """
+        command = self._command(
+            GOLDEN_TITAN_ARM,
+            "normal",
+            "default",
+            "none",
+            ParallelismSpec(dp=2, dense_sharding="zero1"),
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.fsdp-reshard-after-forward") + 1
+            ],
+            "never",
+        )
+
+    def test_no_other_value_sends_the_reshard_policy(self) -> None:
+        """An omitted token leaves TorchTitan at its own default, so no
+        recorded argv moves. ``zero3`` reshards after every forward, which
+        is that default under a spec with no pipeline.
+        """
+        for mode in ("replicate", "zero3"):
+            with self.subTest(dense_sharding=mode):
+                command = self._command(
+                    GOLDEN_TITAN_ARM,
+                    "normal",
+                    "default",
+                    "none",
+                    ParallelismSpec(dp=2, dense_sharding=mode),
+                )
+                self.assertNotIn(
+                    "--parallelism.fsdp-reshard-after-forward", command
+                )
+
+    def test_the_trivial_argv_carries_no_reshard_policy(self) -> None:
+        """Every number this repo has published was measured at the trivial
+        spec or under ``replicate``. The new token may not reach one of
+        those command lines.
+        """
+        self.assertNotIn(
+            "--parallelism.fsdp-reshard-after-forward",
+            self._command(GOLDEN_TITAN_ARM, "normal", "default", "none"),
+        )
+
     def test_a_wider_expert_argv_separates_the_two_mesh_formulations(
         self,
     ) -> None:
