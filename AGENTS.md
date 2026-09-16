@@ -1452,10 +1452,14 @@ values, and the value is what decides it.** `get_megatron_optimizer` ends
 its standard path with an unconditional `ChainedOptimizer(optimizers)`, so
 `replicate` reads `ChainedOptimizer[Float16OptimizerWithFloat16Params]`
 and `zero1` reads `ChainedOptimizer[DistributedOptimizer]`. `zero3` takes
-the Megatron-FSDP branch, which builds one optimizer and returns it bare,
-so it reads `DistributedOptimizer`. **The model shape decides none of
-this.** The chain holds a second member only above expert degree 1, and
-both members carry one class, so the printed string does not move.
+the Megatron-FSDP branch, which returns its one optimizer bare at a single
+model chunk, so it reads `DistributedOptimizer`. **The model shape decides
+none of this.** The chain holds a second member where TransformerEngine
+marked a weight for the expert process groups, which this argv reaches
+above expert degree 1 alone, and both members carry one class, so the
+printed string does not move. **No run has printed the bare `zero3` form.**
+Every `zero3` cell under `out/` predates this field, so read that value
+from the Megatron source rather than as a measurement.
 
 **The microbatch count in that line is `microbatch_geometry`'s, not
 `n_microbatches`'s, and it is 1 at `pp` 1.** One Megatron sample is one
@@ -1511,8 +1515,9 @@ into:**
   `ChainedOptimizer[DistributedOptimizer]` where they agree, and
   `ChainedOptimizer[A+B]` where they do not. It raises on an empty chain.
   **`zero3` is the exception**: it takes the Megatron-FSDP branch, which
-  builds one optimizer and returns it bare, so that value alone reads a
-  plain `DistributedOptimizer`.
+  returns its one optimizer bare at a single model chunk, so that value
+  alone reads a plain `DistributedOptimizer`. No run has printed that form
+  yet.
   **A real eight-GPU `30b-a3b` cell failed arm rule 12 on 2026-09-16,
   because the line said `ChainedOptimizer` alone.**
 - **`grad_reduce_in_fp32` MOVES with `--megatron-precision`, and the marker

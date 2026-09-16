@@ -221,7 +221,8 @@ DATA_PARALLEL_OPTIMIZERS: dict[str, str] = {
 # **The table above names a class, and two of the three values print it
 # inside a chain.** ``get_megatron_optimizer`` ends its standard path with
 # an unconditional ``ChainedOptimizer(optimizers)``. ``zero3`` alone takes
-# the Megatron-FSDP branch, which returns its single optimizer bare.
+# the Megatron-FSDP branch, which returns its one optimizer bare at a
+# single model chunk.
 # ``data_parallel_optimizer`` below is what a marker must read; the raw
 # table cannot state the line.
 CHAINED_OPTIMIZER = "ChainedOptimizer"
@@ -351,9 +352,10 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
 ZERO1_FLAGS: tuple[str, ...] = ("--use-distributed-optimizer",)
 
 # The flag that takes Megatron into its Megatron-FSDP branch. That branch
-# builds one optimizer for the whole model and returns it without a chain,
-# so this flag also decides the optimizer field of the data-parallel line.
-# ``data_parallel_optimizer`` reads it there.
+# collapses its optimizer list at a single model chunk, so it returns a
+# bare optimizer here. This flag therefore also decides the optimizer
+# field of the data-parallel line. ``data_parallel_optimizer`` reads it
+# there, and it states the condition.
 MEGATRON_FSDP_FLAG = "--use-megatron-fsdp"
 
 # **zero3 is five flags, and --use-distributed-optimizer is one of them.**
@@ -427,15 +429,26 @@ def data_parallel_optimizer(dense_sharding: str) -> str:
     with an unconditional ``ChainedOptimizer(optimizers)``
     (``megatron/core/optimizer/__init__.py``), so ``replicate`` and
     ``zero1`` both print a chain. That chain always holds the dense
-    optimizer. It holds a second member for the experts only above expert
-    degree 1, because TransformerEngine marks an expert weight for the
-    expert process groups only there. Both members carry one class,
-    because ``use_distributed_optimizer`` is one value for the whole run,
-    so the printed string does not move with the expert degree.
+    optimizer. It holds a second member where TransformerEngine marked a
+    weight for the expert process groups. That mark has three conditions:
+    an expert degree above 1, an expert tensor degree that differs from
+    the dense one, or an expert GTP remat size that differs. This argv
+    reaches the first alone, because Megatron defaults the other two to
+    the dense values. Both members carry one class, because
+    ``use_distributed_optimizer`` is one value for the whole run, so the
+    printed string does not move with the expert degree.
 
     **``zero3`` is the exception.** ``--use-megatron-fsdp`` takes Megatron
-    into a branch that builds one optimizer for the whole model and
-    returns it without a chain, so the line names the class bare.
+    into a branch that collapses its optimizer list when the list holds one
+    member. The list takes one entry for each group of dense model chunks,
+    and Megatron splits that group only under
+    ``--overlap-param-gather-with-optimizer-step``, which this harness
+    never sends. So the list holds one member here, and the line names the
+    class bare.
+
+    **No run has printed the bare form.** Every ``zero3`` cell under
+    ``out/`` predates this field, so read that value from the Megatron
+    source rather than as a measurement.
 
     **The model shape decides none of this.** An earlier version of this
     function branched on ``shape.num_experts``, which made ``zero3`` expect
