@@ -56,15 +56,17 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     BENCH_FLAGS,
     BENCH_FLAGS_OMITTED_BY_DEFAULT,
     BENCH_PP_SCHEDULE,
+    DATA_PARALLEL_OPTIMIZERS,
     DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     MEGATRON_CHECKPOINT_FORMAT,
     MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES,
     MEGATRON_FSDP_VERSION,
     MEGATRON_SHARDING_STRATEGY,
-    SHARDING_FLAGS,
     NO_CHECK_FOR_NAN_FLAG,
     SHARDING_STRATEGIES,
+    ZERO1_FLAGS,
+    ZERO3_FLAGS,
     microbatch_geometry,
     omitted_flags,
     refuse_unknown_nan_guard,
@@ -96,6 +98,17 @@ PP4_SPEC = ParallelismSpec(
 SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, dense_sharding="zero3")
 EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
 BATCH_32 = dataclasses.replace(PIPER_1B_MEGATRON_WORKLOAD, local_batch_size=32)
+# Read as text rather than imported, so the check needs no megatron import
+# and no GPU. DATA_PARALLEL_OPTIMIZERS is a claim about this file.
+MEGATRON_OPTIMIZER_SOURCE = (
+    Path(__file__).resolve().parent.parent
+    / "third_party"
+    / "Megatron-LM"
+    / "megatron"
+    / "core"
+    / "optimizer"
+    / "__init__.py"
+)
 
 
 def flags_for(shape_name, spec, workload=BATCH_32, **keywords):
@@ -121,7 +134,7 @@ def value_after(emitted, flag):
 # --------------------------------------------------------------------------
 
 # Section 7 of PIPER_STOCK_MEGATRON_PLAN.md, transcribed. See the note at
-# SHARDING_FLAGS: the expert degree and the five sharding flags supersede
+# ZERO3_FLAGS: the expert degree and the five sharding flags supersede
 # what that section declares, so read this tuple as the replicated roster.
 #
 # **What is checked, and what is not.** Megatron's argparse knows every
@@ -394,9 +407,9 @@ class FlagListTest(unittest.TestCase):
         """
         self.assertEqual(
             omitted_flags("replicate"),
-            ALWAYS_OMITTED_FLAGS + SHARDING_FLAGS,
+            ALWAYS_OMITTED_FLAGS + ZERO3_FLAGS,
         )
-        for flag in SHARDING_FLAGS:
+        for flag in ZERO3_FLAGS:
             with self.subTest(flag=flag):
                 self.assertNotIn(flag, set(flags_for("1b", PP4_SPEC)))
 
@@ -410,7 +423,7 @@ class FlagListTest(unittest.TestCase):
         self.assertEqual(omitted_flags("zero3"), ALWAYS_OMITTED_FLAGS)
         for spec in (SHARDED_PP4_SPEC, EXPERT_PP4_SPEC):
             emitted = flags_for("1b", spec)
-            for flag in SHARDING_FLAGS:
+            for flag in ZERO3_FLAGS:
                 with self.subTest(ep=spec.ep, flag=flag):
                     self.assertIn(flag, emitted)
             self.assertEqual(
@@ -437,6 +450,11 @@ class FlagListTest(unittest.TestCase):
         self.assertEqual(MEGATRON_FSDP_VERSION, "1")
         self.assertEqual(
             DATA_PARALLEL_WRAPPERS["zero3"], "FullyShardedDataParallelV1"
+        )
+        # The other two values never reach that wrapper: training.py picks
+        # it on --use-megatron-fsdp alone, and neither value sends it.
+        self.assertEqual(
+            DATA_PARALLEL_WRAPPERS["zero1"], "DistributedDataParallel"
         )
 
     def test_the_expert_degree_reaches_the_argv(self) -> None:
@@ -469,7 +487,7 @@ class FlagListTest(unittest.TestCase):
         self.assertEqual(
             value_after(emitted, "--expert-model-parallel-size"), "1"
         )
-        for flag in SHARDING_FLAGS:
+        for flag in ZERO3_FLAGS:
             with self.subTest(flag=flag):
                 self.assertNotIn(flag, emitted)
 
@@ -498,25 +516,91 @@ class FlagListTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dense sharding"):
             omitted_flags("shard")
 
-    def test_zero1_has_no_command_line_yet(self) -> None:
-        """A declared value this module cannot build an argv for.
+    def test_zero1_emits_the_distributed_optimizer_alone(self) -> None:
+        """One flag, and the four Megatron-FSDP flags stay out.
 
-        ``_sharding_flags`` returns the five sharded flags under ``zero3``
-        and an empty list under ``replicate``, so a silent fall through
-        would send the replicated argv under the ``zero1`` label. The three
-        tables would raise a bare ``KeyError``, which names neither the
-        value nor the missing work.
+        ``--use-distributed-optimizer`` alone gives Megatron a
+        ``DistributedOptimizer`` beside a plain ``DistributedDataParallel``,
+        which shards the optimizer states and nothing else. It builds no
+        device mesh, which is why spec rule 17 lets this value hold a
+        pipeline where ``zero3`` cannot.
         """
-        with self.assertRaisesRegex(
-            ValueError, "no stock megatron command line yet"
-        ):
-            omitted_flags("zero1")
-        with self.assertRaisesRegex(
-            ValueError, "no stock megatron command line yet"
-        ):
-            flags_for(
-                "1b", dataclasses.replace(PP4_SPEC, dense_sharding="zero1")
+        emitted = flags_for(
+            "1b", dataclasses.replace(PP4_SPEC, dense_sharding="zero1")
+        )
+        self.assertEqual(ZERO1_FLAGS, ("--use-distributed-optimizer",))
+        self.assertIn("--use-distributed-optimizer", emitted)
+        for flag in ZERO3_FLAGS:
+            if flag in ZERO1_FLAGS:
+                continue
+            with self.subTest(flag=flag):
+                self.assertNotIn(flag, emitted)
+
+    def test_zero1_declines_the_four_flags_it_does_not_send(self) -> None:
+        """``omitted_flags`` subtracts what the value sends.
+
+        ``--use-distributed-optimizer`` is the flag that moves between the
+        two sharded values, so a hand-written roster could declare it
+        declined while this value's own argv carries it.
+        """
+        declined = omitted_flags("zero1")
+        self.assertNotIn("--use-distributed-optimizer", declined)
+        for flag in ZERO3_FLAGS:
+            if flag in ZERO1_FLAGS:
+                continue
+            with self.subTest(flag=flag):
+                self.assertIn(flag, declined)
+
+    def test_the_optimizer_table_separates_replicate_from_zero1(self) -> None:
+        """The wrapper table cannot separate them, and that is why this
+        table exists.
+
+        Both values build a plain ``DistributedDataParallel``, because
+        ``training.py`` picks the Megatron-FSDP wrapper on
+        ``--use-megatron-fsdp`` alone and ``zero1`` does not send it. The
+        optimizer class is what says which of the two ran.
+        """
+        self.assertEqual(
+            DATA_PARALLEL_WRAPPERS["replicate"],
+            DATA_PARALLEL_WRAPPERS["zero1"],
+        )
+        self.assertNotEqual(
+            DATA_PARALLEL_OPTIMIZERS["replicate"],
+            DATA_PARALLEL_OPTIMIZERS["zero1"],
+        )
+        self.assertEqual(
+            DATA_PARALLEL_OPTIMIZERS["replicate"],
+            "Float16OptimizerWithFloat16Params",
+        )
+        self.assertEqual(
+            DATA_PARALLEL_OPTIMIZERS["zero1"], "DistributedOptimizer"
+        )
+        self.assertEqual(
+            DATA_PARALLEL_OPTIMIZERS["zero3"], "DistributedOptimizer"
+        )
+
+    def test_the_optimizer_table_reads_megatrons_own_branch(self) -> None:
+        """The table is a claim about Megatron's source, so check it.
+
+        ``get_megatron_optimizer`` builds ``DistributedOptimizer`` under
+        ``use_distributed_optimizer`` and
+        ``Float16OptimizerWithFloat16Params`` otherwise. A submodule bump
+        that renamed either class would leave the table naming a class no
+        run can print, and arm rule 12 would fail hours into a real cell.
+        """
+        if not MEGATRON_OPTIMIZER_SOURCE.exists():
+            raise unittest.SkipTest(
+                f"{MEGATRON_OPTIMIZER_SOURCE} is absent; init the submodule"
             )
+        source = MEGATRON_OPTIMIZER_SOURCE.read_text()
+        self.assertIn("if config.use_distributed_optimizer:", source)
+        self.assertIn("optimizer = DistributedOptimizer(", source)
+        self.assertIn(
+            "optimizer = Float16OptimizerWithFloat16Params(", source
+        )
+        for name in DATA_PARALLEL_OPTIMIZERS.values():
+            with self.subTest(optimizer=name):
+                self.assertIn(f"optimizer = {name}(", source)
 
     def test_the_sharding_strategy_table_reads_no_shard_under_replicate(
         self,
@@ -530,6 +614,10 @@ class FlagListTest(unittest.TestCase):
         a replicated run sharded.
         """
         self.assertEqual(SHARDING_STRATEGIES["replicate"], "no_shard")
+        # zero1 reads no_shard for the same reason: the field is read only
+        # under use_megatron_fsdp, which this value does not send. It shards
+        # the optimizer states through the DistributedOptimizer instead.
+        self.assertEqual(SHARDING_STRATEGIES["zero1"], "no_shard")
         self.assertEqual(
             SHARDING_STRATEGIES["zero3"], MEGATRON_SHARDING_STRATEGY
         )
@@ -2383,6 +2471,9 @@ class DataParallelMarkerTest(unittest.TestCase):
         # False for two reasons: no_shard is not in the guard's list, and
         # no Megatron-FSDP wrapper exists under this value at all.
         self.assertFalse(DATA_PARALLEL_OVERLAP["replicate"])
+        # zero1 is False for both of those reasons too. It sends no
+        # --use-megatron-fsdp, so nothing mutates the config in place.
+        self.assertFalse(DATA_PARALLEL_OVERLAP["zero1"])
         self.assertNotIn(
             SHARDING_STRATEGIES["replicate"],
             MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES,

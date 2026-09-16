@@ -53,12 +53,14 @@ carries one change).
 **``--dense-sharding zero3`` moves that third deviation and nothing else.**
 Both engines then shard the dense parameters, so the axis still carries one
 change, and Megatron needs its own distributed optimizer to do it. See
-``SHARDING_FLAGS``.
+``ZERO3_FLAGS``.
 
-**``--dense-sharding zero1`` has no command line in this module yet.** The
-value is declared on the axis, and the flags, the wrapper table and the
-optimizer table are the next commit's work.
-``refuse_unbuilt_dense_sharding`` refuses it by name until then.
+**``--dense-sharding zero1`` sends ONE flag**,
+``--use-distributed-optimizer``. Megatron then keeps a plain
+``DistributedDataParallel`` and builds a ``DistributedOptimizer``, which
+shards the optimizer states over the data-parallel group. No Megatron-FSDP
+wrapper exists under this value, so nothing factors the world size and the
+value holds a pipeline. See ``ZERO1_FLAGS``.
 
 **``--megatron-p2p-sync off`` adds one harness flag and nothing else.**
 Megatron has no CLI flag for ``batch_p2p_sync``, so ``--bench-batch-p2p-sync
@@ -135,17 +137,25 @@ MEGATRON_CHECKPOINT_FORMAT = "fsdp_dtensor"
 # the raw field is inert. A marker built from the raw field would say a
 # replicated run sharded.
 #
-# **"zero1" carries no row yet, and that is deliberate.** Its Megatron
-# command line is the next commit's work, so a row here would declare a
-# wrapper the argv cannot ask for. refuse_unbuilt_dense_sharding refuses the
-# value by name before any lookup, so a caller reads the missing work rather
-# than a bare KeyError.
+# **"replicate" and "zero1" build the SAME wrapper**, because
+# training.py picks FullyShardedDataParallel on --use-megatron-fsdp alone
+# and zero1 does not send it. So this table cannot separate those two
+# values, and DATA_PARALLEL_OPTIMIZERS below is what does.
+#
+# **"zero1" reads "no_shard" too, for the reason "replicate" does.**
+# megatron/core/optimizer/__init__.py reads
+# data_parallel_sharding_strategy only under use_megatron_fsdp, so the
+# strategy a zero1 run acts on is no_shard whatever the raw field says.
+# zero1 shards the optimizer states through the DistributedOptimizer, which
+# is not this field.
 DATA_PARALLEL_WRAPPERS: dict[str, str] = {
     "replicate": "DistributedDataParallel",
+    "zero1": "DistributedDataParallel",
     "zero3": f"FullyShardedDataParallelV{MEGATRON_FSDP_VERSION}",
 }
 SHARDING_STRATEGIES: dict[str, str] = {
     "replicate": "no_shard",
+    "zero1": "no_shard",
     "zero3": MEGATRON_SHARDING_STRATEGY,
 }
 
@@ -178,6 +188,29 @@ MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES: tuple[str, ...] = (
 DATA_PARALLEL_OVERLAP: dict[str, bool] = {
     value: strategy in MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES
     for value, strategy in SHARDING_STRATEGIES.items()
+}
+
+# The optimizer class Megatron builds for each value.
+#
+# **This table is load-bearing, because the wrapper table above no longer
+# separates every value.** ``replicate`` and ``zero1`` both build a plain
+# ``DistributedDataParallel``, so the wrapper class alone cannot say which
+# of the two ran. The optimizer can:
+# ``megatron/core/optimizer/__init__.py:656`` builds ``DistributedOptimizer``
+# under ``use_distributed_optimizer``, and ``:679`` builds
+# ``Float16OptimizerWithFloat16Params`` otherwise.
+#
+# So the two tables together pin all three values and neither does it
+# alone: ``replicate`` is DDP plus the fp16 optimizer, ``zero1`` is DDP plus
+# the distributed optimizer, and ``zero3`` is the Megatron-FSDP wrapper.
+#
+# ``zero3`` reads ``DistributedOptimizer`` too, because ``arguments.py``
+# sets ``use_distributed_optimizer = True`` inside the Megatron-FSDP block
+# whatever the argv said.
+DATA_PARALLEL_OPTIMIZERS: dict[str, str] = {
+    "replicate": "Float16OptimizerWithFloat16Params",
+    "zero1": "DistributedOptimizer",
+    "zero3": "DistributedOptimizer",
 }
 
 # TorchTitan's own optimizer values, replicated flag for flag. The source is
@@ -285,19 +318,36 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--profile-ranks",
 )
 
-# The five flags --dense-sharding zero3 sends and replicate declines. The
-# same tuple states both facts, so the two cannot drift apart.
+# The flag NAMES each dense-sharding value sends.
 #
-# **--use-distributed-optimizer is one of them, and it must be.**
-# Megatron-FSDP v1 turns it on itself and warns (arguments.py). An argv that
-# omitted it would deny a fact the run has.
-SHARDING_FLAGS: tuple[str, ...] = (
+# **zero1 is one flag.** --use-distributed-optimizer alone gives Megatron a
+# DistributedOptimizer beside a plain DistributedDataParallel, which shards
+# the optimizer states over the data-parallel group and nothing else. It
+# builds no device mesh, which is why spec rule 17 lets this value hold a
+# pipeline where zero3 cannot.
+ZERO1_FLAGS: tuple[str, ...] = ("--use-distributed-optimizer",)
+
+# **zero3 is five flags, and --use-distributed-optimizer is one of them.**
+# Megatron-FSDP v1 turns that one on itself and warns (arguments.py), so an
+# argv that omitted it would deny a fact the run has. Two of the other four
+# restate a Megatron default on purpose, so a submodule bump that moves
+# either default changes a recorded argv rather than a silent run.
+ZERO3_FLAGS: tuple[str, ...] = (
     "--use-megatron-fsdp",
     "--megatron-fsdp-version",
     "--data-parallel-sharding-strategy",
     "--use-distributed-optimizer",
     "--ckpt-format",
 )
+
+# What each value sends, as one table. ``_sharding_flags`` builds the tokens
+# with their values and ``omitted_flags`` subtracts this from ``ZERO3_FLAGS``,
+# so presence and absence stay one fact and cannot drift apart.
+SHARDING_FLAGS_BY_VALUE: dict[str, tuple[str, ...]] = {
+    "replicate": (),
+    "zero1": ZERO1_FLAGS,
+    "zero3": ZERO3_FLAGS,
+}
 
 
 def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
@@ -312,30 +362,6 @@ def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
         raise ValueError(
             f"dense sharding {dense_sharding!r} is not one of "
             + ", ".join(repr(mode) for mode in DENSE_SHARDING_MODES)
-        )
-
-
-def refuse_unbuilt_dense_sharding(dense_sharding: str) -> None:
-    """Raise on a declared value this module builds no command line for.
-
-    ``zero1`` is a declared value of the dense-sharding axis, and this
-    module builds no Megatron command line for it yet. The flags, the
-    wrapper table and the optimizer table are the next commit's work.
-
-    **The refusal is named, and it must be.** ``_sharding_flags`` returns
-    the five sharded flags under ``zero3`` and an empty list under
-    ``replicate``, so a silent fall through would send the replicated argv
-    under the ``zero1`` label. The three tables above would raise a bare
-    ``KeyError``, which names neither the value nor the missing work.
-
-    Delete this function with the commit that builds the ``zero1`` argv.
-    """
-    if dense_sharding == "zero1":
-        raise ValueError(
-            "dense sharding 'zero1' has no stock megatron command line yet. "
-            "The flags, the wrapper table and the optimizer table are not "
-            "built. Use --dense-sharding replicate, or --dense-sharding "
-            "zero3, or run --arm to select the TorchTitan arms alone"
         )
 
 
@@ -391,17 +417,21 @@ def refuse_unknown_p2p_sync(megatron_p2p_sync: str) -> None:
 def omitted_flags(dense_sharding: str) -> tuple[str, ...]:
     """Every flag this arm declines at ``dense_sharding``.
 
-    The roster is a function of the value because all five
-    sharding flags move from declined to required under ``zero3``. A test
-    reads this rather than a hand-written list, so the absence under
-    ``replicate`` and the presence under ``zero3`` are both asserted by
-    name.
+    The roster is a function of the value, because the sharding flags move
+    from declined to required as the value changes. A test reads this rather
+    than a hand-written list, so every absence is asserted by name.
+
+    **It is SUBTRACTED from what the value sends, never written twice.**
+    ``replicate`` declines all five, ``zero1`` declines the four it does not
+    send, and ``zero3`` declines none. ``--use-distributed-optimizer`` is
+    the flag that moves between the two sharded values, so a hand-written
+    list here could say a zero1 run declines a flag its own argv carries.
     """
     refuse_unknown_dense_sharding(dense_sharding)
-    refuse_unbuilt_dense_sharding(dense_sharding)
-    if dense_sharding == "zero3":
-        return ALWAYS_OMITTED_FLAGS
-    return ALWAYS_OMITTED_FLAGS + SHARDING_FLAGS
+    sent = SHARDING_FLAGS_BY_VALUE[dense_sharding]
+    return ALWAYS_OMITTED_FLAGS + tuple(
+        flag for flag in ZERO3_FLAGS if flag not in sent
+    )
 
 
 def microbatch_geometry(
@@ -653,12 +683,15 @@ def _sharding_flags(dense_sharding: str) -> list[str]:
     Empty under ``replicate``, which is stock Megatron's own default and
     the treatment every published cell of this scenario ran.
 
-    Under ``zero3`` it is the five flags of ``SHARDING_FLAGS``. Two of them
+    Under ``zero1`` it is the one flag of ``ZERO1_FLAGS``. Megatron then
+    keeps a plain ``DistributedDataParallel`` and builds a
+    ``DistributedOptimizer``, which shards the optimizer states over the
+    data-parallel group. It builds no device mesh, so this value holds a
+    pipeline where ``zero3`` cannot.
+
+    Under ``zero3`` it is the five flags of ``ZERO3_FLAGS``. Two of them
     restate a Megatron default on purpose, so a submodule bump that moves
     either default changes a recorded argv rather than a silent run.
-
-    ``zero1`` is refused by name. This module builds no command line for it
-    yet; see ``refuse_unbuilt_dense_sharding``.
 
     **Megatron-FSDP v1 accepts a pipeline degree and an expert degree.**
     Its distributed index reads ``expt_dp_group`` and ``ep_group``
@@ -679,9 +712,10 @@ def _sharding_flags(dense_sharding: str) -> list[str]:
     keeps a test able to build the whole command line without a shell.
     """
     refuse_unknown_dense_sharding(dense_sharding)
-    refuse_unbuilt_dense_sharding(dense_sharding)
-    if dense_sharding != "zero3":
+    if dense_sharding == "replicate":
         return []
+    if dense_sharding == "zero1":
+        return list(ZERO1_FLAGS)
     return [
         "--use-megatron-fsdp",
         "--megatron-fsdp-version",

@@ -49,7 +49,6 @@ from benchmarks.e2e.megatron_stock.flags import (
     DATA_PARALLEL_WRAPPERS,
     SHARDING_STRATEGIES,
     microbatch_geometry,
-    refuse_unbuilt_dense_sharding,
     refuse_unknown_dense_sharding,
 )
 from benchmarks.e2e.parallelism import (
@@ -414,10 +413,7 @@ def _megatron_stock_parallelism_markers(
     _, microbatches, _ = microbatch_geometry(workload, spec)
     # A garbage value would otherwise reach the three tables below and
     # raise a bare KeyError, which names neither the value nor the flag.
-    # A declared value whose argv is not built yet raises the same way, so
-    # it is refused by its own name too.
     refuse_unknown_dense_sharding(spec.dense_sharding)
-    refuse_unbuilt_dense_sharding(spec.dense_sharding)
     markers = [
         f"Megatron-LM stock parallelism: dp={spec.dp} pp={spec.pp} "
         f"ep={spec.ep} schedule=1F1B microbatches={microbatches} "

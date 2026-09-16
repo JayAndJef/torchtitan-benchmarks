@@ -2029,9 +2029,13 @@ TEST_CENSUS = {
     # gradient consumer, and that --rerun-mode disabled removes neither.
     # +1 with the 30b-a3b shape: the stock argv carries the written head
     # count and expert width, and the other geometry flags beside them.
-    # +1 that zero1 has no stock megatron command line yet, so the value is
-    # refused by name rather than falling through to the replicated argv.
-    "test_megatron_stock_driver": 131,
+    # +3 net with the argv split by ZeRO level. The refusal that stood while
+    # zero1 had no command line is gone, and four cases replace it: zero1
+    # emits the distributed optimizer alone, it declines the four flags it
+    # does not send, the optimizer table separates replicate from zero1
+    # where the wrapper table cannot, and that table is read against
+    # Megatron's own source.
+    "test_megatron_stock_driver": 134,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2322,7 +2326,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1875
+TEST_CENSUS_TOTAL = 1878
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
