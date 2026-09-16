@@ -215,6 +215,16 @@ DATA_PARALLEL_OPTIMIZERS: dict[str, str] = {
     "zero3": "DistributedOptimizer",
 }
 
+# The outer class Megatron returns for a chain of optimizers
+# (``megatron/core/optimizer/optimizer.py``).
+#
+# **The table above names the class of ONE bucket, and a real run has
+# two.** Megatron builds one optimizer for each
+# ``(optimizer_name, is_expert)`` bucket and chains them above one bucket,
+# so a mixture of experts prints the chain. ``data_parallel_optimizer``
+# below is what a marker must read; the raw table cannot state the line.
+CHAINED_OPTIMIZER = "ChainedOptimizer"
+
 # TorchTitan's own optimizer values, replicated flag for flag. The source is
 # benchmarks/e2e/megatron/train.py, which replicates the TorchTitan trainer.
 LEARNING_RATE = "8e-4"
@@ -379,6 +389,10 @@ LEAN_PRECISION_FLAGS: tuple[str, ...] = (
 # apart and a reader meets the recipe as one fact.
 LEAN_PRECISION_DTYPE = "bf16"
 
+# Megatron's own default for ``--main-grads-dtype`` (``arguments.py``). The
+# stock recipe sends no dtype flag, so it runs this one.
+MEGATRON_MAIN_GRADS_DTYPE_DEFAULT = "fp32"
+
 
 def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
     """Raise on a value this module cannot build a command line for.
@@ -393,6 +407,33 @@ def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
             f"dense sharding {dense_sharding!r} is not one of "
             + ", ".join(repr(mode) for mode in DENSE_SHARDING_MODES)
         )
+
+
+def data_parallel_optimizer(dense_sharding: str, shape: PiperShape) -> str:
+    """The optimizer name the data-parallel line must carry.
+
+    ``DATA_PARALLEL_OPTIMIZERS`` names the class of one bucket.
+    **Megatron builds one optimizer for each
+    ``(optimizer_name, is_expert)`` bucket, and it chains them above one
+    bucket** (``megatron/core/optimizer/__init__.py``). A mixture of
+    experts therefore gets a chain: every expert weight carries
+    ``allreduce=False``, which is the flag that key reads, so the dense
+    bucket and the expert bucket both exist on every rank.
+
+    Both buckets take the same branch, because ``use_distributed_optimizer``
+    is one value for the whole run. So the members agree, and the string
+    names one class inside the brackets.
+
+    ``shape.num_experts`` is what decides the chain. Every registered shape
+    is a mixture of experts, because ``PiperShape`` refuses a count below
+    1, so no shape takes the bare branch today. The branch stays, because
+    the chain is a property of the model rather than of this suite.
+    """
+    refuse_unknown_dense_sharding(dense_sharding)
+    inner = DATA_PARALLEL_OPTIMIZERS[dense_sharding]
+    if shape.num_experts < 1:
+        return inner
+    return f"{CHAINED_OPTIMIZER}[{inner}]"
 
 
 # Megatron's own switch for ``check_for_nan_in_loss_and_grad``
@@ -501,6 +542,39 @@ def _precision_flags(
         "--exp-avg-sq-dtype",
         LEAN_PRECISION_DTYPE,
     ]
+
+
+def main_grads_dtype(megatron_precision: str) -> str:
+    """The ``--main-grads-dtype`` value this precision runs.
+
+    ``stock`` sends no dtype flag, so it runs Megatron's own default.
+    ``lean`` sends ``LEAN_PRECISION_DTYPE``.
+    """
+    refuse_unknown_megatron_precision(megatron_precision)
+    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+        return MEGATRON_MAIN_GRADS_DTYPE_DEFAULT
+    return LEAN_PRECISION_DTYPE
+
+
+def grad_reduce_in_fp32(megatron_precision: str) -> bool:
+    """Whether Megatron reduces the gradients in fp32 at this precision.
+
+    **This field moves with the precision axis, and a marker once pinned
+    it to True.** Under ``--bf16`` Megatron turns
+    ``accumulate_allreduce_grads_in_fp32`` on only where the main-grad
+    dtype is fp32 (``arguments.py``), and ``get_megatron_ddp_config``
+    copies that field into ``ddp_config.grad_reduce_in_fp32``. So the
+    stock recipe reduces in fp32 and the lean recipe does not. A real
+    eight-GPU run failed arm rule 12 on 2026-09-16 for that reason.
+
+    The value is DERIVED from the dtype the recipe sends. A hand-written
+    table would keep saying True after somebody moved
+    ``LEAN_PRECISION_DTYPE``.
+    """
+    return (
+        main_grads_dtype(megatron_precision)
+        == MEGATRON_MAIN_GRADS_DTYPE_DEFAULT
+    )
 
 
 def omitted_flags(dense_sharding: str) -> tuple[str, ...]:
