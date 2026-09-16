@@ -50,10 +50,17 @@ runs), and no distributed optimizer under ``--dense-sharding replicate``
 (both engines then replicate their parameters, so the data-parallel axis
 carries one change).
 
-**``--dense-sharding shard`` moves that third deviation and nothing else.**
+**``--dense-sharding zero3`` moves that third deviation and nothing else.**
 Both engines then shard the dense parameters, so the axis still carries one
 change, and Megatron needs its own distributed optimizer to do it. See
-``SHARDING_FLAGS``.
+``ZERO3_FLAGS``.
+
+**``--dense-sharding zero1`` sends ONE flag**,
+``--use-distributed-optimizer``. Megatron then keeps a plain
+``DistributedDataParallel`` and builds a ``DistributedOptimizer``, which
+shards the optimizer states over the data-parallel group. No Megatron-FSDP
+wrapper exists under this value, so nothing factors the world size and the
+value holds a pipeline. See ``ZERO1_FLAGS``.
 
 **``--megatron-p2p-sync off`` adds one harness flag and nothing else.**
 Megatron has no CLI flag for ``batch_p2p_sync``, so ``--bench-batch-p2p-sync
@@ -79,8 +86,10 @@ from benchmarks.e2e.parallelism import (
 from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    DEFAULT_MEGATRON_PRECISION,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
+    MEGATRON_PRECISION_MODES,
     Workload,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
@@ -105,7 +114,7 @@ SUPPORTED_PP_SCHEDULE = "1F1B"
 MEGATRON_FSDP_VERSION = "1"
 
 # What Megatron-FSDP shards. It pairs with what TorchTitan shards under
-# --dense-sharding shard: the parameters, the gradients and the optimizer
+# --dense-sharding zero3: the parameters, the gradients and the optimizer
 # state. Megatron already defaults this value too. The flag list states it
 # for the reason above.
 MEGATRON_SHARDING_STRATEGY = "optim_grads_params"
@@ -129,13 +138,27 @@ MEGATRON_CHECKPOINT_FORMAT = "fsdp_dtensor"
 # use_megatron_fsdp. So the value the run acts on is "no_shard" here, and
 # the raw field is inert. A marker built from the raw field would say a
 # replicated run sharded.
+#
+# **"replicate" and "zero1" build the SAME wrapper**, because
+# training.py picks FullyShardedDataParallel on --use-megatron-fsdp alone
+# and zero1 does not send it. So this table cannot separate those two
+# values, and DATA_PARALLEL_OPTIMIZERS below is what does.
+#
+# **"zero1" reads "no_shard" too, for the reason "replicate" does.**
+# megatron/core/optimizer/__init__.py reads
+# data_parallel_sharding_strategy only under use_megatron_fsdp, so the
+# strategy a zero1 run acts on is no_shard whatever the raw field says.
+# zero1 shards the optimizer states through the DistributedOptimizer, which
+# is not this field.
 DATA_PARALLEL_WRAPPERS: dict[str, str] = {
     "replicate": "DistributedDataParallel",
-    "shard": f"FullyShardedDataParallelV{MEGATRON_FSDP_VERSION}",
+    "zero1": "DistributedDataParallel",
+    "zero3": f"FullyShardedDataParallelV{MEGATRON_FSDP_VERSION}",
 }
 SHARDING_STRATEGIES: dict[str, str] = {
     "replicate": "no_shard",
-    "shard": MEGATRON_SHARDING_STRATEGY,
+    "zero1": "no_shard",
+    "zero3": MEGATRON_SHARDING_STRATEGY,
 }
 
 # The strategies under which Megatron-FSDP turns the gradient overlap on
@@ -167,6 +190,29 @@ MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES: tuple[str, ...] = (
 DATA_PARALLEL_OVERLAP: dict[str, bool] = {
     value: strategy in MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES
     for value, strategy in SHARDING_STRATEGIES.items()
+}
+
+# The optimizer class Megatron builds for each value.
+#
+# **This table is necessary, because the wrapper table above no longer
+# separates every value.** ``replicate`` and ``zero1`` both build a plain
+# ``DistributedDataParallel``, so the wrapper class alone cannot say which
+# of the two ran. The optimizer can:
+# ``megatron/core/optimizer/__init__.py:656`` builds ``DistributedOptimizer``
+# under ``use_distributed_optimizer``, and ``:679`` builds
+# ``Float16OptimizerWithFloat16Params`` otherwise.
+#
+# So the two tables together pin all three values and neither does it
+# alone: ``replicate`` is DDP plus the fp16 optimizer, ``zero1`` is DDP plus
+# the distributed optimizer, and ``zero3`` is the Megatron-FSDP wrapper.
+#
+# ``zero3`` reads ``DistributedOptimizer`` too, because ``arguments.py``
+# sets ``use_distributed_optimizer = True`` inside the Megatron-FSDP block
+# whatever the argv said.
+DATA_PARALLEL_OPTIMIZERS: dict[str, str] = {
+    "replicate": "Float16OptimizerWithFloat16Params",
+    "zero1": "DistributedOptimizer",
+    "zero3": "DistributedOptimizer",
 }
 
 # TorchTitan's own optimizer values, replicated flag for flag. The source is
@@ -251,7 +297,7 @@ BENCH_FLAGS_OMITTED_BY_DEFAULT: tuple[str, ...] = (
 #
 # The marker reads the resolved value instead. See DATA_PARALLEL_OVERLAP.
 #
-# **The consequence under ``shard`` is a caption obligation, not a defect.**
+# **The consequence under ``zero3`` is a caption obligation, not a defect.**
 # ``resolve_ddp_bucket_size`` runs before the wrapper exists and reads the
 # argument, which is False, so a sharded run enters Megatron-FSDP with
 # ``bucket_size = None``. The wrapper then flips ``overlap_grad_reduce`` to
@@ -270,23 +316,68 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--data-path",
     "--tensorboard-dir",
     "--grad-reduce-in-bf16",
-    "--use-precision-aware-optimizer",
     "--profile-ranks",
 )
 
-# The five flags --dense-sharding shard sends and replicate declines. The
-# same tuple states both facts, so the two cannot drift apart.
+# **--use-precision-aware-optimizer LEFT this tuple**, because
+# --megatron-precision lean sends it. It is declined under the default
+# value alone, and _precision_flags is what decides that. A roster entry
+# here would say a lean run declines a flag its own argv carries.
 #
-# **--use-distributed-optimizer is one of them, and it must be.**
-# Megatron-FSDP v1 turns it on itself and warns (arguments.py). An argv that
-# omitted it would deny a fact the run has.
-SHARDING_FLAGS: tuple[str, ...] = (
+# **--grad-reduce-in-bf16 STAYS**, under both precision values. Under
+# --bf16 Megatron turns fp32 accumulation on only when the main-grad dtype
+# is fp32 (arguments.py), so --main-grads-dtype bf16 leaves it off by
+# itself. Sending this flag too would state one fact twice, and a reader of
+# the argv could not tell which token did the work.
+
+# The flag NAMES each dense-sharding value sends.
+#
+# **zero1 is one flag.** --use-distributed-optimizer alone gives Megatron a
+# DistributedOptimizer beside a plain DistributedDataParallel, which shards
+# the optimizer states over the data-parallel group and nothing else. It
+# builds no device mesh, which is why spec rule 17 lets this value hold a
+# pipeline where zero3 cannot.
+ZERO1_FLAGS: tuple[str, ...] = ("--use-distributed-optimizer",)
+
+# **zero3 is five flags, and --use-distributed-optimizer is one of them.**
+# Megatron-FSDP v1 turns that one on itself and warns (arguments.py), so an
+# argv that omitted it would deny a fact the run has. Two of the other four
+# restate a Megatron default on purpose, so a submodule bump that moves
+# either default changes a recorded argv rather than a silent run.
+ZERO3_FLAGS: tuple[str, ...] = (
     "--use-megatron-fsdp",
     "--megatron-fsdp-version",
     "--data-parallel-sharding-strategy",
     "--use-distributed-optimizer",
     "--ckpt-format",
 )
+
+# What each value sends, as one table. ``_sharding_flags`` builds the tokens
+# with their values and ``omitted_flags`` subtracts this from ``ZERO3_FLAGS``,
+# so presence and absence stay one fact and cannot drift apart.
+SHARDING_FLAGS_BY_VALUE: dict[str, tuple[str, ...]] = {
+    "replicate": (),
+    "zero1": ZERO1_FLAGS,
+    "zero3": ZERO3_FLAGS,
+}
+
+# The flag NAMES --megatron-precision lean sends. The whole recipe, its
+# byte table and the two flags it must never send are stated once, above
+# MEGATRON_PRECISION_MODES in benchmarks/e2e/registry.py.
+#
+# The three dtype flags take a value token each, so the argv is eight
+# tokens. This tuple holds the names, which is what a test asserts absence
+# by under the default value.
+LEAN_PRECISION_FLAGS: tuple[str, ...] = (
+    "--use-precision-aware-optimizer",
+    "--main-grads-dtype",
+    "--exp-avg-dtype",
+    "--exp-avg-sq-dtype",
+)
+
+# The dtype every lean flag carries. One name, so the three cannot drift
+# apart and a reader meets the recipe as one fact.
+LEAN_PRECISION_DTYPE = "bf16"
 
 
 def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
@@ -353,19 +444,83 @@ def refuse_unknown_p2p_sync(megatron_p2p_sync: str) -> None:
         )
 
 
+def refuse_unknown_megatron_precision(megatron_precision: str) -> None:
+    """Raise on a precision value this module cannot build a command line for.
+
+    A silent fall through would send the stock argv under the ``lean``
+    label. The manifest would then record 10 bytes of optimizer state per
+    parameter for a run that held 18.
+    """
+    if megatron_precision not in MEGATRON_PRECISION_MODES:
+        raise ValueError(
+            f"megatron precision {megatron_precision!r} is not one of "
+            + ", ".join(repr(mode) for mode in MEGATRON_PRECISION_MODES)
+        )
+
+
+def _precision_flags(
+    megatron_precision: str, dense_sharding: str
+) -> list[str]:
+    """What Megatron needs to hold the optimizer state this way.
+
+    Empty under ``stock``, which is ``--bf16`` alone and 18 bytes of
+    optimizer state per parameter. That is the treatment every published
+    cell of this scenario ran, so the default argv does not move.
+
+    Under ``lean`` it is the four flags of ``LEAN_PRECISION_FLAGS`` and
+    their three dtype tokens, which reach 10 bytes. The recipe, the byte
+    table and the two flags this axis must never send are stated once,
+    above ``MEGATRON_PRECISION_MODES`` in ``benchmarks/e2e/registry.py``.
+
+    **``lean`` needs a sharded dense value, and this refuses the rest.**
+    ``optimizer_config.py`` asserts ``use_distributed_optimizer`` under
+    ``--use-precision-aware-optimizer``, and the dense-sharding axis is the
+    one owner of that flag. A replicated run would die inside Megatron's
+    own config validation, minutes into a subprocess, naming neither this
+    axis nor its repair. ``_resolve_run`` refuses the combination first for
+    a real run; this refusal is for a caller that builds a command line
+    without one.
+    """
+    refuse_unknown_megatron_precision(megatron_precision)
+    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+        return []
+    if dense_sharding == "replicate":
+        raise ValueError(
+            f"megatron precision {megatron_precision!r} needs "
+            "--dense-sharding zero1 or --dense-sharding zero3: Megatron "
+            "asserts use_distributed_optimizer under "
+            "--use-precision-aware-optimizer, and the dense-sharding value "
+            "is the one owner of that flag"
+        )
+    return [
+        "--use-precision-aware-optimizer",
+        "--main-grads-dtype",
+        LEAN_PRECISION_DTYPE,
+        "--exp-avg-dtype",
+        LEAN_PRECISION_DTYPE,
+        "--exp-avg-sq-dtype",
+        LEAN_PRECISION_DTYPE,
+    ]
+
+
 def omitted_flags(dense_sharding: str) -> tuple[str, ...]:
     """Every flag this arm declines at ``dense_sharding``.
 
-    The roster is a function of the value because all five
-    sharding flags move from declined to required under ``shard``. A test
-    reads this rather than a hand-written list, so the absence under
-    ``replicate`` and the presence under ``shard`` are both asserted by
-    name.
+    The roster is a function of the value, because the sharding flags move
+    from declined to required as the value changes. A test reads this rather
+    than a hand-written list, so every absence is asserted by name.
+
+    **It is SUBTRACTED from what the value sends, never written twice.**
+    ``replicate`` declines all five, ``zero1`` declines the four it does not
+    send, and ``zero3`` declines none. ``--use-distributed-optimizer`` is
+    the flag that moves between the two sharded values, so a hand-written
+    list here could say a zero1 run declines a flag its own argv carries.
     """
     refuse_unknown_dense_sharding(dense_sharding)
-    if dense_sharding == "shard":
-        return ALWAYS_OMITTED_FLAGS
-    return ALWAYS_OMITTED_FLAGS + SHARDING_FLAGS
+    sent = SHARDING_FLAGS_BY_VALUE[dense_sharding]
+    return ALWAYS_OMITTED_FLAGS + tuple(
+        flag for flag in ZERO3_FLAGS if flag not in sent
+    )
 
 
 def microbatch_geometry(
@@ -617,7 +772,13 @@ def _sharding_flags(dense_sharding: str) -> list[str]:
     Empty under ``replicate``, which is stock Megatron's own default and
     the treatment every published cell of this scenario ran.
 
-    Under ``shard`` it is the five flags of ``SHARDING_FLAGS``. Two of them
+    Under ``zero1`` it is the one flag of ``ZERO1_FLAGS``. Megatron then
+    keeps a plain ``DistributedDataParallel`` and builds a
+    ``DistributedOptimizer``, which shards the optimizer states over the
+    data-parallel group. It builds no device mesh, so this value holds a
+    pipeline where ``zero3`` cannot.
+
+    Under ``zero3`` it is the five flags of ``ZERO3_FLAGS``. Two of them
     restate a Megatron default on purpose, so a submodule bump that moves
     either default changes a recorded argv rather than a silent run.
 
@@ -640,8 +801,10 @@ def _sharding_flags(dense_sharding: str) -> list[str]:
     keeps a test able to build the whole command line without a shell.
     """
     refuse_unknown_dense_sharding(dense_sharding)
-    if dense_sharding != "shard":
+    if dense_sharding == "replicate":
         return []
+    if dense_sharding == "zero1":
+        return list(ZERO1_FLAGS)
     return [
         "--use-megatron-fsdp",
         "--megatron-fsdp-version",
@@ -787,6 +950,7 @@ def stock_megatron_flags(
     compile_mode: str = SUPPORTED_MODE,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
+    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
 ) -> list[str]:
     """The whole argument list for one stock Megatron-LM arm.
 
@@ -808,12 +972,19 @@ def stock_megatron_flags(
     ``off`` adds Megatron's own ``--no-check-for-nan-in-loss-and-grad``,
     ahead of the harness group, and is legal at every mesh.
 
+    ``megatron_precision`` defaults to ``stock``, which sends nothing and
+    is 18 bytes of optimizer state per parameter. ``lean`` adds the four
+    flags of ``LEAN_PRECISION_FLAGS`` and reaches 10 bytes. It is refused
+    under ``--dense-sharding replicate``, because Megatron asserts
+    ``use_distributed_optimizer`` under the precision-aware optimizer.
+
     Raises ``ValueError`` on a request this arm cannot honour. Each refusal
     names the reason, because a caller may build a command line without a
     run and a bare failure names nothing.
     """
     refuse_unknown_p2p_sync(megatron_p2p_sync)
     refuse_unknown_nan_guard(megatron_nan_guard)
+    refuse_unknown_megatron_precision(megatron_precision)
     if spec.pp == 1 and megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
         raise ValueError(
             f"megatron p2p sync {megatron_p2p_sync!r} was requested at pp 1, "
@@ -832,12 +1003,13 @@ def stock_megatron_flags(
             f"arm runs at {SUPPORTED_MODE!r} alone"
         )
     refuse_unknown_dense_sharding(spec.dense_sharding)
-    if spec.ep > 1 and spec.dense_sharding != "shard":
+    if spec.ep > 1 and spec.dense_sharding == "replicate":
         raise ValueError(
             f"expert-parallel degree {spec.ep} needs "
-            "--dense-sharding shard: TorchTitan cannot split the experts "
-            "while it replicates the dense parameters, so a replicated "
-            "expert row would compare two different memory strategies"
+            "--dense-sharding zero1 or --dense-sharding zero3: TorchTitan "
+            "cannot split the experts while it replicates the dense "
+            "parameters, so a replicated expert row would compare two "
+            "different memory strategies"
         )
     if spec.pp > 1 and spec.pp_schedule != SUPPORTED_PP_SCHEDULE:
         raise ValueError(
@@ -891,6 +1063,7 @@ def stock_megatron_flags(
         ),
         *_mesh_flags(spec),
         *_sharding_flags(spec.dense_sharding),
+        *_precision_flags(megatron_precision, spec.dense_sharding),
         *_data_flags(
             shape, workload, profile_step_end=profile_step_end
         ),

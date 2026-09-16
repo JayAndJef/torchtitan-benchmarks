@@ -17,7 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.cli.e2e import run_all_command, run_command
 from benchmarks.cli.main import cli
-from benchmarks.e2e.parallelism import MEGATRON_LAUNCHERS, NAN_GUARD_LAUNCHERS
+from benchmarks.e2e.parallelism import (
+    MEGATRON_LAUNCHERS,
+    NAN_GUARD_LAUNCHERS,
+    PRECISION_LAUNCHERS,
+)
 from benchmarks.e2e.registry import PIPER_1B_ROPE, SCENARIOS
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
@@ -627,6 +631,139 @@ class CliTests(unittest.TestCase):
         self.assertIn(
             "skipped: --megatron-nan-guard 'off' was requested with baseline, "
             "whose driver benchmarks/e2e/megatron/train.py has no NaN guard",
+            result.output,
+        )
+
+    def test_megatron_precision_reaches_the_request(self) -> None:
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(
+                cli, ["run", "2", "--megatron-precision", "lean"]
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_args.args[0].megatron_precision, "lean")
+
+    def test_megatron_precision_defaults_to_unrequested(self) -> None:
+        """``None`` is what lets a later resume inherit the recorded value."""
+        completed = SimpleNamespace(
+            out_dir=Path("/tmp/output"),
+            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+        )
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run", return_value=completed
+        ) as execute:
+            result = self.runner.invoke(cli, ["run", "2"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(execute.call_args.args[0].megatron_precision)
+
+    def test_an_unknown_megatron_precision_value_is_rejected(self) -> None:
+        result = self.runner.invoke(
+            cli, ["run", "2", "--megatron-precision", "bf16"]
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Invalid value", result.output)
+
+    def test_megatron_precision_takes_no_environment_variable(self) -> None:
+        """``lean`` has to agree with ``--scenario``, ``--arm`` AND
+        ``--dense-sharding``. An exported value would fail every replicated
+        run on a flag the operator never passed.
+        """
+        for command in (run_command, run_all_command):
+            parameters = {
+                option: parameter
+                for parameter in command.params
+                for option in parameter.opts
+            }
+            with self.subTest(command=command.name):
+                self.assertIsNone(parameters["--megatron-precision"].envvar)
+
+    def test_all_scenarios_at_lean_runs_the_stock_scenario_alone(self) -> None:
+        """The value reaches the stock megatron arm alone, and it needs a
+        sharded dense value.
+
+        The sweep skips what ``_resolve_run`` would refuse, with the
+        refusal's own reason, rather than aborting at its first titan-only
+        entry.
+        """
+        holds_stock = [
+            name
+            for name, scenario in SCENARIOS.items()
+            if any(arm.launcher in PRECISION_LAUNCHERS for arm in scenario.arms)
+        ]
+        self.assertEqual(holds_stock, ["piper_megatron_stock"])
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(
+                    cli,
+                    [
+                        "run-all",
+                        "0",
+                        "--all-scenarios",
+                        "--ac",
+                        "none",
+                        "--dense-sharding",
+                        "zero1",
+                        "--megatron-precision",
+                        "lean",
+                    ],
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            [request.scenario_name for request in requests], holds_stock
+        )
+        self.assertEqual(
+            {request.megatron_precision for request in requests}, {"lean"}
+        )
+        # Both arm-side refusals appear, each on the scenario it names.
+        self.assertIn(
+            "skipped: --megatron-precision 'lean' reaches no arm",
+            result.output,
+        )
+        self.assertIn(
+            "skipped: --megatron-precision 'lean' was requested with "
+            "baseline, whose driver benchmarks/e2e/megatron/train.py builds "
+            "a plain torch AdamW",
+            result.output,
+        )
+
+    def test_all_scenarios_at_lean_under_replicate_skips_everything(
+        self,
+    ) -> None:
+        """Megatron asserts the distributed optimizer under the
+        precision-aware optimizer, and ``--dense-sharding`` is the one
+        owner of that flag. No scenario can honour lean without it.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(
+                    cli,
+                    [
+                        "run-all",
+                        "0",
+                        "--all-scenarios",
+                        "--ac",
+                        "none",
+                        "--megatron-precision",
+                        "lean",
+                    ],
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_args_list, [])
+        self.assertIn(
+            "skipped: --megatron-precision 'lean' needs --dense-sharding "
+            "zero1 or --dense-sharding zero3",
             result.output,
         )
 

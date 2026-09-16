@@ -1118,7 +1118,7 @@ class GoldenCommandTests(unittest.TestCase):
             "normal",
             "default",
             "none",
-            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
         )
         self.assertEqual(
             command[
@@ -1162,7 +1162,7 @@ class GoldenCommandTests(unittest.TestCase):
         """
         for mode, replicate, shard in (
             ("replicate", "2", "1"),
-            ("shard", "1", "2"),
+            ("zero3", "1", "2"),
         ):
             with self.subTest(dense_sharding=mode):
                 command = self._command(
@@ -1204,6 +1204,58 @@ class GoldenCommandTests(unittest.TestCase):
                     "--parallelism.expert-parallel-degree", command
                 )
 
+    def test_the_reshard_policy_reaches_the_argv_under_zero1(self) -> None:
+        """The token that makes ``zero1`` ZeRO-1 on this engine.
+
+        ``titan_mesh`` gives ``zero1`` and ``zero3`` the same pair, so the
+        mesh flags alone would build ZeRO-3 under both. Under ``never``
+        FSDP2 gathers the parameters at the first microbatch forward and
+        holds them for the whole step. The fork types the field as
+        ``Literal["default", "always", "never"]`` on its
+        ``ParallelismConfig``, so this is one of the three values it takes.
+        """
+        command = self._command(
+            GOLDEN_TITAN_ARM,
+            "normal",
+            "default",
+            "none",
+            ParallelismSpec(dp=2, dense_sharding="zero1"),
+        )
+        self.assertEqual(
+            command[
+                command.index("--parallelism.fsdp-reshard-after-forward") + 1
+            ],
+            "never",
+        )
+
+    def test_no_other_value_sends_the_reshard_policy(self) -> None:
+        """An omitted token leaves TorchTitan at its own default, so no
+        recorded argv moves. ``zero3`` reshards after every forward, which
+        is that default under a spec with no pipeline.
+        """
+        for mode in ("replicate", "zero3"):
+            with self.subTest(dense_sharding=mode):
+                command = self._command(
+                    GOLDEN_TITAN_ARM,
+                    "normal",
+                    "default",
+                    "none",
+                    ParallelismSpec(dp=2, dense_sharding=mode),
+                )
+                self.assertNotIn(
+                    "--parallelism.fsdp-reshard-after-forward", command
+                )
+
+    def test_the_trivial_argv_carries_no_reshard_policy(self) -> None:
+        """Every number this repo has published was measured at the trivial
+        spec or under ``replicate``. The new token may not reach one of
+        those command lines.
+        """
+        self.assertNotIn(
+            "--parallelism.fsdp-reshard-after-forward",
+            self._command(GOLDEN_TITAN_ARM, "normal", "default", "none"),
+        )
+
     def test_a_wider_expert_argv_separates_the_two_mesh_formulations(
         self,
     ) -> None:
@@ -1221,7 +1273,7 @@ class GoldenCommandTests(unittest.TestCase):
             "normal",
             "default",
             "none",
-            ParallelismSpec(dp=4, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="zero3"),
         )
         self.assertEqual(
             command[
@@ -1613,7 +1665,12 @@ TEST_CENSUS = {
     # defaults to unrequested, refuses an unknown value, takes no
     # environment variable, and the sweep runs the stock scenario alone
     # under off, printing each skipped scenario's own refusal.
-    "test_cli": 30,
+    # +6 with --megatron-precision: the value reaching the request, its
+    # unrequested default, an unknown value refused, no environment
+    # variable, and the two sweeps -- lean under a sharded dense value
+    # runs the stock scenario alone, and lean under replicate reaches no
+    # scenario at all.
+    "test_cli": 36,
     # The knowledge base under database/: one test runs its checker and one
     # builds its document. Both skip, per method, where the gitignored
     # directory is absent, so the count holds on every checkout.
@@ -1977,7 +2034,20 @@ TEST_CENSUS = {
     # gradient consumer, and that --rerun-mode disabled removes neither.
     # +1 with the 30b-a3b shape: the stock argv carries the written head
     # count and expert width, and the other geometry flags beside them.
-    "test_megatron_stock_driver": 130,
+    # +3 net with the argv split by ZeRO level. The refusal that stood while
+    # zero1 had no command line is gone, and four cases replace it: zero1
+    # emits the distributed optimizer alone, it declines the four flags it
+    # does not send, the optimizer table separates replicate from zero1
+    # where the wrapper table cannot, and that table is read against
+    # Megatron's own source.
+    # +5 with the lean precision recipe: the four flags and their bf16
+    # tokens, no flag at all under stock, the refusal under replicate, an
+    # unknown value refused, and the two flags the recipe never sends.
+    # +4 with the two observations of commit 6: the optimizer class the
+    # shim reads from setup_model_and_optimizer, its refusal when the
+    # optimizer is absent, the lean mode line, and that line against the
+    # profile's own precision markers.
+    "test_megatron_stock_driver": 143,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -1995,7 +2065,9 @@ TEST_CENSUS = {
     # +2 with the nan guard half of arm rule 12: the driver's line equal to
     # the profile's marker at both values, and the line asked at every
     # mesh while the tuned profile asks for none and refuses off.
-    "test_megatron_stock_launch": 65,
+    # +2 with the precision value: the lean argv equal to its two parts,
+    # and the titan arm untouched under lean.
+    "test_megatron_stock_launch": 67,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2093,7 +2165,13 @@ TEST_CENSUS = {
     # +2 with the manifest field: a resume inheriting the recorded value
     # and refusing another, and a schema-13 directory reading as on.
     # +1 that execute_run hands the NaN-guard value to validate_arm.
-    "test_runner": 85,
+    # +6 with --megatron-precision: the three refusals before any host
+    # probe, an unknown value refused, lean reaching the stock command
+    # and not the titan one, and the default adding no flag.
+    # +2 with the schema-16 field: a resume inheriting the recorded
+    # precision and refusing another, and a schema-15 directory reading as
+    # stock.
+    "test_runner": 93,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2118,7 +2196,7 @@ TEST_CENSUS = {
     # reach GPTModel.
     "test_megatron_model": 29,
     # The parallelism run axis, landed before anything imports it. Every one
-    # of the seventeen validator rules in both directions, the two
+    # of the sixteen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
     # guard, the four derivations, and the schedule registry checked against
     # the PyTorch classes it names.
@@ -2149,10 +2227,11 @@ TEST_CENSUS = {
     # to 8 whose verdict moved from the cap to rule 7.
     # +8 when rule 14 stopped refusing every expert degree: rules 8 and 9
     # reachable under the sharded parity and still refusing an illegal count
-    # under either, every expert split passing under shard and refused under
-    # replicate with a message that names the flag, and rule 15 refusing
-    # shard at dp 1 -- including the depth-8 cell, which fills the budget and
-    # is therefore replicated by arithmetic rather than by choice.
+    # under either, every expert split passing under a sharded value and
+    # refused under replicate with a message that names the flag, and rule
+    # 15 refusing a sharded value at dp 1 -- including the depth-8 cell,
+    # which fills the budget. Rule 15 is deleted now; the cases stayed and
+    # they assert the other verdict.
     # +8 for rule 16, which refuses both to the tuned megatron driver: the
     # launcher set naming that driver alone, every registry launcher
     # classified, each half refusing under its own message, the expert half
@@ -2165,7 +2244,13 @@ TEST_CENSUS = {
     # while every other sharded row still passed.
     # +1 with NAN_GUARD_LAUNCHERS: it names the stock launcher alone, sits
     # inside MEGATRON_LAUNCHERS, and names no launcher the registry lacks.
-    "test_parallelism": 155,
+    # +14 with the zero1/zero3 axis: the three-value roster, the two sharded
+    # values sharing one mesh and the branch that names replicate rather
+    # than them, three cases for titan_reshard_after_forward, six for
+    # dense_sharding_warnings, and two for rule 17, which holds a pipeline
+    # under zero1 and names it as a repair. Rule 15 is gone and its class
+    # now proves the removal, which adds one case to it.
+    "test_parallelism": 169,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the six CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -2200,7 +2285,17 @@ TEST_CENSUS = {
     # value a TypeError, the same value resuming and a different one
     # refused both ways, the value alone refusing a resume, and a
     # schema-13 directory reading as on.
-    "test_parallelism_plumbing": 77,
+    # +3 with the dense-sharding warnings: both reach the run summary, they
+    # land before the banner the host probe fills in, and the mesh this axis
+    # exists to run carries none.
+    # +7 with the two schema bumps: the precision value round-tripping
+    # through JSON, its default being recorded, an omitted one raising a
+    # TypeError, the resume gate in both directions, a schema-15 directory
+    # reading as stock, and the two halves of the rename -- a retired
+    # 'shard' record names it, and a current 'zero3' record resumes.
+    # +1 with the review repair: a zero1 stock run passes the connection
+    # limit precondition, because its argv sends no --use-megatron-fsdp.
+    "test_parallelism_plumbing": 88,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2240,7 +2335,11 @@ TEST_CENSUS = {
     # for nothing at on and refusing off, a one-rank stock log passing or
     # failing by the requested value, and one rank with the wrong value
     # failing the arm.
-    "test_parallel_validation": 59,
+    # +5 with the --megatron-precision half of arm rule 12: the four
+    # fields per value, the titan profile's silence, the tuned profile's
+    # refusal of lean, a log that must carry the requested value, and one
+    # rank of a pipeline that carries the other one.
+    "test_parallel_validation": 64,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -2253,9 +2352,12 @@ TEST_CENSUS = {
     # fail the arm and name the step, a negative inf is read rather than
     # crashing the parser, every rank is read and the failure names the
     # rank, the titan sentinel passes, and the guard reads a bare log.
-    "test_throughput": 36,
+    # +3 that the same two warnings reach results.json: both under zero1 at
+    # dp 1, none under replicate, and a directory written before the rename
+    # still evaluates rather than failing on a value the axis retired.
+    "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1854
+TEST_CENSUS_TOTAL = 1916
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

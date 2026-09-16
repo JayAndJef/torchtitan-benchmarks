@@ -2,7 +2,7 @@
 
 ``benchmarks/e2e/parallelism.py`` owns the axis itself, while the CLI and
 runner thread it through the harness. This file checks the module-level
-contract: every one of the seventeen validator rules is exercised in both
+contract: every one of the sixteen validator rules is exercised in both
 directions, the four derivations are pinned, and the schedule registry is
 checked against the PyTorch classes it names. Plumbing and runtime validation
 have their own test modules.
@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.e2e.parallelism import (
     DEFAULT_DENSE_SHARDING,
     DENSE_SHARDING_MODES,
+    dense_sharding_warnings,
+    titan_reshard_after_forward,
     MAX_PP,
     MAX_WORLD_SIZE,
     MEGATRON_FSDP_LAUNCHERS,
@@ -144,7 +146,7 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(fields & {"tp", "cp"}, set())
 
     def test_a_degree_below_one_is_refused_at_construction(self):
-        """The precondition the seventeen rules assume.
+        """The precondition the sixteen rules assume.
 
         Without it ``dp=-1, pp=-1`` has world size 1 and walks past rule 1
         on a one-GPU box, which is exactly the illegal mesh the rules exist
@@ -166,9 +168,16 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(ParallelismSpec(dp=4).dp, 4)
         self.assertEqual(ParallelismSpec(pp_microbatch_size=2).pp_microbatch_size, 2)
 
-    def test_the_two_declared_dense_sharding_modes(self):
-        """The roster, and that the default is one of its members."""
-        self.assertEqual(DENSE_SHARDING_MODES, ("replicate", "shard"))
+    def test_the_three_declared_dense_sharding_modes(self):
+        """The roster, and that the default is one of its members.
+
+        The three values name three ZeRO levels: ``replicate`` is ZeRO-0,
+        ``zero1`` shards the optimizer states, and ``zero3`` shards the
+        parameters, the gradients and the optimizer states.
+        """
+        self.assertEqual(
+            DENSE_SHARDING_MODES, ("replicate", "zero1", "zero3")
+        )
         self.assertIn(DEFAULT_DENSE_SHARDING, DENSE_SHARDING_MODES)
         self.assertEqual(DEFAULT_DENSE_SHARDING, "replicate")
 
@@ -186,7 +195,7 @@ class ParallelismSpecTest(unittest.TestCase):
         neither branch knows must not exist. A validator rule would be too
         late: both functions run on specs the validator never sees.
         """
-        for mode in ("", "Shard", "replicated", "zero3", None):
+        for mode in ("", "Shard", "replicated", "shard", "zero2", None):
             with self.subTest(dense_sharding=mode):
                 with self.assertRaisesRegex(
                     ValueError, "Unknown dense sharding mode"
@@ -368,7 +377,7 @@ class TitanMeshTest(unittest.TestCase):
             with self.subTest(dp=dp, ep=ep):
                 self.assertEqual(
                     titan_mesh(
-                        ParallelismSpec(dp=dp, ep=ep, dense_sharding="shard")
+                        ParallelismSpec(dp=dp, ep=ep, dense_sharding="zero3")
                     ),
                     (1, dp),
                 )
@@ -380,7 +389,7 @@ class TitanMeshTest(unittest.TestCase):
         for dp, ep in LEGAL_DP_EP_PAIRS:
             with self.subTest(dp=dp, ep=ep):
                 _, shard = titan_mesh(
-                    ParallelismSpec(dp=dp, ep=ep, dense_sharding="shard")
+                    ParallelismSpec(dp=dp, ep=ep, dense_sharding="zero3")
                 )
                 self.assertEqual(shard % ep, 0)
                 self.assertGreaterEqual(shard // ep, 1)
@@ -410,7 +419,11 @@ class TitanMeshTest(unittest.TestCase):
         runs, and the sweep would go green while this case failed. It also
         lets a reader find the run cell by name.
         """
-        for mode, mesh in (("replicate", (2, 1)), ("shard", (1, 2))):
+        for mode, mesh in (
+            ("replicate", (2, 1)),
+            ("zero1", (1, 2)),
+            ("zero3", (1, 2)),
+        ):
             with self.subTest(dense_sharding=mode):
                 spec = ParallelismSpec(
                     dp=2,
@@ -426,10 +439,160 @@ class TitanMeshTest(unittest.TestCase):
         self.assertEqual(titan_mesh(ParallelismSpec(dp=2, pp=2)), (2, 1))
         self.assertEqual(
             titan_mesh(
-                ParallelismSpec(dp=2, pp=2, dense_sharding="shard")
+                ParallelismSpec(dp=2, pp=2, dense_sharding="zero3")
             ),
             (1, 2),
         )
+
+    def test_the_two_sharded_values_share_one_mesh(self):
+        """``titan_reshard_after_forward`` is what separates them, and the
+        mesh is not. A mesh difference would make ``zero1`` a different
+        split rather than a different policy over one split."""
+        for dp in (2, 4, 8):
+            with self.subTest(dp=dp):
+                self.assertEqual(
+                    titan_mesh(ParallelismSpec(dp=dp, dense_sharding="zero1")),
+                    titan_mesh(ParallelismSpec(dp=dp, dense_sharding="zero3")),
+                )
+
+    def test_the_branch_names_replicate_rather_than_the_sharded_values(self):
+        """A fourth value must not inherit the replicated mesh by omission.
+
+        The replicated mesh is the one every published number was measured
+        under, so a new value that silently took it would publish a parity
+        the run did not have. The test states the rule the implementation
+        has to follow: exactly one declared value gives ``(dp, 1)``.
+        """
+        replicated = [
+            mode
+            for mode in DENSE_SHARDING_MODES
+            if titan_mesh(ParallelismSpec(dp=4, dense_sharding=mode))
+            == (4, 1)
+        ]
+        self.assertEqual(replicated, ["replicate"])
+
+
+class TitanReshardAfterForwardTest(unittest.TestCase):
+    """The one function that makes ``zero1`` ZeRO-1 on TorchTitan.
+
+    ``titan_mesh`` gives ``zero1`` and ``zero3`` the same mesh, so this
+    policy is the only difference between them on that engine. Under
+    ``never`` FSDP2 gathers the parameters once and keeps them for the whole
+    step, which shards the optimizer states and holds whole parameters.
+    """
+
+    def test_zero1_forces_the_never_policy(self):
+        for spec in (
+            ParallelismSpec(dp=2, dense_sharding="zero1"),
+            ParallelismSpec(dp=8, dense_sharding="zero1"),
+            ParallelismSpec(dp=1, pp=8, pp_schedule="1F1B", dense_sharding="zero1"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="zero1"),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(titan_reshard_after_forward(spec), "never")
+
+    def test_every_other_value_sends_no_policy(self):
+        """``None`` means the harness sends no flag, so TorchTitan keeps its
+        own default. Sending ``default`` explicitly would move a recorded
+        argv for every replicated cell."""
+        for spec in (
+            TRIVIAL_SPEC,
+            ParallelismSpec(dp=2),
+            ParallelismSpec(dp=8, dense_sharding="zero3"),
+            ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
+        ):
+            with self.subTest(spec=spec):
+                self.assertIsNone(titan_reshard_after_forward(spec))
+
+    def test_exactly_one_declared_value_forces_the_policy(self):
+        """The roster, so a new value cannot silently take ``never``."""
+        forced = [
+            mode
+            for mode in DENSE_SHARDING_MODES
+            if titan_reshard_after_forward(
+                ParallelismSpec(dp=4, dense_sharding=mode)
+            )
+            is not None
+        ]
+        self.assertEqual(forced, ["zero1"])
+
+
+class DenseShardingWarningsTest(unittest.TestCase):
+    """What a reader must not conclude from a spec's own mesh.
+
+    Both cases are legal and neither refuses anything. Each names a cell
+    whose recorded value describes a mechanism the run does not have.
+    """
+
+    def test_a_sharded_value_at_dp_one_warns(self):
+        """The shard degree is 1 there whatever the value says."""
+        for mode in ("zero1", "zero3"):
+            with self.subTest(dense_sharding=mode):
+                warnings = dense_sharding_warnings(
+                    ParallelismSpec(
+                        dp=1, pp=8, pp_schedule="1F1B", dense_sharding=mode
+                    )
+                )
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("at dp 1", warnings[0])
+                self.assertIn(mode, warnings[0])
+                self.assertIn(
+                    "Do not read this cell as a measurement", warnings[0]
+                )
+
+    def test_zero1_at_pp_one_warns_that_titan_holds_zero2(self):
+        """One microbatch puts the reduce-scatter inside the only backward
+        pass, so the TorchTitan arm holds ZeRO-2 and the Megatron arm holds
+        ZeRO-1. The two arms are then not one ZeRO level."""
+        warnings = dense_sharding_warnings(
+            ParallelismSpec(dp=8, pp=1, dense_sharding="zero1")
+        )
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("ZeRO-2", warnings[0])
+        self.assertIn("The Megatron arm holds ZeRO-1", warnings[0])
+
+    def test_the_two_warnings_are_independent(self):
+        """``dp 1`` and ``pp 1`` together earn both."""
+        self.assertEqual(
+            len(
+                dense_sharding_warnings(
+                    ParallelismSpec(dp=1, pp=1, dense_sharding="zero1")
+                )
+            ),
+            2,
+        )
+
+    def test_zero3_at_pp_one_is_silent(self):
+        """ZeRO-3 reshards after every forward, so no microbatch count
+        turns it into another level."""
+        self.assertEqual(
+            dense_sharding_warnings(
+                ParallelismSpec(dp=8, pp=1, dense_sharding="zero3")
+            ),
+            (),
+        )
+
+    def test_the_intended_cell_is_silent(self):
+        """A warning that fired on the configuration this axis exists to
+        run would teach an operator to ignore warnings."""
+        self.assertEqual(
+            dense_sharding_warnings(
+                ParallelismSpec(
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero1"
+                )
+            ),
+            (),
+        )
+
+    def test_the_replicated_parity_never_warns(self):
+        """Neither warning is about replication, at any mesh."""
+        for spec in (
+            TRIVIAL_SPEC,
+            ParallelismSpec(dp=1, pp=8, pp_schedule="1F1B"),
+            ParallelismSpec(dp=8),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(dense_sharding_warnings(spec), ())
 
 
 class SkipDpTest(unittest.TestCase):
@@ -487,22 +650,26 @@ class ExecutionModelTest(unittest.TestCase):
         this repo has already recorded exactly where it was.
         """
         self.assertEqual(
-            execution_model(ParallelismSpec(dp=2, dense_sharding="shard")),
-            "2-gpu-plain-bf16-dp2-shard",
+            execution_model(ParallelismSpec(dp=2, dense_sharding="zero3")),
+            "2-gpu-plain-bf16-dp2-zero3",
+        )
+        self.assertEqual(
+            execution_model(ParallelismSpec(dp=2, dense_sharding="zero1")),
+            "2-gpu-plain-bf16-dp2-zero1",
         )
         self.assertEqual(
             execution_model(
-                ParallelismSpec(dp=2, ep=2, dense_sharding="shard")
+                ParallelismSpec(dp=2, ep=2, dense_sharding="zero3")
             ),
-            "2-gpu-plain-bf16-dp2-shard-ep2",
+            "2-gpu-plain-bf16-dp2-zero3-ep2",
         )
         self.assertEqual(
             execution_model(
                 ParallelismSpec(
-                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero3"
                 )
             ),
-            "8-gpu-plain-bf16-dp2-shard-pp4-1F1B",
+            "8-gpu-plain-bf16-dp2-zero3-pp4-1F1B",
         )
 
     def test_the_two_parities_give_two_strings(self):
@@ -514,7 +681,7 @@ class ExecutionModelTest(unittest.TestCase):
                 self.assertNotEqual(
                     execution_model(ParallelismSpec(dp=dp)),
                     execution_model(
-                        ParallelismSpec(dp=dp, dense_sharding="shard")
+                        ParallelismSpec(dp=dp, dense_sharding="zero3")
                     ),
                 )
 
@@ -541,7 +708,7 @@ class ExecutionModelTest(unittest.TestCase):
         **The forbidden set names the mesh spelling, not the word.** It
         listed the bare words ``replicate`` and ``shard`` while neither could
         appear. ``dense_sharding`` is a declared parity that BOTH engines
-        honor, so ``dp2-shard`` is true of a TorchTitan arm and of a Megatron
+        honor, so ``dp2-zero3`` is true of a TorchTitan arm and of a Megatron
         arm alike, and the word alone is no longer the thing to refuse. What
         must stay out is a resolved mesh DEGREE -- ``replicate2``,
         ``shard1`` -- which is one engine's and is false for the other's arm.
@@ -549,16 +716,17 @@ class ExecutionModelTest(unittest.TestCase):
         The pattern refuses either word followed by a digit, rather than the
         two numbers ``titan_mesh`` returns for this spec. Refusing only the
         correct numbers would admit a wrong mesh spelling: at ``dp 2`` under
-        ``shard`` the mesh is ``(1, 2)``, so a string reading ``dp2-shard1``
-        would carry ``shard1`` past a check that forbade only ``shard2``.
+        a sharded value the mesh is ``(1, 2)``, so a string reading
+        ``dp2-shard1`` would carry ``shard1`` past a check that forbade only
+        ``shard2``.
         """
         for spec in (
             ParallelismSpec(dp=2),
             ParallelismSpec(dp=4),
             ParallelismSpec(dp=2, ep=2),
             ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
-            ParallelismSpec(dp=2, dense_sharding="shard"),
-            ParallelismSpec(dp=4, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, dense_sharding="zero3"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="zero3"),
         ):
             with self.subTest(spec=spec):
                 rendered = execution_model(spec)
@@ -579,8 +747,8 @@ class ExecutionModelTest(unittest.TestCase):
             ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
             ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
             ParallelismSpec(dp=2, ep=2),
-            ParallelismSpec(dp=2, dense_sharding="shard"),
-            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, dense_sharding="zero3"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
         )
         rendered = [execution_model(spec) for spec in specs]
         self.assertEqual(len(set(rendered)), len(rendered))
@@ -627,9 +795,9 @@ class DescribeTest(unittest.TestCase):
         """Two facts, not one. The parity is what the operator asked for and
         the mesh is what TorchTitan builds from it; neither derives the other
         for a reader who does not hold this module."""
-        spec = ParallelismSpec(dp=4, ep=2, dense_sharding="shard")
+        spec = ParallelismSpec(dp=4, ep=2, dense_sharding="zero3")
         record = describe(spec, local_batch_size=8)
-        self.assertEqual(record["dense_sharding"], "shard")
+        self.assertEqual(record["dense_sharding"], "zero3")
         self.assertEqual(record["dp_replicate"], 1)
         self.assertEqual(record["dp_shard"], 4)
         replicated = describe(
@@ -644,7 +812,7 @@ class DescribeTest(unittest.TestCase):
             TRIVIAL_SPEC,
             PP2,
             ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
-            ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B", dense_sharding="shard"),
+            ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B", dense_sharding="zero3"),
         ):
             with self.subTest(spec=spec):
                 payload = describe(spec, local_batch_size=8)
@@ -1119,12 +1287,14 @@ class Rule08ExpertsDivideTest(unittest.TestCase):
 
     def test_a_legal_expert_split_passes_under_the_sharded_parity(self):
         check(
-            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
             shape=SHAPE_1B,
         )
 
     def test_a_legal_expert_split_reaches_rule_fourteen_under_replicate(self):
-        with self.assertRaisesRegex(ValueError, "needs --dense-sharding shard"):
+        with self.assertRaisesRegex(
+            ValueError, "needs --dense-sharding zero1 or"
+        ):
             check(ParallelismSpec(dp=2, ep=2), shape=SHAPE_1B)
 
     def test_more_expert_ranks_than_experts_is_refused(self):
@@ -1151,10 +1321,12 @@ class Rule08ExpertsDivideTest(unittest.TestCase):
 
 class Rule09ExpertDegreeDividesDataParallelTest(unittest.TestCase):
     def test_an_expert_degree_that_divides_dp_passes_under_shard(self):
-        check(ParallelismSpec(dp=4, ep=2, dense_sharding="shard"))
+        check(ParallelismSpec(dp=4, ep=2, dense_sharding="zero3"))
 
     def test_an_expert_degree_that_divides_dp_reaches_rule_fourteen(self):
-        with self.assertRaisesRegex(ValueError, "needs --dense-sharding shard"):
+        with self.assertRaisesRegex(
+            ValueError, "needs --dense-sharding zero1 or"
+        ):
             check(ParallelismSpec(dp=4, ep=2))
 
     def test_an_expert_degree_that_does_not_divide_dp_is_refused(self):
@@ -1349,22 +1521,28 @@ class Rule14ExpertParallelismNeedsTheShardedParityTest(unittest.TestCase):
     both shard. The rule refuses the other combination and names the flag.
     """
 
-    def test_the_trivial_expert_degree_passes_under_either_parity(self):
+    def test_the_trivial_expert_degree_passes_under_every_parity(self):
         check(TRIVIAL_SPEC)
         check(ParallelismSpec(dp=2, ep=1))
-        check(ParallelismSpec(dp=2, ep=1, dense_sharding="shard"))
+        check(ParallelismSpec(dp=2, ep=1, dense_sharding="zero1"))
+        check(ParallelismSpec(dp=2, ep=1, dense_sharding="zero3"))
 
-    def test_every_expert_split_passes_under_the_sharded_parity(self):
+    def test_every_expert_split_passes_under_either_sharded_value(self):
+        """The rule tests ``!= "replicate"``, so ``zero1`` carries an expert
+        degree too: ``titan_mesh`` gives it the whole data-parallel width as
+        ``dp_shard``, so ``dp_shard >= ep`` holds there as well."""
         for spec in (
-            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
-            ParallelismSpec(dp=4, ep=2, dense_sharding="shard"),
-            ParallelismSpec(dp=4, ep=4, dense_sharding="shard"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="zero1"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="zero1"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
+            ParallelismSpec(dp=4, ep=2, dense_sharding="zero3"),
+            ParallelismSpec(dp=4, ep=4, dense_sharding="zero3"),
             ParallelismSpec(
                 dp=2,
                 pp=4,
                 pp_schedule="1F1B",
                 ep=2,
-                dense_sharding="shard",
+                dense_sharding="zero3",
             ),
         ):
             with self.subTest(spec=spec):
@@ -1379,7 +1557,8 @@ class Rule14ExpertParallelismNeedsTheShardedParityTest(unittest.TestCase):
             with self.subTest(spec=spec):
                 with self.assertRaisesRegex(
                     ValueError,
-                    r"expert degree \d+ needs --dense-sharding shard",
+                    r"expert degree \d+ needs --dense-sharding zero1 or "
+                    r"--dense-sharding zero3",
                 ):
                     check(spec)
 
@@ -1387,53 +1566,76 @@ class Rule14ExpertParallelismNeedsTheShardedParityTest(unittest.TestCase):
         """A refusal that named no repair would leave the operator to read
         this module. The parity is a flag, so the message says which one."""
         with self.assertRaisesRegex(
-            ValueError, "--dense-sharding shard"
+            ValueError, "--dense-sharding zero3"
         ) as raised:
             check(ParallelismSpec(dp=2, ep=2))
         self.assertIn("'replicate'", str(raised.exception))
 
 
-class Rule15ShardNeedsADataParallelWidthTest(unittest.TestCase):
-    """``shard`` at ``dp`` 1 shards one copy over one rank, which is what a
-    replicated run already holds. The manifest would then record a parity
-    the run did not have.
+class Rule15WasDeletedAndAWarningReplacedItTest(unittest.TestCase):
+    """Rule 15 refused a sharded value at ``dp`` 1. It is gone.
+
+    **It refused the agreed 30B-A3B matrix.** That matrix is ``dp 1 x pp
+    8``, which is the deepest split eight GPUs hold, and it asks for
+    ``zero1``. Neither engine refuses that mesh: Megatron builds a
+    ``DistributedOptimizer`` over one rank and TorchTitan skips its
+    data-parallel path. So the harness refused a run both engines accept.
+
+    ``dense_sharding_warnings`` says the same thing to the same reader and
+    takes no GPU away. This class holds the pair: the validator admits the
+    mesh, and the warning fires on it.
     """
 
-    def test_the_sharded_parity_passes_above_dp_one(self):
-        for dp in (2, 4, 8):
-            with self.subTest(dp=dp):
-                check(ParallelismSpec(dp=dp, dense_sharding="shard"))
-
-    def test_the_sharded_parity_is_refused_at_dp_one(self):
+    def test_a_sharded_value_passes_at_dp_one(self):
         for spec in (
-            ParallelismSpec(dense_sharding="shard"),
-            ParallelismSpec(pp=2, pp_schedule="1F1B", dense_sharding="shard"),
-            ParallelismSpec(pp=8, pp_schedule="1F1B", dense_sharding="shard"),
+            ParallelismSpec(dense_sharding="zero1"),
+            ParallelismSpec(dense_sharding="zero3"),
+            ParallelismSpec(pp=2, pp_schedule="1F1B", dense_sharding="zero1"),
+            ParallelismSpec(pp=8, pp_schedule="1F1B", dense_sharding="zero1"),
+            ParallelismSpec(pp=8, pp_schedule="1F1B", dense_sharding="zero3"),
         ):
             with self.subTest(spec=spec):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    r"--dense-sharding shard needs a data-parallel degree "
-                    r"above 1",
-                ):
-                    check(spec, batch=16)
+                check(spec, batch=16)
 
-    def test_the_depth_eight_cell_forces_the_replicated_parity(self):
-        """``pp 8`` fills the budget, so ``dp`` is 1 and this rule then
-        refuses ``shard``. The depth-8 cells are replicated by arithmetic
-        rather than by choice."""
-        check(ParallelismSpec(pp=8, pp_schedule="1F1B"), batch=16)
-        with self.assertRaisesRegex(ValueError, "needs a data-parallel degree"):
-            check(
-                ParallelismSpec(
-                    pp=8, pp_schedule="1F1B", dense_sharding="shard"
-                ),
-                batch=16,
-            )
+    def test_the_depth_eight_cell_holds_a_sharded_value(self):
+        """``pp 8`` fills the budget, so ``dp`` is 1. The old rule refused
+        every sharded value there, which is the agreed matrix."""
+        check(
+            ParallelismSpec(pp=8, pp_schedule="1F1B", dense_sharding="zero1"),
+            batch=16,
+        )
+        self.assertEqual(
+            len(
+                dense_sharding_warnings(
+                    ParallelismSpec(
+                        pp=8, pp_schedule="1F1B", dense_sharding="zero1"
+                    )
+                )
+            ),
+            1,
+        )
+
+    def test_no_rule_names_the_deleted_refusal(self):
+        """The old message must not survive anywhere in the validator."""
+        for spec in (
+            ParallelismSpec(dense_sharding="zero1"),
+            ParallelismSpec(dense_sharding="zero3"),
+        ):
+            with self.subTest(spec=spec):
+                try:
+                    check(spec, batch=16)
+                except ValueError as error:  # pragma: no cover - a failure
+                    self.fail(f"the deleted rule still refuses: {error}")
+
+    def test_the_sharded_parity_still_passes_above_dp_one(self):
+        for dp in (2, 4, 8):
+            with self.subTest(dp=dp):
+                check(ParallelismSpec(dp=dp, dense_sharding="zero3"))
+                check(ParallelismSpec(dp=dp, dense_sharding="zero1"))
 
     def test_the_replicated_parity_is_untouched_at_dp_one(self):
         """Every number this repo has published was measured at ``dp`` 1
-        under ``replicate``. This rule may not reach one of those."""
+        under ``replicate``. The removal may not reach one of those."""
         check(TRIVIAL_SPEC)
         check(PP2)
 
@@ -1510,17 +1712,17 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
             ValueError, r"expert degree 2 is not implemented by the megatron"
         ):
             check(
-                ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+                ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
                 engines=self.TUNED,
             )
 
     def test_the_tuned_arm_refuses_the_sharded_parity(self):
         with self.assertRaisesRegex(
             ValueError,
-            r"--dense-sharding shard is not implemented by the megatron",
+            r"--dense-sharding zero3 is not implemented by the megatron",
         ):
             check(
-                ParallelismSpec(dp=2, dense_sharding="shard"),
+                ParallelismSpec(dp=2, dense_sharding="zero3"),
                 engines=self.TUNED,
             )
 
@@ -1531,16 +1733,16 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         sharding, which is not what the operator asked for."""
         with self.assertRaisesRegex(ValueError, "expert degree") as raised:
             check(
-                ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+                ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
                 engines=self.TUNED,
             )
-        self.assertNotIn("--dense-sharding shard is not", str(raised.exception))
+        self.assertNotIn("--dense-sharding zero3 is not", str(raised.exception))
 
     def test_the_stock_arm_takes_both(self):
         """Stock Megatron implements both, so the rule must not reach it."""
-        check(ParallelismSpec(dp=2, dense_sharding="shard"), engines=self.STOCK)
+        check(ParallelismSpec(dp=2, dense_sharding="zero3"), engines=self.STOCK)
         check(
-            ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
             engines=self.STOCK,
         )
 
@@ -1561,12 +1763,12 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         """
         for spec, opening in (
             (
-                ParallelismSpec(dp=2, ep=2, dense_sharding="shard"),
+                ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
                 r"expert degree 2 is not implemented",
             ),
             (
-                ParallelismSpec(dp=2, dense_sharding="shard"),
-                r"--dense-sharding shard is not implemented",
+                ParallelismSpec(dp=2, dense_sharding="zero3"),
+                r"--dense-sharding zero3 is not implemented",
             ),
         ):
             with self.subTest(spec=spec):
@@ -1587,8 +1789,8 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
         checks the other half of the claim, that ``--arm`` really narrows
         the set.
         """
-        check(ParallelismSpec(dp=2, dense_sharding="shard"))
-        check(ParallelismSpec(dp=2, ep=2, dense_sharding="shard"))
+        check(ParallelismSpec(dp=2, dense_sharding="zero3"))
+        check(ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"))
 
     def test_the_tuned_arm_keeps_every_mesh_it_can_reach(self):
         """The rule may not refuse a mesh the tuned driver already runs.
@@ -1623,7 +1825,7 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
     and has no pipeline term, so it builds a mesh only at ``pp`` 1.
 
     **This rule exists because a run measured it.** On 2026-08-28 a
-    ``--dense-sharding shard --dp 2 --pp 4`` cell died on all eight ranks in
+    ``--dense-sharding zero3 --dp 2 --pp 4`` cell died on all eight ranks in
     20 seconds inside ``einops.rearrange``, before the wrapper existed. The
     error names no flag of ours and no repair, so the refusal has to happen
     here instead.
@@ -1655,12 +1857,12 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
     def test_the_sharded_pipeline_is_refused(self):
         with self.assertRaisesRegex(
             ValueError,
-            r"--dense-sharding shard with pp 4 is not buildable by the "
+            r"--dense-sharding zero3 with pp 4 is not buildable by the "
             r"megatron_stock driver",
         ):
             check(
                 ParallelismSpec(
-                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero3"
                 ),
                 engines=self.STOCK,
                 batch=32,
@@ -1673,7 +1875,7 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             check(
                 ParallelismSpec(
-                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero3"
                 ),
                 engines=self.STOCK,
                 batch=32,
@@ -1688,7 +1890,7 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
         """Rule 14 ties an expert degree to the sharded parity, so every
         expert spec reaches this rule as a sharded one."""
         with self.assertRaisesRegex(
-            ValueError, r"--dense-sharding shard with pp 4 is not buildable"
+            ValueError, r"--dense-sharding zero3 with pp 4 is not buildable"
         ):
             check(
                 ParallelismSpec(
@@ -1696,7 +1898,7 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
                     pp=4,
                     ep=2,
                     pp_schedule="1F1B",
-                    dense_sharding="shard",
+                    dense_sharding="zero3",
                 ),
                 engines=self.STOCK,
                 batch=32,
@@ -1706,7 +1908,7 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
         """``--dp 8 --pp 1`` satisfies the pattern at eight ranks: the
         product is 8 and the world is 8."""
         check(
-            ParallelismSpec(dp=8, dense_sharding="shard"),
+            ParallelismSpec(dp=8, dense_sharding="zero3"),
             engines=self.STOCK,
             batch=32,
             device_count=8,
@@ -1715,11 +1917,39 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
     def test_the_expert_split_without_a_pipeline_passes(self):
         """At ``ep`` 2 the product is ``4 x 2 x 1``, which is still 8."""
         check(
-            ParallelismSpec(dp=8, ep=2, dense_sharding="shard"),
+            ParallelismSpec(dp=8, ep=2, dense_sharding="zero3"),
             engines=self.STOCK,
             batch=32,
             device_count=8,
         )
+
+    def test_zero1_holds_a_pipeline_on_the_stock_driver(self):
+        """``zero1`` sends ``--use-distributed-optimizer`` and no
+        ``--use-megatron-fsdp``, so Megatron takes the plain
+        ``DistributedDataParallel`` branch and calls neither mesh builder.
+        Nothing factors the world size, so the missing pipeline term never
+        matters. This is why the rule narrowed to ``zero3`` alone."""
+        check(
+            ParallelismSpec(
+                dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero1"
+            ),
+            engines=self.STOCK,
+            batch=32,
+            device_count=8,
+        )
+
+    def test_the_message_names_zero1_as_a_repair(self):
+        """An operator who reads only the message must learn that a second
+        repair exists, and that it is a different measurement."""
+        with self.assertRaises(ValueError) as raised:
+            check(
+                ParallelismSpec(
+                    dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero3"
+                ),
+                engines=self.STOCK,
+                batch=32,
+            )
+        self.assertIn("--dense-sharding zero1", str(raised.exception))
 
     def test_the_replicated_pipeline_passes(self):
         """The rule reads the parity, not the pipeline alone. A replicated
@@ -1739,7 +1969,7 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
         Megatron driver."""
         check(
             ParallelismSpec(
-                dp=2, pp=4, pp_schedule="1F1B", dense_sharding="shard"
+                dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero3"
             ),
             engines=self.TITAN,
             batch=32,

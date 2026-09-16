@@ -1,10 +1,10 @@
 """The parallelism axis threaded through the harness, without leaving one GPU.
 
 ``tests/test_parallelism.py`` covers the axis itself -- the degrees, the
-schedules and the seventeen validator rules. This module covers the path the
+schedules and the sixteen validator rules. This module covers the path the
 value takes: the ``<gpu>`` positional read as a device set, the six CLI
 options, ``RunRequest``, ``_resolve_run``, the child environment, the
-provenance query, the NUMA walk, and manifest schema 14.
+provenance query, the NUMA walk, and manifest schema 16.
 
 **The properties under test are mostly negative.** At the trivial spec every
 recorded fact and every environment variable has to be the one this repo has
@@ -209,11 +209,11 @@ class RequestTests(unittest.TestCase):
             "--dp",
             "2",
             "--dense-sharding",
-            "shard",
+            "zero3",
         )
         self.assertEqual(
             request.parallelism,
-            ParallelismSpec(dp=2, dense_sharding="shard"),
+            ParallelismSpec(dp=2, dense_sharding="zero3"),
         )
 
     def test_the_dense_sharding_option_refuses_an_undeclared_value(
@@ -222,12 +222,17 @@ class RequestTests(unittest.TestCase):
         """**Click refuses it, and the exit code is what says so.**
 
         A nonzero exit proves nothing here: a legal ``--dense-sharding
-        shard`` also exits nonzero, because the run then starts and fails on
+        zero3`` also exits nonzero, because the run then starts and fails on
         this host for its own reasons. Click's usage error is exit 2, and
         it names the roster. Without the ``click.Choice`` the string would
         reach ``ParallelismSpec.__post_init__``, raise, and exit 1 -- a
         refusal in the right direction under the wrong code, which this
         assertion separates.
+
+        **The value under test is ``shard``, which is the RETIRED
+        spelling.** Three recorded cells carry it, so an operator who reads
+        an old manifest can type it. It must reach the roster message rather
+        than the new ``zero3`` behaviour.
         """
         result = CliRunner().invoke(
             cli,
@@ -239,11 +244,11 @@ class RequestTests(unittest.TestCase):
                 "--dp",
                 "2",
                 "--dense-sharding",
-                "zero3",
+                "shard",
             ],
         )
         self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("'replicate', 'shard'", result.output)
+        self.assertIn("'replicate', 'zero1', 'zero3'", result.output)
 
     def test_the_pipeline_options_build_one_spec(self) -> None:
         request = self._request(
@@ -473,12 +478,13 @@ class AffinityDeviceTests(unittest.TestCase):
         )
 
 
-class ManifestSchemaFourteenTests(unittest.TestCase):
+class ManifestSchemaSixteenTests(unittest.TestCase):
     def _manifest(
         self,
         parallelism: ParallelismSpec,
         megatron_p2p_sync: str = "on",
         megatron_nan_guard: str = "on",
+        megatron_precision: str = "stock",
     ) -> dict:
         scenario = scenario_by_name("piper1b_rope")
         return manifest_data(
@@ -494,11 +500,12 @@ class ManifestSchemaFourteenTests(unittest.TestCase):
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
 
-    def test_the_schema_is_fourteen(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 14)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 14)
+    def test_the_schema_is_sixteen(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 16)
+        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 16)
 
     def test_the_trivial_spec_round_trips_through_json(self) -> None:
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
@@ -529,16 +536,16 @@ class ManifestSchemaFourteenTests(unittest.TestCase):
     def test_a_sharded_spec_round_trips_through_json(self) -> None:
         """Both halves reach the file: the parity the operator asked for,
         and the TorchTitan mesh it resolves to."""
-        spec = ParallelismSpec(dp=2, dense_sharding="shard")
+        spec = ParallelismSpec(dp=2, dense_sharding="zero3")
         recorded = json.loads(json.dumps(self._manifest(spec)))
         self.assertEqual(
             recorded["parallelism"], describe(spec, local_batch_size=4)
         )
-        self.assertEqual(recorded["parallelism"]["dense_sharding"], "shard")
+        self.assertEqual(recorded["parallelism"]["dense_sharding"], "zero3")
         self.assertEqual(recorded["parallelism"]["dp_replicate"], 1)
         self.assertEqual(recorded["parallelism"]["dp_shard"], 2)
         self.assertEqual(
-            recorded["execution_model"], "2-gpu-plain-bf16-dp2-shard"
+            recorded["execution_model"], "2-gpu-plain-bf16-dp2-zero3"
         )
 
     def test_an_omitted_parallelism_is_a_type_error(self) -> None:
@@ -625,6 +632,30 @@ class ManifestSchemaFourteenTests(unittest.TestCase):
             self._manifest(TRIVIAL_SPEC)["execution_model"],
         )
 
+    def test_the_precision_value_round_trips_through_json(self) -> None:
+        recorded = json.loads(
+            json.dumps(
+                self._manifest(TRIVIAL_SPEC, megatron_precision="lean")
+            )
+        )
+        self.assertEqual(recorded["megatron_precision"], "lean")
+        # Not part of the execution model either, for the same reason: it
+        # is a treatment of the optimizer state and not a degree.
+        self.assertEqual(
+            recorded["execution_model"],
+            self._manifest(TRIVIAL_SPEC)["execution_model"],
+        )
+
+    def test_the_precision_default_is_recorded_rather_than_left_out(
+        self,
+    ) -> None:
+        """An absent key would read as ``stock`` by inference. The record
+        is what separates "this run held 18 bytes for each parameter" from
+        "this file predates the question"."""
+        self.assertEqual(
+            self._manifest(TRIVIAL_SPEC)["megatron_precision"], "stock"
+        )
+
     def test_an_omitted_nan_guard_is_a_type_error(self) -> None:
         """A writer that defaulted it would record ``on`` for a run that
         turned the guard off, and the two are a comparability boundary."""
@@ -642,6 +673,26 @@ class ManifestSchemaFourteenTests(unittest.TestCase):
                 "1b",
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
+            )
+
+    def test_an_omitted_precision_is_a_type_error(self) -> None:
+        """A writer that defaulted it would record ``stock`` for a run that
+        held 10 bytes for each parameter rather than 18."""
+        scenario = scenario_by_name("piper1b_rope")
+        with self.assertRaises(TypeError):
+            manifest_data(
+                scenario,
+                (scenario.arm("baseline"),),
+                {"baseline": ["cmd"]},
+                "test-gpu",
+                _METADATA,
+                (),
+                "default",
+                "sac",
+                "1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
             )
 
 
@@ -669,6 +720,7 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
             parallelism=parallelism,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def test_the_trivial_spec_records_the_string_it_always_recorded(self) -> None:
@@ -726,6 +778,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
         manifest["execution_model"] = "something-else-entirely"
         self.assertEqual(
@@ -742,6 +795,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
                 megatron_nan_guard="on",
+                megatron_precision="stock",
             ),
             [],
         )
@@ -760,6 +814,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
         self.assertIn(
             "parallelism",
@@ -776,6 +831,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
                 megatron_p2p_sync="on",
                 megatron_nan_guard="on",
+                megatron_precision="stock",
             ),
         )
 
@@ -799,6 +855,7 @@ class ResumeParallelismTests(unittest.TestCase):
             parallelism=parallelism,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def _mismatches(self, manifest: dict, parallelism: ParallelismSpec):
@@ -815,6 +872,7 @@ class ResumeParallelismTests(unittest.TestCase):
             parallelism=parallelism,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def test_a_schema_nine_directory_still_resumes_as_single_gpu(self) -> None:
@@ -863,7 +921,7 @@ class ResumeParallelismTests(unittest.TestCase):
         the moment ``describe`` records it.
         """
         recorded = ParallelismSpec(dp=2)
-        requested = ParallelismSpec(dp=2, dense_sharding="shard")
+        requested = ParallelismSpec(dp=2, dense_sharding="zero3")
         self.assertIn(
             "parallelism", self._mismatches(self._manifest(recorded), requested)
         )
@@ -920,6 +978,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             parallelism=self.PP2,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def _mismatches(self, manifest: dict, megatron_p2p_sync: str) -> list[str]:
@@ -936,6 +995,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             parallelism=self.PP2,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -980,7 +1040,9 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
         self.scenario = scenario_by_name("piper_megatron_stock")
         self.arms = (self.scenario.arm("baseline"),)
 
-    def _manifest(self, megatron_nan_guard: str) -> dict:
+    def _manifest(
+        self, megatron_nan_guard: str, megatron_precision: str = "stock"
+    ) -> dict:
         return manifest_data(
             self.scenario,
             self.arms,
@@ -994,9 +1056,15 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
 
-    def _mismatches(self, manifest: dict, megatron_nan_guard: str) -> list[str]:
+    def _mismatches(
+        self,
+        manifest: dict,
+        megatron_nan_guard: str,
+        megatron_precision: str = "stock",
+    ) -> list[str]:
         return _resume_mismatches(
             manifest,
             self.scenario,
@@ -1010,6 +1078,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -1040,6 +1109,112 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
         manifest["schema_version"] = 13
         self.assertEqual(self._mismatches(manifest, "on"), [])
         self.assertIn("megatron_nan_guard", self._mismatches(manifest, "off"))
+
+
+class ResumeMegatronPrecisionTests(unittest.TestCase):
+    """``--resume`` gates ``megatron_precision`` the way it gates the two
+    values above: the same value resumes, a different one is refused in
+    either direction, and a directory that predates the field reads as
+    ``stock``.
+
+    It also carries the schema-15 rename. A manifest that records the
+    retired ``shard`` spelling is refused with a message that names the
+    rename, rather than a bare ``parallelism`` key.
+    """
+
+    def setUp(self) -> None:
+        self.scenario = scenario_by_name("piper_megatron_stock")
+        self.arms = (self.scenario.arm("baseline"),)
+
+    def _manifest(
+        self,
+        megatron_precision: str,
+        parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    ) -> dict:
+        return manifest_data(
+            self.scenario,
+            self.arms,
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "none",
+            "1b",
+            parallelism=parallelism,
+            megatron_p2p_sync="on",
+            megatron_nan_guard="on",
+            megatron_precision=megatron_precision,
+        )
+
+    def _mismatches(
+        self,
+        manifest: dict,
+        megatron_precision: str,
+        parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    ) -> list[str]:
+        return _resume_mismatches(
+            manifest,
+            self.scenario,
+            self.arms,
+            "test-gpu",
+            _METADATA,
+            (),
+            "default",
+            "none",
+            "1b",
+            parallelism=parallelism,
+            megatron_p2p_sync="on",
+            megatron_nan_guard="on",
+            megatron_precision=megatron_precision,
+        )
+
+    def test_the_same_value_resumes_and_a_different_one_is_refused(
+        self,
+    ) -> None:
+        for recorded, requested in (("stock", "lean"), ("lean", "stock")):
+            with self.subTest(recorded=recorded, requested=requested):
+                manifest = self._manifest(recorded)
+                self.assertEqual(self._mismatches(manifest, recorded), [])
+                self.assertIn(
+                    "megatron_precision",
+                    self._mismatches(manifest, requested),
+                )
+
+    def test_a_schema_fifteen_directory_reads_as_stock(self) -> None:
+        """No run before schema 16 could ask for the lean recipe, so the
+        absent key is a record of ``stock`` and not an inference."""
+        manifest = self._manifest("stock")
+        del manifest["megatron_precision"]
+        manifest["schema_version"] = 15
+        self.assertEqual(self._mismatches(manifest, "stock"), [])
+        self.assertIn(
+            "megatron_precision", self._mismatches(manifest, "lean")
+        )
+
+    def test_a_retired_shard_record_names_the_rename(self) -> None:
+        """The run really held the ZeRO-3 parity, so the rename takes no
+        number away. This gate compares two vocabularies, and a bare
+        ``parallelism`` would send the operator looking for a degree that
+        did not move."""
+        from benchmarks.artifacts.manifests import RETIRED_DENSE_SHARDING
+
+        spec = ParallelismSpec(dp=2, dense_sharding="zero3")
+        manifest = self._manifest("stock", parallelism=spec)
+        manifest["parallelism"]["dense_sharding"] = RETIRED_DENSE_SHARDING
+        manifest["schema_version"] = 14
+        refused = self._mismatches(manifest, "stock", parallelism=spec)
+        self.assertEqual(len(refused), 1)
+        self.assertTrue(refused[0].startswith("parallelism"))
+        self.assertIn("retired spelling of 'zero3'", refused[0])
+
+    def test_a_current_zero3_record_resumes(self) -> None:
+        """The rename message is for the retired spelling alone."""
+        spec = ParallelismSpec(dp=2, dense_sharding="zero3")
+        manifest = self._manifest("stock", parallelism=spec)
+        self.assertEqual(
+            self._mismatches(manifest, "stock", parallelism=spec), []
+        )
 
 
 class ResolveRunTests(unittest.TestCase):
@@ -1080,9 +1255,9 @@ class ResolveRunTests(unittest.TestCase):
         degree, so the subprocess no longer refuses the selected arm -- but
         no sharded arm has run on a GPU, so the rule is all this checks.
         """
-        sharded = ParallelismSpec(dp=2, dense_sharding="shard")
+        sharded = ParallelismSpec(dp=2, dense_sharding="zero3")
         with self.assertRaisesRegex(
-            ValueError, r"--dense-sharding shard is not implemented"
+            ValueError, r"--dense-sharding zero3 is not implemented"
         ):
             self._resolve(
                 scenario_name="piper1b_megatron",
@@ -1229,7 +1404,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         """The premise of every case below."""
         resolved = self._resolve(
             self._environment(None),
-            parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+            parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
         )
         self.assertIn("--use-megatron-fsdp", resolved[6]["baseline"])
 
@@ -1239,7 +1414,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         ) as raised:
             self._resolve(
                 self._environment("1"),
-                parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+                parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
             )
         # The refusal names its own repair, as every other refusal here does.
         self.assertIn("Unset CUDA_DEVICE_MAX_CONNECTIONS", str(raised.exception))
@@ -1251,8 +1426,24 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
             with self.subTest(value=value):
                 self._resolve(
                     self._environment(value),
-                    parallelism=ParallelismSpec(dp=2, dense_sharding="shard"),
+                    parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
                 )
+
+    def test_a_zero1_run_is_untouched_by_the_variable(self) -> None:
+        """``zero1`` shards through the optimizer, not through Megatron-FSDP.
+
+        The argv carries ``--use-distributed-optimizer`` and no
+        ``--use-megatron-fsdp``, so Megatron runs no assert on the variable
+        and the refusal goes inert on its own. The test reads both flags,
+        because a refusal that fired here would refuse a legal cell.
+        """
+        resolved = self._resolve(
+            self._environment("1"),
+            parallelism=ParallelismSpec(dp=2, dense_sharding="zero1"),
+        )
+        argv = resolved[6]["baseline"]
+        self.assertIn("--use-distributed-optimizer", argv)
+        self.assertNotIn("--use-megatron-fsdp", argv)
 
     def test_a_replicated_run_is_untouched_by_the_variable(self) -> None:
         """A replicated stock run sends no ``--use-megatron-fsdp``, so the
@@ -1318,6 +1509,47 @@ class RunBannerTests(unittest.TestCase):
             lines,
         )
 
+    def _warnings(self, spec: ParallelismSpec, gpu: str) -> list[str]:
+        return [
+            line
+            for line in self._summaries(spec, gpu)
+            if line.startswith("WARNING: ")
+        ]
+
+    def test_a_zero1_run_at_dp_one_carries_both_warnings(self) -> None:
+        """Legal, and a reader must not take the value at face value. The
+        shard degree is 1 there, and one microbatch puts the gradient
+        reduce-scatter inside the only backward pass."""
+        warnings = self._warnings(ParallelismSpec(dense_sharding="zero1"), "0")
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any("at dp 1" in line for line in warnings))
+        self.assertTrue(any("ZeRO-2" in line for line in warnings))
+
+    def test_the_warnings_land_before_the_banner(self) -> None:
+        """``_resolve_run`` emits them before it probes the host, so they
+        reach the operator before the run claims a GPU. The banner is
+        filled in by that probe, so it is the marker to sort against."""
+        lines = self._summaries(ParallelismSpec(dense_sharding="zero1"), "0")
+        first_warning = min(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("WARNING: ")
+        )
+        banner = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith("GPU (PCI index):")
+        )
+        self.assertLess(first_warning, banner)
+
+    def test_the_intended_mesh_carries_no_warning(self) -> None:
+        """A warning that fired on the configuration this axis exists to run
+        would teach an operator to ignore warnings."""
+        self.assertEqual(
+            self._warnings(ParallelismSpec(dp=2, dense_sharding="zero3"), "0,1"),
+            [],
+        )
+
     def test_the_sharded_parity_reaches_the_banner(self) -> None:
         """The line has to MOVE with the value.
 
@@ -1325,11 +1557,11 @@ class RunBannerTests(unittest.TestCase):
         would pass the test above and tell the operator nothing.
         """
         lines = self._summaries(
-            ParallelismSpec(dp=2, dense_sharding="shard"), "0,1"
+            ParallelismSpec(dp=2, dense_sharding="zero3"), "0,1"
         )
         self.assertIn(
             "parallelism: dp 2 x pp 1 (ep 1, world size 2, "
-            "dense sharding shard)",
+            "dense sharding zero3)",
             lines,
         )
 

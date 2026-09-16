@@ -94,6 +94,7 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def test_the_manifest_names_what_a_tokens_per_second_figure_counts(self) -> None:
@@ -103,8 +104,8 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
         self.assertEqual(THROUGHPUT_DEFINITION, "tokens_per_second_per_device")
 
     def test_the_schema_moved_with_the_new_key(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 14)
-        self.assertEqual(self._manifest()["schema_version"], 14)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 16)
+        self.assertEqual(self._manifest()["schema_version"], 16)
 
 
 class PerRankLogParsingTests(unittest.TestCase):
@@ -231,6 +232,66 @@ class SingleRankIsUnchangedTests(unittest.TestCase):
         result, report = self._evaluate({"world_size": 1, "pp": 1})
         self.assertNotIn("per-rank tokens/s", report)
         self.assertEqual(result.warnings, ())
+
+
+class DenseShardingWarningsReachTheArtifactTests(unittest.TestCase):
+    """The runner says them when the run starts. A reader of results.json
+    was not there, and the file is what a report quotes.
+    """
+
+    def _warnings(self, parallelism: dict | None) -> list[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir, {"baseline": _step_lines(tps=1000)}, parallelism
+            )
+            return list(evaluate_run(out_dir).warnings)
+
+    def test_a_zero1_cell_at_dp_one_carries_both_warnings(self) -> None:
+        warnings = self._warnings(
+            {
+                "world_size": 1,
+                "dp": 1,
+                "pp": 1,
+                "ep": 1,
+                "dense_sharding": "zero1",
+            }
+        )
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any("at dp 1" in warning for warning in warnings))
+        self.assertTrue(any("ZeRO-2" in warning for warning in warnings))
+
+    def test_the_replicated_parity_carries_none(self) -> None:
+        self.assertEqual(
+            self._warnings(
+                {
+                    "world_size": 1,
+                    "dp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dense_sharding": "replicate",
+                }
+            ),
+            [],
+        )
+
+    def test_a_directory_written_before_the_rename_still_evaluates(self) -> None:
+        """Three published cells record ``shard``, which this axis no longer
+        declares. They predate the question these warnings ask, so they earn
+        none -- and evaluating them must not fail.
+        """
+        self.assertEqual(
+            self._warnings(
+                {
+                    "world_size": 1,
+                    "dp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dense_sharding": "shard",
+                }
+            ),
+            [],
+        )
 
 
 class BaselineFreeSingletonTests(unittest.TestCase):

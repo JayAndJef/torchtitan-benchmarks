@@ -38,8 +38,8 @@ shards the parameters, and the manifest still records the dense-sharding
 value the harness asked for.
 
 **The refusal reads the raw value and not the resolved mesh, because the
-harness now asks for both meshes.** Under ``--dense-sharding shard``
-``titan_mesh`` returns ``(1, dp)``, so ``dp_shard`` above 1 is an honest
+harness now asks for both meshes.** Under a sharded ``--dense-sharding``
+value ``titan_mesh`` returns ``(1, dp)``, so ``dp_shard`` above 1 is an honest
 request; a refusal written on the resolved mesh would refuse every sharded
 run and would still pass a dropped flag whenever the remainder resolved to
 the requested degree.
@@ -57,9 +57,9 @@ the flag", and nothing else means that.
 
 **A mesh that replicates AND shards is refused too.** The harness asks for
 one treatment at a time: ``titan_mesh`` is meant to return ``(dp, 1)``
-under ``replicate`` and ``(1, dp)`` under ``shard``. So no spec asks for
-HSDP. A passthrough flag can build one, and the manifest carries no
-dense-sharding value that names it.
+under ``replicate`` and ``(1, dp)`` under ``zero1`` and ``zero3``. So no
+spec asks for HSDP. A passthrough flag can build one, and the manifest
+carries no dense-sharding value that names it.
 
 **This module cannot check ``titan_mesh``, and nothing here can.** It runs
 in the training subprocess and reads only the mesh TorchTitan resolved. A

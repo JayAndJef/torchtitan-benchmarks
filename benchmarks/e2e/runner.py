@@ -26,8 +26,10 @@ from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
     NAN_GUARD_LAUNCHERS,
+    PRECISION_LAUNCHERS,
     ParallelismSpec,
     TRIVIAL_SPEC,
+    dense_sharding_warnings,
     validate_parallelism,
 )
 from benchmarks.e2e.registry import (
@@ -37,9 +39,11 @@ from benchmarks.e2e.registry import (
     DEFAULT_COMPILE_MODE,
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
+    MEGATRON_PRECISION_MODES,
     SCENARIOS,
     UNCOMPILED_COMPILE_MODES,
     Arm,
@@ -126,6 +130,12 @@ class RunRequest:
     # above: a resume inherits the recorded value and a fresh run takes
     # ``on``. It reaches the stock megatron launcher alone.
     megatron_nan_guard: str | None = None
+    # Stock Megatron's optimizer precision. ``None`` means "not requested",
+    # as above: a resume inherits the recorded value and a fresh run takes
+    # ``stock``. A schema <= 15 manifest carries no key, and it reads as
+    # ``stock``. The value reaches the stock megatron launcher alone, and
+    # ``lean`` needs a sharded dense value.
+    megatron_precision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +203,8 @@ def workload_with_overrides(
 def _resolve_run(
     request: RunRequest,
     environment: Mapping[str, str],
+    *,
+    event_handler: EventHandler | None = None,
 ) -> tuple[
     RuntimePaths,
     Scenario,
@@ -206,6 +218,7 @@ def _resolve_run(
     str,
     ParallelismSpec,
     bool,
+    str,
     str,
     str,
 ]:
@@ -288,6 +301,17 @@ def _resolve_run(
             if request.megatron_nan_guard is None
             else request.megatron_nan_guard
         )
+        # Schema <= 15 manifests predate the precision axis, and every one
+        # of them held stock Megatron's own fp32 optimizer state.
+        megatron_precision = (
+            str(
+                existing_manifest.get(
+                    "megatron_precision", DEFAULT_MEGATRON_PRECISION
+                )
+            )
+            if request.megatron_precision is None
+            else request.megatron_precision
+        )
     else:
         workload = workload_with_overrides(
             scenario,
@@ -306,6 +330,9 @@ def _resolve_run(
         megatron_nan_guard = (
             request.megatron_nan_guard or DEFAULT_MEGATRON_NAN_GUARD
         )
+        megatron_precision = (
+            request.megatron_precision or DEFAULT_MEGATRON_PRECISION
+        )
     if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
         raise ValueError(
             f"unknown megatron p2p sync {megatron_p2p_sync!r}. Available: "
@@ -315,6 +342,11 @@ def _resolve_run(
         raise ValueError(
             f"unknown megatron nan guard {megatron_nan_guard!r}. Available: "
             f"{', '.join(MEGATRON_NAN_GUARD_MODES)}"
+        )
+    if megatron_precision not in MEGATRON_PRECISION_MODES:
+        raise ValueError(
+            f"unknown megatron precision {megatron_precision!r}. Available: "
+            f"{', '.join(MEGATRON_PRECISION_MODES)}"
         )
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
@@ -381,12 +413,26 @@ def _resolve_run(
         device_count=len(devices),
     )
     # Both engines start a second rank now, so the blanket refusal that stood
-    # here is gone. What refuses an unimplemented mesh is the seventeen rules
+    # here is gone. What refuses an unimplemented mesh is the sixteen rules
     # above plus the engines themselves: ``parallelize_piper1b`` refuses a
     # tensor or context degree, a dropped shard-degree flag and a mesh that
     # replicates and shards at once, and the Megatron driver refuses a
     # schedule it does not implement. Each failure lands on the module that
     # owns the missing work.
+
+    # Two legal meshes a reader can misread, said where the operator meets
+    # them. Neither refuses anything, so each is a warning and not a rule.
+    #
+    # **This lands before any host probe**, which is the line below that
+    # calls ``hardware_metadata``. So the operator reads the warning before
+    # the run claims a GPU, and a run that dies later still printed it.
+    #
+    # ``dense_sharding_warnings`` is the one statement of both facts, and
+    # ``benchmarks/e2e/results.py`` appends the same strings to
+    # ``results.json``. A second copy of the text here could drift from the
+    # copy the artifact carries.
+    for warning in dense_sharding_warnings(parallelism):
+        _emit(event_handler, "summary", f"WARNING: {warning}")
 
     # The p2p sync treatment, refused parent-side for two reasons that each
     # name their own cause. Without a pipeline there is no message to
@@ -418,6 +464,15 @@ def _resolve_run(
     # run state one reason. Legal at every mesh; what decides it is which
     # launchers the selection holds.
     refusal = megatron_nan_guard_refusal(arms, megatron_nan_guard)
+    if refusal is not None:
+        raise ValueError(refusal)
+
+    # The precision treatment, refused parent-side through the helper the
+    # --all-scenarios sweep reads too, so a skipped scenario and a refused
+    # run state one reason.
+    refusal = megatron_precision_refusal(
+        arms, megatron_precision, parallelism.dense_sharding
+    )
     if refusal is not None:
         raise ValueError(refusal)
 
@@ -481,6 +536,7 @@ def _resolve_run(
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
         for arm in arms
     }
@@ -512,6 +568,7 @@ def _resolve_run(
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
         if mismatches:
             raise ValueError(
@@ -533,7 +590,67 @@ def _resolve_run(
         resumed,
         megatron_p2p_sync,
         megatron_nan_guard,
+        megatron_precision,
     )
+
+
+def megatron_precision_refusal(
+    arms: Iterable[Arm], megatron_precision: str, dense_sharding: str
+) -> str | None:
+    """Why ``--megatron-precision lean`` cannot reach ``arms``, or ``None``.
+
+    Three refusals, each naming its repair, checked from the narrowest
+    fact outward. A tuned megatron arm builds a plain torch AdamW and has
+    no precision-aware path at all. A run with no stock megatron arm gives
+    the value nothing to reach. And ``lean`` under ``replicate`` asks
+    Megatron for a precision-aware optimizer without the distributed
+    optimizer it asserts.
+
+    **The third is the one that could not exist before this axis.**
+    ``optimizer_config.py`` asserts ``use_distributed_optimizer`` under
+    ``--use-precision-aware-optimizer``, and ``--dense-sharding`` is the
+    one owner of that flag. Refused here, the operator reads the repair
+    parent-side; unrefused, Megatron dies in its own config validation
+    minutes into a subprocess and names neither axis.
+
+    ``stock`` is refused nowhere: it is ``--bf16`` alone, and every arm's
+    argv is what it was before the option existed.
+    """
+    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+        return None
+    arms = tuple(arms)
+    without_precision = [
+        arm.name
+        for arm in arms
+        if arm.launcher in MEGATRON_LAUNCHERS
+        and arm.launcher not in PRECISION_LAUNCHERS
+    ]
+    if without_precision:
+        return (
+            f"--megatron-precision {megatron_precision!r} was requested with "
+            f"{', '.join(without_precision)}, whose driver "
+            "benchmarks/e2e/megatron/train.py builds a plain torch AdamW and "
+            "has no precision-aware optimizer; select a run without it "
+            f"(run --arm ...), or leave the option at "
+            f"{DEFAULT_MEGATRON_PRECISION!r}"
+        )
+    if not any(arm.launcher in PRECISION_LAUNCHERS for arm in arms):
+        return (
+            f"--megatron-precision {megatron_precision!r} reaches no arm of "
+            f"this run: {', '.join(arm.name for arm in arms)} run on "
+            "TorchTitan, which holds its own bf16 optimizer states; select "
+            "the stock megatron arm, or leave the option at "
+            f"{DEFAULT_MEGATRON_PRECISION!r}"
+        )
+    if dense_sharding == "replicate":
+        return (
+            f"--megatron-precision {megatron_precision!r} needs "
+            "--dense-sharding zero1 or --dense-sharding zero3: Megatron "
+            "asserts use_distributed_optimizer under "
+            "--use-precision-aware-optimizer, and the dense-sharding value "
+            "is the one owner of that flag"
+        )
+    return None
 
 
 def megatron_nan_guard_refusal(
@@ -604,7 +721,8 @@ def execute_run(
         resumed,
         megatron_p2p_sync,
         megatron_nan_guard,
-    ) = _resolve_run(request, host_environment)
+        megatron_precision,
+    ) = _resolve_run(request, host_environment, event_handler=event_handler)
 
     if resumed:
         state = load_run_state(out_dir, arms)
@@ -625,6 +743,7 @@ def execute_run(
             parallelism=parallelism,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision=megatron_precision,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -656,6 +775,9 @@ def execute_run(
     _emit(
         event_handler, "summary", f"megatron nan guard: {megatron_nan_guard}"
     )
+    _emit(
+        event_handler, "summary", f"megatron precision: {megatron_precision}"
+    )
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
@@ -681,6 +803,7 @@ def execute_run(
                     parallelism=parallelism,
                     megatron_p2p_sync=megatron_p2p_sync,
                     megatron_nan_guard=megatron_nan_guard,
+                    megatron_precision=megatron_precision,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -746,6 +869,7 @@ def execute_run(
                 parallelism=parallelism,
                 megatron_p2p_sync=megatron_p2p_sync,
                 megatron_nan_guard=megatron_nan_guard,
+                megatron_precision=megatron_precision,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

@@ -555,6 +555,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             parallelism=self.PP2,
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard="on",
+            megatron_precision="stock",
         )
 
     def _resume(self, out_dir: Path, megatron_p2p_sync: str | None):
@@ -902,6 +903,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             parallelism=TRIVIAL_SPEC,
             megatron_p2p_sync="on",
             megatron_nan_guard=megatron_nan_guard,
+            megatron_precision="stock",
         )
 
     def _resume(self, out_dir: Path, megatron_nan_guard: str | None):
@@ -960,6 +962,258 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             self.assertNotIn(NO_NAN_CHECK, resolved[6]["baseline"])
             with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
                 self._resume(out_dir, megatron_nan_guard="off")
+
+
+class MegatronPrecisionResolutionTests(unittest.TestCase):
+    """What ``_resolve_run`` does with ``--megatron-precision``.
+
+    All three refusals are parent-side and land before any host probe.
+    The value reaches the stock megatron command alone. The tuned driver
+    builds a plain torch AdamW, so it refuses ``lean``. And ``lean`` needs
+    a sharded dense value, because Megatron asserts the distributed
+    optimizer under the precision-aware optimizer.
+    """
+
+    LEAN_FLAGS = (
+        "--use-precision-aware-optimizer",
+        "--main-grads-dtype",
+        "--exp-avg-dtype",
+        "--exp-avg-sq-dtype",
+    )
+
+    def setUp(self) -> None:
+        self.metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+            "megatron_git_rev": "mcore-rev",
+        }
+
+    def _resolve(
+        self,
+        names: tuple[str, ...],
+        *,
+        megatron_precision: str | None = "lean",
+        dense_sharding: str = "zero1",
+        scenario_name: str = "piper_megatron_stock",
+    ):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name=scenario_name,
+                    arm_names=names,
+                    out_dir=Path("/tmp/precision-test"),
+                    ac_mode="none",
+                    parallelism=ParallelismSpec(
+                        dp=1, dense_sharding=dense_sharding
+                    ),
+                    megatron_precision=megatron_precision,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def _refused_before_any_probe(
+        self, pattern: str, scenario_name: str, **keywords
+    ) -> None:
+        def never(*args, **kwargs):
+            raise AssertionError("a host probe ran for a refused request")
+
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
+        ):
+            with self.assertRaisesRegex(ValueError, pattern):
+                _resolve_run(
+                    RunRequest(
+                        gpu="0",
+                        scenario_name=scenario_name,
+                        out_dir=Path("/tmp/precision-test"),
+                        ac_mode="none",
+                        **keywords,
+                    ),
+                    {"PATH": os.environ["PATH"]},
+                )
+
+    def test_lean_without_a_stock_arm_is_refused_before_any_probe(self) -> None:
+        """TorchTitan holds its own bf16 optimizer states, so a titan-only
+        run gives the value nothing to reach."""
+        for scenario_name, names in (
+            ("piper1b_rope", ("baseline",)),
+            ("piper_megatron_stock", ("titan_stock",)),
+        ):
+            with self.subTest(scenario=scenario_name):
+                self._refused_before_any_probe(
+                    "reaches no arm",
+                    scenario_name,
+                    arm_names=names,
+                    megatron_precision="lean",
+                )
+
+    def test_lean_with_the_tuned_megatron_arm_is_refused_before_any_probe(
+        self,
+    ) -> None:
+        """The tuned driver builds a plain torch AdamW, so it has no
+        precision-aware optimizer to configure. Its refusal names the arm
+        and the repair, and it wins over the other two when all apply."""
+        for names in (("baseline",), ("baseline", "titan_stock"), ()):
+            with self.subTest(arms=names):
+                self._refused_before_any_probe(
+                    r"requested with baseline, whose driver "
+                    r"benchmarks/e2e/megatron/train\.py builds a plain torch "
+                    r"AdamW",
+                    "piper1b_megatron",
+                    arm_names=names,
+                    megatron_precision="lean",
+                )
+
+    def test_lean_under_replicate_is_refused_before_any_probe(self) -> None:
+        """Megatron asserts ``use_distributed_optimizer`` under
+        ``--use-precision-aware-optimizer``, and ``--dense-sharding`` is
+        the one owner of that flag. The refusal names both repairs."""
+        self._refused_before_any_probe(
+            "needs --dense-sharding zero1 or --dense-sharding zero3",
+            "piper_megatron_stock",
+            arm_names=("baseline",),
+            megatron_precision="lean",
+        )
+
+    def test_an_unknown_value_is_refused(self) -> None:
+        self._refused_before_any_probe(
+            "unknown megatron precision",
+            "piper_megatron_stock",
+            arm_names=("baseline",),
+            megatron_precision="bf16",
+        )
+
+    def test_lean_reaches_the_stock_command_and_not_the_titan_one(self) -> None:
+        """A mixed selection is legal: the stock arm gets the four flags
+        and the titan arm gets none of them."""
+        resolved = self._resolve(("baseline", "titan_stock"))
+        self.assertEqual(resolved[14], "lean")
+        commands = resolved[6]
+        stock = commands["baseline"]
+        for flag in self.LEAN_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertEqual(stock.count(flag), 1)
+                self.assertNotIn(flag, commands["titan_stock"])
+
+    def test_the_default_resolves_to_stock_and_adds_no_flag(self) -> None:
+        for requested in (None, "stock"):
+            with self.subTest(requested=requested):
+                resolved = self._resolve(
+                    ("baseline", "titan_stock"), megatron_precision=requested
+                )
+                self.assertEqual(resolved[14], "stock")
+                for name, command in resolved[6].items():
+                    for flag in self.LEAN_FLAGS:
+                        self.assertNotIn(flag, command, name)
+
+    def _write_manifest(
+        self,
+        out_dir: Path,
+        *,
+        megatron_precision: str,
+        parallelism: ParallelismSpec = TRIVIAL_SPEC,
+    ) -> None:
+        scenario = scenario_by_name("piper_megatron_stock")
+        write_manifest(
+            out_dir,
+            scenario,
+            (scenario.arm("baseline"),),
+            {"baseline": ["cmd"]},
+            "test-gpu",
+            {**self.metadata, "cpu_pinning": "none: test"},
+            (),
+            "default",
+            "none",
+            "1b",
+            parallelism=parallelism,
+            megatron_p2p_sync="on",
+            megatron_nan_guard="on",
+            megatron_precision=megatron_precision,
+        )
+
+    def _resume(
+        self,
+        out_dir: Path,
+        *,
+        megatron_precision: str | None = None,
+        parallelism: ParallelismSpec | None = None,
+    ):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name=None,
+                    arm_names=("baseline",),
+                    resume_dir=out_dir,
+                    parallelism=parallelism,
+                    megatron_precision=megatron_precision,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def test_a_resume_inherits_the_recorded_precision(self) -> None:
+        """Schema 16 records the value, so an omitted one reads back and
+        rebuilds the same argv; a different one is refused, and the
+        refusal names the field.
+
+        The recorded mesh is sharded, because an inherited ``lean`` under
+        ``replicate`` would meet the parent-side refusal before this gate.
+        """
+        spec = ParallelismSpec(dp=1, dense_sharding="zero1")
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            out_dir.mkdir()
+            self._write_manifest(
+                out_dir, megatron_precision="lean", parallelism=spec
+            )
+            resolved = self._resume(out_dir, parallelism=spec)
+            self.assertEqual(resolved[14], "lean")
+            self.assertIn(
+                "--use-precision-aware-optimizer", resolved[6]["baseline"]
+            )
+            with self.assertRaisesRegex(ValueError, "megatron_precision"):
+                self._resume(
+                    out_dir, megatron_precision="stock", parallelism=spec
+                )
+
+    def test_a_resume_of_a_schema_fifteen_directory_reads_as_stock(
+        self,
+    ) -> None:
+        """A directory written before the field exists carries no key, and
+        no such run could ask for the lean recipe. So it resumes as
+        ``stock`` with the argv it always had."""
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            out_dir.mkdir()
+            self._write_manifest(out_dir, megatron_precision="stock")
+            manifest_path = out_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            del manifest["megatron_precision"]
+            manifest["schema_version"] = 15
+            manifest_path.write_text(json.dumps(manifest))
+            resolved = self._resume(out_dir)
+            self.assertEqual(resolved[14], "stock")
+            self.assertNotIn(
+                "--use-precision-aware-optimizer", resolved[6]["baseline"]
+            )
 
 
 class ParallelizeTests(unittest.TestCase):
@@ -1615,10 +1869,11 @@ class ManifestTests(unittest.TestCase):
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
                 megatron_nan_guard="on",
+                megatron_precision="stock",
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 14)
+        self.assertEqual(manifest["schema_version"], 16)
         self.assertEqual(manifest["compile_mode"], "cuda-graph")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
@@ -1695,7 +1950,7 @@ class UncompiledRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 14)
+        self.assertEqual(manifest["schema_version"], 16)
         self.assertEqual(manifest["compile_mode"], "none")
         # Region pooling reads Inductor's compiled-graph annotations, and an
         # eager run emits none. The run says so rather than declare a region

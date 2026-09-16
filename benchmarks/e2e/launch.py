@@ -22,10 +22,12 @@ from benchmarks.e2e.parallelism import (
     ParallelismSpec,
     TRIVIAL_SPEC,
     titan_mesh,
+    titan_reshard_after_forward,
 )
 from benchmarks.e2e.registry import (
     DEFAULT_COMPILE_MODE,
     DEFAULT_MEGATRON_NAN_GUARD,
+    DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
@@ -61,18 +63,35 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     and both halves are delivered.
 
     **The pair is gated on the mesh, not on ``dp``.** ``titan_mesh`` reads
-    ``spec.dense_sharding``: it returns ``(1, dp)`` under ``shard`` and
-    ``(dp, 1)`` under ``replicate``, at every expert degree. So the shard
+    ``spec.dense_sharding``: it returns ``(1, dp)`` under ``zero1`` and
+    ``zero3`` and ``(dp, 1)`` under ``replicate``, at every expert degree.
+    So the shard
     degree moves without ``dp`` moving, and a ``dp``-gated test would send a
     sharded run no shard degree at all -- which is the silent ZeRO-3
     substitution this whole paragraph exists to prevent. Gating on the mesh
     also keeps the trivial spec's argv empty, because ``titan_mesh`` returns
-    ``(1, 1)`` there under both values.
+    ``(1, 1)`` there under every value.
+
+    **``--parallelism.fsdp-reshard-after-forward`` is what makes ``zero1``
+    ZeRO-1 here.** ``titan_mesh`` gives ``zero1`` and ``zero3`` the same
+    pair, so the mesh flags alone would build ZeRO-3 under both. The fork
+    types the field as ``Literal["default", "always", "never"]`` on its
+    ``ParallelismConfig`` (``config/configs.py``), and
+    ``get_fsdp_reshard_after_forward_policy`` reads it. Under ``never``
+    FSDP2 gathers the parameters at the first microbatch forward and holds
+    them for the whole step, which shards the optimizer states and keeps
+    whole parameters.
+
+    **The token is sent only when ``titan_reshard_after_forward`` returns a
+    value.** Every other spec sends nothing, so TorchTitan keeps its own
+    default and no recorded argv moves. That one function decides it, so
+    this argv and the tests cannot disagree about which value forces the
+    policy.
 
     **``--parallelism.expert-parallel-degree`` needs no gate of its own.**
     Spec rule 14 refuses ``ep > 1`` under ``replicate``, so every spec that
-    reaches here with an expert degree also asks for ``shard`` and therefore
-    already carries the pair above. The expert mesh degree TorchTitan derives
+    reaches here with an expert degree also asks for a sharded value and
+    therefore already carries the pair above. The expert mesh degree TorchTitan derives
     is ``efsdp = dp_shard * cp * tp // ep``, which needs the shard degree the
     pair delivers.
 
@@ -121,6 +140,14 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
                 str(replicate),
                 "--parallelism.data-parallel-shard-degree",
                 str(shard),
+            )
+        )
+    reshard_after_forward = titan_reshard_after_forward(spec)
+    if reshard_after_forward is not None:
+        flags.extend(
+            (
+                "--parallelism.fsdp-reshard-after-forward",
+                reshard_after_forward,
             )
         )
     if spec.ep > 1:
@@ -179,12 +206,14 @@ def command_for_arm(
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
+    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
 ) -> list[str]:
     """Build the training command for one arm, dispatching on its launcher.
 
-    ``model_size``, ``parallelism``, ``megatron_p2p_sync`` and
-    ``megatron_nan_guard`` are keyword-only: the six positional parameters
-    are the historical signature and callers pass them positionally.
+    ``model_size``, ``parallelism``, ``megatron_p2p_sync``,
+    ``megatron_nan_guard`` and ``megatron_precision`` are keyword-only: the
+    six positional parameters are the historical signature and callers pass
+    them positionally.
 
     ``parallelism`` defaults to ``TRIVIAL_SPEC`` rather than being required,
     and the asymmetry with ``manifest_data`` -- which takes its parallelism
@@ -206,6 +235,12 @@ def command_for_arm(
     reaches the stock megatron command alone. The tuned driver has no NaN
     guard, so ``_megatron_command`` refuses ``off`` outright, and a
     TorchTitan argv is untouched under either value.
+
+    ``megatron_precision`` defaults to ``stock``, which is again the
+    identity: it adds no token to any argv. It reaches the stock megatron
+    command alone. The tuned driver builds a plain torch ``AdamW``, so
+    ``_megatron_command`` refuses ``lean`` outright, and a TorchTitan argv
+    is untouched under either value.
     """
     if arm.launcher == "megatron":
         return _megatron_command(
@@ -219,6 +254,7 @@ def command_for_arm(
             parallelism,
             megatron_p2p_sync,
             megatron_nan_guard,
+            megatron_precision,
         )
     if arm.launcher == "megatron_stock":
         return _megatron_stock_command(
@@ -232,6 +268,7 @@ def command_for_arm(
             parallelism,
             megatron_p2p_sync,
             megatron_nan_guard,
+            megatron_precision,
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
@@ -354,6 +391,7 @@ def _megatron_command(
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
+    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
 ) -> list[str]:
     """Launch command for the Megatron baseline driver.
 
@@ -378,6 +416,11 @@ def _megatron_command(
     refused: this driver never calls ``validate_result`` and has no NaN
     guard, so an argv built under ``off`` would be the ``on`` argv under a
     label the run did not earn. ``_resolve_run`` refuses it first too.
+
+    ``megatron_precision`` behaves the same way, and ``lean`` is refused.
+    This driver builds a plain torch ``AdamW`` with bf16 states and has no
+    precision-aware optimizer, so there is no flag to send and an argv
+    built under ``lean`` would be the ``stock`` argv under another label.
 
     Above one rank the driver reads ``RANK``, ``WORLD_SIZE`` and
     ``LOCAL_RANK`` from torchrun, passes ``pipeline_model_parallel_size`` to
@@ -423,6 +466,13 @@ def _megatron_command(
             f"{arm.name}: megatron nan guard {megatron_nan_guard!r} was "
             "requested for the tuned driver, which has no NaN guard to turn "
             "off; the argv would carry a treatment the run did not have"
+        )
+    if megatron_precision != DEFAULT_MEGATRON_PRECISION:
+        raise ValueError(
+            f"{arm.name}: megatron precision {megatron_precision!r} was "
+            "requested for the tuned driver, which builds a plain torch "
+            "AdamW and has no precision-aware optimizer; the argv would "
+            "carry a treatment the run did not have"
         )
     args = [
         *_megatron_launcher(parallelism),
@@ -488,11 +538,12 @@ def _megatron_stock_command(
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
+    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
 ) -> list[str]:
     """Launch command for the stock Megatron-LM driver.
 
     This function owns three things and no more: the launcher, the ``python
-    -m`` target, and the five values ``stock_megatron_flags`` cannot read
+    -m`` target, and the six values ``stock_megatron_flags`` cannot read
     off a workload. ``benchmarks/e2e/megatron_stock/flags.py`` builds every
     flag, both the Megatron group Megatron's own parser reads and the
     ``--bench-*`` group the driver adds through Megatron's
@@ -583,5 +634,9 @@ def _megatron_stock_command(
             # Megatron's own token under off, nothing under on; flags.py
             # refuses an unknown value with its own message.
             megatron_nan_guard=megatron_nan_guard,
+            # Four flags under lean, nothing under stock. flags.py refuses
+            # an unknown value, and lean under a replicated dense value,
+            # each with its own message; _resolve_run refuses both first.
+            megatron_precision=megatron_precision,
         ),
     ]

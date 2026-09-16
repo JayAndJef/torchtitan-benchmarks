@@ -70,8 +70,10 @@ from benchmarks.e2e.registry import (
     DEFAULT_AC_MODE,
     DEFAULT_COMPILE_MODE,
     DEFAULT_MEGATRON_NAN_GUARD,
+    DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
     MEGATRON_NAN_GUARD_MODES,
+    MEGATRON_PRECISION_MODES,
     MEGATRON_P2P_SYNC_MODES,
     SCENARIOS,
 )
@@ -81,6 +83,7 @@ from benchmarks.e2e.runner import (
     RunResult,
     execute_run,
     megatron_nan_guard_refusal,
+    megatron_precision_refusal,
 )
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
@@ -131,6 +134,11 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     so it has to agree with ``--scenario`` and with ``--arm``, and an
     exported value would fail a plain titan run on a flag nobody passed.
     It defaults to ``None`` as the option above does.
+
+    ``--megatron-precision`` takes no environment variable for the same
+    reason again, and it has one more agreement to keep: ``lean`` needs a
+    sharded ``--dense-sharding`` value, so an exported value would fail
+    every replicated run on a flag nobody passed.
     """
     options = [
         click.option(
@@ -232,8 +240,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.IntRange(min=1),
             help=(
                 "Expert-parallel degree [default: 1]. Needs "
-                "--dense-sharding shard, because TorchTitan cannot split "
-                "the experts and keep the dense parameters replicated. "
+                "--dense-sharding zero1 or zero3, because TorchTitan cannot "
+                "split the experts and keep the dense parameters replicated. "
                 "ep takes its ranks out of the dp axis."
             ),
         ),
@@ -258,9 +266,11 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.Choice(DENSE_SHARDING_MODES),
             help=(
                 "How the run holds the dense parameters [default: "
-                f"{DEFAULT_DENSE_SHARDING}]. The shard value needs --dp "
-                "above 1. An expert degree needs the shard value. Results "
-                "are only comparable within one value."
+                f"{DEFAULT_DENSE_SHARDING}]. replicate keeps a whole copy on "
+                "every rank. zero1 shards the optimizer states. zero3 shards "
+                "the parameters, the gradients and the optimizer states. An "
+                "expert degree needs zero1 or zero3. Results are only "
+                "comparable within one value."
             ),
         ),
         # No envvar; the docstring above gives the reason.
@@ -289,6 +299,22 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "arm; it is refused beside the tuned megatron arm, which "
                 "has no such guard, and TorchTitan arms receive nothing. "
                 "Results are only comparable within one value."
+            ),
+        ),
+        # No envvar; the docstring above gives the reason.
+        click.option(
+            "--megatron-precision",
+            "megatron_precision",
+            type=click.Choice(MEGATRON_PRECISION_MODES),
+            help=(
+                "How stock Megatron holds the optimizer state [default: "
+                f"{DEFAULT_MEGATRON_PRECISION}]. stock is --bf16 alone, "
+                "which is 18 bytes per parameter. lean adds the "
+                "precision-aware optimizer with bf16 gradients and bf16 "
+                "Adam moments, which is 10. lean needs --dense-sharding "
+                "zero1 or zero3, because Megatron asserts the distributed "
+                "optimizer under it, and it reaches the stock megatron arm "
+                "alone. Results are only comparable within one value."
             ),
         ),
     ]
@@ -479,6 +505,14 @@ def run_all_command(
     megatron_nan_guard = (
         options.get("megatron_nan_guard") or DEFAULT_MEGATRON_NAN_GUARD
     )
+    megatron_precision = (
+        options.get("megatron_precision") or DEFAULT_MEGATRON_PRECISION
+    )
+    # Read rather than popped: ``_parallelism`` pops it from the per-scenario
+    # copy below, and the sweep only needs its value to ask the refusal.
+    dense_sharding = (
+        options.get("dense_sharding") or DEFAULT_DENSE_SHARDING
+    )
     for name, scenario in SCENARIOS.items():
         # A sweep skips a scenario that declines either global axis, rather
         # than aborting: the axis restriction is a declaration, not a fault.
@@ -513,6 +547,15 @@ def run_all_command(
         # _resolve_run would refuse a scenario it cannot reach. The sweep
         # prints that same reason and skips, as it does above.
         refusal = megatron_nan_guard_refusal(scenario.arms, megatron_nan_guard)
+        if refusal is not None:
+            click.echo(f"\n===== scenario: {name} =====\nskipped: {refusal}")
+            continue
+        # The precision value reaches the stock megatron arm alone, and
+        # ``lean`` needs a sharded dense value. ``_resolve_run`` refuses
+        # both cases; the sweep prints the same reason and skips.
+        refusal = megatron_precision_refusal(
+            scenario.arms, megatron_precision, dense_sharding
+        )
         if refusal is not None:
             click.echo(f"\n===== scenario: {name} =====\nskipped: {refusal}")
             continue
