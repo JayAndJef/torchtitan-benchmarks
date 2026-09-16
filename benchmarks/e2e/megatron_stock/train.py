@@ -177,8 +177,9 @@ PARALLELISM_LINE = (
 # **replicate and zero1 get a CHAIN, and the chain's own name proves no
 # ZeRO level.** get_megatron_optimizer ends its standard path with an
 # unconditional ChainedOptimizer(optimizers), so both values carry one.
-# zero3 takes the Megatron-FSDP branch instead, which builds one optimizer
-# and returns it bare. A chain of Float16OptimizerWithFloat16Params and a
+# zero3 takes the Megatron-FSDP branch instead, which returns its one
+# optimizer bare at a single model chunk. A chain of
+# Float16OptimizerWithFloat16Params and a
 # chain of DistributedOptimizer print the same word, so
 # optimizer_class_name names the members. A real eight-GPU run failed this
 # rule on 2026-09-16, because the line said "ChainedOptimizer" alone.
@@ -652,15 +653,17 @@ def optimizer_class_name(optimizer: Any) -> str:
     """The optimizer name the data-parallel line states.
 
     A bare optimizer states its own class. The Megatron-FSDP branch
-    returns one: it builds a single optimizer and returns it without a
-    chain (``megatron/core/optimizer/__init__.py``).
+    returns one, because it collapses its optimizer list where the list
+    holds one member, and this harness builds one group of model chunks
+    (``megatron/core/optimizer/__init__.py``).
 
     **A chain states its members too.** The standard path ends with an
     unconditional ``ChainedOptimizer(optimizers)``, so ``replicate`` and
     ``zero1`` both reach this function with a chain. That path always
-    holds the dense optimizer. It adds a second member for the experts
-    only where an expert group exists, which needs an expert degree above
-    1. Every member takes ``DistributedOptimizer`` under
+    holds the dense optimizer. It adds a second member where
+    TransformerEngine marked a weight for the expert process groups, which
+    this argv reaches above expert degree 1 alone. Every member takes
+    ``DistributedOptimizer`` under
     ``use_distributed_optimizer`` and
     ``Float16OptimizerWithFloat16Params`` without it, because that flag is
     one value for the whole run. So a ZeRO-0 chain and a ZeRO-1 chain

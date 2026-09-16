@@ -456,8 +456,9 @@ def _megatron_stock_parallelism_markers(
     three values, and the dense-sharding value is what decides it.**
     ``get_megatron_optimizer`` ends its standard path with an unconditional
     ``ChainedOptimizer(optimizers)``, so ``replicate`` and ``zero1`` always
-    chain. ``zero3`` takes the Megatron-FSDP branch instead, which builds
-    one optimizer and returns it bare. A chain's own name proves no ZeRO
+    chain. ``zero3`` takes the Megatron-FSDP branch instead, which returns
+    its one optimizer bare at a single model chunk. A chain's own name
+    proves no ZeRO
     level, because both chained values carry it, so the marker names the
     members. ``data_parallel_optimizer`` is the one statement of that
     string.

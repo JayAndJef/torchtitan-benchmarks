@@ -2496,9 +2496,9 @@ class DataParallelMarkerTest(unittest.TestCase):
         """The expert degree must not move the printed string.
 
         ``get_megatron_optimizer`` appends a second member only where the
-        model carries expert parameter groups, which needs an expert
-        degree above 1. So a dense shape gives a chain of one and
-        ``30b-a3b`` at ``ep`` 2 gives a chain of two. Deduplication
+        model carries expert parameter groups, which this argv reaches
+        above expert degree 1 alone. So a dense shape gives a chain of one
+        and ``30b-a3b`` at ``ep`` 2 gives a chain of two. Deduplication
         collapses both to one name, so one expected string covers every
         shape.
 
@@ -2667,7 +2667,8 @@ class DataParallelMarkerTest(unittest.TestCase):
         ``get_megatron_optimizer`` ends its standard path with an
         unconditional ``ChainedOptimizer(optimizers)``, and ``replicate``
         and ``zero1`` take that path. ``zero3`` takes the Megatron-FSDP
-        branch, which builds one optimizer and returns it bare.
+        branch, which returns its one optimizer bare at a single model
+        chunk.
         """
         from benchmarks.e2e.megatron_stock.flags import (
             CHAINED_OPTIMIZER,

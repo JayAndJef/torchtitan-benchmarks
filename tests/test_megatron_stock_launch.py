@@ -930,9 +930,9 @@ class StockValidationProfileTests(unittest.TestCase):
     def test_the_sharded_marker_names_a_bare_optimizer(self) -> None:
         """``zero3`` takes the Megatron-FSDP branch, which does not chain.
 
-        That branch builds one optimizer for the whole model and returns
-        it bare. A marker that expected a chain here would fail an honest
-        sharded run.
+        That branch collapses its optimizer list at a single model chunk,
+        which is what this harness builds. A marker that expected a chain
+        here would fail an honest sharded run.
         """
         line = _megatron_stock_parallelism_markers(
             SHARDED_MESH, self.workload, "stock"
