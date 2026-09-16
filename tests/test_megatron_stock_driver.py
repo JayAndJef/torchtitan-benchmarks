@@ -63,6 +63,7 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES,
     MEGATRON_FSDP_VERSION,
     MEGATRON_SHARDING_STRATEGY,
+    LEAN_PRECISION_FLAGS,
     NO_CHECK_FOR_NAN_FLAG,
     SHARDING_STRATEGIES,
     ZERO1_FLAGS,
@@ -621,6 +622,80 @@ class FlagListTest(unittest.TestCase):
         self.assertEqual(
             SHARDING_STRATEGIES["zero3"], MEGATRON_SHARDING_STRATEGY
         )
+
+    def test_lean_sends_the_four_precision_flags(self) -> None:
+        """The whole recipe, and the dtype each flag carries.
+
+        The four together take the optimizer state from 18 bytes per
+        parameter to 10: the master becomes a 2-byte remainder, the
+        gradients become bf16, and the two Adam moments become bf16.
+        """
+        emitted = flags_for(
+            "1b",
+            dataclasses.replace(PP4_SPEC, dense_sharding="zero1"),
+            megatron_precision="lean",
+        )
+        self.assertIn("--use-precision-aware-optimizer", emitted)
+        for flag in (
+            "--main-grads-dtype",
+            "--exp-avg-dtype",
+            "--exp-avg-sq-dtype",
+        ):
+            with self.subTest(flag=flag):
+                self.assertEqual(value_after(emitted, flag), "bf16")
+
+    def test_stock_sends_no_precision_flag(self) -> None:
+        """The default value must change no published command line."""
+        for spec in (TRIVIAL_SPEC, PP4_SPEC, SHARDED_PP4_SPEC):
+            emitted = flags_for("1b", spec)
+            for flag in LEAN_PRECISION_FLAGS:
+                with self.subTest(dense_sharding=spec.dense_sharding, flag=flag):
+                    self.assertNotIn(flag, emitted)
+
+    def test_lean_under_the_replicated_parity_is_refused(self) -> None:
+        """Megatron asserts use_distributed_optimizer under the
+        precision-aware optimizer, and the dense-sharding value is the one
+        owner of that flag. Unrefused, the run dies inside Megatron's own
+        config validation and names neither axis.
+        """
+        with self.assertRaisesRegex(
+            ValueError, "needs --dense-sharding zero1 or"
+        ):
+            flags_for("1b", PP4_SPEC, megatron_precision="lean")
+
+    def test_an_unknown_precision_value_is_refused(self) -> None:
+        """A silent fall through would send the stock argv under the lean
+        label, and record 10 bytes per parameter for a run that held 18."""
+        with self.assertRaisesRegex(ValueError, "megatron precision"):
+            flags_for(
+                "1b",
+                dataclasses.replace(PP4_SPEC, dense_sharding="zero1"),
+                megatron_precision="bf16",
+            )
+
+    def test_the_two_flags_the_recipe_never_sends(self) -> None:
+        """Both would be wrong, and each for its own reason.
+
+        ``--main-params-dtype`` accepts fp32 and fp16 only, and the master
+        is already 2 bytes through ``store_param_remainders`` while staying
+        exactly fp32. ``--grad-reduce-in-bf16`` would state one fact twice:
+        under ``--bf16`` Megatron turns fp32 accumulation on only when the
+        main-grad dtype is fp32, so ``--main-grads-dtype bf16`` leaves it
+        off by itself.
+        """
+        for precision in ("stock", "lean"):
+            emitted = flags_for(
+                "1b",
+                dataclasses.replace(PP4_SPEC, dense_sharding="zero1"),
+                megatron_precision=precision,
+            )
+            with self.subTest(megatron_precision=precision):
+                self.assertNotIn("--main-params-dtype", emitted)
+                self.assertNotIn("--grad-reduce-in-bf16", emitted)
+        # The one that moved: it is the precision axis's flag now, so a
+        # roster entry would say a lean run declines what its argv carries.
+        self.assertIn("--grad-reduce-in-bf16", ALWAYS_OMITTED_FLAGS)
+        self.assertNotIn("--use-precision-aware-optimizer", ALWAYS_OMITTED_FLAGS)
 
     def test_geometry_comes_from_the_shape(self) -> None:
         """Every registered shape, field by field.

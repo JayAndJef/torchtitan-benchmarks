@@ -1665,7 +1665,12 @@ TEST_CENSUS = {
     # defaults to unrequested, refuses an unknown value, takes no
     # environment variable, and the sweep runs the stock scenario alone
     # under off, printing each skipped scenario's own refusal.
-    "test_cli": 30,
+    # +6 with --megatron-precision: the value reaching the request, its
+    # unrequested default, an unknown value refused, no environment
+    # variable, and the two sweeps -- lean under a sharded dense value
+    # runs the stock scenario alone, and lean under replicate reaches no
+    # scenario at all.
+    "test_cli": 36,
     # The knowledge base under database/: one test runs its checker and one
     # builds its document. Both skip, per method, where the gitignored
     # directory is absent, so the count holds on every checkout.
@@ -2035,7 +2040,10 @@ TEST_CENSUS = {
     # does not send, the optimizer table separates replicate from zero1
     # where the wrapper table cannot, and that table is read against
     # Megatron's own source.
-    "test_megatron_stock_driver": 134,
+    # +5 with the lean precision recipe: the four flags and their bf16
+    # tokens, no flag at all under stock, the refusal under replicate, an
+    # unknown value refused, and the two flags the recipe never sends.
+    "test_megatron_stock_driver": 139,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2053,7 +2061,9 @@ TEST_CENSUS = {
     # +2 with the nan guard half of arm rule 12: the driver's line equal to
     # the profile's marker at both values, and the line asked at every
     # mesh while the tuned profile asks for none and refuses off.
-    "test_megatron_stock_launch": 65,
+    # +2 with the precision value: the lean argv equal to its two parts,
+    # and the titan arm untouched under lean.
+    "test_megatron_stock_launch": 67,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2151,7 +2161,10 @@ TEST_CENSUS = {
     # +2 with the manifest field: a resume inheriting the recorded value
     # and refusing another, and a schema-13 directory reading as on.
     # +1 that execute_run hands the NaN-guard value to validate_arm.
-    "test_runner": 85,
+    # +6 with --megatron-precision: the three refusals before any host
+    # probe, an unknown value refused, lean reaching the stock command
+    # and not the titan one, and the default adding no flag.
+    "test_runner": 91,
     "test_run_validation": 1,
     "test_swiglu": 4,
     "test_te_rope": 1,
@@ -2326,7 +2339,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1878
+TEST_CENSUS_TOTAL = 1897
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

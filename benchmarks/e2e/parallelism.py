@@ -226,6 +226,19 @@ REPLICATE_ONLY_LAUNCHERS = frozenset({"megatron"})
 # launcher is an edit here rather than a silent classification.
 NAN_GUARD_LAUNCHERS = frozenset({"megatron_stock"})
 
+# The launchers whose driver can hold ``--megatron-precision lean``.
+#
+# The stock driver hands the four precision flags to Megatron's own
+# optimizer builder. The tuned driver
+# (``benchmarks/e2e/megatron/train.py``) builds a plain torch ``AdamW`` and
+# has no precision-aware path at all, so ``lean`` would reach nothing there
+# and the manifest would record a precision the run did not have.
+#
+# Declared beside ``NAN_GUARD_LAUNCHERS`` and for the same reason: the
+# refusal follows the arm roster the run really starts, so ``run --arm``
+# narrows it.
+PRECISION_LAUNCHERS = frozenset({"megatron_stock"})
+
 
 # The ``Arm.launcher`` values whose sharded parity goes through
 # Megatron-FSDP. Rule 17 reads this set.

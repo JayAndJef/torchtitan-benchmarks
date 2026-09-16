@@ -86,8 +86,10 @@ from benchmarks.e2e.parallelism import (
 from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
+    DEFAULT_MEGATRON_PRECISION,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
+    MEGATRON_PRECISION_MODES,
     Workload,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
@@ -314,9 +316,19 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--data-path",
     "--tensorboard-dir",
     "--grad-reduce-in-bf16",
-    "--use-precision-aware-optimizer",
     "--profile-ranks",
 )
+
+# **--use-precision-aware-optimizer LEFT this tuple**, because
+# --megatron-precision lean sends it. It is declined under the default
+# value alone, and _precision_flags is what decides that. A roster entry
+# here would say a lean run declines a flag its own argv carries.
+#
+# **--grad-reduce-in-bf16 STAYS**, under both precision values. Under
+# --bf16 Megatron turns fp32 accumulation on only when the main-grad dtype
+# is fp32 (arguments.py), so --main-grads-dtype bf16 leaves it off by
+# itself. Sending this flag too would state one fact twice, and a reader of
+# the argv could not tell which token did the work.
 
 # The flag NAMES each dense-sharding value sends.
 #
@@ -348,6 +360,24 @@ SHARDING_FLAGS_BY_VALUE: dict[str, tuple[str, ...]] = {
     "zero1": ZERO1_FLAGS,
     "zero3": ZERO3_FLAGS,
 }
+
+# The flag NAMES --megatron-precision lean sends. The whole recipe, its
+# byte table and the two flags it must never send are stated once, above
+# MEGATRON_PRECISION_MODES in benchmarks/e2e/registry.py.
+#
+# The three dtype flags take a value token each, so the argv is eight
+# tokens. This tuple holds the names, which is what a test asserts absence
+# by under the default value.
+LEAN_PRECISION_FLAGS: tuple[str, ...] = (
+    "--use-precision-aware-optimizer",
+    "--main-grads-dtype",
+    "--exp-avg-dtype",
+    "--exp-avg-sq-dtype",
+)
+
+# The dtype every lean flag carries. One name, so the three cannot drift
+# apart and a reader meets the recipe as one fact.
+LEAN_PRECISION_DTYPE = "bf16"
 
 
 def refuse_unknown_dense_sharding(dense_sharding: str) -> None:
@@ -412,6 +442,65 @@ def refuse_unknown_p2p_sync(megatron_p2p_sync: str) -> None:
             f"megatron p2p sync {megatron_p2p_sync!r} is not one of "
             + ", ".join(repr(mode) for mode in MEGATRON_P2P_SYNC_MODES)
         )
+
+
+def refuse_unknown_megatron_precision(megatron_precision: str) -> None:
+    """Raise on a precision value this module cannot build a command line for.
+
+    A silent fall through would send the stock argv under the ``lean``
+    label. The manifest would then record 10 bytes of optimizer state per
+    parameter for a run that held 18.
+    """
+    if megatron_precision not in MEGATRON_PRECISION_MODES:
+        raise ValueError(
+            f"megatron precision {megatron_precision!r} is not one of "
+            + ", ".join(repr(mode) for mode in MEGATRON_PRECISION_MODES)
+        )
+
+
+def _precision_flags(
+    megatron_precision: str, dense_sharding: str
+) -> list[str]:
+    """What Megatron needs to hold the optimizer state this way.
+
+    Empty under ``stock``, which is ``--bf16`` alone and 18 bytes of
+    optimizer state per parameter. That is the treatment every published
+    cell of this scenario ran, so the default argv does not move.
+
+    Under ``lean`` it is the four flags of ``LEAN_PRECISION_FLAGS`` and
+    their three dtype tokens, which reach 10 bytes. The recipe, the byte
+    table and the two flags this axis must never send are stated once,
+    above ``MEGATRON_PRECISION_MODES`` in ``benchmarks/e2e/registry.py``.
+
+    **``lean`` needs a sharded dense value, and this refuses the rest.**
+    ``optimizer_config.py`` asserts ``use_distributed_optimizer`` under
+    ``--use-precision-aware-optimizer``, and the dense-sharding axis is the
+    one owner of that flag. A replicated run would die inside Megatron's
+    own config validation, minutes into a subprocess, naming neither this
+    axis nor its repair. ``_resolve_run`` refuses the combination first for
+    a real run; this refusal is for a caller that builds a command line
+    without one.
+    """
+    refuse_unknown_megatron_precision(megatron_precision)
+    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+        return []
+    if dense_sharding == "replicate":
+        raise ValueError(
+            f"megatron precision {megatron_precision!r} needs "
+            "--dense-sharding zero1 or --dense-sharding zero3: Megatron "
+            "asserts use_distributed_optimizer under "
+            "--use-precision-aware-optimizer, and the dense-sharding value "
+            "is the one owner of that flag"
+        )
+    return [
+        "--use-precision-aware-optimizer",
+        "--main-grads-dtype",
+        LEAN_PRECISION_DTYPE,
+        "--exp-avg-dtype",
+        LEAN_PRECISION_DTYPE,
+        "--exp-avg-sq-dtype",
+        LEAN_PRECISION_DTYPE,
+    ]
 
 
 def omitted_flags(dense_sharding: str) -> tuple[str, ...]:
@@ -861,6 +950,7 @@ def stock_megatron_flags(
     compile_mode: str = SUPPORTED_MODE,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
+    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
 ) -> list[str]:
     """The whole argument list for one stock Megatron-LM arm.
 
@@ -882,12 +972,19 @@ def stock_megatron_flags(
     ``off`` adds Megatron's own ``--no-check-for-nan-in-loss-and-grad``,
     ahead of the harness group, and is legal at every mesh.
 
+    ``megatron_precision`` defaults to ``stock``, which sends nothing and
+    is 18 bytes of optimizer state per parameter. ``lean`` adds the four
+    flags of ``LEAN_PRECISION_FLAGS`` and reaches 10 bytes. It is refused
+    under ``--dense-sharding replicate``, because Megatron asserts
+    ``use_distributed_optimizer`` under the precision-aware optimizer.
+
     Raises ``ValueError`` on a request this arm cannot honour. Each refusal
     names the reason, because a caller may build a command line without a
     run and a bare failure names nothing.
     """
     refuse_unknown_p2p_sync(megatron_p2p_sync)
     refuse_unknown_nan_guard(megatron_nan_guard)
+    refuse_unknown_megatron_precision(megatron_precision)
     if spec.pp == 1 and megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
         raise ValueError(
             f"megatron p2p sync {megatron_p2p_sync!r} was requested at pp 1, "
@@ -966,6 +1063,7 @@ def stock_megatron_flags(
         ),
         *_mesh_flags(spec),
         *_sharding_flags(spec.dense_sharding),
+        *_precision_flags(megatron_precision, spec.dense_sharding),
         *_data_flags(
             shape, workload, profile_step_end=profile_step_end
         ),

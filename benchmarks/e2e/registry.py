@@ -121,6 +121,54 @@ DEFAULT_MEGATRON_P2P_SYNC = "on"
 MEGATRON_NAN_GUARD_MODES = ("on", "off")
 DEFAULT_MEGATRON_NAN_GUARD = "on"
 
+# Stock Megatron's optimizer precision, selectable per run.
+#
+# "stock" is --bf16 alone, and it is 18 bytes of optimizer state per
+# parameter: the bf16 parameter 2, an fp32 master 4, fp32 gradients 4, and
+# two fp32 Adam moments 8. That is what every published cell of this
+# scenario ran, and it is the first of the four deliberate differences the
+# stock arm carries against TorchTitan's 8.
+#
+# "lean" sends four flags and reaches 10 bytes:
+#
+#     --use-precision-aware-optimizer
+#     --main-grads-dtype bf16
+#     --exp-avg-dtype bf16
+#     --exp-avg-sq-dtype bf16
+#
+#     tensor            stock   lean
+#     parameter bf16        2      2
+#     master                4      2
+#     gradients             4      2
+#     Adam moments          8      4
+#     total                18     10
+#
+# **The master stays fp32, and it is never fp16.** store_param_remainders
+# defaults True (optimizer_config.py) and needs TE >= 2.1.0; this repo runs
+# 2.17.1. The bf16 parameter is the top half of the fp32 master and the
+# remainder holds the low 16 bits, so the master costs 2 bytes and is still
+# exactly fp32. --main-params-dtype accepts fp32 and fp16 only
+# (arguments.py), so this axis never sends it.
+#
+# **--grad-reduce-in-bf16 is never sent either.** Under --bf16 Megatron
+# turns fp32 accumulation on only when the main-grad dtype is fp32
+# (arguments.py), so --main-grads-dtype bf16 leaves it off by itself. The
+# second flag would state one fact twice.
+#
+# "lean" needs a sharded dense value. optimizer_config.py asserts
+# use_distributed_optimizer under --use-precision-aware-optimizer, and the
+# dense-sharding axis is the one owner of that flag. The value reaches the
+# stock megatron launcher alone: the tuned driver builds a plain torch
+# AdamW and has no precision-aware path.
+#
+# **"lean" changes the numerics.** bf16 Adam moments and bf16 gradient
+# accumulation are a real change, and at pp 8 the accumulation is 16-way in
+# bf16. Read the loss trajectories beside any lean number. At dp 1 the
+# distributed optimizer also runs its bucket bookkeeping for no saving.
+# Both effects are unmeasured.
+MEGATRON_PRECISION_MODES = ("stock", "lean")
+DEFAULT_MEGATRON_PRECISION = "stock"
+
 
 @dataclass(frozen=True)
 class Workload:

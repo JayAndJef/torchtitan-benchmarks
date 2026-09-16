@@ -962,6 +962,161 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 self._resume(out_dir, megatron_nan_guard="off")
 
 
+class MegatronPrecisionResolutionTests(unittest.TestCase):
+    """What ``_resolve_run`` does with ``--megatron-precision``.
+
+    All three refusals are parent-side and land before any host probe.
+    The value reaches the stock megatron command alone. The tuned driver
+    builds a plain torch AdamW, so it refuses ``lean``. And ``lean`` needs
+    a sharded dense value, because Megatron asserts the distributed
+    optimizer under the precision-aware optimizer.
+    """
+
+    LEAN_FLAGS = (
+        "--use-precision-aware-optimizer",
+        "--main-grads-dtype",
+        "--exp-avg-dtype",
+        "--exp-avg-sq-dtype",
+    )
+
+    def setUp(self) -> None:
+        self.metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+            "megatron_git_rev": "mcore-rev",
+        }
+
+    def _resolve(
+        self,
+        names: tuple[str, ...],
+        *,
+        megatron_precision: str | None = "lean",
+        dense_sharding: str = "zero1",
+        scenario_name: str = "piper_megatron_stock",
+    ):
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0",
+                    scenario_name=scenario_name,
+                    arm_names=names,
+                    out_dir=Path("/tmp/precision-test"),
+                    ac_mode="none",
+                    parallelism=ParallelismSpec(
+                        dp=1, dense_sharding=dense_sharding
+                    ),
+                    megatron_precision=megatron_precision,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def _refused_before_any_probe(
+        self, pattern: str, scenario_name: str, **keywords
+    ) -> None:
+        def never(*args, **kwargs):
+            raise AssertionError("a host probe ran for a refused request")
+
+        with mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
+        ):
+            with self.assertRaisesRegex(ValueError, pattern):
+                _resolve_run(
+                    RunRequest(
+                        gpu="0",
+                        scenario_name=scenario_name,
+                        out_dir=Path("/tmp/precision-test"),
+                        ac_mode="none",
+                        **keywords,
+                    ),
+                    {"PATH": os.environ["PATH"]},
+                )
+
+    def test_lean_without_a_stock_arm_is_refused_before_any_probe(self) -> None:
+        """TorchTitan holds its own bf16 optimizer states, so a titan-only
+        run gives the value nothing to reach."""
+        for scenario_name, names in (
+            ("piper1b_rope", ("baseline",)),
+            ("piper_megatron_stock", ("titan_stock",)),
+        ):
+            with self.subTest(scenario=scenario_name):
+                self._refused_before_any_probe(
+                    "reaches no arm",
+                    scenario_name,
+                    arm_names=names,
+                    megatron_precision="lean",
+                )
+
+    def test_lean_with_the_tuned_megatron_arm_is_refused_before_any_probe(
+        self,
+    ) -> None:
+        """The tuned driver builds a plain torch AdamW, so it has no
+        precision-aware optimizer to configure. Its refusal names the arm
+        and the repair, and it wins over the other two when all apply."""
+        for names in (("baseline",), ("baseline", "titan_stock"), ()):
+            with self.subTest(arms=names):
+                self._refused_before_any_probe(
+                    r"requested with baseline, whose driver "
+                    r"benchmarks/e2e/megatron/train\.py builds a plain torch "
+                    r"AdamW",
+                    "piper1b_megatron",
+                    arm_names=names,
+                    megatron_precision="lean",
+                )
+
+    def test_lean_under_replicate_is_refused_before_any_probe(self) -> None:
+        """Megatron asserts ``use_distributed_optimizer`` under
+        ``--use-precision-aware-optimizer``, and ``--dense-sharding`` is
+        the one owner of that flag. The refusal names both repairs."""
+        self._refused_before_any_probe(
+            "needs --dense-sharding zero1 or --dense-sharding zero3",
+            "piper_megatron_stock",
+            arm_names=("baseline",),
+            megatron_precision="lean",
+        )
+
+    def test_an_unknown_value_is_refused(self) -> None:
+        self._refused_before_any_probe(
+            "unknown megatron precision",
+            "piper_megatron_stock",
+            arm_names=("baseline",),
+            megatron_precision="bf16",
+        )
+
+    def test_lean_reaches_the_stock_command_and_not_the_titan_one(self) -> None:
+        """A mixed selection is legal: the stock arm gets the four flags
+        and the titan arm gets none of them."""
+        resolved = self._resolve(("baseline", "titan_stock"))
+        self.assertEqual(resolved[14], "lean")
+        commands = resolved[6]
+        stock = commands["baseline"]
+        for flag in self.LEAN_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertEqual(stock.count(flag), 1)
+                self.assertNotIn(flag, commands["titan_stock"])
+
+    def test_the_default_resolves_to_stock_and_adds_no_flag(self) -> None:
+        for requested in (None, "stock"):
+            with self.subTest(requested=requested):
+                resolved = self._resolve(
+                    ("baseline", "titan_stock"), megatron_precision=requested
+                )
+                self.assertEqual(resolved[14], "stock")
+                for name, command in resolved[6].items():
+                    for flag in self.LEAN_FLAGS:
+                        self.assertNotIn(flag, command, name)
+
+
 class ParallelizeTests(unittest.TestCase):
     def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
         for factory in (

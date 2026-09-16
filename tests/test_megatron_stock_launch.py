@@ -239,6 +239,7 @@ def _command(
     local_batch_size: int | None = None,
     megatron_p2p_sync: str = "on",
     megatron_nan_guard: str = "on",
+    megatron_precision: str = "stock",
 ) -> list[str]:
     scenario = scenario_by_name(SCENARIO_NAME)
     workload = scenario.workload
@@ -255,6 +256,7 @@ def _command(
         parallelism=parallelism,
         megatron_p2p_sync=megatron_p2p_sync,
         megatron_nan_guard=megatron_nan_guard,
+        megatron_precision=megatron_precision,
     )
 
 
@@ -459,6 +461,7 @@ class StockArgvTests(unittest.TestCase):
         compile_mode="default",
         megatron_p2p_sync="on",
         megatron_nan_guard="on",
+        megatron_precision="stock",
     ):
         from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
@@ -475,7 +478,42 @@ class StockArgvTests(unittest.TestCase):
                 compile_mode=compile_mode,
                 megatron_p2p_sync=megatron_p2p_sync,
                 megatron_nan_guard=megatron_nan_guard,
+                megatron_precision=megatron_precision,
             )
+        )
+
+    def test_the_lean_precision_argv_is_exactly_its_two_parts(self) -> None:
+        """The value crosses ``launch.py`` untouched into ``flags.py``.
+
+        ``lean`` needs a sharded dense value, so the mesh here is the
+        sharded one. The four flags and their three dtype tokens appear
+        once each, and none of them reaches the launcher head.
+        """
+        command = _command(
+            _stock_arm(),
+            parallelism=SHARDED_MESH,
+            local_batch_size=32,
+            megatron_precision="lean",
+        )
+        head = command[: command.index(STOCK_MEGATRON_DRIVER_MODULE) + 1]
+        self.assertEqual(
+            command,
+            head
+            + self._flags(
+                SHARDED_MESH,
+                local_batch_size=32,
+                megatron_precision="lean",
+            ),
+        )
+        self.assertEqual(command.count("--use-precision-aware-optimizer"), 1)
+        self.assertNotIn("--use-precision-aware-optimizer", head)
+
+    def test_the_titan_arm_gets_no_token_under_lean(self) -> None:
+        """TorchTitan holds its own bf16 optimizer states, and this axis
+        never reaches it."""
+        self.assertEqual(
+            _command(_titan_arm(), megatron_precision="lean"),
+            _command(_titan_arm()),
         )
 
     def test_the_nan_guard_off_argv_is_exactly_its_two_parts(self) -> None:
