@@ -411,8 +411,10 @@ when **both** shard, and three rules enforce it:
 it is not worth a refusal: the run is honest and the manifest records the
 value the operator asked for. `_resolve_run` prints a warning instead,
 before any host probe, and `results.json` carries it in `warnings`. The
-second warning names `zero1` at `pp` 1, where sharding the optimizer state
-without a pipeline is the level other frameworks call ZeRO-2.
+second warning names `zero1` at `pp` 1. One microbatch puts the gradient
+reduce-scatter inside the only backward pass, so the TorchTitan arm holds
+ZeRO-2 there. The Megatron arm holds ZeRO-1 at every mesh. Do not read the
+two arms of such a cell as one ZeRO level.
 
 **What each value delivers.** TorchTitan gets
 `--parallelism.data-parallel-replicate-degree` and its shard twin from
@@ -435,6 +437,22 @@ against `Float16OptimizerWithFloat16Params` without it. The stock driver
 reads the optimizer `setup_model_and_optimizer` returned and prints its
 class name on the data-parallel line, so arm rule 12 fails a run that lost
 the flag rather than publishing ZeRO-0 memory under a ZeRO-1 label.
+
+**That line prints above `dp` 1 alone, so a `dp 1 x pp 8` cell proves no
+ZeRO level.** `install_data_parallel_marker` returns early at a
+data-parallel size of 1, and arm rule 12 asks for the line only above `dp`
+1. A `--dp 1 --pp 8 --dense-sharding zero1` run whose argv lost
+`--use-distributed-optimizer` therefore passes every rule. Two things
+narrow the gap and neither closes it: the `dp 1` warning says the value
+shards nothing there, and arm rule 12's precision half runs at every mesh.
+
+**Nothing observes the TorchTitan half of `zero1` at any mesh.**
+`titan_mesh` returns the same pair under both sharded values, so a `zero1`
+arm and a `zero3` arm print the same mesh line and arm rule 12 cannot
+separate them. `--parallelism.fsdp-reshard-after-forward` is the whole
+difference, and TorchTitan logs no policy. `manifest.commands` is therefore
+the one record of which value a titan arm ran. Carry the manifest with
+every titan `zero1` number.
 
 **The two engines still reshard differently, and only `zero1` removes it.**
 TorchTitan's `get_fsdp_reshard_after_forward_policy` returns `not
