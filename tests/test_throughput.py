@@ -230,9 +230,10 @@ class SingleRankIsUnchangedTests(unittest.TestCase):
         self.assertEqual(summary.published_rank, 0)
         self.assertEqual([row.rank for row in summary.per_rank], [0])
 
-    def test_one_rank_prints_no_per_rank_table_and_raises_no_warning(self) -> None:
+    def test_one_rank_prints_one_row_per_arm_and_raises_no_warning(self) -> None:
         result, report = self._evaluate({"world_size": 1, "pp": 1})
         self.assertNotIn("per-rank tokens/s", report)
+        self.assertNotIn("WARNING", report)
         self.assertEqual(result.warnings, ())
 
 
@@ -528,7 +529,10 @@ class WholeEvaluationTests(unittest.TestCase):
             1200,
         )
         self.assertEqual(machine["losses"]["megatron_stock"][0]["value"], 1.0)
-        self.assertIn("stable tokens/s", report)
+        self.assertIn("tokens/s", report)
+        self.assertIn("step ms", report)
+        self.assertIn("p95 ms", report)
+        self.assertIn("peak GiB", report)
         self.assertNotIn("gpu kernel time", report)
 
     def test_the_payload_carries_the_schema_six_keys_and_no_others(
