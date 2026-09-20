@@ -424,10 +424,10 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
 
     def test_the_megatron_pattern_reads_the_degree_not_the_line(self) -> None:
         """``pp=1`` is not a pipeline. Any other degree is."""
-        pattern = VALIDATION_PROFILES["megatron"].pipelined_pattern
-        trivial = "Megatron-LM parallelism: dp=1 pp=1 schedule=None"
-        pipelined = "Megatron-LM parallelism: dp=1 pp=2 schedule=1F1B"
-        deeper = "Megatron-LM parallelism: dp=1 pp=4 schedule=1F1B"
+        pattern = VALIDATION_PROFILES["megatron_stock"].pipelined_pattern
+        trivial = "Megatron-LM stock parallelism: dp=1 pp=1 schedule=None"
+        pipelined = "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B"
+        deeper = "Megatron-LM stock parallelism: dp=1 pp=4 schedule=1F1B"
         self.assertIsNone(pattern.search(trivial))
         self.assertIsNotNone(pattern.search(pipelined))
         self.assertIsNotNone(pattern.search(deeper))
@@ -498,17 +498,18 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
                 "(dp_replicate=2, dp_shard=1); 17 FSDP units"
             )
         )
-        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        megatron = VALIDATION_PROFILES["megatron_stock"].data_parallel_pattern
         self.assertIsNotNone(
             megatron.search(
-                "Megatron-LM parallelism: dp=2 pp=1 schedule=None "
+                "Megatron-LM stock parallelism: dp=2 pp=1 schedule=None "
                 "microbatches=1 stages=1"
             )
         )
         self.assertIsNotNone(
             megatron.search(
-                "Megatron-LM data parallel: DistributedDataParallel over 2 "
-                "ranks (overlap_grad_reduce=True, grad_reduce_in_fp32=False)"
+                "Megatron-LM stock data parallel: DistributedDataParallel "
+                "over 2 ranks (overlap_grad_reduce=True, "
+                "grad_reduce_in_fp32=False)"
             )
         )
 
@@ -542,19 +543,21 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
             )
         )
         self.assertIsNone(titan.search(_titan_log(PP2)))
-        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        megatron = VALIDATION_PROFILES["megatron_stock"].data_parallel_pattern
         self.assertIsNone(
             megatron.search(
-                "Megatron-LM parallelism: dp=1 pp=2 schedule=1F1B "
+                "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B "
                 "microbatches=4 stages=2"
             )
         )
 
     def test_a_double_digit_degree_is_not_read_as_one(self) -> None:
         """``dp=1`` must not match ``dp=12``, and the reverse."""
-        megatron = VALIDATION_PROFILES["megatron"].data_parallel_pattern
+        megatron = VALIDATION_PROFILES["megatron_stock"].data_parallel_pattern
         self.assertIsNotNone(
-            megatron.search("Megatron-LM parallelism: dp=12 pp=1 schedule=None")
+            megatron.search(
+                "Megatron-LM stock parallelism: dp=12 pp=1 schedule=None"
+            )
         )
         titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
         self.assertIsNotNone(titan.search("dp_replicate=10, dp_shard=1,"))
@@ -864,7 +867,7 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     def test_no_line_is_asked_below_a_pipeline(self) -> None:
         """Below ``pp`` 1 there is no message to synchronize, and ``off``
         is refused parent-side; the callable asks for nothing there."""
-        for name in ("megatron", "megatron_stock", "torchtitan"):
+        for name in ("megatron_stock", "torchtitan"):
             for spec in (TRIVIAL_SPEC, DP2):
                 for value in ("on", "off"):
                     with self.subTest(profile=name, spec=spec, value=value):
@@ -879,7 +882,7 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
         titan = VALIDATION_PROFILES["torchtitan"]
         for value in ("on", "off"):
             self.assertEqual(titan.p2p_markers(PP2, value), ())
-        for name in ("megatron", "megatron_stock", "torchtitan"):
+        for name in ("megatron_stock", "torchtitan"):
             with self.subTest(profile=name):
                 with self.assertRaisesRegex(ValueError, "unknown megatron p2p"):
                     VALIDATION_PROFILES[name].p2p_markers(PP2, "sometimes")
@@ -946,7 +949,7 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
         titan = VALIDATION_PROFILES["torchtitan"]
         for value in ("on", "off"):
             self.assertEqual(titan.nan_guard_markers(value), ())
-        for name in ("megatron", "megatron_stock", "torchtitan"):
+        for name in ("megatron_stock", "torchtitan"):
             with self.subTest(profile=name):
                 with self.assertRaisesRegex(ValueError, "unknown megatron nan"):
                     VALIDATION_PROFILES[name].nan_guard_markers("sometimes")
@@ -1070,22 +1073,12 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         titan = VALIDATION_PROFILES["torchtitan"]
         for value in ("stock", "lean"):
             self.assertEqual(titan.precision_markers(value), ())
-        for name in ("megatron", "megatron_stock", "torchtitan"):
+        for name in ("megatron_stock", "torchtitan"):
             with self.subTest(profile=name):
                 with self.assertRaisesRegex(
                     ValueError, "unknown megatron precision"
                 ):
                     VALIDATION_PROFILES[name].precision_markers("bf16")
-
-    def test_the_tuned_profile_asks_for_nothing_and_refuses_lean(
-        self,
-    ) -> None:
-        """That driver builds a plain torch AdamW, so no line of its log
-        could prove the treatment."""
-        tuned = VALIDATION_PROFILES["megatron"]
-        self.assertEqual(tuned.precision_markers("stock"), ())
-        with self.assertRaisesRegex(ValueError, "plain torch AdamW"):
-            tuned.precision_markers("lean")
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,

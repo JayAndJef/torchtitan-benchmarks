@@ -13,7 +13,7 @@ are exercised by an import, and every one of them fails only at run time --
 This file pins all of them so a missed reference costs one CPU second.
 
 Everything the move was allowed to change lives in the constants at the top:
-``CANONICAL_ROOTS``, ``TITAN_CONFIG_MODULE``, ``MEGATRON_DRIVER_MODULE``, the
+``CANONICAL_ROOTS``, ``TITAN_CONFIG_MODULE``, the
 override/builder path prefixes, and the golden argv lists. Updating this file
 for the move was a handful of data edits, and reverting the move would be the
 same edits back -- the assertions themselves never move.
@@ -46,11 +46,8 @@ from benchmarks.models.piper_qwen3.megatron_bootstrap import (
 # training subprocess. It was three roots before the restructure.
 CANONICAL_ROOTS = ("benchmarks",)
 
-# The two strings a mechanical move is allowed to change, and the only two.
-# TITAN_CONFIG_MODULE is the --module token; MEGATRON_DRIVER_MODULE is the
-# python -m target of the megatron launcher.
+# The ``--module`` token a mechanical move is allowed to change.
 TITAN_CONFIG_MODULE = "benchmarks.models.piper_qwen3"
-MEGATRON_DRIVER_MODULE = "benchmarks.e2e.megatron.train"
 
 # Dotted-path prefixes the registries hand to importlib at run time.
 SWIGLU_INDUCTOR_OVERRIDE = (
@@ -517,8 +514,6 @@ LAUNCHERS = ("torchtitan", "megatron_stock")
 VALIDATION_KEYS = ("torchtitan", "megatron_stock")
 # The tuned driver's launcher and profile are still live, and no arm names
 # them. They are deleted with the driver.
-RETIRED_KEYS = ("megatron",)
-
 # The launchers whose scenario supports only ``--ac none``. Two calls below
 # pick an ac mode from it, so that a builder does not refuse the mode and
 # hide what the call meant to exercise.
@@ -528,7 +523,7 @@ RETIRED_KEYS = ("megatron",)
 # it would silently give a future ``megatron_*`` launcher the ``none`` path
 # and stop exercising ``sac`` for it. An explicit set makes a new launcher
 # an edit here, which is where the decision belongs.
-AC_NONE_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
+AC_NONE_LAUNCHERS = frozenset({"megatron_stock"})
 
 
 class RegistryDispatchTests(unittest.TestCase):
@@ -570,9 +565,7 @@ class RegistryDispatchTests(unittest.TestCase):
         self.assertEqual(used, set(VALIDATION_KEYS))
         # Both directions: an unused profile after the move means an arm lost
         # its engine-specific rules and fell back to another engine's.
-        self.assertEqual(
-            set(VALIDATION_PROFILES), set(VALIDATION_KEYS + RETIRED_KEYS)
-        )
+        self.assertEqual(set(VALIDATION_PROFILES), set(VALIDATION_KEYS))
         for key in VALIDATION_KEYS:
             with self.subTest(validation=key):
                 self.assertIn(key, VALIDATION_PROFILES)
@@ -590,9 +583,8 @@ class RegistryDispatchTests(unittest.TestCase):
 
 # The strongest single proof that a mechanical move changed nothing. After the
 # move the only tokens permitted to differ are TITAN_CONFIG_MODULE (the
-# --module value), MEGATRON_DRIVER_MODULE (the python -m target), and the
-# dotted override path -- all three are constants above, so the diff must be
-# exactly those substitutions and nothing else.
+# --module value) and the dotted override path -- both are constants above,
+# so the diff must be exactly those substitutions and nothing else.
 #
 # The titan golden is engines/titan_compiled under default/none at both
 # sizes: it exercises every optional branch of the builder except the
@@ -797,102 +789,6 @@ GOLDEN_OVERRIDE_COMMAND = [
 
 # sys.executable leads the megatron argv and is machine-specific, so it is
 # asserted separately and the literal starts at the -m.
-# The tuned megatron driver has no registered arm. Its launcher is still
-# live, so the golden argv is frozen against a synthetic arm.
-GOLDEN_MEGATRON_ARM = (
-    "engines",
-    Arm(
-        name="tuned_megatron",
-        description="the tuned megatron driver, which no scenario selects",
-        launcher="megatron",
-        validation="megatron",
-    ),
-)
-
-
-def _golden_megatron_tail(size: str) -> list[str]:
-    return [
-        "-m",
-        MEGATRON_DRIVER_MODULE,
-        "--seq-len",
-        "1024",
-        "--steps",
-        "40",
-        "--batch",
-        "4",
-        "--seed",
-        "42",
-        "--profile-freq",
-        "20",
-        "--profiler-warmup",
-        "5",
-        "--profiler-active",
-        "5",
-        "--mode",
-        "default",
-        "--model-size",
-        size,
-        "/tmp/arm-dir",
-    ]
-
-
-# The megatron twin of the titan pp2 golden, at the same spec.
-#
-# **It freezes the launcher, which is the half a flag list cannot state.**
-# The titan arms reach torchrun through ``run_train.sh``, which reads NGPU
-# and LOG_RANK from the environment; nothing wraps the megatron driver, so
-# the harness builds the launcher itself. Every flag below has a consumer:
-# ``--local-ranks-filter`` names every rank rather than torchrun's default of
-# rank 0 alone, and ``--role rank --tee 3`` is what puts the prefix that
-# ``benchmarks/artifacts/layout.py``'s ``logs_by_rank`` reads back on each
-# line. Drop one and a rank's output, or its rank label, is gone.
-#
-# sys.executable leads this argv too, so the literal starts at the first -m.
-def _golden_megatron_pp2_tail(size: str) -> list[str]:
-    return [
-        "-m",
-        "torch.distributed.run",
-        "--nproc-per-node=2",
-        "--rdzv-backend",
-        "c10d",
-        "--rdzv-endpoint",
-        "localhost:0",
-        "--local-ranks-filter",
-        "0,1",
-        "--role",
-        "rank",
-        "--tee",
-        "3",
-        "-m",
-        MEGATRON_DRIVER_MODULE,
-        "--seq-len",
-        "1024",
-        "--steps",
-        "40",
-        "--batch",
-        "4",
-        "--seed",
-        "42",
-        "--profile-freq",
-        "20",
-        "--profiler-warmup",
-        "5",
-        "--profiler-active",
-        "5",
-        "--mode",
-        "default",
-        "--model-size",
-        size,
-        "--pp",
-        "2",
-        "--pp-schedule",
-        "1F1B",
-        "--pp-microbatch-size",
-        "1",
-        "/tmp/arm-dir",
-    ]
-
-
 class GoldenCommandTests(unittest.TestCase):
     def _command(
         self, pinned, size, compile_mode, ac_mode, parallelism=None, batch=None
@@ -965,16 +861,6 @@ class GoldenCommandTests(unittest.TestCase):
             self._command(GOLDEN_OVERRIDE_ARM, "normal", "default", "none"),
             GOLDEN_OVERRIDE_COMMAND,
         )
-
-    def test_megatron_argv_at_normal(self) -> None:
-        command = self._command(GOLDEN_MEGATRON_ARM, "normal", "default", "none")
-        self.assertEqual(command[0], sys.executable)
-        self.assertEqual(command[1:], _golden_megatron_tail("normal"))
-
-    def test_megatron_argv_at_huge(self) -> None:
-        command = self._command(GOLDEN_MEGATRON_ARM, "huge", "default", "none")
-        self.assertEqual(command[0], sys.executable)
-        self.assertEqual(command[1:], _golden_megatron_tail("huge"))
 
     # ----------------------------------------------------------------
     # The parallelism axis, read mechanically rather than by eye.
@@ -1340,153 +1226,6 @@ class GoldenCommandTests(unittest.TestCase):
                 "none",
                 ParallelismSpec(pp=2),
             )
-
-    def test_megatron_argv_at_pp2(self) -> None:
-        command = self._command(
-            GOLDEN_MEGATRON_ARM,
-            "normal",
-            "default",
-            "none",
-            GOLDEN_TITAN_PP2_SPEC,
-        )
-        self.assertEqual(command[0], sys.executable)
-        self.assertEqual(command[1:], _golden_megatron_pp2_tail("normal"))
-
-    def _p2p_command(self, megatron_p2p_sync: str, parallelism=None):
-        scenario = scenario_by_name(GOLDEN_MEGATRON_ARM[0])
-        extra = {} if parallelism is None else {"parallelism": parallelism}
-        return command_for_arm(
-            scenario.workload,
-            GOLDEN_MEGATRON_ARM[1],
-            Path("/tmp/arm-dir"),
-            (),
-            "default",
-            "none",
-            model_size="normal",
-            megatron_p2p_sync=megatron_p2p_sync,
-            **extra,
-        )
-
-    def test_the_default_p2p_value_is_the_pre_option_argv(self) -> None:
-        """``on`` by name builds the argv a caller that passes nothing
-        builds, at the trivial spec and at pp 2."""
-        self.assertEqual(
-            self._p2p_command("on")[1:], _golden_megatron_tail("normal")
-        )
-        self.assertEqual(
-            self._p2p_command("on", GOLDEN_TITAN_PP2_SPEC)[1:],
-            _golden_megatron_pp2_tail("normal"),
-        )
-
-    def test_megatron_argv_at_pp2_with_the_p2p_sync_off(self) -> None:
-        """One pair, before the arm directory, and nothing else moves."""
-        golden = _golden_megatron_pp2_tail("normal")
-        self.assertEqual(
-            self._p2p_command("off", GOLDEN_TITAN_PP2_SPEC)[1:],
-            golden[:-1] + ["--batch-p2p-sync", "off"] + golden[-1:],
-        )
-
-    def test_the_p2p_sync_off_is_refused_at_the_trivial_spec(self) -> None:
-        with self.assertRaisesRegex(ValueError, "no pipeline message"):
-            self._p2p_command("off")
-
-    def _nan_guard_command(self, megatron_nan_guard: str, parallelism=None):
-        scenario = scenario_by_name(GOLDEN_MEGATRON_ARM[0])
-        extra = {} if parallelism is None else {"parallelism": parallelism}
-        return command_for_arm(
-            scenario.workload,
-            GOLDEN_MEGATRON_ARM[1],
-            Path("/tmp/arm-dir"),
-            (),
-            "default",
-            "none",
-            model_size="normal",
-            megatron_nan_guard=megatron_nan_guard,
-            **extra,
-        )
-
-    def test_the_default_nan_guard_is_the_pre_option_tuned_argv(self) -> None:
-        """``on`` by name builds the argv a caller that passes nothing
-        builds, at the trivial spec and at pp 2. The tuned driver takes no
-        token at either value."""
-        self.assertEqual(
-            self._nan_guard_command("on")[1:], _golden_megatron_tail("normal")
-        )
-        self.assertEqual(
-            self._nan_guard_command("on", GOLDEN_TITAN_PP2_SPEC)[1:],
-            _golden_megatron_pp2_tail("normal"),
-        )
-
-    def test_the_nan_guard_off_is_refused_for_the_tuned_driver(self) -> None:
-        """It has no guard to turn off, at any mesh."""
-        for parallelism in (None, GOLDEN_TITAN_PP2_SPEC):
-            with self.subTest(pp=1 if parallelism is None else parallelism.pp):
-                with self.assertRaisesRegex(ValueError, "no NaN guard"):
-                    self._nan_guard_command("off", parallelism)
-
-    def test_both_engines_are_told_the_same_pipeline(self) -> None:
-        """One spec, two spellings, and they must not drift apart.
-
-        The stage hazard of this axis is a split or a microbatch count that
-        differs between the engines: both runs would pass every other check
-        and the cross-engine row would compare two different jobs.
-        """
-        titan = self._command(
-            GOLDEN_TITAN_ARM, "normal", "default", "none", GOLDEN_TITAN_PP2_SPEC
-        )
-        megatron = self._command(
-            GOLDEN_MEGATRON_ARM,
-            "normal",
-            "default",
-            "none",
-            GOLDEN_TITAN_PP2_SPEC,
-        )
-        for titan_flag, megatron_flag in (
-            ("--parallelism.pipeline-parallel-degree", "--pp"),
-            ("--parallelism.pipeline-parallel-schedule", "--pp-schedule"),
-            (
-                "--parallelism.pipeline-parallel-microbatch-size",
-                "--pp-microbatch-size",
-            ),
-        ):
-            with self.subTest(flag=titan_flag):
-                self.assertEqual(
-                    titan[titan.index(titan_flag) + 1],
-                    megatron[megatron.index(megatron_flag) + 1],
-                )
-        # And the batch each engine splits is the same batch.
-        self.assertEqual(
-            titan[titan.index("--training.local-batch-size") + 1],
-            megatron[megatron.index("--batch") + 1],
-        )
-
-    def test_a_data_parallel_megatron_argv_states_the_degree(self) -> None:
-        """The driver needs the degree, and must not derive it.
-
-        Megatron gives its data-parallel axis every rank the pipeline degree
-        leaves over, so a derived degree could never disagree with the mesh
-        -- and the disagreement is what ``refuse_unsupported_mesh`` exists to
-        see. The flag is what a rank the operator did not account for trips
-        over.
-        """
-        for spec, expected in (
-            (ParallelismSpec(dp=2), "2"),
-            (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), "2"),
-        ):
-            with self.subTest(spec=spec):
-                command = self._command(
-                    GOLDEN_MEGATRON_ARM, "normal", "default", "none", spec
-                )
-                self.assertEqual(command[command.index("--dp") + 1], expected)
-
-    def test_the_trivial_spec_starts_no_launcher(self) -> None:
-        """The megatron argv at one rank is the interpreter, not torchrun."""
-        command = self._command(GOLDEN_MEGATRON_ARM, "normal", "default", "none")
-        self.assertEqual(command[0], sys.executable)
-        self.assertEqual(command[1:3], ["-m", MEGATRON_DRIVER_MODULE])
-        self.assertNotIn("torch.distributed.run", command)
-        self.assertNotIn("--dp", command)
-        self.assertNotIn("--pp", command)
 
 
 # --------------------------------------------------------------------------
@@ -2054,7 +1793,7 @@ TEST_CENSUS = {
     # ChainedOptimizer, reads a bare optimizer under zero3, refuses a
     # replicated chain under a zero1 label, and follows
     # --megatron-precision on the gradient reduction.
-    "test_megatron_stock_launch": 71,
+    "test_megatron_stock_launch": 68,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -2158,7 +1897,7 @@ TEST_CENSUS = {
     # +2 with the schema-16 field: a resume inheriting the recorded
     # precision and refusing another, and a schema-15 directory reading as
     # stock.
-    "test_runner": 81,
+    "test_runner": 75,
     "test_swiglu": 4,
     "test_te_rope": 1,
     # New with the in-process titan build: 3 that pin the override count
@@ -2325,7 +2064,7 @@ TEST_CENSUS = {
     # fields per value, the titan profile's silence, the tuned profile's
     # refusal of lean, a log that must carry the requested value, and one
     # rank of a pipeline that carries the other one.
-    "test_parallel_validation": 58,
+    "test_parallel_validation": 57,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -2343,7 +2082,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1856
+TEST_CENSUS_TOTAL = 1846
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

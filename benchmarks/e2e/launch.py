@@ -232,30 +232,13 @@ def command_for_arm(
     holds no megatron arm.
 
     ``megatron_nan_guard`` defaults to ``on`` for the same reason, and it
-    reaches the stock megatron command alone. The tuned driver has no NaN
-    guard, so ``_megatron_command`` refuses ``off`` outright, and a
-    TorchTitan argv is untouched under either value.
+    reaches the stock megatron command alone, and a TorchTitan argv is
+    untouched under either value.
 
     ``megatron_precision`` defaults to ``stock``, which is again the
     identity: it adds no token to any argv. It reaches the stock megatron
-    command alone. The tuned driver builds a plain torch ``AdamW``, so
-    ``_megatron_command`` refuses ``lean`` outright, and a TorchTitan argv
-    is untouched under either value.
+    command alone, and a TorchTitan argv is untouched under either value.
     """
-    if arm.launcher == "megatron":
-        return _megatron_command(
-            workload,
-            arm,
-            arm_dir,
-            extra_args,
-            compile_mode,
-            ac_mode,
-            model_size,
-            parallelism,
-            megatron_p2p_sync,
-            megatron_nan_guard,
-            megatron_precision,
-        )
     if arm.launcher == "megatron_stock":
         return _megatron_stock_command(
             workload,
@@ -380,153 +363,6 @@ def _megatron_launcher(spec: ParallelismSpec) -> list[str]:
     ]
 
 
-def _megatron_command(
-    workload: Workload,
-    arm: Arm,
-    arm_dir: Path,
-    extra_args: list[str] | tuple[str, ...],
-    compile_mode: str,
-    ac_mode: str,
-    model_size: str = "1b",
-    parallelism: ParallelismSpec = TRIVIAL_SPEC,
-    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
-    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
-    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
-) -> list[str]:
-    """Launch command for the Megatron baseline driver.
-
-    The driver replicates the titan workload treatment itself; the only
-    parameters that cross the seam are the workload sizes, the seed, the
-    profiler schedule, the compile mode (mapped to Megatron's native
-    CUDA-graph mechanism by the driver), and the p2p sync value.
-
-    **At the trivial spec the argv is unchanged**: ``_megatron_launcher``
-    returns the plain interpreter, and the three pipeline flags are omitted
-    rather than passed at their defaults. The driver refuses
-    ``--pp-schedule`` and ``--pp-microbatch-size`` at ``--pp 1`` for that
-    reason -- a value there names a split that does not happen.
-
-    ``--batch-p2p-sync`` follows the same rule: it is sent only under
-    ``off``, so the argv at the default is the argv every megatron directory
-    under ``out/`` records, and it is refused at ``pp`` 1, where there is no
-    pipeline message. ``_resolve_run`` refuses that first; it is restated
-    here for a caller that builds a command line without a run.
-
-    ``megatron_nan_guard`` sends nothing at either value, and ``off`` is
-    refused: this driver never calls ``validate_result`` and has no NaN
-    guard, so an argv built under ``off`` would be the ``on`` argv under a
-    label the run did not earn. ``_resolve_run`` refuses it first too.
-
-    ``megatron_precision`` behaves the same way, and ``lean`` is refused.
-    This driver builds a plain torch ``AdamW`` with bf16 states and has no
-    precision-aware optimizer, so there is no flag to send and an argv
-    built under ``lean`` would be the ``stock`` argv under another label.
-
-    Above one rank the driver reads ``RANK``, ``WORLD_SIZE`` and
-    ``LOCAL_RANK`` from torchrun, passes ``pipeline_model_parallel_size`` to
-    ``initialize_model_parallel``, builds only its own stage's layers, and
-    splits the batch into microbatches. It implements ``1F1B`` alone and
-    raises on any other schedule, so a schedule megatron-core supports but
-    this driver does not fails where the missing work lives rather than at a
-    validator claiming the library cannot do it.
-    """
-    if extra_args:
-        raise ValueError(
-            f"{arm.name}: TorchTitan passthrough arguments cannot apply to a "
-            f"megatron arm: {list(extra_args)}"
-        )
-    if ac_mode != "none":
-        raise ValueError(
-            f"{arm.name}: the megatron arm always runs without recompute; "
-            f"ac mode {ac_mode!r} has no Megatron parity (use --ac none)"
-        )
-    if compile_mode in UNCOMPILED_COMPILE_MODES:
-        # The scenario declines this mode, so the runner refuses it first.
-        # Restated here because a caller may build a command without one.
-        raise ValueError(
-            f"{arm.name}: compile mode {compile_mode!r} turns off the "
-            f"whole-block torch.compile a titan arm gets, and Megatron never "
-            f"has one; it cannot apply to this arm"
-        )
-    if workload.seed is None:
-        raise ValueError(
-            f"{arm.name}: megatron arms require a seeded workload"
-        )
-    if (
-        megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC
-        and parallelism.pp == 1
-    ):
-        raise ValueError(
-            f"{arm.name}: megatron p2p sync {megatron_p2p_sync!r} was "
-            "requested at pp 1, where there is no pipeline message to "
-            "synchronize"
-        )
-    if megatron_nan_guard != DEFAULT_MEGATRON_NAN_GUARD:
-        raise ValueError(
-            f"{arm.name}: megatron nan guard {megatron_nan_guard!r} was "
-            "requested for the tuned driver, which has no NaN guard to turn "
-            "off; the argv would carry a treatment the run did not have"
-        )
-    if megatron_precision != DEFAULT_MEGATRON_PRECISION:
-        raise ValueError(
-            f"{arm.name}: megatron precision {megatron_precision!r} was "
-            "requested for the tuned driver, which builds a plain torch "
-            "AdamW and has no precision-aware optimizer; the argv would "
-            "carry a treatment the run did not have"
-        )
-    args = [
-        *_megatron_launcher(parallelism),
-        "benchmarks.e2e.megatron.train",
-        "--seq-len",
-        str(workload.seq_len),
-        "--steps",
-        str(workload.steps),
-        "--batch",
-        str(workload.local_batch_size),
-        "--seed",
-        str(workload.seed),
-        "--profile-freq",
-        str(workload.profile_freq),
-        "--profiler-warmup",
-        str(workload.profiler_warmup),
-        "--profiler-active",
-        str(workload.profiler_active),
-        "--mode",
-        compile_mode,
-        "--model-size",
-        model_size,
-    ]
-    if parallelism.dp > 1:
-        # Omitted at dp 1, where the driver's default is the same value and
-        # the argv is the argv every megatron directory under out/ records.
-        # The driver needs the degree explicitly rather than deriving it from
-        # WORLD_SIZE: megatron gives the data-parallel axis every rank the
-        # pipeline degree leaves over, so a derived degree could never
-        # disagree with the mesh and the disagreement is what a check must be
-        # able to see.
-        args.extend(("--dp", str(parallelism.dp)))
-    if parallelism.pp > 1:
-        # Omitted at pp 1, where the driver refuses them: a schedule name and
-        # a microbatch size there would name a split that does not happen.
-        args.extend(
-            (
-                "--pp",
-                str(parallelism.pp),
-                "--pp-schedule",
-                str(parallelism.pp_schedule),
-                "--pp-microbatch-size",
-                str(parallelism.pp_microbatch_size),
-            )
-        )
-    if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
-        # Omitted at the default, which is megatron's own, so no recorded
-        # argv moves. The driver reads the value into the built config and
-        # prints what that config carries.
-        args.extend(("--batch-p2p-sync", megatron_p2p_sync))
-    args.append(str(arm_dir))
-    return args
-
-
 def _megatron_stock_command(
     workload: Workload,
     arm: Arm,
@@ -552,8 +388,7 @@ def _megatron_stock_command(
     last-wins, so a duplicate would change a value with nothing to see it.
 
     **At the trivial spec the launcher is the plain interpreter.**
-    ``_megatron_launcher`` is shared with the tuned driver and is unchanged,
-    so this arm starts torchrun only above one rank.
+    ``_megatron_launcher`` starts torchrun only above one rank.
 
     The five refusals below restate what a run already refuses, and
     ``flags.py`` restates two of them again for a caller that reaches it
@@ -562,10 +397,10 @@ def _megatron_stock_command(
     the reason.
 
     **The schedule refusal has a second cause, and it is not a
-    restatement.** Parallelism rule 5 reads ``"megatron" in engines``, so it
-    does not see this launcher at all: a schedule Megatron-LM implements and
-    this driver does not passes every parallelism rule. The refusal lands
-    here instead, and ``flags.py`` repeats it.
+    restatement.** Parallelism rule 5 asks what Megatron-LM implements, so
+    a schedule the library implements and this driver does not passes every
+    parallelism rule. The refusal lands here instead, and ``flags.py``
+    repeats it.
     """
     if extra_args:
         raise ValueError(
@@ -613,8 +448,8 @@ def _megatron_stock_command(
     # message, not with whatever the flag module raises first.
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
-    # ``model_size`` is passed on as the operator typed it, exactly as the
-    # tuned command passes ``--model-size``. ``_resolve_run`` canonicalizes
+    # ``model_size`` is passed on as the operator typed it.
+    # ``_resolve_run`` canonicalizes
     # the name before it reaches here, and ``shape_by_name`` resolves an
     # alias either way, so the flag list and the shape cannot disagree.
     return [

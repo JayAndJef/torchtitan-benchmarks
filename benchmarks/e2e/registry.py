@@ -111,9 +111,7 @@ DEFAULT_MEGATRON_P2P_SYNC = "on"
 # "on" is stock Megatron, and it is what every published number was
 # measured under. "off" sends Megatron's own
 # --no-check-for-nan-in-loss-and-grad to the stock launcher, so a stock user
-# can reproduce the argv. The tuned driver (benchmarks/e2e/megatron/train.py)
-# never calls validate_result and has no guard to turn off, so "off" is
-# refused whenever it is selected; TorchTitan arms receive nothing. The
+# can reproduce the argv. TorchTitan arms receive nothing. The
 # measured effect is in reports/20260905-host-sync-ab.md. Evaluation refuses
 # a non-finite loss or grad norm on every arm under either value
 # (benchmarks/e2e/results.py's refuse_non_finite_trajectories), which is the
@@ -158,8 +156,7 @@ DEFAULT_MEGATRON_NAN_GUARD = "on"
 # "lean" needs a sharded dense value. optimizer_config.py asserts
 # use_distributed_optimizer under --use-precision-aware-optimizer, and the
 # dense-sharding axis is the one owner of that flag. The value reaches the
-# stock megatron launcher alone: the tuned driver builds a plain torch
-# AdamW and has no precision-aware path.
+# stock megatron launcher alone.
 #
 # **"lean" changes the numerics.** bf16 Adam moments and bf16 gradient
 # accumulation are a real change, and at pp 8 the accumulation is 16-way in

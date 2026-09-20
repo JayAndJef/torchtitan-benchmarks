@@ -599,14 +599,13 @@ def megatron_precision_refusal(
 ) -> str | None:
     """Why ``--megatron-precision lean`` cannot reach ``arms``, or ``None``.
 
-    Three refusals, each naming its repair, checked from the narrowest
-    fact outward. A tuned megatron arm builds a plain torch AdamW and has
-    no precision-aware path at all. A run with no stock megatron arm gives
-    the value nothing to reach. And ``lean`` under ``replicate`` asks
-    Megatron for a precision-aware optimizer without the distributed
-    optimizer it asserts.
+    Two refusals, each naming its repair, checked from the narrowest
+    fact outward. A run with no stock megatron arm gives the value nothing
+    to reach. And ``lean`` under ``replicate`` asks Megatron for a
+    precision-aware optimizer without the distributed optimizer it
+    asserts.
 
-    **The third is the one that could not exist before this axis.**
+    **The second is the one that could not exist before this axis.**
     ``optimizer_config.py`` asserts ``use_distributed_optimizer`` under
     ``--use-precision-aware-optimizer``, and ``--dense-sharding`` is the
     one owner of that flag. Refused here, the operator reads the repair
@@ -619,21 +618,6 @@ def megatron_precision_refusal(
     if megatron_precision == DEFAULT_MEGATRON_PRECISION:
         return None
     arms = tuple(arms)
-    without_precision = [
-        arm.name
-        for arm in arms
-        if arm.launcher in MEGATRON_LAUNCHERS
-        and arm.launcher not in PRECISION_LAUNCHERS
-    ]
-    if without_precision:
-        return (
-            f"--megatron-precision {megatron_precision!r} was requested with "
-            f"{', '.join(without_precision)}, whose driver "
-            "benchmarks/e2e/megatron/train.py builds a plain torch AdamW and "
-            "has no precision-aware optimizer; select a run without it "
-            f"(run --arm ...), or leave the option at "
-            f"{DEFAULT_MEGATRON_PRECISION!r}"
-        )
     if not any(arm.launcher in PRECISION_LAUNCHERS for arm in arms):
         return (
             f"--megatron-precision {megatron_precision!r} reaches no arm of "
@@ -658,14 +642,11 @@ def megatron_nan_guard_refusal(
 ) -> str | None:
     """Why ``--megatron-nan-guard off`` cannot reach ``arms``, or ``None``.
 
-    Two refusals, each naming its repair, and the first is checked first
-    because it is the narrower fact. A tuned megatron arm has no guard to
-    turn off, so a run holding one would record ``off`` for an arm the
-    value never reached; ``run --arm`` narrows the selection past it. A
-    run with no stock megatron arm at all gives the value nothing to
-    reach, which is the ``--megatron-p2p-sync`` refusal with a smaller
-    launcher set. ``_resolve_run`` raises the string, and the
-    ``--all-scenarios`` sweep prints it and skips the scenario.
+    One refusal, naming its repair. A run with no stock megatron arm
+    gives the value nothing to reach, which is the ``--megatron-p2p-sync``
+    refusal with a smaller launcher set. ``_resolve_run`` raises the
+    string, and the ``--all-scenarios`` sweep prints it and skips the
+    scenario.
 
     ``on`` is refused nowhere: it is stock Megatron, and every arm's argv
     is what it was before the option existed.
@@ -673,20 +654,6 @@ def megatron_nan_guard_refusal(
     if megatron_nan_guard == DEFAULT_MEGATRON_NAN_GUARD:
         return None
     arms = tuple(arms)
-    without_guard = [
-        arm.name
-        for arm in arms
-        if arm.launcher in MEGATRON_LAUNCHERS
-        and arm.launcher not in NAN_GUARD_LAUNCHERS
-    ]
-    if without_guard:
-        return (
-            f"--megatron-nan-guard {megatron_nan_guard!r} was requested with "
-            f"{', '.join(without_guard)}, whose driver "
-            "benchmarks/e2e/megatron/train.py has no NaN guard to turn off; "
-            "select a run without it (run --arm ...), or leave the option "
-            f"at {DEFAULT_MEGATRON_NAN_GUARD!r}"
-        )
     if not any(arm.launcher in NAN_GUARD_LAUNCHERS for arm in arms):
         return (
             f"--megatron-nan-guard {megatron_nan_guard!r} reaches no arm of "
