@@ -27,34 +27,23 @@ sample summarization is ``summaries.py``. This module is exactly the part
 that is not, which is why the whole of the edge described below now lands in
 one file.
 
-**Structural edge, pending resolution.** This module imports from
-``benchmarks.e2e.registry`` at runtime, which inverts the intuitive layering
-(``artifacts/`` looks lower-level than ``e2e/`` and is not). It is
-*structural* rather than incidental: a manifest is a serialization of a run's
-scenario and arms, so the builders here need those types by construction. One
-name crosses at runtime, ``Workload`` (``_resume_workload`` reconstructs and
-revalidates it from recorded JSON); ``Scenario`` and ``Arm`` are
-annotation-only and are imported under ``TYPE_CHECKING``, so they cost
-nothing at runtime.
+**Structural edge, almost closed.** A manifest serializes a run's scenario
+and arms, so the builders here need those types by construction. They now
+come from ``benchmarks.e2e.schema``, which imports nothing first-party, so
+``Arm``, ``Scenario``, ``ParallelismSpec`` and ``RunRequest`` cost a
+stdlib-only module at runtime and need no ``TYPE_CHECKING`` block. The
+``RunRequest`` import is the sharpest case: it used to come from
+``e2e/runner.py``, which imports this module, and only the
+``TYPE_CHECKING`` guard kept that pair out of a module-level cycle.
 
-Be precise about what does and does not cycle. At *module* granularity there
-is no cycle: ``e2e/registry.py`` imports nothing from ``artifacts/``. At
-*package* granularity there is one, because ``e2e/runner.py`` and
-``e2e/results.py`` import from this module. (``e2e/validation.py`` used to as
-well; it needed only ``trace_files`` and now takes it from ``layout.py``.) So
-``artifacts/`` and ``e2e/`` are mutually dependent as packages and only the
-module-level ordering keeps imports resolvable. The third name this module
-takes from ``e2e`` makes the point sharpest: ``RunRequest`` comes from
-``e2e/runner.py``, which imports this module at runtime, so that pair *would*
-be a genuine module-level cycle -- it is legal only because it is confined to
-``TYPE_CHECKING``. Anything moved out of that block must be re-checked. The
-candidate resolution is to move this module into ``e2e/`` outright, leaving
-``artifacts/`` engine-neutral; splitting ``layout.py`` and ``run_state.py``
-off was the step that reduced it to a single-file move, since every symbol
-that would have had to stay behind is already elsewhere. The cheapest
-partial step is already taken: ``execution_model`` composes the field from
-the run's own mesh and lives in ``benchmarks/e2e/parallelism.py``, so
-``Workload`` is now the single genuinely structural edge. The move itself is
+One name still crosses to ``benchmarks.e2e.registry``: ``Workload``, which
+``_resume_workload`` reconstructs and revalidates from recorded JSON.
+
+At *package* granularity ``artifacts/`` and ``e2e/`` remain mutually
+dependent, because ``e2e/runner.py`` and ``e2e/results.py`` import from this
+module. The candidate resolution is to move this module into ``e2e/``
+outright, leaving ``artifacts/`` engine-neutral; splitting ``layout.py`` and
+``run_state.py`` off reduced it to a single-file move. The move itself is
 deferred rather than made permanent.
 
 """
@@ -64,23 +53,24 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
 from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.e2e.parallelism import (
-    ParallelismSpec,
     describe as describe_parallelism,
     execution_model,
 )
 from benchmarks.e2e.registry import Workload
+from benchmarks.e2e.schema import (
+    Arm,
+    ParallelismSpec,
+    RunRequest,
+    Scenario,
+)
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
     shape_by_name,
 )
-
-if TYPE_CHECKING:
-    from benchmarks.e2e.registry import Arm, Scenario
-    from benchmarks.e2e.runner import RunRequest
 
 
 MANIFEST_SCHEMA_VERSION = 17

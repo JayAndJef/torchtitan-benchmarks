@@ -1,5 +1,8 @@
 """Benchmark scenario definitions and the global run axes.
 
+The declarations themselves live in ``benchmarks.e2e.schema``. This module
+holds the instances, the tables and the run-axis constants built from them.
+
 Scenarios describe what differs between arms, and nothing else: command
 construction (``benchmarks.e2e.launch``), provenance collection
 (``benchmarks.execution.provenance``), and validation
@@ -14,10 +17,9 @@ command construction (``benchmarks.e2e.launch``), validation
 (``benchmarks.artifacts.manifests``).
 """
 
-from dataclasses import dataclass, replace
-from typing import Literal
+from dataclasses import replace
 
-from benchmarks.models.piper_qwen3.shape import PIPER_1B
+from benchmarks.e2e.schema import Arm, Scenario, Workload
 
 
 # How a SINGLE-GPU training process executes the model: plain bf16 params on
@@ -162,96 +164,6 @@ DEFAULT_MEGATRON_NAN_GUARD = "off"
 # Both effects are unmeasured.
 MEGATRON_PRECISION_MODES = ("stock", "lean")
 DEFAULT_MEGATRON_PRECISION = "stock"
-
-
-@dataclass(frozen=True)
-class Workload:
-    """Training settings shared by every arm in one scenario.
-
-    ``replay_dataloader`` records that every TorchTitan arm of the scenario
-    uses ``benchmarks.e2e.data.piper_qwen3``'s replay loader, whose
-    materialized sample count must track ``steps``; the runner then delivers
-    ``--dataloader.replay-steps`` alongside ``--training.steps``. Declared on
-    the workload rather than sniffed from the config name because
-    ``--model-size`` suffixes that name.
-    """
-
-    module: str
-    config: str
-    seq_len: int
-    steps: int
-    local_batch_size: int
-    profile_freq: int = 20
-    profiler_warmup: int = 5
-    profiler_active: int = 5
-    min_trace_windows: int = 2
-    seed: int | None = None
-    replay_dataloader: bool = False
-
-
-@dataclass(frozen=True)
-class Arm:
-    """One implementation measured by a scenario.
-
-    ``description`` is the one-line answer to "what is this arm?", shown by
-    the ``scenarios`` command and recorded in the manifest. ``config``
-    selects an arm-specific trainer config when the implementation
-    difference must be expressed while building the model rather than as an
-    override. When unset, the scenario workload config is used.
-
-    ``compile`` is the compile treatment of this arm, and it has no
-    default: every arm states it. ``"torch"`` asks for whole-block
-    ``torch.compile``, ``"none"`` runs the blocks eager. It is an arm
-    property and not a run axis, because two arms of one run may differ in
-    it -- that difference is what the ``engines`` scenario measures. The
-    manifest records it through ``asdict(arm)``, and validation rule 8
-    reads it: the compile log line must be present under ``"torch"`` and
-    absent under ``"none"``.
-    """
-
-    name: str
-    description: str
-    compile: Literal["torch", "none"]
-    config: str | None = None
-    override_imports: tuple[str, ...] = ()
-    # [Override] log lines expected per transformer block. validate_arm
-    # multiplies by the shape's layer count, so an arm stays correct at any
-    # --model-size (16 lines at normal, 1 at huge).
-    overrides_per_block: int = 0
-    trace_kernel_markers: tuple[str, ...] = ()
-    requires_gcc_toolset: bool = False
-    # Which engine the runner launches and which validation profile applies.
-    # Plain strings (registry keys in benchmarks.e2e.launch /
-    # benchmarks.e2e.validation) so asdict(arm) stays JSON-serializable for
-    # the manifest.
-    launcher: str = "torchtitan"
-    validation: str = "torchtitan"
-
-
-@dataclass(frozen=True)
-class Scenario:
-    """A reproducible workload and its comparable implementation arms.
-
-    ``supported_ac_modes`` restricts the global ``--ac`` axis: a scenario
-    whose arms cannot honor a mode (e.g. an engine with no SAC-parity
-    recompute) lists only the modes it supports; ``run-all --all-scenarios``
-    skips unsupported combinations and a direct request errors.
-    """
-
-    name: str
-    description: str
-    workload: Workload
-    arms: tuple[Arm, ...]
-    supported_ac_modes: tuple[str, ...] = ("sac", "none")
-
-    def arm(self, name: str) -> Arm:
-        for arm in self.arms:
-            if arm.name == name:
-                return arm
-        raise ValueError(
-            f"Unknown arm {name!r} for scenario {self.name!r}. "
-            f"Available arms: {', '.join(arm.name for arm in self.arms)}"
-        )
 
 
 PIPER_1B_WORKLOAD = Workload(

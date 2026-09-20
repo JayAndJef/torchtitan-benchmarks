@@ -17,9 +17,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from benchmarks.e2e.schema import Arm, ParallelismSpec, Workload
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
-    ParallelismSpec,
     TRIVIAL_SPEC,
     titan_mesh,
     titan_reshard_after_forward,
@@ -28,8 +28,6 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
-    Arm,
-    Workload,
 )
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 

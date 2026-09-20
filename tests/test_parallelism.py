@@ -28,9 +28,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.e2e.parallelism import (
+from benchmarks.e2e.schema import (
     DEFAULT_ZERO,
+    ParallelismSpec,
+    PipelineSchedule,
+    Workload,
     ZERO_MODES,
+)
+from benchmarks.e2e.parallelism import (
     zero_warnings,
     titan_reshard_after_forward,
     MAX_PP,
@@ -39,8 +44,6 @@ from benchmarks.e2e.parallelism import (
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
-    ParallelismSpec,
-    PipelineSchedule,
     describe,
     execution_model,
     n_microbatches,
@@ -51,7 +54,6 @@ from benchmarks.e2e.parallelism import (
 from benchmarks.e2e.registry import (
     EXECUTION_MODEL,
     SCENARIOS,
-    Workload,
 )
 from benchmarks.models.piper_qwen3.shape import (
     PIPER_SHAPES,
@@ -1811,6 +1813,7 @@ class ImportBudgetTest(unittest.TestCase):
             {name for name in imported if name.startswith("benchmarks")},
             {
                 "benchmarks.e2e.registry",
+                "benchmarks.e2e.schema",
                 "benchmarks.models.piper_qwen3.shape",
             },
         )

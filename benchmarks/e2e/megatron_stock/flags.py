@@ -73,10 +73,7 @@ and ``train.py`` prints the value Megatron parsed. The token is omitted at
 
 from __future__ import annotations
 
-from benchmarks.e2e.parallelism import (
-    ZERO_MODES,
-    ParallelismSpec,
-)
+from benchmarks.e2e.schema import ParallelismSpec, Workload, ZERO_MODES
 from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
@@ -84,7 +81,6 @@ from benchmarks.e2e.registry import (
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
-    Workload,
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 

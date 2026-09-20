@@ -29,7 +29,8 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
     scenario_by_name,
 )
-from benchmarks.e2e.runner import RunRequest, execute_run
+from benchmarks.e2e.schema import RunRequest
+from benchmarks.e2e.runner import execute_run
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import (

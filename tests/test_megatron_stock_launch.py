@@ -40,12 +40,13 @@ from benchmarks.e2e.launch import (
     STOCK_MEGATRON_PP_SCHEDULE,
     command_for_arm,
 )
-from benchmarks.e2e.parallelism import (
-    ParallelismSpec,
-    TRIVIAL_SPEC,
+from benchmarks.e2e.schema import Arm, ParallelismSpec, RunRequest
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC
+from benchmarks.e2e.registry import (
+    SCENARIOS,
+    scenario_by_name,
 )
-from benchmarks.e2e.registry import SCENARIOS, Arm, scenario_by_name
-from benchmarks.e2e.runner import RunRequest, _resolve_run
+from benchmarks.e2e.runner import _resolve_run
 from benchmarks.e2e.validation import (
     VALIDATION_PROFILES,
     _megatron_stock_parallelism_markers,

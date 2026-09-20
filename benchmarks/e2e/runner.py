@@ -26,7 +26,6 @@ from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
     PP_SCHEDULES,
-    ParallelismSpec,
     TRIVIAL_SPEC,
     zero_warnings,
     validate_parallelism,
@@ -44,10 +43,14 @@ from benchmarks.e2e.registry import (
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
     SCENARIOS,
+    scenario_by_name,
+)
+from benchmarks.e2e.schema import (
     Arm,
+    ParallelismSpec,
+    RunRequest,
     Scenario,
     Workload,
-    scenario_by_name,
 )
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import resolve_cpu_pinning
@@ -64,83 +67,6 @@ from benchmarks.models.piper_qwen3.shape import (
     MODEL_SIZE_CHOICES,
     PIPER_SHAPES,
 )
-
-
-@dataclass(frozen=True)
-class RunRequest:
-    """User-selected inputs for one benchmark execution."""
-
-    # The ``<gpu>`` positional, kept exactly as the operator typed it. It
-    # names a device *set* -- ``parse_devices`` splits it -- but the string
-    # itself is never rewritten: roughly one hundred manifests under ``out/``
-    # record it as ``hardware_metadata.requested_gpu``, and
-    # ``CUDA_VISIBLE_DEVICES`` is set from the same value.
-    gpu: str
-    # No default scenario. ``None`` means "not requested", which only a resume
-    # may leave unanswered: the recorded manifest names the scenario there. A
-    # default could only be reached by an omission, and would then measure one
-    # scenario under whatever label the operator assumed, which is a wrong
-    # result rather than a missing one. ``_resolve_run`` refuses it otherwise.
-    scenario_name: str | None = None
-    # Empty means every scenario arm. A non-empty tuple is an ordered subset,
-    # matching repeated ``run --arm NAME`` options exactly.
-    arm_names: tuple[str, ...] = ()
-    hardware: str = "auto"
-    out_dir: Path | None = None
-    resume_dir: Path | None = None
-    seq_len: int | None = None
-    steps: int | None = None
-    batch: int | None = None
-    extra_args: tuple[str, ...] | None = None
-    timestamp: str | None = None
-    cache_root: Path | None = None
-    compiler_env: Path | None = None
-    # None means "not requested": a resume then inherits the recorded mode,
-    # while an explicit value is checked against the manifest.
-    ac_mode: str | None = None
-    model_size: str | None = None
-    # The fourth global run axis. ``None`` means "not requested" and resolves
-    # to ``TRIVIAL_SPEC``, exactly as the three above resolve to their own
-    # defaults.
-    #
-    # **A resume does not inherit it, and that is not an oversight.** The
-    # three axes above are single strings, so a resume can read one back and
-    # rebuild the run from it. A spec is five fields that together decide
-    # every arm's command line, and ``--resume`` compares no command line --
-    # so a reconstruction that dropped one field would relaunch the arms
-    # differently and the gate would not see it. Omitting the flags on a
-    # resume therefore asks for the trivial spec, which matches a
-    # single-GPU directory and is refused against any other. The stage that
-    # first runs a parallel job may add inheritance, with the round trip
-    # under test.
-    parallelism: ParallelismSpec | None = None
-    # The Megatron pipeline p2p sync treatment. ``None`` means "not
-    # requested": a resume inherits the recorded value, and a fresh run
-    # takes ``on``, exactly as ``ac_mode`` does. It is not a field of
-    # ``parallelism``, because it is a treatment of the pipeline messages
-    # and ``execution_model`` names degrees rather than mechanisms.
-    megatron_p2p_sync: str | None = None
-    # Stock Megatron's NaN/Inf guard. ``None`` means "not requested", as
-    # above: a resume inherits the recorded value and a fresh run takes
-    # ``on``. It reaches the stock megatron launcher alone.
-    megatron_nan_guard: str | None = None
-    # Stock Megatron's optimizer precision. ``None`` means "not requested",
-    # as above: a resume inherits the recorded value and a fresh run takes
-    # ``stock``. The value reaches the stock megatron launcher alone, and
-    # ``lean`` needs a sharded dense value.
-    megatron_precision: str | None = None
-    # Whether the run collects profiler traces. ``None`` means "not
-    # requested", as above: a resume inherits the recorded value and a
-    # fresh run takes ``DEFAULT_PROFILE``, which is off. It reaches both
-    # engines, the 40-step floor and every trace rule of
-    # ``benchmarks/e2e/validation.py``.
-    profile: bool | None = None
-    # How many steps an unprofiled run discards before it measures.
-    # ``None`` means "not requested": a resume inherits the recorded
-    # value, and a fresh run takes ``DEFAULT_WARMUP_STEPS``. It is refused
-    # beside ``--profile``, where the profiler schedule decides the sample
-    # set instead, and the manifest then records ``null``.
-    warmup_steps: int | None = None
 
 
 @dataclass(frozen=True)
