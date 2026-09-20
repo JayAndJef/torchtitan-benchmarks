@@ -19,6 +19,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -40,7 +41,12 @@ from benchmarks.cli.e2e import (
     run_command,
 )
 from benchmarks.cli.main import cli
-from benchmarks.e2e.schema import ParallelismSpec, RunRequest
+from benchmarks.e2e.schema import (
+    ParallelismSpec,
+    RequestedAxes,
+    RunAxes,
+    RunRequest,
+)
 from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
     describe,
@@ -238,7 +244,7 @@ class RequestTests(unittest.TestCase):
 
     def test_an_untouched_command_line_requests_no_parallelism(self) -> None:
         request = self._request("0", "--scenario", "engines")
-        self.assertIsNone(request.parallelism)
+        self.assertIsNone(request.axes.parallelism)
 
     def test_the_gpu_string_is_kept_exactly_as_typed(self) -> None:
         # Roughly one hundred manifests record it as requested_gpu, and
@@ -260,7 +266,7 @@ class RequestTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            request.parallelism,
+            request.axes.parallelism,
             ParallelismSpec(dp=2, zero=1),
         )
 
@@ -310,13 +316,13 @@ class RequestTests(unittest.TestCase):
             "1",
         )
         self.assertEqual(
-            request.parallelism,
+            request.axes.parallelism,
             ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=1),
         )
 
     def test_an_option_left_out_takes_the_spec_default(self) -> None:
         request = self._request("0,1", "--scenario", "engines", "--dp", "2")
-        self.assertEqual(request.parallelism, ParallelismSpec(dp=2))
+        self.assertEqual(request.axes.parallelism, ParallelismSpec(dp=2))
 
     def test_a_degree_below_one_is_refused_by_the_option(self) -> None:
         result = CliRunner().invoke(
@@ -360,7 +366,7 @@ class RequestTests(unittest.TestCase):
         # Every swept scenario carries the same spec.
         self.assertTrue(seen)
         for request in seen:
-            self.assertEqual(request.parallelism, ParallelismSpec(dp=2))
+            self.assertEqual(request.axes.parallelism, ParallelismSpec(dp=2))
             self.assertEqual(request.gpu, "0,1")
 
 
@@ -550,14 +556,16 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "1b",
-            parallelism=parallelism,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision=megatron_precision,
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="1b",
+                parallelism=parallelism,
+                megatron_p2p_sync=megatron_p2p_sync,
+                megatron_nan_guard=megatron_nan_guard,
+                megatron_precision=megatron_precision,
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def test_the_schema_is_seventeen(self) -> None:
@@ -659,10 +667,12 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "sac",
-                "1b",
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="sac",
+                    model_size="1b",
+                    profile=False,
+                    warmup_steps=10,
+                ),
             )
 
     def test_the_p2p_sync_default_is_recorded_rather_than_left_out(
@@ -703,11 +713,13 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "sac",
-                "1b",
-                parallelism=TRIVIAL_SPEC,
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="sac",
+                    model_size="1b",
+                    parallelism=TRIVIAL_SPEC,
+                    profile=False,
+                    warmup_steps=10,
+                ),
             )
 
     def test_the_nan_guard_default_is_recorded_rather_than_left_out(
@@ -770,12 +782,14 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "sac",
-                "1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="sac",
+                    model_size="1b",
+                    parallelism=TRIVIAL_SPEC,
+                    megatron_p2p_sync="on",
+                    profile=False,
+                    warmup_steps=10,
+                ),
             )
 
     def test_an_omitted_precision_is_a_type_error(self) -> None:
@@ -790,13 +804,15 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "sac",
-                "1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="sac",
+                    model_size="1b",
+                    parallelism=TRIVIAL_SPEC,
+                    megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
+                    profile=False,
+                    warmup_steps=10,
+                ),
             )
 
 
@@ -818,14 +834,16 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "1b",
-            parallelism=parallelism,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="1b",
+                parallelism=parallelism,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def test_the_trivial_spec_records_the_string_it_always_recorded(self) -> None:
@@ -877,14 +895,16 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "1b",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
         manifest["execution_model"] = "something-else-entirely"
         self.assertEqual(
@@ -895,14 +915,16 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "sac",
-                "1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="sac",
+                    model_size="1b",
+                    parallelism=TRIVIAL_SPEC,
+                    megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
+                    megatron_precision="stock",
+                    profile=False,
+                    warmup_steps=10,
+                ),
             ),
             [],
         )
@@ -915,14 +937,16 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "1b",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
         self.assertIn(
             "parallelism",
@@ -933,14 +957,16 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "sac",
-                "1b",
-                parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="sac",
+                    model_size="1b",
+                    parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
+                    megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
+                    megatron_precision="stock",
+                    profile=False,
+                    warmup_steps=10,
+                ),
             ),
         )
 
@@ -958,14 +984,16 @@ class ResumeParallelismTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "1b",
-            parallelism=parallelism,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="1b",
+                parallelism=parallelism,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def _mismatches(self, manifest: dict, parallelism: ParallelismSpec):
@@ -976,14 +1004,16 @@ class ResumeParallelismTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "1b",
-            parallelism=parallelism,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="1b",
+                parallelism=parallelism,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def test_the_same_spec_resumes_and_a_different_one_does_not(self) -> None:
@@ -1057,14 +1087,16 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "none",
-            "1b",
-            parallelism=self.PP2,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=self.PP2,
+                megatron_p2p_sync=megatron_p2p_sync,
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def _mismatches(self, manifest: dict, megatron_p2p_sync: str) -> list[str]:
@@ -1075,14 +1107,16 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "none",
-            "1b",
-            parallelism=self.PP2,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=self.PP2,
+                megatron_p2p_sync=megatron_p2p_sync,
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -1126,14 +1160,16 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "none",
-            "1b",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="on",
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision=megatron_precision,
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+                megatron_nan_guard=megatron_nan_guard,
+                megatron_precision=megatron_precision,
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def _mismatches(
@@ -1149,14 +1185,16 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "none",
-            "1b",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="on",
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision=megatron_precision,
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+                megatron_nan_guard=megatron_nan_guard,
+                megatron_precision=megatron_precision,
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -1200,14 +1238,16 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "none",
-            "1b",
-            parallelism=parallelism,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision=megatron_precision,
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=parallelism,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision=megatron_precision,
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def _mismatches(
@@ -1223,14 +1263,16 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "none",
-            "1b",
-            parallelism=parallelism,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision=megatron_precision,
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=parallelism,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision=megatron_precision,
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -1254,11 +1296,24 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
         )
 
 
+# The eight names ``RequestedAxes`` owns, used to split a flat keyword
+# mapping into the axes and the rest.
+_AXIS_KEYWORDS = tuple(field.name for field in fields(RequestedAxes))
+
+
 class ResolveRunTests(unittest.TestCase):
     """``_resolve_run`` resolves the mesh."""
 
     def _resolve(self, scenario_name: str = "engines", **kwargs):
         kwargs.setdefault("ac_mode", "none")
+        # One flat mapping per case, split into the axes and the rest.
+        axes = RequestedAxes(
+            **{
+                name: kwargs.pop(name)
+                for name in list(kwargs)
+                if name in _AXIS_KEYWORDS
+            }
+        )
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", dict(_METADATA)),
@@ -1267,16 +1322,16 @@ class ResolveRunTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return _resolve_run(
-                RunRequest(scenario_name=scenario_name, **kwargs),
+                RunRequest(scenario_name=scenario_name, axes=axes, **kwargs),
                 {"PATH": os.environ["PATH"]},
             )
 
     def test_a_single_gpu_run_resolves_to_the_trivial_spec(self) -> None:
         resolved = self._resolve(gpu="0")
-        self.assertEqual(resolved[9], TRIVIAL_SPEC)
+        self.assertEqual(resolved[7].parallelism, TRIVIAL_SPEC)
 
     def test_a_named_trivial_spec_resolves_the_same_way(self) -> None:
-        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC)[9], TRIVIAL_SPEC)
+        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC)[7].parallelism, TRIVIAL_SPEC)
 
     def test_a_mesh_that_does_not_fill_the_device_list_is_refused(self) -> None:
         # Rule 1: not "at most". An under-filled request would leave a GPU
@@ -1288,7 +1343,7 @@ class ResolveRunTests(unittest.TestCase):
 
     def test_a_legal_mesh_resolves(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
-        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[9], spec)
+        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[7].parallelism, spec)
 
     def test_a_malformed_device_list_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "comma-separated GPU indices"):
@@ -1338,12 +1393,14 @@ class RunBannerTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             request = RunRequest(
+                axes=RequestedAxes(
+                    ac_mode="none",
+                    parallelism=spec,
+                ),
                 gpu=gpu,
                 scenario_name="engines",
                 arm_names=("titan_compiled",),
                 out_dir=Path(temporary) / "run",
-                ac_mode="none",
-                parallelism=spec,
             )
             with self.assertRaises(RuntimeError):
                 execute_run(

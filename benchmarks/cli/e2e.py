@@ -60,6 +60,7 @@ from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.schema import (
     DEFAULT_ZERO,
     ParallelismSpec,
+    RequestedAxes,
     RunRequest,
     ZERO_MODES,
 )
@@ -414,6 +415,35 @@ def _refuse_warmup_under_profile(options: dict[str, Any]) -> None:
         )
 
 
+# The seven option names that ``RequestedAxes`` takes directly, alongside
+# the parallelism spec ``_parallelism`` builds from six more. ``_axes`` pops
+# all seven, so an option renamed here is a keyword renamed there and
+# nowhere else.
+_AXIS_OPTIONS = (
+    "ac_mode",
+    "model_size",
+    "megatron_p2p_sync",
+    "megatron_nan_guard",
+    "megatron_precision",
+    "profile",
+    "warmup_steps",
+)
+
+
+def _axes(options: dict[str, Any]) -> RequestedAxes:
+    """Pop the axis options and build the record they describe.
+
+    Every value stays as Click delivered it, so an omitted option reaches
+    ``_resolve_run`` as ``None`` and a resume inherits the recorded value.
+    """
+    parallelism = _parallelism(options)
+    _refuse_warmup_under_profile(options)
+    return RequestedAxes(
+        parallelism=parallelism,
+        **{name: options.pop(name, None) for name in _AXIS_OPTIONS},
+    )
+
+
 def _request(
     gpu: str,
     torchtitan_args: tuple[str, ...],
@@ -424,14 +454,13 @@ def _request(
 ) -> RunRequest:
     # Popped before the ``**options`` expansion below, which must not see it.
     scenario_name = options.pop("scenario")
-    parallelism = _parallelism(options)
-    _refuse_warmup_under_profile(options)
+    axes = _axes(options)
     return RunRequest(
         gpu=gpu,
         scenario_name=scenario_name,
         arm_names=arm_names,
         resume_dir=resume_dir,
-        parallelism=parallelism,
+        axes=axes,
         extra_args=(
             None if resume_dir is not None and not torchtitan_args else torchtitan_args
         ),

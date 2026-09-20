@@ -27,6 +27,7 @@ from benchmarks.artifacts.manifests import (
 )
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
+from benchmarks.e2e.schema import RunAxes
 from benchmarks.e2e.registry import (
     DEFAULT_WARMUP_STEPS,
     ENGINES,
@@ -106,14 +107,16 @@ def _manifest(profile: bool, warmup_steps: int | None) -> dict:
         "test-gpu",
         _METADATA,
         (),
-        "none",
-        "1b",
-        parallelism=TRIVIAL_SPEC,
-        megatron_p2p_sync="off",
-        megatron_nan_guard="off",
-        megatron_precision="stock",
-        profile=profile,
-        warmup_steps=warmup_steps,
+        axes=RunAxes(
+            ac_mode="none",
+            model_size="1b",
+            parallelism=TRIVIAL_SPEC,
+            megatron_p2p_sync="off",
+            megatron_nan_guard="off",
+            megatron_precision="stock",
+            profile=profile,
+            warmup_steps=warmup_steps,
+        ),
     )
 
 
@@ -146,14 +149,16 @@ class ResumeTests(unittest.TestCase):
                     "test-gpu",
                     _METADATA,
                     (),
-                    "none",
-                    "1b",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="off",
-                    megatron_nan_guard="off",
-                    megatron_precision="stock",
-                    profile=False,
-                    warmup_steps=requested,
+                    axes=RunAxes(
+                        ac_mode="none",
+                        model_size="1b",
+                        parallelism=TRIVIAL_SPEC,
+                        megatron_p2p_sync="off",
+                        megatron_nan_guard="off",
+                        megatron_precision="stock",
+                        profile=False,
+                        warmup_steps=requested,
+                    ),
                 ),
                 expected,
             )
@@ -182,17 +187,17 @@ class CliRefusalTests(unittest.TestCase):
     def test_each_option_alone_is_accepted(self) -> None:
         result, execute = self._run("--profile")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIs(execute.call_args.args[0].profile, True)
-        self.assertIsNone(execute.call_args.args[0].warmup_steps)
+        self.assertIs(execute.call_args.args[0].axes.profile, True)
+        self.assertIsNone(execute.call_args.args[0].axes.warmup_steps)
 
         result, execute = self._run("--warmup-steps", "2")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].warmup_steps, 2)
+        self.assertEqual(execute.call_args.args[0].axes.warmup_steps, 2)
 
     def test_an_unrequested_count_reaches_the_request_as_none(self) -> None:
         result, execute = self._run()
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].warmup_steps)
+        self.assertIsNone(execute.call_args.args[0].axes.warmup_steps)
 
 
 class EvaluationPicksTheRuleTests(unittest.TestCase):

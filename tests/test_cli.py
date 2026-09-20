@@ -104,7 +104,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2", "--ac", "none"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].ac_mode, "none")
+        self.assertEqual(execute.call_args.args[0].axes.ac_mode, "none")
 
     def test_ac_mode_defaults_to_unrequested(self) -> None:
         completed = SimpleNamespace(
@@ -116,7 +116,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].ac_mode)
+        self.assertIsNone(execute.call_args.args[0].axes.ac_mode)
 
     def test_ac_mode_applies_to_every_swept_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -137,10 +137,10 @@ class CliTests(unittest.TestCase):
                     ],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
-        ac_modes = {call.args[0].ac_mode for call in execute.call_args_list}
+        ac_modes = {call.args[0].axes.ac_mode for call in execute.call_args_list}
         self.assertEqual(ac_modes, {"none"})
         # The third global axis must reach every swept scenario too.
-        sizes = {call.args[0].model_size for call in execute.call_args_list}
+        sizes = {call.args[0].axes.model_size for call in execute.call_args_list}
         self.assertEqual(sizes, {"huge"})
 
     def test_model_size_defaults_to_unrequested_and_rejects_unknowns(self) -> None:
@@ -153,7 +153,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].model_size)
+        self.assertIsNone(execute.call_args.args[0].axes.model_size)
 
         rejected = self.runner.invoke(cli, ["run", "2", "--model-size", "enormous"])
         self.assertNotEqual(rejected.exit_code, 0)
@@ -448,7 +448,7 @@ class CliTests(unittest.TestCase):
                 cli, ["run", "2", "--megatron-p2p-sync", "off"]
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].megatron_p2p_sync, "off")
+        self.assertEqual(execute.call_args.args[0].axes.megatron_p2p_sync, "off")
 
     def test_megatron_p2p_sync_defaults_to_unrequested(self) -> None:
         """``None`` is what lets a resume inherit the recorded value."""
@@ -461,7 +461,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].megatron_p2p_sync)
+        self.assertIsNone(execute.call_args.args[0].axes.megatron_p2p_sync)
 
     def test_an_unknown_megatron_p2p_sync_value_is_rejected(self) -> None:
         result = self.runner.invoke(
@@ -528,7 +528,7 @@ class CliTests(unittest.TestCase):
             [request.scenario_name for request in requests], holds_megatron
         )
         self.assertEqual(
-            {request.megatron_p2p_sync for request in requests}, {"off"}
+            {request.axes.megatron_p2p_sync for request in requests}, {"off"}
         )
 
     def test_megatron_nan_guard_reaches_the_request(self) -> None:
@@ -543,7 +543,7 @@ class CliTests(unittest.TestCase):
                 cli, ["run", "2", "--megatron-nan-guard", "off"]
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].megatron_nan_guard, "off")
+        self.assertEqual(execute.call_args.args[0].axes.megatron_nan_guard, "off")
 
     def test_megatron_nan_guard_defaults_to_unrequested(self) -> None:
         """``None`` is what lets a resume inherit the recorded value."""
@@ -556,7 +556,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].megatron_nan_guard)
+        self.assertIsNone(execute.call_args.args[0].axes.megatron_nan_guard)
 
     def test_an_unknown_megatron_nan_guard_value_is_rejected(self) -> None:
         result = self.runner.invoke(
@@ -619,7 +619,7 @@ class CliTests(unittest.TestCase):
             [request.scenario_name for request in requests], holds_stock
         )
         self.assertEqual(
-            {request.megatron_nan_guard for request in requests}, {"off"}
+            {request.axes.megatron_nan_guard for request in requests}, {"off"}
         )
 
     def test_megatron_precision_reaches_the_request(self) -> None:
@@ -634,7 +634,7 @@ class CliTests(unittest.TestCase):
                 cli, ["run", "2", "--megatron-precision", "lean"]
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].megatron_precision, "lean")
+        self.assertEqual(execute.call_args.args[0].axes.megatron_precision, "lean")
 
     def test_megatron_precision_defaults_to_unrequested(self) -> None:
         """``None`` is what lets a later resume inherit the recorded value."""
@@ -647,7 +647,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].megatron_precision)
+        self.assertIsNone(execute.call_args.args[0].axes.megatron_precision)
 
     def test_an_unknown_megatron_precision_value_is_rejected(self) -> None:
         result = self.runner.invoke(
@@ -709,7 +709,7 @@ class CliTests(unittest.TestCase):
             [request.scenario_name for request in requests], holds_stock
         )
         self.assertEqual(
-            {request.megatron_precision for request in requests}, {"lean"}
+            {request.axes.megatron_precision for request in requests}, {"lean"}
         )
 
     def test_all_scenarios_at_lean_under_zero_zero_skips_everything(

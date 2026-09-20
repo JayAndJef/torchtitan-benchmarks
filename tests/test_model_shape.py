@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -29,7 +30,7 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
     scenario_by_name,
 )
-from benchmarks.e2e.schema import RunRequest
+from benchmarks.e2e.schema import RequestedAxes, RunAxes, RunRequest
 from benchmarks.e2e.runner import execute_run
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning
@@ -902,14 +903,16 @@ class ModelSizeAliasTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "normal",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="normal",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
         self.assertEqual(recorded["model_size"], "1b")
         self.assertEqual(recorded["model_shape"]["name"], "1b")
@@ -939,14 +942,16 @@ class ModelSizeAliasTests(unittest.TestCase):
                     "test-gpu",
                     _METADATA,
                     (),
-                    "sac",
-                    "1b",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    megatron_precision="stock",
-                    profile=False,
-                    warmup_steps=10,
+                    axes=RunAxes(
+                        ac_mode="sac",
+                        model_size="1b",
+                        parallelism=TRIVIAL_SPEC,
+                        megatron_p2p_sync="on",
+                        megatron_nan_guard="on",
+                        megatron_precision="stock",
+                        profile=False,
+                        warmup_steps=10,
+                    ),
                 )
                 # Written by hand, because manifest_data canonicalises: an
                 # on-disk manifest from before the rename says "normal".
@@ -959,14 +964,16 @@ class ModelSizeAliasTests(unittest.TestCase):
                         "test-gpu",
                         _METADATA,
                         (),
-                        "sac",
-                        requested,
-                        parallelism=TRIVIAL_SPEC,
-                        megatron_p2p_sync="on",
-                        megatron_nan_guard="on",
-                        megatron_precision="stock",
-                        profile=False,
-                        warmup_steps=10,
+                        axes=RunAxes(
+                            ac_mode="sac",
+                            model_size=requested,
+                            parallelism=TRIVIAL_SPEC,
+                            megatron_p2p_sync="on",
+                            megatron_nan_guard="on",
+                            megatron_precision="stock",
+                            profile=False,
+                            warmup_steps=10,
+                        ),
                     ),
                     [],
                 )
@@ -978,14 +985,16 @@ class ModelSizeAliasTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "sac",
-            "normal",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="sac",
+                model_size="normal",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="on",
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
         self.assertEqual(
             _resume_mismatches(
@@ -995,14 +1004,16 @@ class ModelSizeAliasTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "sac",
-                "huge",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="sac",
+                    model_size="huge",
+                    parallelism=TRIVIAL_SPEC,
+                    megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
+                    megatron_precision="stock",
+                    profile=False,
+                    warmup_steps=10,
+                ),
             ),
             ["model_size"],
         )
@@ -1331,8 +1342,20 @@ def _fake_process(size_line: str):
     return run
 
 
+# The eight names ``RequestedAxes`` owns, used to split a flat keyword
+# mapping into the axes and the rest.
+_AXIS_KEYWORDS = tuple(field.name for field in fields(RequestedAxes))
+
+
 class ManifestAndResumeTests(unittest.TestCase):
     def _run(self, **request_kwargs):
+        axes = RequestedAxes(
+            **{
+                name: request_kwargs.pop(name)
+                for name in list(request_kwargs)
+                if name in _AXIS_KEYWORDS
+            }
+        )
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", _METADATA),
@@ -1341,7 +1364,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return execute_run(
-                RunRequest(gpu="0", **request_kwargs),
+                RunRequest(gpu="0", axes=axes, **request_kwargs),
                 process_runner=_fake_process(_size_line(HUGE)),
                 environment={"PATH": os.environ["PATH"]},
             )

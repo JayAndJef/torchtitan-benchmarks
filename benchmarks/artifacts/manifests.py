@@ -1,19 +1,24 @@
 """``manifest.json``: what a run is, and whether it may be resumed.
 
 Everything here serializes one run's *identity* -- scenario, arms, the
-command line each arm was launched with, the three global axes
-(``ac_mode`` / ``model_size`` / ``parallelism``), the
-resolved model shape, the execution model, and the provenance block -- reads
-one back, and decides whether a recorded run is the same run the caller is
-now asking for.
+command line each arm was launched with, the eight global run axes the
+``RunAxes`` record carries, the resolved model shape, the execution model,
+and the provenance block -- reads one back, and decides whether a recorded
+run is the same run the caller is now asking for.
 
 Those last two are here rather than in modules of their own on purpose. A
 manifest field and its resume rule are two halves of one invariant: a new
-axis adds a field to ``manifest_data`` *and* a comparison to
-``_resume_mismatches`` in a single commit, and a field recorded but not
+axis adds a field to ``RunAxes`` *and* a key to ``AXIS_KEYS``, which the
+writer and ``_resume_mismatches`` both read, and a field recorded but not
 gated is a comparability boundary that silently does not hold. Splitting
 reader from writer would divide the same invariant the other way -- a schema
 bump has to move both together, and neither half is meaningful alone.
+
+**The axis keys stay flat, and their names stay fixed.** One nested
+``axes`` object would read better and would break every external reader
+that addresses ``manifest["parallelism"]`` or ``manifest["ac_mode"]`` by
+name. ``RunAxes`` is the in-process grouping; the file keeps the shape it
+had.
 
 **The reader takes one schema.** Every field above is a comparability
 boundary, so a manifest another schema wrote cannot be read as this one.
@@ -30,7 +35,7 @@ one file.
 **Structural edge, almost closed.** A manifest serializes a run's scenario
 and arms, so the builders here need those types by construction. They now
 come from ``benchmarks.e2e.schema``, which imports nothing first-party, so
-``Arm``, ``Scenario``, ``ParallelismSpec`` and ``RunRequest`` cost a
+``Arm``, ``Scenario``, ``RunAxes`` and ``RunRequest`` cost a
 stdlib-only module at runtime and need no ``TYPE_CHECKING`` block. The
 ``RunRequest`` import is the sharpest case: it used to come from
 ``e2e/runner.py``, which imports this module, and only the
@@ -64,6 +69,7 @@ from benchmarks.e2e.parallelism import (
 from benchmarks.e2e.schema import (
     Arm,
     ParallelismSpec,
+    RunAxes,
     RunRequest,
     Scenario,
     Workload,
@@ -108,6 +114,39 @@ def _parallelism_record(
     )
 
 
+AXIS_KEYS = (
+    "ac_mode",
+    "model_size",
+    "parallelism",
+    "megatron_p2p_sync",
+    "megatron_nan_guard",
+    "megatron_precision",
+    "profile",
+    "warmup_steps",
+)
+"""The manifest keys that record the run axes, one key per ``RunAxes`` field.
+
+The names are flat and written out here rather than derived from the
+dataclass. External readers address them by name, so a renamed field must
+stay a deliberate schema change. ``tests/test_axes.py`` compares this tuple
+against ``RunAxes``, so a new axis that nothing recorded fails there.
+"""
+
+
+def _axis_record(scenario: Scenario, axes: RunAxes) -> dict[str, Any]:
+    """The flat axis keys of one manifest, written and compared here.
+
+    Two of the eight are not the field value itself. ``model_size`` is
+    canonicalized, so a fresh manifest never carries a retired alias.
+    ``parallelism`` becomes the described block, which holds the derived
+    degrees a reader needs beside the six spec fields.
+    """
+    record = {**asdict(axes)}
+    record["model_size"] = canonical_size_name(axes.model_size)
+    record["parallelism"] = _parallelism_record(scenario, axes.parallelism)
+    return {key: record[key] for key in AXIS_KEYS}
+
+
 def manifest_data(
     scenario: Scenario,
     selected_arms: tuple[Arm, ...],
@@ -115,41 +154,16 @@ def manifest_data(
     hardware: str,
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
-    ac_mode: str,
-    # No default. This value is what the manifest *claims* the run was, and
-    # _resume_mismatches below already requires it explicitly; a writer that
-    # defaults what the checker demands is the asymmetry that lets a huge run
-    # be recorded, resumed and published as "1b".
-    model_size: str,
     *,
-    # No default either, and for the same reason one step further: an omitted
-    # argument would record dp 1 x pp 1 for a run of any mesh, which is a
-    # single-GPU claim about a job that was not one. Keyword-only because the
-    # eight positional parameters above are the historical signature.
-    parallelism: ParallelismSpec,
-    # No default, for the reason the two above have none: a writer that
-    # defaulted it would record ``on`` for a run that turned the sync off,
-    # and the two are a comparability boundary.
-    megatron_p2p_sync: str,
-    # No default, for the same reason again.
-    megatron_nan_guard: str,
-    # No default, for the same reason once more: a writer that defaulted it
-    # would record ``stock`` for a run that held 10 bytes for each
-    # parameter rather than 18.
-    megatron_precision: str,
-    # No default, for the same reason once more: a writer that defaulted it
-    # would claim a trace layout the run did not write, and every trace rule
-    # of benchmarks/e2e/validation.py reads this axis.
-    profile: bool,
-    # ``None`` under a profiled run, where the profiler schedule decides
-    # the sample set. No default, for the reason the axes above have none:
-    # the throughput this run publishes is taken over the steps after this
-    # count, and two directories that disagree about it are not comparable.
-    warmup_steps: int | None,
+    # No default, and ``RunAxes`` gives none of its fields one either. This
+    # record is what the manifest *claims* the run was, and
+    # ``_resume_mismatches`` below compares every field of it; a writer that
+    # defaults what the checker demands is the asymmetry that lets a huge
+    # run be recorded, resumed and published as "1b", or a two-GPU run be
+    # recorded as one.
+    axes: RunAxes,
 ) -> dict[str, Any]:
-    # Recorded canonically, so a fresh manifest never carries a retired name.
-    model_size = canonical_size_name(model_size)
-    shape = shape_by_name(model_size)
+    shape = shape_by_name(canonical_size_name(axes.model_size))
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "scenario": scenario.name,
@@ -161,17 +175,10 @@ def manifest_data(
         "selected_arms": [arm.name for arm in selected_arms],
         "commands": commands,
         "extra_torchtitan_args": list(extra_args),
-        "ac_mode": ac_mode,
-        "model_size": model_size,
+        **_axis_record(scenario, axes),
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
-        "parallelism": _parallelism_record(scenario, parallelism),
-        "megatron_p2p_sync": megatron_p2p_sync,
-        "megatron_nan_guard": megatron_nan_guard,
-        "megatron_precision": megatron_precision,
-        "profile": profile,
-        "warmup_steps": warmup_steps,
         "throughput_definition": THROUGHPUT_DEFINITION,
-        "execution_model": execution_model(parallelism),
+        "execution_model": execution_model(axes.parallelism),
     }
 
 
@@ -183,15 +190,8 @@ def write_manifest(
     hardware: str,
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
-    ac_mode: str,
-    model_size: str,
     *,
-    parallelism: ParallelismSpec,
-    megatron_p2p_sync: str,
-    megatron_nan_guard: str,
-    megatron_precision: str,
-    profile: bool,
-    warmup_steps: int | None,
+    axes: RunAxes,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -202,14 +202,7 @@ def write_manifest(
             hardware,
             metadata,
             extra_args,
-            ac_mode,
-            model_size,
-            parallelism=parallelism,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision=megatron_precision,
-            profile=profile,
-            warmup_steps=warmup_steps,
+            axes=axes,
         ),
     )
 
@@ -239,39 +232,28 @@ def _resume_mismatches(
     hardware: str,
     metadata: dict[str, str],
     extra_args: tuple[str, ...],
-    ac_mode: str,
-    model_size: str,
     *,
-    parallelism: ParallelismSpec,
-    megatron_p2p_sync: str,
-    megatron_nan_guard: str,
-    megatron_precision: str,
-    profile: bool,
-    warmup_steps: int | None,
+    axes: RunAxes,
 ) -> list[str]:
+    axis_record = _axis_record(scenario, axes)
+    # Compared below on its own, because the registry still resolves the
+    # retired alias "normal" to the 1B shape and a recorded manifest may
+    # carry either spelling.
+    del axis_record["model_size"]
     expected = {
         "scenario": scenario.name,
         "workload": asdict(scenario.workload),
         "selected_arms": [arm.name for arm in arms],
         "hardware": hardware,
         "extra_torchtitan_args": list(extra_args),
-        "ac_mode": ac_mode,
-        "megatron_p2p_sync": megatron_p2p_sync,
-        "megatron_nan_guard": megatron_nan_guard,
-        "megatron_precision": megatron_precision,
-        "profile": profile,
-        "warmup_steps": warmup_steps,
-        "parallelism": _parallelism_record(scenario, parallelism),
+        **axis_record,
     }
     mismatches = [
         key for key, value in expected.items() if manifest.get(key) != value
     ]
-    # Both sides go through canonical_size_name, because the registry still
-    # resolves the retired alias "normal" to the 1B shape and a caller may
-    # pass it. The recorded value is always canonical.
     if canonical_size_name(
         str(manifest.get("model_size"))
-    ) != canonical_size_name(model_size):
+    ) != canonical_size_name(axes.model_size):
         mismatches.append("model_size")
     existing_metadata = manifest.get("hardware_metadata", {})
     for key in (

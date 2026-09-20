@@ -15,7 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts.layout import trace_files
 from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.engines import command_for_arm
-from benchmarks.e2e.schema import Arm, ParallelismSpec, RunRequest
+from benchmarks.e2e.schema import (
+    Arm,
+    ParallelismSpec,
+    RequestedAxes,
+    RunAxes,
+    RunRequest,
+)
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
@@ -31,7 +37,7 @@ from benchmarks.e2e.runner import (
 )
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
-from dataclasses import replace
+from dataclasses import fields, replace
 from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     PiperOptimizedCrossEntropyLoss,
 )
@@ -68,6 +74,21 @@ OVERRIDE_ARM = Arm(
     override_imports=(PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
     overrides_per_block=1,
 )
+
+# The eight names ``RequestedAxes`` owns. The refusal helpers below take one
+# flat keyword mapping per case, so this list is what splits an axis from a
+# plain request field.
+_AXIS_KEYWORDS = tuple(field.name for field in fields(RequestedAxes))
+
+
+def _request_with_axes(**keywords) -> RunRequest:
+    """A ``RunRequest`` from flat keywords, axes and all."""
+    axes = {
+        name: keywords.pop(name)
+        for name in list(keywords)
+        if name in _AXIS_KEYWORDS
+    }
+    return RunRequest(axes=RequestedAxes(**axes), **keywords)
 
 
 class ScenarioTests(unittest.TestCase):
@@ -165,13 +186,15 @@ class UncompiledScheduleRefusalTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                        parallelism=self.ZBV,
+                    ),
                     gpu="0,1",
                     scenario_name="engines",
                     arm_names=names,
                     out_dir=Path(temporary) / "run",
-                    ac_mode="none",
                     batch=8,
-                    parallelism=self.ZBV,
                 ),
                 {"PATH": os.environ["PATH"]},
             )
@@ -230,11 +253,13 @@ class SelectedArmTests(unittest.TestCase):
 
     def _resolve(self, names: tuple[str, ...]):
         request = RunRequest(
+            axes=RequestedAxes(
+                ac_mode="none",
+            ),
             gpu="0",
             scenario_name=self.scenario.name,
             arm_names=names,
             out_dir=Path("/tmp/selected-arm-test"),
-            ac_mode="none",
         )
         return _resolve_run(request, {"PATH": os.environ["PATH"]})
 
@@ -281,11 +306,13 @@ class SelectedArmTests(unittest.TestCase):
             out_dir = Path(temporary) / "run"
             execute_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                    ),
                     gpu="0",
                     scenario_name="engines",
                     arm_names=("titan_eager", "titan_compiled"),
                     out_dir=out_dir,
-                    ac_mode="none",
                 ),
                 process_runner=fake_process,
                 environment={"PATH": os.environ["PATH"]},
@@ -364,13 +391,15 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                        parallelism=self.PP2 if parallelism is None else parallelism,
+                        megatron_p2p_sync=megatron_p2p_sync,
+                    ),
                     gpu=gpu,
                     scenario_name=scenario_name,
                     arm_names=names,
                     out_dir=Path("/tmp/p2p-sync-test"),
-                    ac_mode="none",
-                    parallelism=self.PP2 if parallelism is None else parallelism,
-                    megatron_p2p_sync=megatron_p2p_sync,
                 ),
                 {"PATH": os.environ["PATH"]},
             )
@@ -386,7 +415,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, pattern):
                 _resolve_run(
-                    RunRequest(
+                    _request_with_axes(
                         scenario_name="engines",
                         out_dir=Path("/tmp/p2p-sync-test"),
                         ac_mode="none",
@@ -437,7 +466,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         legal: the megatron arm gets the flag and the titan arm gets
         nothing."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[11], "off")
+        self.assertEqual(resolved[7].megatron_p2p_sync, "off")
         commands = resolved[6]
         megatron = commands["megatron_stock"]
         self.assertEqual(megatron[-2:], ["--bench-batch-p2p-sync", "off"])
@@ -446,7 +475,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
     def test_a_megatron_only_subset_passes(self) -> None:
         resolved = self._resolve(("megatron_stock",))
         self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
-        self.assertEqual(resolved[11], "off")
+        self.assertEqual(resolved[7].megatron_p2p_sync, "off")
 
     def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
         for requested in (None, "off"):
@@ -454,7 +483,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_p2p_sync=requested
                 )
-                self.assertEqual(resolved[11], "off")
+                self.assertEqual(resolved[7].megatron_p2p_sync, "off")
                 commands = resolved[6]
                 self.assertEqual(
                     _p2p_flags(commands["megatron_stock"]),
@@ -466,7 +495,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         resolved = self._resolve(
             ("megatron_stock", "titan_compiled"), megatron_p2p_sync="on"
         )
-        self.assertEqual(resolved[11], "on")
+        self.assertEqual(resolved[7].megatron_p2p_sync, "on")
         for name, command in resolved[6].items():
             self.assertEqual(_p2p_flags(command), [], name)
 
@@ -487,14 +516,16 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
-            "none",
-            "1b",
-            parallelism=self.PP2,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard="on",
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=self.PP2,
+                megatron_p2p_sync=megatron_p2p_sync,
+                megatron_nan_guard="on",
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def _resume(self, out_dir: Path, megatron_p2p_sync: str | None):
@@ -507,12 +538,14 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        parallelism=self.PP2,
+                        megatron_p2p_sync=megatron_p2p_sync,
+                    ),
                     gpu="0,1",
                     scenario_name=None,
                     arm_names=("megatron_stock",),
                     resume_dir=out_dir,
-                    parallelism=self.PP2,
-                    megatron_p2p_sync=megatron_p2p_sync,
                 ),
                 {"PATH": os.environ["PATH"]},
             )
@@ -528,8 +561,8 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             out_dir.mkdir()
             self._write_manifest(out_dir, "off")
             resolved = self._resume(out_dir, megatron_p2p_sync=None)
-            self.assertEqual(resolved[11], "off")
-            self.assertTrue(resolved[10])
+            self.assertEqual(resolved[7].megatron_p2p_sync, "off")
+            self.assertTrue(resolved[8])
             self.assertEqual(
                 resolved[6]["megatron_stock"][-2:],
                 ["--bench-batch-p2p-sync", "off"],
@@ -553,13 +586,15 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
             execute_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                        parallelism=self.PP2,
+                        megatron_p2p_sync="off",
+                    ),
                     gpu="0,1",
                     scenario_name="engines",
                     arm_names=("megatron_stock",),
                     out_dir=Path(temporary) / "run",
-                    ac_mode="none",
-                    parallelism=self.PP2,
-                    megatron_p2p_sync="off",
                 ),
                 process_runner=fake_process,
                 environment={"PATH": os.environ["PATH"]},
@@ -587,13 +622,15 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 execute_run(
                     RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode="none",
+                            parallelism=self.PP2,
+                            megatron_p2p_sync="off",
+                        ),
                         gpu="0,1",
                         scenario_name="engines",
                         arm_names=("megatron_stock",),
                         out_dir=Path(temporary) / "run",
-                        ac_mode="none",
-                        parallelism=self.PP2,
-                        megatron_p2p_sync="off",
                     ),
                     event_handler=lambda event: events.append(
                         event.message if event.kind == "summary" else ""
@@ -642,12 +679,14 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                        megatron_nan_guard=megatron_nan_guard,
+                    ),
                     gpu="0",
                     scenario_name=scenario_name,
                     arm_names=names,
                     out_dir=Path("/tmp/nan-guard-test"),
-                    ac_mode="none",
-                    megatron_nan_guard=megatron_nan_guard,
                 ),
                 {"PATH": os.environ["PATH"]},
             )
@@ -665,7 +704,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, pattern):
                 _resolve_run(
-                    RunRequest(
+                    _request_with_axes(
                         gpu="0",
                         scenario_name=scenario_name,
                         out_dir=Path("/tmp/nan-guard-test"),
@@ -699,7 +738,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         token, once, ahead of the harness group, and the titan arm gets
         nothing."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[12], "off")
+        self.assertEqual(resolved[7].megatron_nan_guard, "off")
         commands = resolved[6]
         stock = commands["megatron_stock"]
         self.assertEqual(stock.count(NO_NAN_CHECK), 1)
@@ -709,7 +748,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
     def test_a_stock_only_subset_passes(self) -> None:
         resolved = self._resolve(("megatron_stock",))
         self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
-        self.assertEqual(resolved[12], "off")
+        self.assertEqual(resolved[7].megatron_nan_guard, "off")
 
     def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
         for requested in (None, "off"):
@@ -717,7 +756,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_nan_guard=requested
                 )
-                self.assertEqual(resolved[12], "off")
+                self.assertEqual(resolved[7].megatron_nan_guard, "off")
                 commands = resolved[6]
                 self.assertIn(NO_NAN_CHECK, commands["megatron_stock"])
                 self.assertNotIn(NO_NAN_CHECK, commands["titan_compiled"])
@@ -726,7 +765,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         resolved = self._resolve(
             ("megatron_stock", "titan_compiled"), megatron_nan_guard="on"
         )
-        self.assertEqual(resolved[12], "on")
+        self.assertEqual(resolved[7].megatron_nan_guard, "on")
         for name, command in resolved[6].items():
             self.assertNotIn(NO_NAN_CHECK, command, name)
 
@@ -749,12 +788,14 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 execute_run(
                     RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode="none",
+                            megatron_nan_guard="off",
+                        ),
                         gpu="0",
                         scenario_name="engines",
                         arm_names=("megatron_stock",),
                         out_dir=Path(temporary) / "run",
-                        ac_mode="none",
-                        megatron_nan_guard="off",
                     ),
                     event_handler=lambda event: events.append(
                         event.message if event.kind == "summary" else ""
@@ -780,12 +821,14 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
             execute_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                        megatron_nan_guard="off",
+                    ),
                     gpu="0",
                     scenario_name="engines",
                     arm_names=("megatron_stock",),
                     out_dir=Path(temporary) / "run",
-                    ac_mode="none",
-                    megatron_nan_guard="off",
                 ),
                 process_runner=fake_process,
                 environment={"PATH": os.environ["PATH"]},
@@ -804,14 +847,16 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
-            "none",
-            "1b",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="off",
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision="stock",
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="off",
+                megatron_nan_guard=megatron_nan_guard,
+                megatron_precision="stock",
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def _resume(self, out_dir: Path, megatron_nan_guard: str | None):
@@ -824,11 +869,13 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        megatron_nan_guard=megatron_nan_guard,
+                    ),
                     gpu="0",
                     scenario_name=None,
                     arm_names=("megatron_stock",),
                     resume_dir=out_dir,
-                    megatron_nan_guard=megatron_nan_guard,
                 ),
                 {"PATH": os.environ["PATH"]},
             )
@@ -844,8 +891,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             out_dir.mkdir()
             self._write_manifest(out_dir, "off")
             resolved = self._resume(out_dir, megatron_nan_guard=None)
-            self.assertEqual(resolved[12], "off")
-            self.assertTrue(resolved[10])
+            self.assertEqual(resolved[7].megatron_nan_guard, "off")
+            self.assertTrue(resolved[8])
             self.assertIn(NO_NAN_CHECK, resolved[6]["megatron_stock"])
             with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
                 self._resume(out_dir, megatron_nan_guard="on")
@@ -895,15 +942,17 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                        parallelism=ParallelismSpec(
+                        dp=1, zero=zero
+                    ),
+                        megatron_precision=megatron_precision,
+                    ),
                     gpu="0",
                     scenario_name=scenario_name,
                     arm_names=names,
                     out_dir=Path("/tmp/precision-test"),
-                    ac_mode="none",
-                    parallelism=ParallelismSpec(
-                        dp=1, zero=zero
-                    ),
-                    megatron_precision=megatron_precision,
                 ),
                 {"PATH": os.environ["PATH"]},
             )
@@ -921,7 +970,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, pattern):
                 _resolve_run(
-                    RunRequest(
+                    _request_with_axes(
                         gpu="0",
                         scenario_name=scenario_name,
                         out_dir=Path("/tmp/precision-test"),
@@ -958,7 +1007,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         """A mixed selection is legal: the stock arm gets the four flags
         and the titan arm gets none of them."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[13], "lean")
+        self.assertEqual(resolved[7].megatron_precision, "lean")
         commands = resolved[6]
         stock = commands["megatron_stock"]
         for flag in self.LEAN_FLAGS:
@@ -972,7 +1021,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_precision=requested
                 )
-                self.assertEqual(resolved[13], "stock")
+                self.assertEqual(resolved[7].megatron_precision, "stock")
                 for name, command in resolved[6].items():
                     for flag in self.LEAN_FLAGS:
                         self.assertNotIn(flag, command, name)
@@ -993,14 +1042,16 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
-            "none",
-            "1b",
-            parallelism=parallelism,
-            megatron_p2p_sync="off",
-            megatron_nan_guard="off",
-            megatron_precision=megatron_precision,
-            profile=False,
-            warmup_steps=10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=parallelism,
+                megatron_p2p_sync="off",
+                megatron_nan_guard="off",
+                megatron_precision=megatron_precision,
+                profile=False,
+                warmup_steps=10,
+            ),
         )
 
     def _resume(
@@ -1019,12 +1070,14 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        parallelism=parallelism,
+                        megatron_precision=megatron_precision,
+                    ),
                     gpu="0",
                     scenario_name=None,
                     arm_names=("megatron_stock",),
                     resume_dir=out_dir,
-                    parallelism=parallelism,
-                    megatron_precision=megatron_precision,
                 ),
                 {"PATH": os.environ["PATH"]},
             )
@@ -1045,7 +1098,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 out_dir, megatron_precision="lean", parallelism=spec
             )
             resolved = self._resume(out_dir, parallelism=spec)
-            self.assertEqual(resolved[13], "lean")
+            self.assertEqual(resolved[7].megatron_precision, "lean")
             self.assertIn(
                 "--use-precision-aware-optimizer", resolved[6]["megatron_stock"]
             )
@@ -1474,7 +1527,11 @@ class EnginesScenarioTests(unittest.TestCase):
 
     def test_run_refuses_sac_for_the_megatron_scenario(self) -> None:
         request = RunRequest(
-            gpu="0", scenario_name="engines", ac_mode="sac"
+            axes=RequestedAxes(
+                ac_mode="sac",
+            ),
+            gpu="0",
+            scenario_name="engines",
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
@@ -1557,14 +1614,16 @@ class ManifestTests(unittest.TestCase):
                 "rtx-a6000",
                 metadata,
                 extra_args,
-                "none",
-                "1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
+                axes=RunAxes(
+                    ac_mode="none",
+                    model_size="1b",
+                    parallelism=TRIVIAL_SPEC,
+                    megatron_p2p_sync="on",
+                    megatron_nan_guard="on",
+                    megatron_precision="stock",
+                    profile=False,
+                    warmup_steps=10,
+                ),
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
@@ -1624,11 +1683,13 @@ class EagerArmTests(unittest.TestCase):
         ):
             execute_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode="none",
+                    ),
                     gpu="0",
                     scenario_name="engines",
                     arm_names=("titan_eager",),
                     out_dir=out_dir,
-                    ac_mode="none",
                 ),
                 process_runner=fake_process,
                 environment={"PATH": os.environ["PATH"]},
@@ -1890,11 +1951,13 @@ class ResumeTests(unittest.TestCase):
             out_dir = Path(temporary) / "run"
             environment = {"PATH": os.environ["PATH"]}
             request = RunRequest(
+                axes=RequestedAxes(
+                    ac_mode="none",
+                ),
                 gpu="0",
                 scenario_name="engines",
                 arm_names=("titan_compiled",),
                 out_dir=out_dir,
-                ac_mode="none",
                 seq_len=512,
                 steps=60,
                 batch=2,
@@ -1979,11 +2042,13 @@ class ResumeTests(unittest.TestCase):
                 )
 
             conflicting_size = RunRequest(
+                axes=RequestedAxes(
+                    model_size="huge",
+                ),
                 gpu="0",
                 scenario_name=None,
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
-                model_size="huge",
             )
             with self.assertRaisesRegex(ValueError, "model_size"):
                 execute_run(
@@ -2020,11 +2085,13 @@ class ResumeTests(unittest.TestCase):
             environment = {"PATH": os.environ["PATH"]}
             execute_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode=mode,
+                    ),
                     gpu="0",
                     scenario_name="engines",
                     arm_names=("titan_eager",),
                     out_dir=out_dir,
-                    ac_mode=mode,
                 ),
                 process_runner=fake_process,
                 environment=environment,
