@@ -167,7 +167,7 @@ class ExecutionOptionTests(unittest.TestCase):
         for option in self.PARALLELISM_OPTIONS:
             with self.subTest(option=option):
                 self.assertIsNone(parameters[option].envvar)
-        for option in ("--compile-mode", "--ac", "--model-size"):
+        for option in ("--ac", "--model-size"):
             with self.subTest(option=option):
                 self.assertIsNotNone(parameters[option].envvar)
 
@@ -504,7 +504,6 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "sac",
             "1b",
             parallelism=parallelism,
@@ -612,7 +611,6 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "default",
                 "sac",
                 "1b",
             )
@@ -625,7 +623,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
         states a fact the other cannot state."""
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
         self.assertEqual(recorded["megatron_p2p_sync"], "on")
-        # Its own field beside compile_mode, not a key of the parallelism
+        # Its own field beside ac_mode, not a key of the parallelism
         # block: it is a treatment of the pipeline messages, not a degree.
         self.assertNotIn("megatron_p2p_sync", recorded["parallelism"])
 
@@ -655,7 +653,6 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "default",
                 "sac",
                 "1b",
                 parallelism=TRIVIAL_SPEC,
@@ -721,7 +718,6 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "default",
                 "sac",
                 "1b",
                 parallelism=TRIVIAL_SPEC,
@@ -740,7 +736,6 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "default",
                 "sac",
                 "1b",
                 parallelism=TRIVIAL_SPEC,
@@ -767,7 +762,6 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "sac",
             "1b",
             parallelism=parallelism,
@@ -825,7 +819,6 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "sac",
             "1b",
             parallelism=TRIVIAL_SPEC,
@@ -842,7 +835,6 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "default",
                 "sac",
                 "1b",
                 parallelism=TRIVIAL_SPEC,
@@ -861,7 +853,6 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "sac",
             "1b",
             parallelism=TRIVIAL_SPEC,
@@ -878,7 +869,6 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
-                "default",
                 "sac",
                 "1b",
                 parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
@@ -902,7 +892,6 @@ class ResumeParallelismTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "sac",
             "1b",
             parallelism=parallelism,
@@ -919,7 +908,6 @@ class ResumeParallelismTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "sac",
             "1b",
             parallelism=parallelism,
@@ -980,10 +968,9 @@ class ResumeParallelismTests(unittest.TestCase):
 
 
 class ResumeMegatronP2pSyncTests(unittest.TestCase):
-    """``--resume`` gates ``megatron_p2p_sync`` the way it gates the
-    compile mode: the same value resumes, a different one is refused in
-    either direction, and a directory that predates the field reads as
-    ``on``.
+    """``--resume`` gates ``megatron_p2p_sync`` the way it gates the ac
+    mode: the same value resumes, a different one is refused in either
+    direction, and a directory that predates the field reads as ``on``.
     """
 
     PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
@@ -1000,7 +987,6 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "none",
             "1b",
             parallelism=self.PP2,
@@ -1017,7 +1003,6 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "none",
             "1b",
             parallelism=self.PP2,
@@ -1067,7 +1052,6 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "none",
             "1b",
             parallelism=TRIVIAL_SPEC,
@@ -1089,7 +1073,6 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "none",
             "1b",
             parallelism=TRIVIAL_SPEC,
@@ -1139,7 +1122,6 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "none",
             "1b",
             parallelism=parallelism,
@@ -1161,7 +1143,6 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "default",
             "none",
             "1b",
             parallelism=parallelism,
@@ -1210,10 +1191,10 @@ class ResolveRunTests(unittest.TestCase):
 
     def test_a_single_gpu_run_resolves_to_the_trivial_spec(self) -> None:
         resolved = self._resolve(gpu="0")
-        self.assertEqual(resolved[10], TRIVIAL_SPEC)
+        self.assertEqual(resolved[9], TRIVIAL_SPEC)
 
     def test_a_named_trivial_spec_resolves_the_same_way(self) -> None:
-        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC)[10], TRIVIAL_SPEC)
+        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC)[9], TRIVIAL_SPEC)
 
     def test_a_mesh_that_does_not_fill_the_device_list_is_refused(self) -> None:
         # Rule 1: not "at most". An under-filled request would leave a GPU
@@ -1225,7 +1206,7 @@ class ResolveRunTests(unittest.TestCase):
 
     def test_a_legal_mesh_resolves(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
-        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[10], spec)
+        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[9], spec)
 
     def test_a_malformed_device_list_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "comma-separated GPU indices"):

@@ -129,16 +129,16 @@ say "supervisor:  pid $SUPERVISOR_PID (sid $SID, user $ME); foreign = any comput
 say "hf cache:    $HF_DATASETS_CACHE"
 
 # ------------------------------------------------------------- the cell list
-# "size|ac|mode|scenario". Huge first: it is the new measurement and the one
+# "size|ac|scenario". Huge first: it is the new measurement and the one
 # the report is built around.
-# The engines scenario declares supported_ac_modes=("none",) and
-# supported_compile_modes=("default",), so one cell per size is legal.
+# The engines scenario declares supported_ac_modes=("none",), so one cell
+# per size is legal.
 CELL_LIST=()
 if [ "$CELLS" = all ] || [ "$CELLS" = huge ]; then
-    CELL_LIST+=("huge|none|default|engines")
+    CELL_LIST+=("huge|none|engines")
 fi
 if [ "$CELLS" = all ] || [ "$CELLS" = 1b ]; then
-    CELL_LIST+=("1b|none|default|engines")
+    CELL_LIST+=("1b|none|engines")
 fi
 say "cells:       ${#CELL_LIST[@]}"
 for cell in "${CELL_LIST[@]}"; do say "  $cell"; done
@@ -251,8 +251,8 @@ for pass in $(seq 1 "$PASSES"); do
     say "########## pass $pass/$PASSES ##########"
     remaining=0
     for cell in "${CELL_LIST[@]}"; do
-        IFS='|' read -r size ac mode scenario <<<"$cell"
-        out="$ROOT/$size/ac-$ac/$mode/$scenario"
+        IFS='|' read -r size ac scenario <<<"$cell"
+        out="$ROOT/$size/ac-$ac/$scenario"
         # The marker lives NEXT TO the directory, so it survives an early
         # failure that never created the directory at all.
         marker="$out.CONTAMINATED"
@@ -277,7 +277,7 @@ for pass in $(seq 1 "$PASSES"); do
         : >"$watch_file"
 
         args=(run-all "$GPU" --scenario "$scenario" --ac "$ac"
-              --compile-mode "$mode" --model-size "$size" --steps "$STEPS")
+              --model-size "$size" --steps "$STEPS")
         if [ -f "$out/manifest.json" ]; then
             # Gate on the manifest, not the directory: a crash between mkdir
             # and write_manifest leaves a directory --resume cannot use.

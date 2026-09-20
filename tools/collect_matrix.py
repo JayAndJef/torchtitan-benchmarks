@@ -24,7 +24,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 
 def cells(root: Path, size_filter: str | None):
-    """Yield (size, ac, mode, scenario, cell_dir) for every complete cell.
+    """Yield (size, ac, scenario, cell_dir) for every complete cell.
 
     The size comes from the cell's own manifest, not from the directory name.
     A directory name is what the supervisor was asked for and a manifest
@@ -37,21 +37,20 @@ def cells(root: Path, size_filter: str | None):
     from benchmarks.models.piper_qwen3.shape import canonical_size_name
 
     wanted = canonical_size_name(size_filter) if size_filter else None
-    for manifest_path in sorted(root.glob("*/ac-*/*/*/manifest.json")):
+    for manifest_path in sorted(root.glob("*/ac-*/*/manifest.json")):
         cell_dir = manifest_path.parent
         scenario = cell_dir.name
-        mode = cell_dir.parent.name
-        ac = cell_dir.parent.parent.name.removeprefix("ac-")
+        ac = cell_dir.parent.name.removeprefix("ac-")
         try:
             recorded = json.loads(manifest_path.read_text()).get("model_size")
         except (OSError, json.JSONDecodeError):
             recorded = None
         size = canonical_size_name(
-            str(recorded) if recorded else cell_dir.parent.parent.parent.name
+            str(recorded) if recorded else cell_dir.parent.parent.name
         )
         if wanted and size != wanted:
             continue
-        yield size, ac, mode, scenario, cell_dir
+        yield size, ac, scenario, cell_dir
 
 
 def launch_counts(cell_dir: Path, arms: list[str]) -> dict[str, float]:
@@ -99,7 +98,7 @@ def main() -> None:
     args = parser.parse_args()
 
     collected = []
-    for size, ac, mode, scenario, cell_dir in cells(args.root, args.size):
+    for size, ac, scenario, cell_dir in cells(args.root, args.size):
         manifest = json.loads((cell_dir / "manifest.json").read_text())
         results_path = cell_dir / "results.json"
         results = (
@@ -108,10 +107,9 @@ def main() -> None:
         marker = cell_dir.with_suffix(cell_dir.suffix + ".CONTAMINATED")
         watch = cell_dir.with_suffix(cell_dir.suffix + ".watch")
         entry = {
-            "cell": f"{size}|{ac}|{mode}|{scenario}",
+            "cell": f"{size}|{ac}|{scenario}",
             "model_size": size,
             "ac_mode": ac,
-            "compile_mode": mode,
             "scenario": scenario,
             "path": str(cell_dir),
             "contaminated": marker.exists(),

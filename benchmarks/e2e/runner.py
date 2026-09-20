@@ -32,9 +32,7 @@ from benchmarks.e2e.parallelism import (
 )
 from benchmarks.e2e.registry import (
     AC_MODES,
-    COMPILE_MODES,
     DEFAULT_AC_MODE,
-    DEFAULT_COMPILE_MODE,
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MEGATRON_PRECISION,
@@ -96,7 +94,6 @@ class RunRequest:
     compiler_env: Path | None = None
     # None means "not requested": a resume then inherits the recorded mode,
     # while an explicit value is checked against the manifest.
-    compile_mode: str | None = None
     ac_mode: str | None = None
     model_size: str | None = None
     # The fourth global run axis. ``None`` means "not requested" and resolves
@@ -116,10 +113,9 @@ class RunRequest:
     parallelism: ParallelismSpec | None = None
     # The Megatron pipeline p2p sync treatment. ``None`` means "not
     # requested": a resume inherits the recorded value, and a fresh run
-    # takes ``on``, exactly as ``compile_mode`` does. It is not a field of
+    # takes ``on``, exactly as ``ac_mode`` does. It is not a field of
     # ``parallelism``, because it is a treatment of the pipeline messages
-    # the way ``compile_mode`` is a treatment of the blocks, and
-    # ``execution_model`` names degrees rather than mechanisms.
+    # and ``execution_model`` names degrees rather than mechanisms.
     megatron_p2p_sync: str | None = None
     # Stock Megatron's NaN/Inf guard. ``None`` means "not requested", as
     # above: a resume inherits the recorded value and a fresh run takes
@@ -209,7 +205,6 @@ def _resolve_run(
     dict[str, list[str]],
     str,
     str,
-    str,
     ParallelismSpec,
     bool,
     str,
@@ -256,11 +251,6 @@ def _resolve_run(
             if request.extra_args is None
             else request.extra_args
         )
-        compile_mode = (
-            str(existing_manifest["compile_mode"])
-            if request.compile_mode is None
-            else request.compile_mode
-        )
         ac_mode = (
             str(existing_manifest["ac_mode"])
             if request.ac_mode is None
@@ -295,7 +285,6 @@ def _resolve_run(
             environment=environment,
         )
         extra_args = request.extra_args or ()
-        compile_mode = request.compile_mode or DEFAULT_COMPILE_MODE
         ac_mode = request.ac_mode or DEFAULT_AC_MODE
         model_size = request.model_size or DEFAULT_MODEL_SIZE
         megatron_p2p_sync = (
@@ -322,11 +311,6 @@ def _resolve_run(
             f"unknown megatron precision {megatron_precision!r}. Available: "
             f"{', '.join(MEGATRON_PRECISION_MODES)}"
         )
-    if compile_mode not in COMPILE_MODES:
-        raise ValueError(
-            f"unknown compile mode {compile_mode!r}. Available: "
-            f"{', '.join(COMPILE_MODES)}"
-        )
     if ac_mode not in AC_MODES:
         raise ValueError(
             f"unknown ac mode {ac_mode!r}. Available: {', '.join(AC_MODES)}"
@@ -343,12 +327,6 @@ def _resolve_run(
     shape = PIPER_SHAPES[model_size]
     scenario = replace(scenario, workload=workload)
     arms = select_arms(scenario, request.arm_names)
-    if compile_mode not in scenario.supported_compile_modes:
-        raise ValueError(
-            f"scenario {scenario.name!r} does not support compile mode "
-            f"{compile_mode!r} (supported: "
-            f"{', '.join(scenario.supported_compile_modes)})"
-        )
     if ac_mode not in scenario.supported_ac_modes:
         raise ValueError(
             f"scenario {scenario.name!r} does not support ac mode {ac_mode!r} "
@@ -367,7 +345,7 @@ def _resolve_run(
         parallelism,
         shape=shape,
         workload=workload,
-        compile_mode=compile_mode,
+        compiled=any(arm.compile == "torch" for arm in arms),
         engines={arm.launcher for arm in arms},
         device_count=len(devices),
     )
@@ -400,10 +378,8 @@ def _resolve_run(
     # synchronize, so the field is inert and the manifest would record a
     # treatment the run did not have. Without a megatron arm the value
     # reaches nothing: TorchTitan sends no pipeline message through
-    # Megatron. This is the ``--compile-mode none`` exception the other way
-    # round -- that mode needs every selected arm to be TorchTitan, this
-    # value needs at least one not to be -- and ``run --arm`` narrows the
-    # engine set on purpose, so a megatron-only subset passes.
+    # Megatron. ``run --arm`` narrows the engine set on purpose, so a
+    # megatron-only subset passes.
     if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
         if parallelism.pp == 1:
             raise ValueError(
@@ -453,7 +429,6 @@ def _resolve_run(
             arm,
             out_dir / arm.name,
             extra_args,
-            compile_mode,
             ac_mode,
             model_size=model_size,
             parallelism=parallelism,
@@ -472,7 +447,6 @@ def _resolve_run(
             hardware,
             metadata,
             extra_args,
-            compile_mode,
             ac_mode,
             model_size,
             parallelism=parallelism,
@@ -493,7 +467,6 @@ def _resolve_run(
         metadata,
         out_dir,
         commands,
-        compile_mode,
         ac_mode,
         model_size,
         parallelism,
@@ -590,7 +563,6 @@ def execute_run(
         metadata,
         out_dir,
         commands,
-        compile_mode,
         ac_mode,
         model_size,
         parallelism,
@@ -613,7 +585,6 @@ def execute_run(
             hardware,
             metadata,
             request.extra_args or (),
-            compile_mode,
             ac_mode,
             model_size,
             parallelism=parallelism,
@@ -637,7 +608,6 @@ def execute_run(
         "summary",
         f"arms: {' '.join(arm.name for arm in arms)}",
     )
-    _emit(event_handler, "summary", f"compile mode: {compile_mode}")
     _emit(event_handler, "summary", f"ac mode: {ac_mode}")
     _emit(event_handler, "summary", f"model size: {model_size}")
     _emit(

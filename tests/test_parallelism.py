@@ -49,7 +49,6 @@ from benchmarks.e2e.parallelism import (
     validate_parallelism,
 )
 from benchmarks.e2e.registry import (
-    COMPILE_MODES,
     EXECUTION_MODEL,
     SCENARIOS,
     Workload,
@@ -84,7 +83,7 @@ def check(
     *,
     shape: PiperShape = SHAPE_1B,
     batch: int = 4,
-    compile_mode: str = "default",
+    compiled: bool = True,
     engines: tuple[str, ...] = ("torchtitan",),
     device_count: int | None = None,
 ) -> None:
@@ -97,7 +96,7 @@ def check(
         spec,
         shape=shape,
         workload=workload(batch),
-        compile_mode=compile_mode,
+        compiled=compiled,
         engines=engines,
         device_count=spec.world_size if device_count is None else device_count,
     )
@@ -1010,7 +1009,7 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
         check(
             ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
             batch=8,
-            compile_mode="none",
+            compiled=False,
             engines=("torchtitan",),
         )
 
@@ -1040,7 +1039,7 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
                     check(
                         ParallelismSpec(pp=2, pp_schedule=name),
                         batch=8,
-                        compile_mode="none",
+                        compiled=False,
                         engines=("torchtitan", "megatron_stock"),
                     )
 
@@ -1102,7 +1101,7 @@ class MegatronLauncherSetTest(unittest.TestCase):
                     check(
                         ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
                         batch=8,
-                        compile_mode="none",
+                        compiled=False,
                         engines=("torchtitan", launcher),
                     )
 
@@ -1115,36 +1114,36 @@ class MegatronLauncherSetTest(unittest.TestCase):
         check(
             ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
             batch=8,
-            compile_mode="none",
+            compiled=False,
             engines=("torchtitan", "some-other-engine"),
         )
 
 
 class Rule06UncompiledScheduleTest(unittest.TestCase):
-    def test_an_uncompiled_mode_carries_a_zero_bubble_schedule(self):
+    def test_an_eager_run_carries_a_zero_bubble_schedule(self):
         check(
             ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
             batch=8,
-            compile_mode="none",
+            compiled=False,
         )
 
-    def test_a_compiled_mode_is_refused_for_a_zero_bubble_schedule(self):
-        with self.assertRaisesRegex(ValueError, "uncompiled compile mode"):
+    def test_a_compiled_arm_is_refused_for_a_zero_bubble_schedule(self):
+        with self.assertRaisesRegex(ValueError, "must run eager"):
             check(
                 ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
                 batch=8,
-                compile_mode="default",
+                compiled=True,
             )
 
     def test_the_two_targeted_schedules_run_compiled(self):
         """1F1B and Interleaved1F1B never call
         ``_check_torch_compile_compatibility``, so the milestone is a fully
         compiled run."""
-        check(PP2, compile_mode="default")
+        check(PP2, compiled=True)
         check(
             ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
             batch=8,
-            compile_mode="default",
+            compiled=True,
         )
 
 
@@ -1458,7 +1457,7 @@ class Rule12MicrobatchesCoverTheWarmupTest(unittest.TestCase):
         check(TRIVIAL_SPEC, batch=2)
 
 
-# Rule 13 is DELETED with the graph-capture compile mode.
+# Rule 13 is DELETED with graph capture.
 
 
 class Rule14ExpertParallelismNeedsTheShardedParityTest(unittest.TestCase):
@@ -1619,10 +1618,10 @@ class TheEightGpuCellTest(unittest.TestCase):
                 ):
                     check(DP2_PP4, batch=8, device_count=device_count)
 
-    def test_the_cell_keeps_every_compile_mode(self):
-        for mode in ("default", "none"):
-            with self.subTest(compile_mode=mode):
-                check(DP2_PP4, batch=8, device_count=8, compile_mode=mode)
+    def test_the_cell_keeps_both_compile_treatments(self):
+        for compiled in (True, False):
+            with self.subTest(compiled=compiled):
+                check(DP2_PP4, batch=8, device_count=8, compiled=compiled)
 
     def test_the_cell_records_eight_ranks_and_eight_microbatches(self):
         self.assertEqual(DP2_PP4.world_size, 8)
@@ -1727,25 +1726,11 @@ class CapsThatMovedTest(unittest.TestCase):
 
 
 class PreconditionsOnTheBorrowedArgumentsTest(unittest.TestCase):
-    """The two values this module reads but does not own.
+    """The one value this module reads but does not own.
 
-    Both are checked before the numbered rules, because a rule that reads an
+    It is checked before the numbered rules, because a rule that reads an
     unchecked value can fail open.
     """
-
-    def test_every_declared_compile_mode_is_accepted(self):
-        for mode in COMPILE_MODES:
-            with self.subTest(compile_mode=mode):
-                check(TRIVIAL_SPEC, compile_mode=mode)
-
-    def test_an_unknown_compile_mode_is_refused(self):
-        """Rule 6 refuses anything outside the uncompiled set, so it must
-        know that the name is a real mode. A name no axis holds is a caller
-        error, and the run would record a treatment it never had."""
-        for mode in ("max-autotune", "", "eager"):
-            with self.subTest(compile_mode=mode):
-                with self.assertRaisesRegex(ValueError, "Unknown compile mode"):
-                    check(PP2, compile_mode=mode)
 
     def test_a_batch_below_one_is_refused(self):
         """Neither ``Workload`` nor ``workload_with_overrides`` bounds it --
@@ -1762,7 +1747,7 @@ class TheSingleGpuRunStaysLegalTest(unittest.TestCase):
 
     The trivial spec is what every published number was measured under, so
     it has to survive every other axis: each registered shape, each compile
-    mode, each engine roster, and any batch size.
+    treatment, each engine roster, and any batch size.
     """
 
     def test_every_registered_shape_passes_at_the_trivial_spec(self):
@@ -1770,11 +1755,11 @@ class TheSingleGpuRunStaysLegalTest(unittest.TestCase):
             with self.subTest(model_size=name):
                 check(TRIVIAL_SPEC, shape=PIPER_SHAPES[name])
 
-    def test_every_compile_mode_and_engine_roster_passes(self):
-        for mode in COMPILE_MODES:
+    def test_every_compile_treatment_and_engine_roster_passes(self):
+        for compiled in (True, False):
             for engines in ((), ("torchtitan",), ("torchtitan", "megatron_stock")):
-                with self.subTest(compile_mode=mode, engines=engines):
-                    check(TRIVIAL_SPEC, compile_mode=mode, engines=engines)
+                with self.subTest(compiled=compiled, engines=engines):
+                    check(TRIVIAL_SPEC, compiled=compiled, engines=engines)
 
     def test_any_batch_size_passes(self):
         for batch in (1, 2, 3, 4, 8, 48):
@@ -1796,7 +1781,7 @@ class ValidatorInterfaceTest(unittest.TestCase):
                 PP2,
                 shape=SHAPE_1B,
                 workload=workload(4),
-                compile_mode="default",
+                compiled=True,
                 engines=("torchtitan", "megatron_stock"),
                 device_count=2,
             )
@@ -1848,7 +1833,7 @@ class ImportBudgetTest(unittest.TestCase):
 
     def test_the_module_imports_only_the_declared_dependencies(self):
         """Static: the module scope may reach the stdlib, the shape registry
-        and the compile-mode constants, and nothing else."""
+        and the workload type, and nothing else."""
         source = (REPO_ROOT / "benchmarks" / "e2e" / "parallelism.py").read_text()
         tree = ast.parse(source)
         imported = set()

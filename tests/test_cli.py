@@ -84,11 +84,11 @@ class CliTests(unittest.TestCase):
             "BATCH",
             "BENCHMARK_CACHE_ROOT",
             "BENCH_COMPILER_ENV",
-            "COMPILE_MODE",
+            "AC_MODE",
         ):
             self.assertIn(envvar, result.output)
 
-    def test_compile_mode_reaches_the_request(self) -> None:
+    def test_ac_mode_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
             selected_arms=(ENGINES.arm("titan_compiled"),),
@@ -96,14 +96,11 @@ class CliTests(unittest.TestCase):
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
-            result = self.runner.invoke(
-                cli, ["run", "2", "--compile-mode", "none", "--ac", "none"]
-            )
+            result = self.runner.invoke(cli, ["run", "2", "--ac", "none"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].compile_mode, "none")
         self.assertEqual(execute.call_args.args[0].ac_mode, "none")
 
-    def test_compile_mode_defaults_to_unrequested(self) -> None:
+    def test_ac_mode_defaults_to_unrequested(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
             selected_arms=(ENGINES.arm("titan_compiled"),),
@@ -113,10 +110,9 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].compile_mode)
         self.assertIsNone(execute.call_args.args[0].ac_mode)
 
-    def test_compile_mode_applies_to_every_swept_scenario(self) -> None:
+    def test_ac_mode_applies_to_every_swept_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
@@ -128,8 +124,6 @@ class CliTests(unittest.TestCase):
                         "run-all",
                         "0",
                         "--all-scenarios",
-                        "--compile-mode",
-                        "default",
                         "--ac",
                         "none",
                         "--model-size",
@@ -137,8 +131,6 @@ class CliTests(unittest.TestCase):
                     ],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
-        modes = {call.args[0].compile_mode for call in execute.call_args_list}
-        self.assertEqual(modes, {"default"})
         ac_modes = {call.args[0].ac_mode for call in execute.call_args_list}
         self.assertEqual(ac_modes, {"none"})
         # The third global axis must reach every swept scenario too.
@@ -234,8 +226,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(command[command.index("--config-arg") + 1], "size=huge")
         self.assertFalse([token for token in command if token.endswith("_huge")])
 
-    def test_unknown_compile_mode_is_rejected(self) -> None:
-        result = self.runner.invoke(cli, ["run", "2", "--compile-mode", "turbo"])
+    def test_unknown_ac_mode_is_rejected(self) -> None:
+        result = self.runner.invoke(cli, ["run", "2", "--ac", "turbo"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Invalid value", result.output)
 
@@ -346,30 +338,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         execute.assert_not_called()
         self.assertIn("skipped: does not support ac mode 'sac'", result.output)
-
-    def test_all_scenarios_at_compile_none_skips_the_megatron_scenario(self) -> None:
-        # The uncompiled mode names a titan treatment Megatron never has, so
-        # the sweep skips that scenario with a message instead of recording a
-        # mode one of its arms could not receive.
-        supported = [
-            name
-            for name, scenario in SCENARIOS.items()
-            if "none" in scenario.supported_compile_modes
-        ]
-        with tempfile.TemporaryDirectory() as temporary:
-            completed = SimpleNamespace(out_dir=Path(temporary))
-            with mock.patch(
-                "benchmarks.cli.e2e.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
-                result = self.runner.invoke(
-                    cli,
-                    ["run-all", "0", "--all-scenarios", "--compile-mode", "none"],
-                )
-        self.assertEqual(result.exit_code, 0, result.output)
-        names = [call.args[0].scenario_name for call in execute.call_args_list]
-        self.assertEqual(names, supported)
-        self.assertNotIn("engines", supported)
-        self.assertIn("skipped: does not support compile mode 'none'", result.output)
 
     def test_all_scenarios_at_ac_none_includes_the_megatron_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -7,8 +7,8 @@ construction (``benchmarks.e2e.launch``), provenance collection
 declarations. That is what lets a new ablation be a registry entry rather
 than a new copy of the training harness.
 
-The compile-mode, activation-checkpointing, and execution-model constants
-live here too: they are per-run axes of a scenario execution, consumed by
+The activation-checkpointing and execution-model constants live here too:
+they are per-run axes of a scenario execution, consumed by
 command construction (``benchmarks.e2e.launch``), validation
 (``benchmarks.e2e.validation``), and the manifest
 (``benchmarks.artifacts.manifests``).
@@ -35,37 +35,15 @@ from benchmarks.models.piper_qwen3.shape import PIPER_1B
 EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
 
 
-# Engine-neutral compile modes selectable per run. TORCH_COMPILE_MODE maps a
-# compiled mode to the --compile.mode value the TorchTitan fork applies per
-# block.
-#
-# "none" runs every arm eager. It is a value of this axis rather than a flag
-# of its own, because the axis already carries what an uncompiled run needs:
-# the manifest records it, --resume gates it, and it is a stated
-# comparability boundary.
-COMPILE_MODES = ("default", "none")
-TORCH_COMPILE_MODE = {"default": "default"}
-
-# Modes that apply no torch.compile at all. Such a run has no torch-level
-# mode name, so TORCH_COMPILE_MODE deliberately holds no entry for one: a
-# caller that asks for the name of a mode the run never used gets a KeyError
-# rather than a name to record. One consequence follows, and it is an
-# inversion rather than a relaxation. And validation rule 8 reads the other way: the compile log line must be absent, because its
-# presence would mean the arm compiled under an uncompiled label
-# (benchmarks.e2e.validation).
-UNCOMPILED_COMPILE_MODES = frozenset({"none"})
-
 # Activation checkpointing modes selectable per run. "sac" is TorchTitan's
 # per-op SelectiveAC; "none" disables checkpointing entirely, delivered to
 # TorchTitan as the tyro subcommand token "activation-checkpoint:none".
 AC_MODES = ("sac", "none")
 
-# Default values of the three global run axes.
+# Default values of the global run axes.
 # ``_resolve_run`` (benchmarks.e2e.runner) and the ``run-all
 # --all-scenarios`` pre-pass (benchmarks.cli.e2e) read these constants.
-# Neither site repeats the literal value now. This gives a future fourth
-# axis (parallelism) one default location instead of two.
-DEFAULT_COMPILE_MODE = "default"
+# Neither site repeats the literal value now.
 DEFAULT_AC_MODE = "sac"
 DEFAULT_MODEL_SIZE = "1b"
 
@@ -78,11 +56,11 @@ DEFAULT_MODEL_SIZE = "1b"
 # which removes the call. TorchTitan arms receive nothing.
 #
 # It is a run axis and not a ParallelismSpec field. The value is a treatment
-# of the pipeline messages, the way --compile-mode is a treatment of the
-# blocks, and execution_model names degrees rather than mechanisms. Megatron
-# exposes no CLI flag for the field, so each driver takes the value from the
-# harness and prints what its BUILT config carries. The measured effect and
-# its caveats are in reports/20260901-p2p-sync-ab.md.
+# of the pipeline messages, and execution_model names degrees rather than
+# mechanisms. Megatron exposes no CLI flag for the field, so each driver
+# takes the value from the harness and prints what its BUILT config carries.
+# The measured effect and its caveats are in
+# reports/20260901-p2p-sync-ab.md.
 MEGATRON_P2P_SYNC_MODES = ("on", "off")
 DEFAULT_MEGATRON_P2P_SYNC = "on"
 
@@ -228,10 +206,6 @@ class Scenario:
     whose arms cannot honor a mode (e.g. an engine with no SAC-parity
     recompute) lists only the modes it supports; ``run-all --all-scenarios``
     skips unsupported combinations and a direct request errors.
-    ``supported_compile_modes`` restricts the global ``--compile-mode`` axis
-    the same way, and for the same reason: a run records one mode for every
-    arm in it, so a scenario holding an arm that cannot receive the treatment
-    must decline the mode rather than let the manifest claim it.
     """
 
     name: str
@@ -239,7 +213,6 @@ class Scenario:
     workload: Workload
     arms: tuple[Arm, ...]
     supported_ac_modes: tuple[str, ...] = ("sac", "none")
-    supported_compile_modes: tuple[str, ...] = COMPILE_MODES
 
     def arm(self, name: str) -> Arm:
         for arm in self.arms:
@@ -312,7 +285,6 @@ ENGINES = Scenario(
     ),
     workload=PIPER_1B_MEGATRON_WORKLOAD,
     supported_ac_modes=("none",),
-    supported_compile_modes=("default",),
     arms=(
         Arm(
             name="titan_compiled",

@@ -195,7 +195,6 @@ def command_for_arm(
     arm: Arm,
     arm_dir: Path,
     extra_args: list[str] | tuple[str, ...],
-    compile_mode: str = "default",
     ac_mode: str = "sac",
     *,
     model_size: str = "1b",
@@ -208,8 +207,8 @@ def command_for_arm(
 
     ``model_size``, ``parallelism``, ``megatron_p2p_sync``,
     ``megatron_nan_guard`` and ``megatron_precision`` are keyword-only: the
-    six positional parameters are the historical signature and callers pass
-    them positionally.
+    five positional parameters are the historical signature and callers
+    pass them positionally.
 
     ``parallelism`` defaults to ``TRIVIAL_SPEC`` rather than being required,
     and the asymmetry with ``manifest_data`` -- which takes its parallelism
@@ -241,7 +240,6 @@ def command_for_arm(
             arm,
             arm_dir,
             extra_args,
-            compile_mode,
             ac_mode,
             model_size,
             parallelism,
@@ -361,7 +359,6 @@ def _megatron_stock_command(
     arm: Arm,
     arm_dir: Path,
     extra_args: list[str] | tuple[str, ...],
-    compile_mode: str,
     ac_mode: str,
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,

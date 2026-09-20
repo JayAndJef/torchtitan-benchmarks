@@ -66,9 +66,7 @@ from benchmarks.e2e.parallelism import (
 )
 from benchmarks.e2e.registry import (
     AC_MODES,
-    COMPILE_MODES,
     DEFAULT_AC_MODE,
-    DEFAULT_COMPILE_MODE,
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
@@ -105,8 +103,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     ``run 0 --scenario X`` fail its own world-size check -- rule 1 of
     ``benchmarks/e2e/parallelism.py`` compares ``dp * pp`` against the number
     of devices requested -- and the operator would see a refusal naming a
-    flag they did not pass. ``COMPILE_MODE``, ``AC_MODE`` and ``MODEL_SIZE``
-    have no such partner and stay exported.
+    flag they did not pass. ``AC_MODE`` and ``MODEL_SIZE`` have no such
+    partner and stay exported.
 
     ``--zero`` joins them for the same reason, one step removed. A sharded
     level says something only above ``dp`` 1, so the level has to agree
@@ -125,9 +123,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     ``pp`` 1 and only beside a megatron arm, so it has to agree with the
     ``<gpu>`` positional and with ``--arm``. An exported value would make a
     plain ``run 0 --scenario X`` fail a refusal naming a flag the operator
-    never passed. It defaults to ``None`` for the reason ``--compile-mode``
-    does: a resume inherits the recorded value, and a fresh run takes
-    ``on``.
+    never passed. It defaults to ``None`` for the reason ``--ac`` does: a
+    resume inherits the recorded value, and a fresh run takes ``on``.
 
     ``--megatron-nan-guard`` takes no environment variable for the same
     reason. Its ``off`` value is legal beside a stock megatron arm alone,
@@ -177,17 +174,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             envvar="BENCH_COMPILER_ENV",
             show_envvar=True,
             help="Shell script that enables the host compiler for CUDA extensions.",
-        ),
-        click.option(
-            "--compile-mode",
-            type=click.Choice(COMPILE_MODES),
-            envvar="COMPILE_MODE",
-            show_envvar=True,
-            help=(
-                "Compile mode applied to every arm in the run [default: "
-                "default]. none runs the TorchTitan arms eager. Results are "
-                "only comparable within one mode."
-            ),
         ),
         click.option(
             "--ac",
@@ -494,7 +480,6 @@ def run_all_command(
     # One stamp for the sweep so every scenario lands under out/<stamp>/.
     timestamp = run_timestamp()
     ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
-    compile_mode = options.get("compile_mode") or DEFAULT_COMPILE_MODE
     megatron_p2p_sync = (
         options.get("megatron_p2p_sync") or DEFAULT_MEGATRON_P2P_SYNC
     )
@@ -510,15 +495,8 @@ def run_all_command(
     if zero is None:
         zero = DEFAULT_ZERO
     for name, scenario in SCENARIOS.items():
-        # A sweep skips a scenario that declines either global axis, rather
-        # than aborting: the axis restriction is a declaration, not a fault.
-        if compile_mode not in scenario.supported_compile_modes:
-            click.echo(
-                f"\n===== scenario: {name} ====="
-                f"\nskipped: does not support compile mode {compile_mode!r} "
-                f"(supported: {', '.join(scenario.supported_compile_modes)})"
-            )
-            continue
+        # A sweep skips a scenario that declines a global axis, rather than
+        # aborting: the axis restriction is a declaration, not a fault.
         if ac_mode not in scenario.supported_ac_modes:
             click.echo(
                 f"\n===== scenario: {name} ====="

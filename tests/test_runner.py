@@ -18,9 +18,7 @@ from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     Arm,
-    COMPILE_MODES,
     SCENARIOS,
-    TORCH_COMPILE_MODE,
     ENGINES,
     PIPER_1B_MEGATRON_WORKLOAD,
     scenario_by_name,
@@ -170,24 +168,22 @@ class SelectedArmTests(unittest.TestCase):
         ):
             select_arms(self.scenario, ("missing", "also_missing"))
 
-    def _resolve(self, names: tuple[str, ...], compile_mode: str):
+    def _resolve(self, names: tuple[str, ...]):
         request = RunRequest(
             gpu="0",
             scenario_name=self.scenario.name,
             arm_names=names,
             out_dir=Path("/tmp/selected-arm-test"),
-            compile_mode=compile_mode,
             ac_mode="none",
         )
         return _resolve_run(request, {"PATH": os.environ["PATH"]})
 
-    def test_compile_mode_acceptance_depends_on_the_selected_engines(self) -> None:
+    def test_every_subset_resolves_and_keeps_its_order(self) -> None:
         cases = (
-            (("megatron_stock", "titan_compiled"), "default", True),
-            (("titan_compiled",), "none", False),
-            (("megatron_stock",), "none", False),
-            (("megatron_stock", "titan_compiled"), "none", False),
-            ((), "none", False),
+            ("megatron_stock", "titan_compiled"),
+            ("titan_eager",),
+            ("megatron_stock",),
+            (),
         )
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
@@ -196,21 +192,17 @@ class SelectedArmTests(unittest.TestCase):
             "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
         ):
-            for names, compile_mode, allowed in cases:
-                with self.subTest(names=names, compile_mode=compile_mode):
+            for names in cases:
+                with self.subTest(names=names):
                     hardware.reset_mock()
-                    if allowed:
-                        resolved = self._resolve(names, compile_mode)
-                        self.assertEqual(
-                            [arm.name for arm in resolved[2]], list(names)
-                        )
-                        hardware.assert_called_once()
-                    else:
-                        with self.assertRaisesRegex(
-                            ValueError, "does not support compile mode 'none'"
-                        ):
-                            self._resolve(names, compile_mode)
-                        hardware.assert_not_called()
+                    resolved = self._resolve(names)
+                    expected = list(names) or [
+                        arm.name for arm in self.scenario.arms
+                    ]
+                    self.assertEqual(
+                        [arm.name for arm in resolved[2]], expected
+                    )
+                    hardware.assert_called_once()
 
     def test_order_reaches_execution_manifest_state_and_resume_gate(self) -> None:
         launched: list[str] = []
@@ -356,11 +348,10 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
     def test_off_without_a_megatron_arm_is_refused_before_any_host_probe(
         self,
     ) -> None:
-        """The ``--compile-mode none`` exception, the other way round.
+        """The value needs at least one arm that is not TorchTitan.
 
-        That mode needs every selected arm to be TorchTitan. This value
-        needs at least one not to be, because TorchTitan sends no pipeline
-        message through Megatron and the value would reach nothing.
+        TorchTitan sends no pipeline message through Megatron, so the
+        value would reach nothing.
         """
         self._refused_before_any_probe(
             "reaches no arm",
@@ -386,7 +377,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         legal: the megatron arm gets the flag and the titan arm gets
         nothing."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[12], "off")
+        self.assertEqual(resolved[11], "off")
         commands = resolved[6]
         megatron = commands["megatron_stock"]
         self.assertEqual(megatron[-2:], ["--bench-batch-p2p-sync", "off"])
@@ -395,7 +386,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
     def test_a_megatron_only_subset_passes(self) -> None:
         resolved = self._resolve(("megatron_stock",))
         self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
-        self.assertEqual(resolved[12], "off")
+        self.assertEqual(resolved[11], "off")
 
     def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
         for requested in (None, "on"):
@@ -403,7 +394,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_p2p_sync=requested
                 )
-                self.assertEqual(resolved[12], "on")
+                self.assertEqual(resolved[11], "on")
                 for name, command in resolved[6].items():
                     self.assertEqual(_p2p_flags(command), [], name)
 
@@ -424,7 +415,6 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
-            "default",
             "none",
             "1b",
             parallelism=self.PP2,
@@ -456,7 +446,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
     def test_a_resume_inherits_the_recorded_value_and_refuses_another(
         self,
     ) -> None:
-        """The gate reads like --compile-mode's: an omitted value inherits
+        """The gate reads like --ac's: an omitted value inherits
         the recorded one and rebuilds the same argv, a different value is
         refused, and the refusal names the field."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -464,8 +454,8 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             out_dir.mkdir()
             self._write_manifest(out_dir, "off")
             resolved = self._resume(out_dir, megatron_p2p_sync=None)
-            self.assertEqual(resolved[12], "off")
-            self.assertTrue(resolved[11])
+            self.assertEqual(resolved[11], "off")
+            self.assertTrue(resolved[10])
             self.assertEqual(
                 resolved[6]["megatron_stock"][-2:],
                 ["--bench-batch-p2p-sync", "off"],
@@ -640,7 +630,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         token, once, ahead of the harness group, and the titan arm gets
         nothing."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[13], "off")
+        self.assertEqual(resolved[12], "off")
         commands = resolved[6]
         stock = commands["megatron_stock"]
         self.assertEqual(stock.count(NO_NAN_CHECK), 1)
@@ -650,7 +640,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
     def test_a_stock_only_subset_passes(self) -> None:
         resolved = self._resolve(("megatron_stock",))
         self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
-        self.assertEqual(resolved[13], "off")
+        self.assertEqual(resolved[12], "off")
 
     def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
         for requested in (None, "on"):
@@ -658,7 +648,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_nan_guard=requested
                 )
-                self.assertEqual(resolved[13], "on")
+                self.assertEqual(resolved[12], "on")
                 for name, command in resolved[6].items():
                     self.assertNotIn(NO_NAN_CHECK, command, name)
 
@@ -736,7 +726,6 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
-            "default",
             "none",
             "1b",
             parallelism=TRIVIAL_SPEC,
@@ -775,8 +764,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             out_dir.mkdir()
             self._write_manifest(out_dir, "off")
             resolved = self._resume(out_dir, megatron_nan_guard=None)
-            self.assertEqual(resolved[13], "off")
-            self.assertTrue(resolved[11])
+            self.assertEqual(resolved[12], "off")
+            self.assertTrue(resolved[10])
             self.assertIn(NO_NAN_CHECK, resolved[6]["megatron_stock"])
             with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
                 self._resume(out_dir, megatron_nan_guard="on")
@@ -889,7 +878,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         """A mixed selection is legal: the stock arm gets the four flags
         and the titan arm gets none of them."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[14], "lean")
+        self.assertEqual(resolved[13], "lean")
         commands = resolved[6]
         stock = commands["megatron_stock"]
         for flag in self.LEAN_FLAGS:
@@ -903,7 +892,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_precision=requested
                 )
-                self.assertEqual(resolved[14], "stock")
+                self.assertEqual(resolved[13], "stock")
                 for name, command in resolved[6].items():
                     for flag in self.LEAN_FLAGS:
                         self.assertNotIn(flag, command, name)
@@ -924,7 +913,6 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
-            "default",
             "none",
             "1b",
             parallelism=parallelism,
@@ -975,7 +963,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 out_dir, megatron_precision="lean", parallelism=spec
             )
             resolved = self._resume(out_dir, parallelism=spec)
-            self.assertEqual(resolved[14], "lean")
+            self.assertEqual(resolved[13], "lean")
             self.assertIn(
                 "--use-precision-aware-optimizer", resolved[6]["megatron_stock"]
             )
@@ -1287,16 +1275,6 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--compile.enable", command)
         self.assertIn("--profiler.enable_profiling", command)
 
-    def test_default_compile_mode_leaves_the_command_untouched(self) -> None:
-        command = command_for_arm(
-            ENGINES.workload,
-            ENGINES.arm("titan_compiled"),
-            Path("/out/baseline"),
-            [],
-        )
-        self.assertNotIn("--compile.mode", command)
-        self.assertIn("--compile.enable", command)
-
     def test_an_eager_arm_drops_only_the_compile_flag(self) -> None:
         # CompileConfig.enable is False in the fork, so an eager arm omits
         # the flag rather than negating it. Everything else must be the
@@ -1339,7 +1317,6 @@ class CommandTests(unittest.TestCase):
             ENGINES.arm("titan_compiled"),
             Path("/out/baseline"),
             [],
-            "default",
             "none",
         )
         # tyro attributes flags after a subcommand token to that subcommand,
@@ -1360,7 +1337,7 @@ class CommandTests(unittest.TestCase):
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
                 command = command_for_arm(
-                    scenario.workload, arm, Path("/out") / arm.name, [], "default", "none"
+                    scenario.workload, arm, Path("/out") / arm.name, [], "none"
                 )
                 self.assertIn(f"/out/{arm.name}", command)
 
@@ -1381,7 +1358,6 @@ class EnginesScenarioTests(unittest.TestCase):
             ("cudnn_generated_fort_native_sdpa", "_mul_silu_split"),
         )
         self.assertEqual(scenario.supported_ac_modes, ("none",))
-        self.assertEqual(scenario.supported_compile_modes, ("default",))
         self.assertEqual(scenario.workload.seed, 42)
         for arm in scenario.arms[:2]:
             self.assertEqual(arm.launcher, "torchtitan")
@@ -1411,7 +1387,6 @@ class EnginesScenarioTests(unittest.TestCase):
                 arm,
                 Path("/out") / arm.name,
                 [],
-                "default",
                 "none",
             )
             self.assertTrue(command, arm.name)
@@ -1422,32 +1397,6 @@ class EnginesScenarioTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
-
-    def test_run_refuses_the_uncompiled_mode_for_the_megatron_scenario(self) -> None:
-        request = RunRequest(
-            gpu="0",
-            scenario_name="engines",
-            compile_mode="none",
-            ac_mode="none",
-        )
-        with self.assertRaisesRegex(ValueError, "does not support compile mode"):
-            execute_run(request, environment={"PATH": os.environ["PATH"]})
-
-    def test_every_titan_only_scenario_supports_every_compile_mode(self) -> None:
-        """The exemption is derived from the cause, not from a name.
-
-        A scenario restricts the compile axis because one of its arms cannot
-        receive a treatment, and only a non-TorchTitan arm has that problem:
-        the axis names whole-block ``torch.compile``, which every titan arm
-        gets and no Megatron arm has. So a scenario whose arms are all
-        TorchTitan must accept every mode. A name-based skip would let a
-        future titan-only scenario restrict the axis for no stated reason.
-        """
-        for name, scenario in SCENARIOS.items():
-            if any(arm.launcher != "torchtitan" for arm in scenario.arms):
-                continue
-            with self.subTest(scenario=name):
-                self.assertEqual(scenario.supported_compile_modes, COMPILE_MODES)
 
 
 class CpuPinningTests(unittest.TestCase):
@@ -1528,7 +1477,6 @@ class ManifestTests(unittest.TestCase):
                 metadata,
                 extra_args,
                 "none",
-                "none",
                 "1b",
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
@@ -1538,7 +1486,6 @@ class ManifestTests(unittest.TestCase):
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
         self.assertEqual(manifest["schema_version"], 17)
-        self.assertEqual(manifest["compile_mode"], "none")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
         self.assertEqual(manifest["megatron_p2p_sync"], "on")
