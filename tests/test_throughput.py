@@ -80,7 +80,7 @@ class DriverArithmeticTests(unittest.TestCase):
 
 class ManifestRecordsTheDefinitionTests(unittest.TestCase):
     def _manifest(self) -> dict:
-        scenario = SCENARIOS["piper1b_megatron"]
+        scenario = SCENARIOS["engines"]
         return manifest_data(
             scenario,
             [scenario.arms[0]],

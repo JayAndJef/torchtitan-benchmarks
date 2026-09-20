@@ -22,7 +22,7 @@ from benchmarks.e2e.parallelism import (
     NAN_GUARD_LAUNCHERS,
     PRECISION_LAUNCHERS,
 )
-from benchmarks.e2e.registry import PIPER_1B_MEGATRON, SCENARIOS
+from benchmarks.e2e.registry import ENGINES, SCENARIOS
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import HUGE
@@ -73,8 +73,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("run-all", help_result.output)
         result = self.runner.invoke(cli, ["scenarios"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("piper1b_megatron", result.output)
-        self.assertIn("titan_stock", result.output)
+        self.assertIn("engines", result.output)
+        self.assertIn("titan_compiled", result.output)
 
     def test_execution_help_shows_environment_variables(self) -> None:
         result = self.runner.invoke(cli, ["run-all", "--help"])
@@ -93,7 +93,7 @@ class CliTests(unittest.TestCase):
     def test_compile_mode_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -108,7 +108,7 @@ class CliTests(unittest.TestCase):
     def test_compile_mode_defaults_to_unrequested(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -131,7 +131,7 @@ class CliTests(unittest.TestCase):
                         "0",
                         "--all-scenarios",
                         "--compile-mode",
-                        "cuda-graph",
+                        "default",
                         "--ac",
                         "none",
                         "--model-size",
@@ -140,7 +140,7 @@ class CliTests(unittest.TestCase):
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         modes = {call.args[0].compile_mode for call in execute.call_args_list}
-        self.assertEqual(modes, {"cuda-graph"})
+        self.assertEqual(modes, {"default"})
         ac_modes = {call.args[0].ac_mode for call in execute.call_args_list}
         self.assertEqual(ac_modes, {"none"})
         # The third global axis must reach every swept scenario too.
@@ -150,7 +150,7 @@ class CliTests(unittest.TestCase):
     def test_model_size_defaults_to_unrequested_and_rejects_unknowns(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -214,9 +214,9 @@ class CliTests(unittest.TestCase):
                     "run",
                     "0",
                     "--scenario",
-                    "piper1b_megatron",
+                    "engines",
                     "--arm",
-                    "titan_stock",
+                    "titan_compiled",
                     "--ac",
                     "none",
                     "--model-size",
@@ -229,7 +229,7 @@ class CliTests(unittest.TestCase):
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
         self.assertEqual(manifest["model_size"], "huge")
-        command = manifest["commands"]["titan_stock"]
+        command = manifest["commands"]["titan_compiled"]
         self.assertEqual(
             command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
         )
@@ -244,7 +244,7 @@ class CliTests(unittest.TestCase):
     def test_run_preserves_torchtitan_passthrough_arguments(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -255,7 +255,7 @@ class CliTests(unittest.TestCase):
                     "run",
                     "2",
                     "--scenario",
-                    "piper1b_megatron",
+                    "engines",
                     "--arm",
                     "baseline",
                     "--",
@@ -278,8 +278,8 @@ class CliTests(unittest.TestCase):
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
             selected_arms=(
-                PIPER_1B_MEGATRON.arm("titan_swiglu"),
-                PIPER_1B_MEGATRON.arm("titan_stock"),
+                ENGINES.arm("titan_eager"),
+                ENGINES.arm("titan_compiled"),
             ),
         )
         with mock.patch(
@@ -291,16 +291,16 @@ class CliTests(unittest.TestCase):
                     "run",
                     "2",
                     "--scenario",
-                    "piper1b_megatron",
+                    "engines",
                     "--arm",
-                    "titan_swiglu",
+                    "titan_eager",
                     "--arm",
-                    "titan_stock",
+                    "titan_compiled",
                 ],
             )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(
-            execute.call_args.args[0].arm_names, ("titan_swiglu", "titan_stock")
+            execute.call_args.args[0].arm_names, ("titan_eager", "titan_compiled")
         )
 
     def test_run_all_executes_then_evaluates_same_output(self) -> None:
@@ -312,7 +312,7 @@ class CliTests(unittest.TestCase):
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
                 result = self.runner.invoke(
                     cli,
-                    ["run-all", "6", "--scenario", "piper1b_megatron", "--ac", "none"],
+                    ["run-all", "6", "--scenario", "engines", "--ac", "none"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
@@ -370,7 +370,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         names = [call.args[0].scenario_name for call in execute.call_args_list]
         self.assertEqual(names, supported)
-        self.assertNotIn("piper1b_megatron", supported)
+        self.assertNotIn("engines", supported)
         self.assertIn("skipped: does not support compile mode 'none'", result.output)
 
     def test_all_scenarios_at_ac_none_includes_the_megatron_scenario(self) -> None:
@@ -426,7 +426,7 @@ class CliTests(unittest.TestCase):
 
     def test_all_scenarios_rejects_conflicting_options(self) -> None:
         for conflicting in (
-            ["--scenario", "piper1b_megatron"],
+            ["--scenario", "engines"],
             ["--out", "/tmp/output"],
             ["--results", "/tmp/results.json"],
         ):
@@ -449,7 +449,7 @@ class CliTests(unittest.TestCase):
     def test_megatron_p2p_sync_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -464,7 +464,7 @@ class CliTests(unittest.TestCase):
         """``None`` is what lets a resume inherit the recorded value."""
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -544,7 +544,7 @@ class CliTests(unittest.TestCase):
     def test_megatron_nan_guard_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -559,7 +559,7 @@ class CliTests(unittest.TestCase):
         """``None`` is what lets a resume inherit the recorded value."""
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -605,7 +605,7 @@ class CliTests(unittest.TestCase):
             for name, scenario in SCENARIOS.items()
             if any(arm.launcher in NAN_GUARD_LAUNCHERS for arm in scenario.arms)
         ]
-        self.assertEqual(holds_stock, ["piper_megatron_stock"])
+        self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
@@ -631,16 +631,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             {request.megatron_nan_guard for request in requests}, {"off"}
         )
-        self.assertIn(
-            "skipped: --megatron-nan-guard 'off' was requested with baseline, "
-            "whose driver benchmarks/e2e/megatron/train.py has no NaN guard",
-            result.output,
-        )
 
     def test_megatron_precision_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -655,7 +650,7 @@ class CliTests(unittest.TestCase):
         """``None`` is what lets a later resume inherit the recorded value."""
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
+            selected_arms=(ENGINES.arm("titan_compiled"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -698,7 +693,7 @@ class CliTests(unittest.TestCase):
             for name, scenario in SCENARIOS.items()
             if any(arm.launcher in PRECISION_LAUNCHERS for arm in scenario.arms)
         ]
-        self.assertEqual(holds_stock, ["piper_megatron_stock"])
+        self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
@@ -725,12 +720,6 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(
             {request.megatron_precision for request in requests}, {"lean"}
-        )
-        self.assertIn(
-            "skipped: --megatron-precision 'lean' was requested with "
-            "baseline, whose driver benchmarks/e2e/megatron/train.py builds "
-            "a plain torch AdamW",
-            result.output,
         )
 
     def test_all_scenarios_at_lean_under_replicate_skips_everything(

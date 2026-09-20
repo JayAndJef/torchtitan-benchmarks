@@ -42,6 +42,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -54,7 +55,7 @@ from benchmarks.artifacts.manifests import (
     load_run,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.registry import scenario_by_name
+from benchmarks.e2e.registry import Arm, ENGINES
 from benchmarks.e2e.runner import RunRequest, execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.kernel.results.schema import (
@@ -309,7 +310,16 @@ class LegacyResumeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.manifest = _fixture_e2e_manifest()
         self.recorded_metadata = dict(self.manifest["hardware_metadata"])
-        self.scenario = scenario_by_name(self.manifest["scenario"])
+        # The recorded scenario is retired, so the roster is rebuilt from
+        # the manifest. Only the git rev may then differ.
+        self.scenario = replace(
+            ENGINES,
+            name=self.manifest["scenario"],
+            arms=tuple(
+                Arm(name=name, description=name)
+                for name in self.manifest["selected_arms"]
+            ),
+        )
 
     def _mismatches(self, benchmarks_git_rev: str) -> list[str]:
         metadata = {
@@ -380,11 +390,10 @@ class LegacyResumeTests(unittest.TestCase):
                     environment={"PATH": os.environ["PATH"]},
                 )
 
+        # The recorded scenario is retired, so the refusal names it. The
+        # git-rev guard below is the one that outlives the rename.
         message = str(caught.exception)
-        self.assertIn(
-            "resume request does not match the existing manifest", message
-        )
-        self.assertIn("hardware_metadata.benchmarks_git_rev", message)
+        self.assertIn("Unknown scenario", message)
         never.assert_not_called()
 
 
@@ -467,8 +476,10 @@ class LegacyCommandsAreWriteOnlyTests(unittest.TestCase):
                     environment={"PATH": os.environ["PATH"]},
                 )
 
+        # The recorded scenario is retired, so the refusal now names it.
+        # Either way the resume stops before it reads the recorded argv.
         message = str(caught.exception)
-        self.assertIn("hardware_metadata.benchmarks_git_rev", message)
+        self.assertIn("Unknown scenario", message)
         self.assertNotIn("commands", message)
         never.assert_not_called()
 

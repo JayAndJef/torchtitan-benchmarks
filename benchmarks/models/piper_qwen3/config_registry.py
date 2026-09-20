@@ -71,11 +71,6 @@ from torchtitan.trainer import Trainer
 
 # See "Reverse edge, pending resolution" above: models/ -> e2e/.
 from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataLoader
-from benchmarks.models.piper_qwen3.components.lm_head.losses import (
-    FusedLinearCrossEntropyLoss,
-    PiperOptimizedCrossEntropyLoss,
-    TECrossEntropyLoss,
-)
 from benchmarks.models.piper_qwen3.parallelize import parallelize_piper1b
 from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
 
@@ -143,32 +138,11 @@ def qwen3_piper_1b(*, size: str = "1b") -> Trainer.Config:
     )
 
 
-def qwen3_piper_1b_piper_optimized_te_ce(
-    *, attn_backend: str = "flex", size: str = "1b"
-) -> Trainer.Config:
-    """Full-token lm_head followed by Piper-optimized TE-derived CE."""
-    return _piper_1b_trainer(
-        fuse_qkv=True,
-        loss_kind="piper_optimized_te_ce",
-        attn_backend=attn_backend,
-        shape=shape_by_name(size),
-    )
-
-
 def qwen3_piper_1b_pretokenized(*, size: str = "1b") -> Trainer.Config:
-    """Stock model on the pre-tokenized replay stream (piper1b_megatron)."""
+    """Stock model on the pre-tokenized replay stream (the engines scenario)."""
     # Pass the size on rather than a resolved shape: the delegate resolves it
     # itself, and resolving here as well would be two places to keep in step.
     return _with_pretokenized_replay(qwen3_piper_1b(size=size))
-
-
-def qwen3_piper_1b_piper_optimized_te_ce_pretokenized(
-    *, size: str = "1b"
-) -> Trainer.Config:
-    """Piper-optimized TE CE loss on the pre-tokenized replay stream."""
-    return _with_pretokenized_replay(
-        qwen3_piper_1b_piper_optimized_te_ce(size=size)
-    )
 
 
 def _with_pretokenized_replay(config: Trainer.Config) -> Trainer.Config:
@@ -209,19 +183,9 @@ def _piper_1b_trainer(
     cross_entropy = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(model_spec),
     )
-    if loss_kind == "full_logits":
-        loss = cross_entropy
-    elif loss_kind == "fused_linear_ce":
-        loss = FusedLinearCrossEntropyLoss.Config(
-            batch_chunk_size=None,
-            chunking_method=None,
-        )
-    elif loss_kind == "te_fused_ce":
-        loss = TECrossEntropyLoss.Config()
-    elif loss_kind == "piper_optimized_te_ce":
-        loss = PiperOptimizedCrossEntropyLoss.Config()
-    else:
+    if loss_kind != "full_logits":
         raise ValueError(f"Unknown piper-1B loss kind: {loss_kind}")
+    loss = cross_entropy
 
     return Trainer.Config(
         loss=loss,

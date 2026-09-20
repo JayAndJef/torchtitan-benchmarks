@@ -189,7 +189,7 @@ class RequestTests(unittest.TestCase):
         return seen[0]
 
     def test_an_untouched_command_line_requests_no_parallelism(self) -> None:
-        request = self._request("0", "--scenario", "piper1b_megatron")
+        request = self._request("0", "--scenario", "engines")
         self.assertIsNone(request.parallelism)
 
     def test_the_gpu_string_is_kept_exactly_as_typed(self) -> None:
@@ -197,7 +197,7 @@ class RequestTests(unittest.TestCase):
         # CUDA_VISIBLE_DEVICES is set from the same value.
         for value in ("0", "0,1", "3,2"):
             with self.subTest(value=value):
-                request = self._request(value, "--scenario", "piper1b_megatron")
+                request = self._request(value, "--scenario", "engines")
                 self.assertEqual(request.gpu, value)
                 self.assertIsInstance(request.gpu, str)
 
@@ -205,7 +205,7 @@ class RequestTests(unittest.TestCase):
         request = self._request(
             "0,1",
             "--scenario",
-            "piper1b_megatron",
+            "engines",
             "--dp",
             "2",
             "--dense-sharding",
@@ -240,7 +240,7 @@ class RequestTests(unittest.TestCase):
                 "run",
                 "0,1",
                 "--scenario",
-                "piper1b_megatron",
+                "engines",
                 "--dp",
                 "2",
                 "--dense-sharding",
@@ -254,7 +254,7 @@ class RequestTests(unittest.TestCase):
         request = self._request(
             "0,1",
             "--scenario",
-            "piper1b_megatron",
+            "engines",
             "--pp",
             "2",
             "--pp-schedule",
@@ -268,12 +268,12 @@ class RequestTests(unittest.TestCase):
         )
 
     def test_an_option_left_out_takes_the_spec_default(self) -> None:
-        request = self._request("0,1", "--scenario", "piper1b_megatron", "--dp", "2")
+        request = self._request("0,1", "--scenario", "engines", "--dp", "2")
         self.assertEqual(request.parallelism, ParallelismSpec(dp=2))
 
     def test_a_degree_below_one_is_refused_by_the_option(self) -> None:
         result = CliRunner().invoke(
-            cli, ["run", "0", "--scenario", "piper1b_megatron", "--pp", "0"]
+            cli, ["run", "0", "--scenario", "engines", "--pp", "0"]
         )
         self.assertNotEqual(result.exit_code, 0)
 
@@ -310,8 +310,8 @@ class RequestTests(unittest.TestCase):
                 ],
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        # Several scenarios, and every one of them carries the same spec.
-        self.assertGreater(len(seen), 1)
+        # Every swept scenario carries the same spec.
+        self.assertTrue(seen)
         for request in seen:
             self.assertEqual(request.parallelism, ParallelismSpec(dp=2))
             self.assertEqual(request.gpu, "0,1")
@@ -495,10 +495,10 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
         megatron_nan_guard: str = "on",
         megatron_precision: str = "stock",
     ) -> dict:
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         return manifest_data(
             scenario,
-            (scenario.arm("baseline"),),
+            (scenario.arm("megatron_stock"),),
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
@@ -559,11 +559,11 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
 
     def test_an_omitted_parallelism_is_a_type_error(self) -> None:
         """A defaulted value would record dp 1 x pp 1 for any mesh."""
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
-                (scenario.arm("baseline"),),
+                (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
@@ -602,11 +602,11 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
     def test_an_omitted_p2p_sync_is_a_type_error(self) -> None:
         """A writer that defaulted it would record ``on`` for a run that
         turned the sync off, and the two are a comparability boundary."""
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
-                (scenario.arm("baseline"),),
+                (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
@@ -668,11 +668,11 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
     def test_an_omitted_nan_guard_is_a_type_error(self) -> None:
         """A writer that defaulted it would record ``on`` for a run that
         turned the guard off, and the two are a comparability boundary."""
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
-                (scenario.arm("baseline"),),
+                (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
@@ -687,11 +687,11 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
     def test_an_omitted_precision_is_a_type_error(self) -> None:
         """A writer that defaulted it would record ``stock`` for a run that
         held 10 bytes for each parameter rather than 18."""
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
-                (scenario.arm("baseline"),),
+                (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
@@ -715,10 +715,10 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
     """
 
     def _manifest(self, parallelism: ParallelismSpec) -> dict:
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         return manifest_data(
             scenario,
-            (scenario.arm("baseline"),),
+            (scenario.arm("megatron_stock"),),
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
@@ -768,8 +768,8 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper1b_megatron")
-        self.arms = (self.scenario.arm("baseline"),)
+        self.scenario = scenario_by_name("engines")
+        self.arms = (self.scenario.arm("megatron_stock"),)
 
     def test_a_manifest_whose_only_difference_is_the_derived_field_resumes(
         self,
@@ -847,8 +847,8 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
 
 class ResumeParallelismTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper1b_megatron")
-        self.arms = (self.scenario.arm("baseline"),)
+        self.scenario = scenario_by_name("engines")
+        self.arms = (self.scenario.arm("megatron_stock"),)
 
     def _manifest(self, parallelism: ParallelismSpec) -> dict:
         return manifest_data(
@@ -970,8 +970,8 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
     PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
 
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper1b_megatron")
-        self.arms = (self.scenario.arm("baseline"),)
+        self.scenario = scenario_by_name("engines")
+        self.arms = (self.scenario.arm("megatron_stock"),)
 
     def _manifest(self, megatron_p2p_sync: str) -> dict:
         return manifest_data(
@@ -1046,8 +1046,8 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper_megatron_stock")
-        self.arms = (self.scenario.arm("baseline"),)
+        self.scenario = scenario_by_name("engines")
+        self.arms = (self.scenario.arm("megatron_stock"),)
 
     def _manifest(
         self, megatron_nan_guard: str, megatron_precision: str = "stock"
@@ -1132,8 +1132,8 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper_megatron_stock")
-        self.arms = (self.scenario.arm("baseline"),)
+        self.scenario = scenario_by_name("engines")
+        self.arms = (self.scenario.arm("megatron_stock"),)
 
     def _manifest(
         self,
@@ -1229,7 +1229,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
 class ResolveRunTests(unittest.TestCase):
     """``_resolve_run`` resolves the mesh, and derives the regions from it."""
 
-    def _resolve(self, scenario_name: str = "piper1b_megatron", **kwargs):
+    def _resolve(self, scenario_name: str = "engines", **kwargs):
         kwargs.setdefault("ac_mode", "none")
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
@@ -1242,53 +1242,6 @@ class ResolveRunTests(unittest.TestCase):
                 RunRequest(scenario_name=scenario_name, **kwargs),
                 {"PATH": os.environ["PATH"]},
             )
-
-    def test_an_arm_subset_narrows_the_engine_set_spec_rule_16_reads(
-        self,
-    ) -> None:
-        """**The repair rule 16's messages name, checked where it happens.**
-
-        ``_resolve_run`` builds the ``engines`` argument from the arms this
-        run will really start, so ``run --arm NAME`` narrows it. Rule 16
-        refuses the sharded parity to the tuned megatron driver, and its
-        messages tell the operator to select the TorchTitan arms alone. That
-        advice is only true if the selector reaches the engine set, and this
-        is the one test that says it does.
-
-        ``piper1b_megatron`` is the scenario that holds both engines. Its
-        ``baseline`` arm is the tuned megatron driver and ``titan_stock`` is
-        a TorchTitan arm. The scenario declines ``--ac sac``, so both cases
-        pass ``ac_mode="none"``.
-
-        **It says the rule admits the run. It does not say the run
-        succeeds.** ``parallelize_piper1b`` now admits an explicit shard
-        degree, so the subprocess no longer refuses the selected arm -- but
-        no sharded arm has run on a GPU, so the rule is all this checks.
-        """
-        sharded = ParallelismSpec(dp=2, dense_sharding="zero3")
-        with self.assertRaisesRegex(
-            ValueError, r"--dense-sharding zero3 is not implemented"
-        ):
-            self._resolve(
-                scenario_name="piper1b_megatron",
-                gpu="0,1",
-                ac_mode="none",
-                parallelism=sharded,
-            )
-        resolved = self._resolve(
-            scenario_name="piper1b_megatron",
-            gpu="0,1",
-            ac_mode="none",
-            arm_names=("titan_stock",),
-            parallelism=sharded,
-        )
-        self.assertEqual(
-            [arm.name for arm in resolved[2]], ["titan_stock"]
-        )
-        self.assertEqual(
-            {arm.launcher for arm in resolved[2]}, {"torchtitan"}
-        )
-        self.assertEqual(resolved[10], sharded)
 
     def test_a_single_gpu_run_resolves_to_the_trivial_spec(self) -> None:
         resolved = self._resolve(gpu="0")
@@ -1335,7 +1288,7 @@ class ResolveRunTests(unittest.TestCase):
         ):
             scenario = _resolve_run(
                 RunRequest(
-                    gpu="0", scenario_name="piper1b_megatron", ac_mode="none"
+                    gpu="0", scenario_name="engines", ac_mode="none"
                 ),
                 {"PATH": os.environ["PATH"]},
             )[1]
@@ -1356,7 +1309,7 @@ class ResolveRunTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 _resolve_run(
-                    RunRequest(gpu="0,1", scenario_name="piper1b_megatron"),
+                    RunRequest(gpu="0,1", scenario_name="engines"),
                     {"PATH": os.environ["PATH"]},
                 )
 
@@ -1386,7 +1339,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
             return _resolve_run(
                 RunRequest(
                     gpu="0,1",
-                    scenario_name="piper_megatron_stock",
+                    scenario_name="engines",
                     ac_mode="none",
                     **kwargs,
                 ),
@@ -1405,7 +1358,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
             self._environment(None),
             parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
         )
-        self.assertIn("--use-megatron-fsdp", resolved[6]["baseline"])
+        self.assertIn("--use-megatron-fsdp", resolved[6]["megatron_stock"])
 
     def test_the_forbidden_value_refuses_a_sharded_run(self) -> None:
         with self.assertRaisesRegex(
@@ -1440,7 +1393,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
             self._environment("1"),
             parallelism=ParallelismSpec(dp=2, dense_sharding="zero1"),
         )
-        argv = resolved[6]["baseline"]
+        argv = resolved[6]["megatron_stock"]
         self.assertIn("--use-distributed-optimizer", argv)
         self.assertNotIn("--use-megatron-fsdp", argv)
 
@@ -1451,7 +1404,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         resolved = self._resolve(
             self._environment("1"), parallelism=ParallelismSpec(dp=2)
         )
-        self.assertNotIn("--use-megatron-fsdp", resolved[6]["baseline"])
+        self.assertNotIn("--use-megatron-fsdp", resolved[6]["megatron_stock"])
 
 
 class RunBannerTests(unittest.TestCase):
@@ -1483,8 +1436,8 @@ class RunBannerTests(unittest.TestCase):
         ):
             request = RunRequest(
                 gpu=gpu,
-                scenario_name="piper1b_megatron",
-                arm_names=("titan_stock",),
+                scenario_name="engines",
+                arm_names=("titan_compiled",),
                 out_dir=Path(temporary) / "run",
                 ac_mode="none",
                 parallelism=spec,

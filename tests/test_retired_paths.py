@@ -25,7 +25,7 @@ Two design rules, both learned the hard way, both load-bearing:
    ===========================  ==========================================
    still legal                  because
    ===========================  ==========================================
-   ``piper1b_rope`` et al.      the six scenario ids; they name directories
+   ``piper1b_rope`` et al.      retired scenario ids; they name directories
                                 under ``out/`` and keys in every manifest
    ``qwen3_piper_1b*``          the ``--config`` names
    ``parallelize_piper1b``      a function name
@@ -449,12 +449,11 @@ class RetiredPathAuditTests(unittest.TestCase):
         """
         legal = (
             'scenario_by_name("piper1b_rope")',
-            'SCENARIOS["piper1b_megatron"]',
-            "qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+            'SCENARIOS["engines"]',
+            "qwen3_piper_1b_pretokenized",
             "from x import parallelize_piper1b",
             'manifest["model_shape"], manifest["model_size"]',
             "kernel_bench.log",
-            "the five titan scenarios share PIPER_1B_REGIONS",
             "competing kernels are timed head-to-head",
             "benchmarks/models/piper_qwen3/shape.py",
             "benchmarks.kernel.registry, benchmarks.kernel.runner",

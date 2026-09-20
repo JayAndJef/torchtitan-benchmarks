@@ -131,21 +131,14 @@ say "hf cache:    $HF_DATASETS_CACHE"
 # ------------------------------------------------------------- the cell list
 # "size|ac|mode|scenario". Huge first: it is the new measurement and the one
 # the report is built around.
+# The engines scenario declares supported_ac_modes=("none",) and
+# supported_compile_modes=("default",), so one cell per size is legal.
 CELL_LIST=()
 if [ "$CELLS" = all ] || [ "$CELLS" = huge ]; then
-    for mode in default cuda-graph; do
-        CELL_LIST+=("huge|none|$mode|piper1b_megatron")
-    done
+    CELL_LIST+=("huge|none|default|engines")
 fi
 if [ "$CELLS" = all ] || [ "$CELLS" = 1b ]; then
-    for ac in sac none; do
-        for mode in default cuda-graph; do
-            # Both scenarios declare supported_ac_modes=("none",); the CLI
-            # errors rather than skipping on a direct --scenario request.
-            [ "$ac" != none ] && continue
-            CELL_LIST+=("1b|$ac|$mode|piper1b_megatron")
-        done
-    done
+    CELL_LIST+=("1b|none|default|engines")
 fi
 say "cells:       ${#CELL_LIST[@]}"
 for cell in "${CELL_LIST[@]}"; do say "  $cell"; done
