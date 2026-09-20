@@ -1957,25 +1957,19 @@ TEST_CENSUS = {
     # 15 refusing a sharded value at dp 1 -- including the depth-8 cell,
     # which fills the budget. Rule 15 is deleted now; the cases stayed and
     # they assert the other verdict.
-    # +8 for rule 16, which refuses both to the tuned megatron driver: the
-    # launcher set naming that driver alone, every registry launcher
-    # classified, each half refusing under its own message, the expert half
-    # checked first, the stock arm and a titan-only roster keeping both, and
-    # every mesh the tuned arm has already run staying legal.
-    # +1 that both halves of rule 16 name the repair, beside the test that
-    # the named repair really passes.
+    # Rule 16 and its ten cases are gone with the tuned megatron driver,
+    # and so is the NAN_GUARD_LAUNCHERS case: one MEGATRON_LAUNCHERS set
+    # now carries every megatron axis.
     # +1 for the planned sharded cell at expert degree 1, whose mesh an
     # implementation that read ep rather than the parity would get wrong
     # while every other sharded row still passed.
-    # +1 with NAN_GUARD_LAUNCHERS: it names the stock launcher alone, sits
-    # inside MEGATRON_LAUNCHERS, and names no launcher the registry lacks.
     # +14 with the zero1/zero3 axis: the three-value roster, the two sharded
     # values sharing one mesh and the branch that names replicate rather
     # than them, three cases for titan_reshard_after_forward, six for
     # dense_sharding_warnings, and two for rule 17, which holds a pipeline
     # under zero1 and names it as a repair. Rule 15 is gone and its class
     # now proves the removal, which adds one case to it.
-    "test_parallelism": 169,
+    "test_parallelism": 158,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the six CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -1998,8 +1992,7 @@ TEST_CENSUS = {
     # keywords _parallelism pops, each recorded default read from the spec
     # rather than written out, the option reaching the spec, and click
     # refusing an undeclared value before it gets there.
-    # +1 that an --arm subset narrows the engine set spec rule 16 reads,
-    # which is the repair that rule's two messages name.
+    # +1 that an --arm subset narrows the engine set the spec rules read.
     # +6 with manifest schema 13: the p2p default recorded rather than
     # left out, the value round-tripping through JSON, an omitted value a
     # TypeError, the same value resuming and a different one refused both
@@ -2082,7 +2075,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1846
+TEST_CENSUS_TOTAL = 1835
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
