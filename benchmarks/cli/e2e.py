@@ -539,9 +539,15 @@ def run_command(
     # out/<stamp>/ root. A single scenario takes none and the layout builds
     # its own.
     timestamp = run_timestamp() if len(selected) > 1 else None
+    skipped: list[str] = []
+    executed = False
     for name in selected:
-        if not requested and _skipped(name, options):
-            continue
+        if not requested:
+            reason = _skip_reason(name, options)
+            if reason is not None:
+                click.echo(f"\n===== scenario: {name} =====\nskipped: {reason}")
+                skipped.append(f"{name}: {reason}")
+                continue
         if len(selected) > 1:
             click.echo(f"\n===== scenario: {name} =====")
         # A copy per scenario: ``_axes`` pops the axis options out of it.
@@ -561,6 +567,15 @@ def run_command(
                 **scenario_options,
             ),
             results_path,
+        )
+        executed = True
+    if not executed:
+        raise click.ClickException(
+            "every scenario of this sweep declines one of the run axes, so "
+            "nothing ran:\n  "
+            + "\n  ".join(skipped)
+            + "\nChange the axis, or name a scenario with --scenario to get "
+            "the refusal for it."
         )
 
 
@@ -614,12 +629,16 @@ def _refuse_a_single_run_option(
             )
 
 
-def _skipped(name: str, options: dict[str, Any]) -> bool:
-    """Whether a swept scenario declines one of the global axes.
+def _skip_reason(name: str, options: dict[str, Any]) -> str | None:
+    """Why a swept scenario declines one of the global axes, or ``None``.
 
     A sweep skips such a scenario and says why, rather than aborting: the
     restriction is a declaration, not a fault. A ``--scenario`` that names
     the scenario gets the matching refusal from ``_resolve_run`` instead.
+
+    A sweep that skips every scenario is a different case, and ``run``
+    refuses it: the command ran no arm, and an exit code of 0 would report
+    a measurement that never happened.
     """
     scenario = SCENARIOS[name]
     ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
@@ -656,10 +675,7 @@ def _skipped(name: str, options: dict[str, Any]) -> bool:
         ) or megatron_precision_refusal(
             scenario.arms, megatron_precision, zero
         )
-    if reason is None:
-        return False
-    click.echo(f"\n===== scenario: {name} =====\nskipped: {reason}")
-    return True
+    return reason
 
 
 @click.command("evaluate")

@@ -343,6 +343,7 @@ class CliTests(unittest.TestCase):
         )
 
     def test_all_scenarios_skips_a_scenario_that_declines_the_ac_mode(self) -> None:
+        """The skip says why, and a sweep that ran nothing exits nonzero."""
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
@@ -351,9 +352,49 @@ class CliTests(unittest.TestCase):
                 result = self.runner.invoke(
                     cli, ["run", "0", "--ac", "sac"]
                 )
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotEqual(result.exit_code, 0)
         execute.assert_not_called()
         self.assertIn("skipped: does not support ac mode 'sac'", result.output)
+
+    def test_a_sweep_that_skips_every_scenario_is_refused(self) -> None:
+        """Nothing ran, so the command exits nonzero.
+
+        The message names each skipped scenario and the axis that excluded
+        it. An exit code of 0 would report a measurement nobody took.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(cli, ["run", "0", "--ac", "sac"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        execute.assert_not_called()
+        self.assertIn("nothing ran", result.output)
+        for name in SCENARIOS:
+            self.assertIn(
+                f"{name}: does not support ac mode 'sac'", result.output
+            )
+
+    def test_a_sweep_that_runs_one_scenario_of_two_is_not_refused(self) -> None:
+        """The refusal covers an empty sweep alone, not a partial skip."""
+        registry = self._two_scenarios()
+        registry["engines_copy"] = replace(
+            registry["engines_copy"], supported_ac_modes=("sac",)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.SCENARIOS", registry
+            ), mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            [call.args[0].scenario_name for call in execute.call_args_list],
+            ["engines"],
+        )
 
     def test_the_cli_ac_default_is_the_registry_default(self) -> None:
         """An omitted --ac resolves to the registry default, and the sweep
@@ -824,7 +865,8 @@ class CliTests(unittest.TestCase):
                     cli,
                     ["run", "0", "--ac", "none", "--megatron-precision", "lean"],
                 )
-        self.assertEqual(result.exit_code, 0, result.output)
+        # Nothing ran, so the sweep refuses rather than exiting 0.
+        self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(execute.call_args_list, [])
         self.assertIn(
             "skipped: --megatron-precision 'lean' needs --zero 1",
