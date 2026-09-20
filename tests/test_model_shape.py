@@ -90,8 +90,8 @@ class ShapeArithmeticTests(unittest.TestCase):
     def test_normal_matches_the_numbers_a_real_run_logs(self) -> None:
         # These four are the exact values torchtitan prints
         # ("Total parameter count: dense D, sparse S, vision 0, active A")
-        # and the constant tools/megatron_parity_check.py asserts. They were
-        # duplicated by hand in the megatron baseline before schema 9.
+        # at the 1b shape. They were duplicated by hand in the megatron
+        # baseline before schema 9.
         self.assertEqual(PIPER_1B.param_count, 1_066_241_024)
         self.assertEqual(PIPER_1B.nparams_dense, 361_532_416)
         self.assertEqual(PIPER_1B.nparams_sparse, 704_708_608)
@@ -405,8 +405,9 @@ class ShapeArithmeticTests(unittest.TestCase):
             self.assertEqual(described["name"], shape.name)
 
     def test_parity_gate_is_shape_data(self) -> None:
-        # tools/megatron_parity_check.py reads these; the huge gate is wider
-        # only because bf16 accumulation scales with the reduction length.
+        # These are the per-shape logit-parity tolerances, recorded data with
+        # no current consumer. The huge value is wider only because bf16
+        # accumulation scales with the reduction length.
         self.assertEqual(PIPER_1B.parity_gate, 2e-2)
         self.assertEqual(HUGE.parity_gate, 5e-2)
         self.assertEqual(LARGE.parity_gate, 3e-2)
@@ -1117,11 +1118,10 @@ class ConfigSizeClosureTests(unittest.TestCase):
         ``build_model`` is the megatron twin of ``_piper_1b_model``: both
         construct the same geometry from the same ``PiperShape``, and the
         whole point of that sharing is that a size cannot drift between the
-        engines. A default here would reintroduce the drift on one side --
-        and it would land in the arm with the least protection, since
-        ``tools/megatron_parity_check.py`` builds the model outside the
-        harness and so never reaches validation rule 11's parameter-count
-        check. Signature inspection only; this imports no megatron.
+        engines. A default here would reintroduce the drift on one side, and
+        a caller that builds the model outside the harness never reaches
+        validation rule 11's parameter-count check. Signature inspection
+        only; this imports no megatron.
         """
         import inspect
 

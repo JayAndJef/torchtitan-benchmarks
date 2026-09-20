@@ -629,9 +629,8 @@ def validate_parallelism(
     #    [4, 4, 4, 4], and this rule would pass both. Four stages are
     #    reachable at pp 2, eight at pp 4 and sixteen at pp 8, because four
     #    of the five registered schedules ask for two stages per rank.
-    #    ``launch.py`` sends both flags at every ``pp > 1``; this rule
-    #    assumes that, and ``tests/test_migration_contract.py`` freezes the
-    #    argv at pp 2 and at pp 4.
+    #    ``launch.py`` sends both flags at every ``pp > 1``, and this rule
+    #    assumes that.
     #
     #    Megatron needs no flag: it divides ``config.num_layers`` and asserts
     #    the remainder itself.
@@ -762,10 +761,9 @@ def validate_parallelism(
     #     the tests and the agent guide all name the rules that remain, so
     #     a renumber would break more than it tidies.
 
-    # 16. DELETED with the tuned megatron driver, and the number is kept
-    #     empty on purpose. The rule refused a sharded parity and an expert
-    #     degree to a driver that implemented neither. The stock driver
-    #     implements both.
+    # 16. DELETED, and the number is kept empty on purpose. The rule refused
+    #     a sharded parity and an expert degree to an earlier megatron
+    #     driver that implemented neither. The stock driver implements both.
 
     # 17. DELETED with ZeRO level 3. The rule refused that level under
     #     a pipeline, because Megatron's own sharded wrapper factors the

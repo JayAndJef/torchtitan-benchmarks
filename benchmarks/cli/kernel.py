@@ -15,9 +15,9 @@ and ``--compiler-env`` read one; ``--out``, ``--seq-len``, ``--batch`` and
 exported for an end-to-end session cannot leak into a kernel measurement
 (CLAUDE.md, "Kernel-isolation benchmarks"). That is also why ``--model-size``
 is declared twice in this package rather than shared: this one defaults to
-``normal`` and shows it, while ``benchmarks/cli/e2e.py``'s carries
+``1b`` and shows it, while ``benchmarks/cli/e2e.py``'s carries
 ``envvar="MODEL_SIZE"`` and no default so a resume can tell an unrequested
-size from an explicit ``normal``. Two options that share a spelling; see that
+size from an explicit one. Two options that share a spelling; see that
 module's docstring for the other half.
 
 The single ``--out`` guard is here rather than in ``KernelRunRequest``

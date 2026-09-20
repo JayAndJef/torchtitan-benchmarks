@@ -25,9 +25,8 @@ from benchmarks.kernel.schema import (
 
 class RegistryTests(unittest.TestCase):
     def test_every_scenario_is_internally_consistent(self) -> None:
-        """The roster itself is pinned in ``tests/test_migration_contract.py``,
-        which owns the stable-id inventory; a literal list here would be the
-        same pin written twice and edited sixteen times. What this checks is
+        """The roster itself is not pinned here: a literal list would be a
+        second copy of the registry, edited once per arm. What this checks is
         the shape of each declaration: the anchor is one of the arms, every
         mode is a real mode, and every correctness reference resolves."""
         for scenario in KERNEL_SCENARIOS.values():
@@ -216,8 +215,8 @@ class RegistryTests(unittest.TestCase):
         # need to be well-formed module:function references, each one naming
         # its *own* family's arm module. A builder left in another family's
         # module would import and measure correctly, so nothing but this
-        # notices. tests/test_migration_contract.py pins the five literal
-        # module names; here the point is that they track the scenario.
+        # notices. The point here is that each module name tracks the name of
+        # the scenario that owns it.
         for name in ("benchmarks.kernel.registry", "benchmarks.kernel.schema"):
             self.assertNotIn("torch", vars(importlib.import_module(name)))
         for scenario in KERNEL_SCENARIOS.values():

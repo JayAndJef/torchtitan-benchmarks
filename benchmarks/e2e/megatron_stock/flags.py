@@ -505,9 +505,8 @@ def microbatch_geometry(
     Measured on this rev with ``m`` 4: ``(64, 1, 8)`` sent into a
     ``(16, 4, 8)`` buffer.
 
-    So the harness packs the rows itself, exactly as the tuned megatron
-    driver does, and tells Megatron the sample is one row of ``rows * S``
-    tokens. Every shape then agrees, and the attention is unchanged:
+    So the harness packs the rows itself and tells Megatron the sample is
+    one row of ``rows * S`` tokens. Every shape then agrees, and the attention is unchanged:
     ``cu_seqlens`` already marks every document, and a row boundary is a
     document boundary.
 

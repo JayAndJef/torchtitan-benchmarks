@@ -651,8 +651,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
     """What ``_resolve_run`` does with ``--megatron-nan-guard``.
 
     Both refusals are parent-side and land before any host probe. The value
-    reaches the stock megatron command alone; the tuned driver has no guard
-    and refuses ``off``; a TorchTitan argv is untouched under either value.
+    reaches the stock megatron command alone, and a TorchTitan argv is
+    untouched under either value.
     Legal at every mesh, so every case here is the trivial spec.
     """
 
@@ -904,9 +904,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
 class MegatronPrecisionResolutionTests(unittest.TestCase):
     """What ``_resolve_run`` does with ``--megatron-precision``.
 
-    All three refusals are parent-side and land before any host probe.
-    The value reaches the stock megatron command alone. The tuned driver
-    builds a plain torch AdamW, so it refuses ``lean``. And ``lean`` needs
+    The refusals are parent-side and land before any host probe.
+    The value reaches the stock megatron command alone. And ``lean`` needs
     a sharded dense value, because Megatron asserts the distributed
     optimizer under the precision-aware optimizer.
     """
@@ -1820,7 +1819,7 @@ _SAC_LINE = (
 
 # Validation rule 11's marker: both engines print the parameter count, and a
 # run whose --model-size silently failed to apply would otherwise pass every
-# other rule. Exported so tests/test_run_validation.py builds the same log.
+# other rule. Exported so the other test modules build the same log.
 _SIZE_LINE = (
     "[titan] - root - INFO - Model qwen3 piper_1B "
     f"size: {PIPER_SHAPES['1b'].param_count:,} total parameters\n"

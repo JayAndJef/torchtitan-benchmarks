@@ -6,11 +6,10 @@ kernel arm has no subprocess and no ConfigManager, so anything that wants "the
 module production builds, configured the way production configures it" has to
 build it here.
 
-Two callers in prospect. ``tools/megatron_parity_check.py`` already builds this
-way and now calls in rather than repeating the recipe. Cross-engine kernel arms
-need the same build so that what they time is the production module and not a
-hand-constructed lookalike -- the difference being every default the registry
-sets and a hand construction forgets.
+Cross-engine kernel arms are the callers in prospect. They need this build so
+that what they time is the production module and not a hand-constructed
+lookalike -- the difference being every default the registry sets and a hand
+construction forgets.
 
 **Overrides are counted, not trusted.** ``--override.imports`` is applied in
 the training subprocess and ``validate_arm`` proves it landed by counting

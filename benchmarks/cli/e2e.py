@@ -689,7 +689,7 @@ def _skip_reason(name: str, options: dict[str, Any]) -> str | None:
 def evaluate_command(
     out_dir: Path, arms: tuple[str, ...], results_path: Path | None
 ) -> None:
-    """Report throughput and GPU-time metrics for a finished run."""
+    """Report throughput, step time and peak memory for a finished run."""
     _evaluate(out_dir, arms, results_path)
 
 

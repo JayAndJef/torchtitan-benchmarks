@@ -687,8 +687,7 @@ class FlagListTest(unittest.TestCase):
 
         Under a pipeline the count is the harness's own
         ``local_batch_size // pp_microbatch_size``. Without one neither
-        engine splits, which is what the tuned megatron driver's
-        ``pipeline_settings`` returns at pipeline degree 1.
+        engine splits, so the count is 1 at pipeline degree 1.
         """
         self.assertEqual(microbatch_geometry(BATCH_32, PP4_SPEC)[1], 8)
         self.assertEqual(microbatch_geometry(BATCH_32, TRIVIAL_SPEC)[1], 1)

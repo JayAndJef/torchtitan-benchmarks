@@ -10,10 +10,7 @@ Three things join here, and each can fail silently:
 3. The scenario must decline every mode its Megatron arm cannot honor, and
    must still admit a TorchTitan-only subset.
 
-**The golden argv tests live here and not in
-``tests/test_migration_contract.py``.** That module holds the goldens for
-the two engines that already existed, and three agents wrote this scenario
-in parallel; a new golden there would have collided.
+**This module holds the golden argv tests for every engine.**
 
 **Some tests here need ``benchmarks/e2e/megatron_stock/``, which the driver
 agent owns.** Each such test skips with a named reason until that package
@@ -381,11 +378,8 @@ class TrivialSpecArgvTests(unittest.TestCase):
     def test_no_torchtitan_arm_gains_a_parallelism_token(self) -> None:
         """Every TorchTitan arm of every scenario, at the trivial spec.
 
-        ``tests/test_migration_contract.py`` asks the same question over the
-        whole registry, and its ``subTest`` for the new Megatron arm now
-        errors on the ac mode, so that arm alone is unasserted there. This
-        covers the arms that already existed; ``StockArgvTests`` covers the
-        new one, and skips until the flag module lands.
+        This covers the TorchTitan arms; ``StockArgvTests`` covers the
+        Megatron arm, and skips until the flag module lands.
         """
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
@@ -1428,7 +1422,7 @@ class StockMarkerContractTests(unittest.TestCase):
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_package_prints_no_tuned_marker(self) -> None:
-        """The stock driver must not print the tuned driver's lines."""
+        """The stock driver must not print an earlier driver's marker lines."""
         source = self._package_source()
         for fragment in (
             "Megatron-LM training loop (mode=",

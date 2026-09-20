@@ -1,13 +1,13 @@
 """The mcore profile registry, and the extraction it has to preserve.
 
-``tools/megatron_parity_check.py`` cannot guard this. It is forward-only,
-eval-mode, and computes its loss with ``F.cross_entropy`` on logits rather
-than through ``compute_language_model_loss``, so it would pass unchanged if
-the extraction dropped ``cross_entropy_fusion_impl``,
-``cross_entropy_loss_fusion``, ``gradient_accumulation_fusion`` or
-``bias_dropout_fusion`` -- and it never exercises the cuda-graph branch at
-all. A frozen literal does guard it: any flag that moves has to move here too,
-in the same commit, where a reader sees it.
+A forward-only logit comparison cannot guard this. It computes its loss with
+``F.cross_entropy`` on logits rather than through
+``compute_language_model_loss``, so it would pass unchanged if the extraction
+dropped ``cross_entropy_fusion_impl``, ``cross_entropy_loss_fusion``,
+``gradient_accumulation_fusion`` or ``bias_dropout_fusion`` -- and it never
+exercises the cuda-graph branch at all. A frozen literal does guard it: any
+flag that moves has to move here too, in the same commit, where a reader
+sees it.
 
 Every test here is CPU-only and imports no torch, which is the property the
 registry exists to have.
@@ -91,7 +91,7 @@ class BaseProfileExtractionTests(unittest.TestCase):
         )
 
     def test_the_cuda_graph_branch_is_frozen_too(self) -> None:
-        """The branch the parity check never reaches, so nothing else pins it.
+        """The branch a forward-only check never reaches, so this pins it.
 
         ``use_te_rng_tracker`` is the subtle one: TE's attention asserts on
         the tracker type inside a captured graph, so dropping it turns every

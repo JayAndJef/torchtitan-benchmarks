@@ -10,8 +10,9 @@ with a validation profile, and it owns the dispatch.
 **At the trivial parallelism spec the argv is the argv this repo has always
 built.** ``_titan_parallelism_flags`` returns an empty tuple there, so no
 ``--parallelism.*`` token appears and every published command line is
-reproduced token for token. ``tests/test_migration_contract.py`` asserts that
-mechanically over every arm of every scenario, not by reading a golden list.
+reproduced token for token. ``tests/test_megatron_stock_launch.py`` asserts
+that mechanically over every arm of every scenario, not by reading a golden
+list.
 """
 
 from __future__ import annotations
