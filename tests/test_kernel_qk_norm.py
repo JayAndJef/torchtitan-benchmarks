@@ -717,9 +717,9 @@ class CrossEngineNameTest(unittest.TestCase):
     def test_the_attribute_names_match_the_shared_weight_map(self):
         """The arm navigates to the module the weight map already transfers.
 
-        ``tools/megatron_parity_check.py`` proves the two engines agree
-        numerically, and it proves it through this map. An arm that reads a
-        different attribute measures a module nothing checked.
+        The weight map is the one route by which the two engines get the
+        same weights. An arm that reads a different attribute measures a
+        module nothing checked.
         """
         self.assertIn(WEIGHT_COMPONENT, COMPONENTS)
         found = []

@@ -218,8 +218,8 @@ def build_model(
     blank_parts: tuple[str, ...] = (),
     # The pipeline split. Every one of these three defaults to the whole
     # model on one rank, which is the model every caller but the e2e driver
-    # wants: the twelve kernel builders and tools/megatron_parity_check.py
-    # build one process and pass none of them.
+    # wants: the twelve kernel builders build one process and pass none of
+    # them.
     pipeline_model_parallel_size: int = 1,
     pre_process: bool = True,
     post_process: bool = True,

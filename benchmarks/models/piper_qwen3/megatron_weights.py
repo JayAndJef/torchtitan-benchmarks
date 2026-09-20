@@ -1,18 +1,15 @@
 """The per-parameter map from TorchTitan's layout into megatron-core's.
 
-One implementation, three callers in prospect: ``tools/megatron_parity_check.py``
-(which owned it first), and -- once cross-engine kernel scenarios exist -- the
+One implementation, and -- once cross-engine kernel scenarios exist -- the
 arm builders that must hand both engines the same weights before they compare
-outputs. A second implementation would be a second thing to prove, and two of
-these mappings are already proved: the QKV grouped-interleave bitwise by
-``assert_qkv_roundtrip``, and the whole map numerically by the parity check's
-logit agreement.
+outputs. A second implementation would be a second thing to prove, and the
+QKV grouped-interleave is already proved bitwise by ``assert_qkv_roundtrip``.
 
 **Every transfer carries a component tag**, so a caller can take a slice.
 A scenario that measures only the expert MLP needs only the ``experts``
 weights; loading the rest would cost a full model's memory to compare one
 GEMM. The tags name the components the cross-engine partition cuts on, which
-is why they are finer than the four groups the parity check needs.
+is why they are finer than a whole-model transfer needs.
 
 **This is a correctness mechanism, not a timing one.** A GEMM takes the same
 time whatever its values are. The one place values reach timing is MoE

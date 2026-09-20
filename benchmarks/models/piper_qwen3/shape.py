@@ -197,10 +197,12 @@ class PiperShape:
     # ceiling. A longer sequence fails the eager bounds check; under compile
     # that check is dropped and the read goes out of bounds silently.
     max_seq_len: int = 4096
-    # Logit rel_l2 ceiling for tools/megatron_parity_check.py. bf16-scaled:
-    # rel_l2 grows roughly with the square root of the reduction length, so a
-    # wider shape legitimately needs a wider gate. Never widen one without the
-    # --fp32-reference evidence that check's docstring describes.
+    # The per-shape logit-parity tolerance: the rel_l2 ceiling a cross-engine
+    # logit comparison at this shape must hold to. No code reads it today --
+    # the check that did is deleted -- so it is recorded data, not a gate.
+    # bf16-scaled: rel_l2 grows roughly with the square root of the reduction
+    # length, so a wider shape legitimately needs a wider value. Never widen
+    # one without an fp32 reference to measure the widening against.
     parity_gate: float = 2e-2
 
     def __post_init__(self) -> None:
@@ -524,7 +526,7 @@ HUGE = PiperShape(
     num_experts=4,
     # 12x the 1b dim, so the bf16 accumulation error grows with it: the
     # 1b shape's measured 5.5e-3 becomes 2.03e-2 (sqrt(12) = 3.46). This
-    # is evidenced, not slack -- --fp32-reference puts titan's own bf16 output
+    # is evidenced, not slack -- an fp32 reference puts titan's own bf16 output
     # 3.25e-2 from fp32 against megatron's 3.29e-2, so the engines agree with
     # each other better than either agrees with fp32.
     parity_gate=5e-2,
@@ -553,9 +555,9 @@ LARGE = PiperShape(
     # huge keeps over its own measurement. Two anchors cannot separate the
     # width term from a depth term -- 1b is 16 layers at dim 1024 and huge
     # is 1 layer at dim 12288 -- and this shape is 4 layers, so the estimate
-    # is weaker here than the number alone suggests. Run
-    # tools/megatron_parity_check.py --model-size large before any parity
-    # claim, and --fp32-reference before you change this value.
+    # is weaker here than the number alone suggests. Measure the logit
+    # parity at this shape before any parity claim, and take an fp32
+    # reference before you change this value.
     parity_gate=3e-2,
 )
 
@@ -586,9 +588,9 @@ GIANT = PiperShape(
     # UNVERIFIED, on the same sqrt(dim) law LARGE uses: dim 16384 predicts
     # about 2.4e-2, and 6e-2 keeps huge's 2.46x margin over it. The depth
     # caveat on LARGE does not apply here, because giant is one layer as huge
-    # is, so the width extrapolation is the only step. Run
-    # tools/megatron_parity_check.py --model-size giant before any parity
-    # claim, and --fp32-reference before you change this value.
+    # is, so the width extrapolation is the only step. Measure the logit
+    # parity at this shape before any parity claim, and take an fp32
+    # reference before you change this value.
     parity_gate=6e-2,
 )
 
@@ -609,9 +611,9 @@ PIPER_9B = PiperShape(
     # UNVERIFIED, on the same sqrt(dim) law LARGE and GIANT use: dim 2048
     # predicts about 7.8e-3, and 2e-2 keeps huge's 2.46x margin over it. The
     # depth caveat on LARGE applies here and more so -- this is 24 layers,
-    # further from both anchors than any other estimate in this file. Run
-    # tools/megatron_parity_check.py --model-size 9b before any parity claim,
-    # and --fp32-reference before you change this value.
+    # further from both anchors than any other estimate in this file.
+    # Measure the logit parity at this shape before any parity claim, and
+    # take an fp32 reference before you change this value.
     parity_gate=2e-2,
 )
 
@@ -639,9 +641,9 @@ PIPER_9B = PiperShape(
 #
 # NOTHING HAS RUN THIS SHAPE. No e2e scenario, no kernel scenario and no
 # parity check has executed at it, in either engine. parity_gate is the
-# default 2e-2 because no measurement exists to set it from; run
-# tools/megatron_parity_check.py --model-size 30b-a3b before any parity
-# claim. VALIDATION RULE 7 IS UNTESTED AT 48 LAYERS: the window invocation
+# default 2e-2 because no measurement exists to set it from; measure the
+# logit parity at this shape before any parity claim.
+# VALIDATION RULE 7 IS UNTESTED AT 48 LAYERS: the window invocation
 # count is 240 here. THIS SHAPE DOES NOT FIT ONE H200: 30,532,122,624
 # parameters at titan's 8 B/param of state is 227.5 GiB, and at megatron's
 # 10 B/param under graph mode 284.4 GiB, against a 139.81 GiB device, before
@@ -693,9 +695,9 @@ PIPER_48B = PiperShape(
     # UNVERIFIED, on the same law: dim 4096 predicts about 1.1e-2, and 3e-2
     # keeps huge's 2.46x margin. It is the same gate LARGE carries, which is
     # the arithmetic agreeing with itself -- the law reads dim alone and the
-    # two shapes share a dim. Run tools/megatron_parity_check.py --model-size
-    # 48b before any parity claim, and --fp32-reference before you change
-    # this value.
+    # two shapes share a dim. Measure the logit parity at this shape before
+    # any parity claim, and take an fp32 reference before you change this
+    # value.
     parity_gate=3e-2,
 )
 

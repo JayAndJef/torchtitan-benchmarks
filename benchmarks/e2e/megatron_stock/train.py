@@ -469,8 +469,8 @@ def tokens_per_second(
 ) -> int:
     """Tokens per second PER DEVICE, which is the published figure.
 
-    The same definition the tuned megatron driver and TorchTitan use: one
-    rank's own token count divided by ``cp * tp * pp``. The ranks of one
+    The same definition TorchTitan uses: one rank's own token count
+    divided by ``cp * tp * pp``. The ranks of one
     pipeline share a batch; each data-parallel rank reads a batch of its
     own, so the data-parallel degree is absent from the divisor.
     """
@@ -835,7 +835,7 @@ def broadcast_pipeline_loss(loss: "Any") -> "Any":
     loss field, and ``loss_visible_rank`` -- TorchTitan's own arithmetic,
     ``(world_size // pp) * (pp - 1)`` -- does not always name a last-stage
     rank of Megatron's own layout. Broadcasting removes the question: every
-    rank prints the same real number, exactly as the tuned driver does.
+    rank prints the same real number.
 
     The value the last stage holds is already the mean over the
     data-parallel group, because ``train_step`` all-reduces it there. So
@@ -878,7 +878,7 @@ def install_rendezvous_defaults(environ: "MutableMapping[str, str]" = os.environ
     environment. Above one rank ``torch.distributed.run`` sets both. At one
     rank nothing did, and the arm died before it trained a step. The two
     ``setdefault`` calls keep a value the launcher chose and fill the
-    single-rank case only, which is what the tuned driver does.
+    single-rank case only.
     """
     environ.setdefault("MASTER_ADDR", "127.0.0.1")
     if "MASTER_PORT" not in environ:
@@ -899,9 +899,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv is not None:
         sys.argv = [sys.argv[0], *argv]
 
-    # The allocator setting the TorchTitan arms get from run_train.sh, and
-    # the tuned megatron driver sets for itself. It must be set before torch
-    # initializes CUDA, and torch is not imported yet. Both engines of this
+    # The allocator setting the TorchTitan arms get from run_train.sh, which
+    # this driver sets for itself. It must be set before torch initializes
+    # CUDA, and torch is not imported yet. Both engines of this
     # scenario then run one allocator policy, which is the comparability
     # property that matters here.
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")

@@ -255,8 +255,8 @@ def refuse_non_finite_trajectories(arm: str, log_path: Path) -> None:
 
     This is the one non-finite check the harness owns. Stock Megatron
     carries its own, ``check_for_nan_in_loss_and_grad``, and it is
-    Megatron's to turn off; TorchTitan and the tuned megatron driver carry
-    none. The check therefore runs on every arm, whatever the engine's own
+    Megatron's to turn off; TorchTitan carries none. The check therefore
+    runs on every arm, whatever the engine's own
     guard did, and it names the rank and the first step that failed.
     """
     for rank, text in sorted(_log_by_rank(log_path).items()):

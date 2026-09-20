@@ -10,8 +10,8 @@ provenance query, the NUMA walk, and manifest schema 16.
 recorded fact and every environment variable has to be the one this repo has
 always produced, character for character, because ``--resume`` compares
 several of them in every directory under ``out/`` and roughly one hundred
-manifests record the ``<gpu>`` string. The command lines are pinned next to
-the other goldens in ``tests/test_migration_contract.py``.
+manifests record the ``<gpu>`` string. The command lines are pinned in
+``tests/test_megatron_stock_launch.py``.
 """
 
 import json

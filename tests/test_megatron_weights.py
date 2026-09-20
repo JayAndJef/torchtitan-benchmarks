@@ -1,10 +1,10 @@
 """The cross-engine weight map, exercised on CPU at a toy shape.
 
-``tools/megatron_parity_check.py`` is the numerics check for this map, and it
-needs two real models, a GPU and about a minute. That is the right tool for
-"do the engines agree", and the wrong one for "did a reshape literal move".
-These tests run the real arithmetic against stand-in modules at a shape small
-enough to build in milliseconds, so a layout bug costs one CPU second.
+A numerics check of this map needs two real models, a GPU and about a
+minute. That is the right tool for "do the engines agree", and the wrong one
+for "did a reshape literal move". These tests run the real arithmetic against
+stand-in modules at a shape small enough to build in milliseconds, so a
+layout bug costs one CPU second.
 
 The stand-ins are deliberately dumb: a state dict and a named-parameter dict
 of the right names and shapes. The map only ever reads the first and writes

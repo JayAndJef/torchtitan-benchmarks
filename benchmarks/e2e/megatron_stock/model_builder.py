@@ -14,9 +14,9 @@ assertion passes. A rank that built the wrong slice therefore fails the run
 instead of printing a total it did not verify.
 
 **No collective runs here.** An all-reduce inside a builder deadlocks if any
-rank ever builds a different number of model chunks. The tuned driver takes
-the collective route; this one does not, and pays for it with a per-stage
-identity rather than a measured sum. ``tests/test_model_shape.py`` already
+rank ever builds a different number of model chunks. This builder declines
+the collective route, and pays for it with a per-stage identity rather than
+a measured sum. ``tests/test_model_shape.py`` already
 pins the arithmetic that the stage counts sum to ``param_count``.
 
 ``GPTModelConfig.builder`` is a ``ClassVar[str]`` dotted path

@@ -5,10 +5,10 @@ back to the repository root and ``TITAN_DIR`` is derived from it, not read
 from the environment: there is no ``TITAN_DIR`` override and no
 ``TITAN_PYTHON``, so a run cannot be pointed at a torchtitan checkout that
 the manifest's ``torchtitan_git_rev`` does not describe. The only thing that
-invalidates ``parents[2]`` is moving this file, and
-``tests/test_migration_contract.py`` asserts the walk against the directory
-holding ``run_bench.sh`` because a stale ``.parent`` chain does not raise --
-it silently relocates ``out/``, the caches, and the git-rev lookups.
+invalidates ``parents[2]`` is moving this file. Check the walk against the
+directory that holds ``run_bench.sh`` after any move, because a stale
+``.parent`` chain does not raise -- it silently relocates ``out/``, the
+caches, and the git-rev lookups.
 
 These constants are split out from the rest of ``execution/`` because they
 have consumers that are not the runners. ``benchmarks.artifacts.layout``
