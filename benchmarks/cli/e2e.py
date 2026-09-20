@@ -58,8 +58,8 @@ from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.parallelism import (
-    DEFAULT_DENSE_SHARDING,
-    DENSE_SHARDING_MODES,
+    DEFAULT_ZERO,
+    ZERO_MODES,
     MEGATRON_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
     ParallelismSpec,
@@ -108,11 +108,11 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     flag they did not pass. ``COMPILE_MODE``, ``AC_MODE`` and ``MODEL_SIZE``
     have no such partner and stay exported.
 
-    ``--dense-sharding`` joins them for the same reason, one step removed.
-    Its ``shard`` value is legal only above ``dp`` 1, so that value has to
-    agree with the ``<gpu>`` positional too. An exported
-    ``DENSE_SHARDING=shard`` would make a plain ``run 0 --scenario X`` fail
-    spec rule 15. The refusal would name a flag the operator never passed.
+    ``--zero`` joins them for the same reason, one step removed. A sharded
+    level says something only above ``dp`` 1, so the level has to agree
+    with the ``<gpu>`` positional too. An exported ``ZERO=3`` would make a
+    plain ``run 0 --scenario X`` carry a level the mesh cannot hold, and
+    the warning would name a flag the operator never passed.
 
     Each of the six defaults to ``None``, meaning "not requested", exactly
     as ``--model-size`` does: ``_request`` builds a ``ParallelismSpec`` only
@@ -121,7 +121,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     spec.
 
     ``--megatron-p2p-sync`` takes no environment variable either, for the
-    reason ``--dense-sharding`` gives. Its ``off`` value is legal only above
+    reason ``--zero`` gives. Its ``off`` value is legal only above
     ``pp`` 1 and only beside a megatron arm, so it has to agree with the
     ``<gpu>`` positional and with ``--arm``. An exported value would make a
     plain ``run 0 --scenario X`` fail a refusal naming a flag the operator
@@ -137,8 +137,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
 
     ``--megatron-precision`` takes no environment variable for the same
     reason again, and it has one more agreement to keep: ``lean`` needs a
-    sharded ``--dense-sharding`` value, so an exported value would fail
-    every replicated run on a flag nobody passed.
+    sharded ``--zero`` level, so an exported value would fail every
+    replicated run on a flag nobody passed.
     """
     options = [
         click.option(
@@ -238,7 +238,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.IntRange(min=1),
             help=(
                 "Expert-parallel degree [default: 1]. Needs "
-                "--dense-sharding zero1 or zero3, because TorchTitan cannot "
+                "--zero 1 or --zero 3, because TorchTitan cannot "
                 "split the experts and keep the dense parameters replicated. "
                 "ep takes its ranks out of the dp axis."
             ),
@@ -259,16 +259,16 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             ),
         ),
         click.option(
-            "--dense-sharding",
-            "dense_sharding",
-            type=click.Choice(DENSE_SHARDING_MODES),
+            "--zero",
+            "zero",
+            type=click.Choice(ZERO_MODES),
             help=(
-                "How the run holds the dense parameters [default: "
-                f"{DEFAULT_DENSE_SHARDING}]. replicate keeps a whole copy on "
-                "every rank. zero1 shards the optimizer states. zero3 shards "
-                "the parameters, the gradients and the optimizer states. An "
-                "expert degree needs zero1 or zero3. Results are only "
-                "comparable within one value."
+                "The ZeRO level the run holds the dense parameters at "
+                f"[default: {DEFAULT_ZERO}]. 0 keeps a whole copy on every "
+                "rank. 1 shards the optimizer states. 3 shards the "
+                "parameters, the gradients and the optimizer states. An "
+                "expert degree needs 1 or 3. Results are only comparable "
+                "within one level."
             ),
         ),
         # No envvar; the docstring above gives the reason.
@@ -309,8 +309,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 f"{DEFAULT_MEGATRON_PRECISION}]. stock is --bf16 alone, "
                 "which is 18 bytes per parameter. lean adds the "
                 "precision-aware optimizer with bf16 gradients and bf16 "
-                "Adam moments, which is 10. lean needs --dense-sharding "
-                "zero1 or zero3, because Megatron asserts the distributed "
+                "Adam moments, which is 10. lean needs --zero 1 or "
+                "--zero 3, because Megatron asserts the distributed "
                 "optimizer under it, and it reaches the stock megatron arm "
                 "alone. Results are only comparable within one value."
             ),
@@ -326,8 +326,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
 # renamed option here is a renamed keyword there and nowhere else.
 #
 # **Five of the six defaults are written out a second time here.** The spec
-# owns them, and a copy can drift. ``dense_sharding`` reads
-# ``DEFAULT_DENSE_SHARDING`` instead, because that default is the one
+# owns them, and a copy can drift. ``zero`` reads ``DEFAULT_ZERO``
+# instead, because that default is the one
 # ``benchmarks/e2e/parallelism.py`` names as a reversal point. A test
 # compares every row against ``ParallelismSpec()``, so a drift fails rather
 # than building a spec the operator did not ask for.
@@ -337,7 +337,7 @@ _PARALLELISM_OPTIONS = (
     ("ep", 1),
     ("pp_schedule", None),
     ("pp_microbatch_size", 1),
-    ("dense_sharding", DEFAULT_DENSE_SHARDING),
+    ("zero", DEFAULT_ZERO),
 )
 
 
@@ -508,9 +508,9 @@ def run_all_command(
     )
     # Read rather than popped: ``_parallelism`` pops it from the per-scenario
     # copy below, and the sweep only needs its value to ask the refusal.
-    dense_sharding = (
-        options.get("dense_sharding") or DEFAULT_DENSE_SHARDING
-    )
+    zero = options.get("zero")
+    if zero is None:
+        zero = DEFAULT_ZERO
     for name, scenario in SCENARIOS.items():
         # A sweep skips a scenario that declines either global axis, rather
         # than aborting: the axis restriction is a declaration, not a fault.
@@ -552,7 +552,7 @@ def run_all_command(
         # ``lean`` needs a sharded dense value. ``_resolve_run`` refuses
         # both cases; the sweep prints the same reason and skips.
         refusal = megatron_precision_refusal(
-            scenario.arms, megatron_precision, dense_sharding
+            scenario.arms, megatron_precision, zero
         )
         if refusal is not None:
             click.echo(f"\n===== scenario: {name} =====\nskipped: {refusal}")

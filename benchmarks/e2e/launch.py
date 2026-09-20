@@ -61,8 +61,8 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     and both halves are delivered.
 
     **The pair is gated on the mesh, not on ``dp``.** ``titan_mesh`` reads
-    ``spec.dense_sharding``: it returns ``(1, dp)`` under ``zero1`` and
-    ``zero3`` and ``(dp, 1)`` under ``replicate``, at every expert degree.
+    ``spec.zero``: it returns ``(1, dp)`` under ``zero 1`` and
+    ``zero 3`` and ``(dp, 1)`` under ``zero 0``, at every expert degree.
     So the shard
     degree moves without ``dp`` moving, and a ``dp``-gated test would send a
     sharded run no shard degree at all -- which is the silent ZeRO-3
@@ -70,8 +70,8 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     also keeps the trivial spec's argv empty, because ``titan_mesh`` returns
     ``(1, 1)`` there under every value.
 
-    **``--parallelism.fsdp-reshard-after-forward`` is what makes ``zero1``
-    ZeRO-1 here.** ``titan_mesh`` gives ``zero1`` and ``zero3`` the same
+    **``--parallelism.fsdp-reshard-after-forward`` is what makes ``zero 1``
+    ZeRO-1 here.** ``titan_mesh`` gives ``zero 1`` and ``zero 3`` the same
     pair, so the mesh flags alone would build ZeRO-3 under both. The fork
     types the field as ``Literal["default", "always", "never"]`` on its
     ``ParallelismConfig`` (``config/configs.py``), and
@@ -87,7 +87,7 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     policy.
 
     **``--parallelism.expert-parallel-degree`` needs no gate of its own.**
-    Spec rule 14 refuses ``ep > 1`` under ``replicate``, so every spec that
+    Spec rule 14 refuses ``ep > 1`` under ``zero 0``, so every spec that
     reaches here with an expert degree also asks for a sharded value and
     therefore already carries the pair above. The expert mesh degree TorchTitan derives
     is ``efsdp = dp_shard * cp * tp // ep``, which needs the shard degree the
@@ -186,7 +186,7 @@ def _refuse_parallelism_passthrough(
         raise ValueError(
             f"{arm.name}: {', '.join(offenders)} cannot be passed through: "
             "the parallelism block is built from --dp/--pp/--ep and "
-            "--dense-sharding, and recorded "
+            "--zero, and recorded "
             "in the manifest, and a trailing flag would override it while "
             "the record still named the requested mesh"
         )

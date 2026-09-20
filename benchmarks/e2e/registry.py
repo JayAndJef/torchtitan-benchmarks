@@ -143,7 +143,7 @@ DEFAULT_MEGATRON_NAN_GUARD = "on"
 #
 # "lean" needs a sharded dense value. optimizer_config.py asserts
 # use_distributed_optimizer under --use-precision-aware-optimizer, and the
-# dense-sharding axis is the one owner of that flag. The value reaches the
+# zero axis is the one owner of that flag. The value reaches the
 # stock megatron launcher alone.
 #
 # **"lean" changes the numerics.** bf16 Adam moments and bf16 gradient

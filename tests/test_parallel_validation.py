@@ -1165,7 +1165,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
 
     TorchTitan reads an omitted shard degree as every remaining rank, so a
     run that lost the flag shards the parameters and the manifest still
-    records the dense-sharding value the harness asked for. No other check
+    records the zero value the harness asked for. No other check
     sees that: the log states the mesh TorchTitan resolved, which is the
     mesh the dropped flag produced.
 
@@ -1252,7 +1252,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         self.assertIn("data_parallel_shard_degree=-1", str(caught.exception))
 
     def test_a_stated_shard_degree_runs(self) -> None:
-        """``--dense-sharding zero3`` asks for exactly this mesh.
+        """``--zero 3`` asks for exactly this mesh.
 
         The old guard refused every mesh with a shard degree above 1, so it
         would refuse an honest sharded run. This is the behaviour change.
@@ -1273,9 +1273,9 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         )
 
     def test_a_mesh_that_replicates_and_shards_is_refused(self) -> None:
-        """No dense-sharding value names HSDP.
+        """No zero value names HSDP.
 
-        ``titan_mesh`` returns ``(dp, 1)`` under ``replicate`` and
+        ``titan_mesh`` returns ``(dp, 1)`` under ``zero 0`` and
         ``(1, dp)`` under a sharded value, so a passthrough flag is the only way
         to build this mesh and the manifest could not record it.
         """

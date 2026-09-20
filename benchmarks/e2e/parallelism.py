@@ -65,13 +65,13 @@ supported. Adding one means adding it to ``world_size``, to
 ``execution_model`` and to the throughput divisor at the same time.
 
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` under the
-``replicate`` dense parity, rule 17 refuses ``zero3`` under a pipeline to
+``zero 0`` dense parity, rule 17 refuses ``zero 3`` under a pipeline to
 the stock megatron driver, and rules 5 and 6 refuse three of the five
 registered schedules for every cross-engine run. **There are fifteen rules,
 and the numbering keeps a gap at 15 and at 16.** Rule 15 refused a sharded
 value at ``dp`` 1. It now warns instead, because it blocked
 ``dp 1 x pp 8``, which is the agreed 30B-A3B matrix, and because no engine
-refuses that mesh. ``dense_sharding_warnings`` carries the warning. The
+refuses that mesh. ``zero_warnings`` carries the warning. The
 numbers of rules 16 and 17 stay where they are: messages, tests and the
 agent guide all name them.
 
@@ -79,9 +79,9 @@ Read a registered schedule as a declaration, never as a measurement: only
 ``1F1B`` is targeted, and the caps admit up to ``pp 8``. Real ``pp2``,
 ``dp2``, and ``dp2 x pp2`` correctness runs have passed on both engines, and
 one ``dp 2 x pp 4`` cell at world size 8 has completed on the stock arm.
-Three ``zero3`` cells have completed on the stock arm, all of them at
+Three ``zero 3`` cells have completed on the stock arm, all of them at
 ``dp 8 x pp 1``, and two of those carried ``ep 2``. **No run has used
-``pp 8``, and no run has used ``zero1``.** The caps admit both; that is a
+``pp 8``, and no run has used ``zero 1``.** The caps admit both; that is a
 declaration and not evidence.
 No parallel timing is citable, because the cells that ran were on a loaded
 host and nobody repeated them on an idle one.
@@ -203,7 +203,7 @@ MEGATRON_LAUNCHERS = frozenset({"megatron_stock"})
 #     mcore_fsdp_adapter.py:739  "(outer_fsdp_dp fsdp ep tp) -> ..."
 #
 # The product of the terms must equal the world size, so both hold only at
-# ``pp`` 1. On 2026-08-28 a ``--dense-sharding zero3 --dp 2 --pp 4`` cell
+# ``pp`` 1. On 2026-08-28 a ``--zero 3 --dp 2 --pp 4`` cell
 # died on all eight ranks in 20 seconds with ``einops.EinopsError: ... Shape
 # mismatch, 8 != 2``. The missing factor is exactly ``pp``.
 #
@@ -224,11 +224,11 @@ MEGATRON_LAUNCHERS = frozenset({"megatron_stock"})
 # drivers that shard through Megatron-FSDP. ``torchtitan`` shards through
 # ``fully_shard``, which holds a pipeline.
 #
-# **Only ``zero3`` reaches Megatron-FSDP, so rule 17 refuses ``zero3``
-# alone.** ``zero1`` sends ``--use-distributed-optimizer`` and no
+# **Only ``zero 3`` reaches Megatron-FSDP, so rule 17 refuses ``zero 3``
+# alone.** ``zero 1`` sends ``--use-distributed-optimizer`` and no
 # ``--use-megatron-fsdp``, so Megatron builds a plain
 # ``DistributedDataParallel`` and never calls either mesh builder above.
-# ``zero1`` therefore holds a pipeline on this driver.
+# ``zero 1`` therefore holds a pipeline on this driver.
 MEGATRON_FSDP_LAUNCHERS = frozenset({"megatron_stock"})
 
 
@@ -365,20 +365,14 @@ PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 
 
 # How the run holds the DENSE parameters -- every parameter that is not a
-# routed expert weight. The three values name three ZeRO levels.
+# routed expert weight. Each value names one ZeRO level, and the number is
+# that level.
 #
-# ``replicate`` is ZeRO-0: each rank keeps a whole copy of everything.
-# ``zero1`` shards the optimizer states alone. ``zero3`` shards the
-# parameters, the gradients and the optimizer states.
+# ``0`` is ZeRO-0: each rank keeps a whole copy of everything. ``1`` shards
+# the optimizer states alone. ``3`` shards the parameters, the gradients
+# and the optimizer states.
 #
-# **``zero3`` is the RENAME of the old ``shard``, never a redefinition.**
-# Three cells on disk record ``dense_sharding: "shard"`` and carry published
-# numbers. A redefinition would let a reader pool a ZeRO-3 cell against a
-# ZeRO-1 cell as if the two were repeats of one measurement. A manifest
-# schema bump separated the two spellings, and this code reads one schema,
-# so a recorded ``shard`` never reaches this axis.
-#
-# **What ``zero1`` asks each engine for.** Megatron gets
+# **What ``--zero 1`` asks each engine for.** Megatron gets
 # ``--use-distributed-optimizer`` alone, which is a plain
 # ``DistributedDataParallel`` plus a ``DistributedOptimizer``. TorchTitan
 # gets the whole data-parallel width as ``dp_shard`` plus
@@ -398,7 +392,7 @@ PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 # **It is a comparability boundary at any expert degree**, because it decides
 # how much optimizer state one rank holds and what the ranks exchange each
 # step. Every number this repo has published was measured under
-# ``replicate``, which is why that is the default.
+# ``zero 0``, which is why that is the default.
 #
 # **It is also what makes an expert degree legal.** The reason is a
 # TorchTitan constraint rather than a preference. TorchTitan cannot split
@@ -408,8 +402,8 @@ PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 # ``efsdp = dp_shard * cp * tp // ep`` needs ``dp_shard >= ep``. Megatron
 # holds every parity. So the two engines compare under an expert degree only
 # when both shard, and spec rule 14 refuses the replicated combination.
-DENSE_SHARDING_MODES = ("replicate", "zero1", "zero3")
-DEFAULT_DENSE_SHARDING = "replicate"
+ZERO_MODES: tuple[int, ...] = (0, 1, 3)
+DEFAULT_ZERO = 0
 
 
 @dataclass(frozen=True)
@@ -420,20 +414,20 @@ class ParallelismSpec:
     the run this repo has always done and ``TRIVIAL_SPEC`` is that object.
 
     ``__post_init__`` enforces well-formedness only -- every degree is a
-    positive count, and ``dense_sharding`` names a declared mode. That is
+    positive count, and ``zero`` names a declared ZeRO level. That is
     not one of the sixteen validator rules; it is the precondition they
     assume. Without it a spec of ``dp=-1, pp=-1`` would have ``world_size``
     1 and walk past rule 1 on a one-GPU box, which is exactly the illegal
     mesh the rules exist to refuse. ``PiperShape`` guards its geometry the
     same way and for the same reason.
 
-    **``dense_sharding`` takes the same treatment, and it must.**
+    **``zero`` takes the same treatment, and it must.**
     ``titan_mesh`` and ``execution_model`` are total functions over a spec
-    and both branch on this value, so a spec carrying a string neither
+    and both branch on this value, so a spec carrying a level neither
     branch knows must not exist. A validator rule would be too late: both
     functions run on specs the validator never sees.
 
-    ``dense_sharding`` sits here rather than beside ``--model-size`` as a
+    ``zero`` sits here rather than beside ``--model-size`` as a
     run axis of its own, for the reason ``pp_schedule`` and
     ``pp_microbatch_size`` do: it is a treatment of one parallelism axis,
     and every function that needs it already takes the spec.
@@ -444,7 +438,7 @@ class ParallelismSpec:
     ep: int = 1
     pp_schedule: str | None = None
     pp_microbatch_size: int = 1
-    dense_sharding: str = DEFAULT_DENSE_SHARDING
+    zero: int = DEFAULT_ZERO
 
     def __post_init__(self) -> None:
         for field, value in (
@@ -458,10 +452,10 @@ class ParallelismSpec:
                     f"{field} must be >= 1, got {value}: a degree counts "
                     "ranks and a microbatch size counts rows"
                 )
-        if self.dense_sharding not in DENSE_SHARDING_MODES:
+        if self.zero not in ZERO_MODES:
             raise ValueError(
-                f"Unknown dense sharding mode {self.dense_sharding!r}. "
-                "Available: " + ", ".join(DENSE_SHARDING_MODES)
+                f"Unknown zero level {self.zero!r}. Available: "
+                + ", ".join(str(mode) for mode in ZERO_MODES)
             )
 
     @property
@@ -488,16 +482,16 @@ def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
     path. ``dp_shard=1`` therefore means HSDP over a shard group of one rank,
     which shards nothing and replicates across ``dp_replicate`` -- the
     closest thing TorchTitan has to Megatron's DDP, and the pairing a
-    cross-engine DP row needs. That is the ``replicate`` parity. Under
+    cross-engine DP row needs. That is the ``zero 0`` parity. Under
     either sharded value the whole data-parallel width becomes the shard
     degree, which is pure FSDP.
 
     **The two sharded values share this mesh, and ``titan_reshard_after_
-    forward`` is what separates them.** ``zero1`` keeps the gathered
+    forward`` is what separates them.** ``zero 1`` keeps the gathered
     parameters through the step, so it holds ZeRO-1 rather than ZeRO-3 while
     it builds the same mesh.
 
-    **The test names ``replicate`` rather than the sharded values.** A fourth
+    **The test names ``zero 0`` rather than the sharded values.** A fourth
     value must not take the replicated mesh by omission: the replicated mesh
     is the one every published number was measured under, and a new value
     that silently inherited it would publish a parity the run did not have.
@@ -520,7 +514,7 @@ def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
     and the expert row would again carry two changes.
 
     Spec rule 9 keeps ``dp // ep`` whole, so ``efsdp`` is a whole degree of
-    at least 1 under either sharded value. Under ``replicate`` at ``ep > 1``
+    at least 1 under either sharded value. Under ``zero 0`` at ``ep > 1``
     it would be ``1 // ep``, which is 0 and is not a degree -- and TorchTitan
     asserts no lower bound on it. Spec rule 14 is what keeps that mesh out of
     a run. ``replicate * shard == dp`` holds in both branches.
@@ -531,7 +525,7 @@ def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
     silently run ZeRO-3 instead of the intended replication, and nothing in
     the log or the manifest would say so.
     """
-    if spec.dense_sharding == "replicate":
+    if spec.zero == 0:
         return (spec.dp, 1)
     return (1, spec.dp)
 
@@ -539,11 +533,11 @@ def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
 def titan_reshard_after_forward(spec: ParallelismSpec) -> str | None:
     """TorchTitan's ``--parallelism.fsdp-reshard-after-forward`` policy.
 
-    ``"never"`` under ``zero1``, and ``None`` under every other value, which
+    ``"never"`` under ``zero 1``, and ``None`` under every other value, which
     means the harness sends no flag and TorchTitan keeps its own default.
 
-    **This one function is what makes ``zero1`` ZeRO-1 on TorchTitan.**
-    ``titan_mesh`` gives ``zero1`` and ``zero3`` the same mesh, so the policy
+    **This one function is what makes ``zero 1`` ZeRO-1 on TorchTitan.**
+    ``titan_mesh`` gives ``zero 1`` and ``zero 3`` the same mesh, so the policy
     is the only difference between them on this engine. Under ``"never"``
     FSDP2 gathers the parameters at the first microbatch forward and keeps
     them for the whole step, so the run shards the optimizer states and holds
@@ -554,16 +548,24 @@ def titan_reshard_after_forward(spec: ParallelismSpec) -> str | None:
     spellings of "which value forces the policy" would let the argv and the
     test disagree about what a recorded cell ran.
     """
-    return "never" if spec.dense_sharding == "zero1" else None
+    return "never" if spec.zero == 1 else None
 
 
-def dense_sharding_warnings(spec: ParallelismSpec) -> tuple[str, ...]:
+def zero_warnings(
+    spec: ParallelismSpec, *, engines: Iterable[str] = ()
+) -> tuple[str, ...]:
     """What a reader must not conclude from this spec's own mesh.
 
     Both cases below are legal, and neither refuses anything. Each names a
-    cell whose recorded ``dense_sharding`` value describes a mechanism the
-    run does not really have, so a reader who takes the value at face value
-    reads the cell wrongly.
+    cell whose recorded ``zero`` level describes a mechanism the run does
+    not really have, so a reader who takes the level at face value reads
+    the cell wrongly.
+
+    ``engines`` is the set of ``Arm.launcher`` values the run holds. The
+    second warning is about TorchTitan's FSDP2 alone, so a run of megatron
+    arms alone does not get it: Megatron builds a ``DistributedOptimizer``
+    and holds ZeRO-1 exactly, at every mesh. An empty set therefore emits
+    the first warning only.
 
     **Nothing is emitted above ``dp`` 1 and above ``pp`` 1.** That is the
     configuration this axis exists to run. A warning on the intended cell is
@@ -575,22 +577,24 @@ def dense_sharding_warnings(spec: ParallelismSpec) -> tuple[str, ...]:
     the artifact.
     """
     warnings: list[str] = []
-    if spec.dense_sharding != "replicate" and spec.dp == 1:
+    if spec.zero != 0 and spec.dp == 1:
         warnings.append(
-            f"dense sharding {spec.dense_sharding!r} was requested at dp 1. "
-            "The shard degree is 1 there, whatever the value says. Megatron "
+            f"--zero {spec.zero} was requested at dp 1. "
+            "The shard degree is 1 there, whatever the level says. Megatron "
             "shards the optimizer states over one rank and saves nothing, "
             "and TorchTitan skips its data-parallel path. So this run holds "
             "the dense parameters exactly as a replicated run holds them. "
             "Do not read this cell as a measurement of the sharded parity"
         )
-    if spec.dense_sharding == "zero1" and spec.pp == 1:
+    titan = frozenset(engines) - MEGATRON_LAUNCHERS
+    if spec.zero == 1 and spec.pp == 1 and titan:
         warnings.append(
-            "dense sharding 'zero1' was requested at pp 1. One microbatch "
-            "puts the gradient reduce-scatter inside the only backward pass, "
-            "so the TorchTitan arm holds ZeRO-2 rather than the ZeRO-1 shape "
-            "the value names. The Megatron arm holds ZeRO-1 at every mesh. "
-            "Do not read the two arms of this cell as one ZeRO level"
+            "--zero 1 was requested at pp 1. One microbatch puts the "
+            "gradient reduce-scatter inside the only backward pass, so the "
+            f"TorchTitan arms ({', '.join(sorted(titan))}) hold ZeRO-2 "
+            "rather than the ZeRO-1 shape the level names. Megatron holds "
+            "ZeRO-1 at every mesh. Do not read the two engines of this cell "
+            "as one ZeRO level"
         )
     return tuple(warnings)
 
@@ -655,27 +659,21 @@ def execution_model(spec: ParallelismSpec) -> str:
     difference is documented rather than encoded. Cite it beside a
     cross-engine dp number.
 
-    **``dense_sharding`` reaches the string, and it does not name an engine.**
-    Both engines shard under ``zero1`` and under ``zero3``, so ``dp2-zero1``
-    is true of a TorchTitan arm and of a Megatron arm alike -- unlike
+    **``zero`` reaches the string, and it does not name an engine.**
+    Both engines shard at level 1 and at level 3, so ``dp2-zero1`` is true
+    of a TorchTitan arm and of a Megatron arm alike -- unlike
     ``fsdp2-replicate2-shard1``, which spells out one engine's mesh. The
-    value is written out rather than mapped, so a new value cannot take
-    another value's suffix. The default parity adds nothing, which is what
-    keeps every replicated string this repo has already recorded exactly
-    where it was.
-
-    **The sharded suffix MOVED.** Three recorded cells carry
-    ``dp8-shard``. This function now writes ``dp8-zero3`` for the same mesh,
-    so an old string and a new string of one mesh do not match as text.
-    That is the rename.
+    level number carries into the suffix, so a new level cannot take
+    another level's suffix. Level 0 adds nothing, which is what keeps every
+    replicated string this repo has already recorded exactly where it was.
     """
     devices = "single-gpu" if spec.world_size == 1 else f"{spec.world_size}-gpu"
     if skip_dp(spec):
         data_parallel = "no-fsdp"
-    elif spec.dense_sharding == "replicate":
+    elif spec.zero == 0:
         data_parallel = f"dp{spec.dp}"
     else:
-        data_parallel = f"dp{spec.dp}-{spec.dense_sharding}"
+        data_parallel = f"dp{spec.dp}-zero{spec.zero}"
     parts = [devices, "plain-bf16", data_parallel]
     if spec.pp > 1:
         parts.append(f"pp{spec.pp}-{spec.pp_schedule}")
@@ -692,7 +690,7 @@ def describe(
     Mirrors ``PiperShape.describe``: the declared fields, then the values a
     reader would otherwise have to re-derive with this module in hand.
 
-    ``dense_sharding`` is the declared parity, and ``dp_replicate`` and
+    ``zero`` is the declared parity, and ``dp_replicate`` and
     ``dp_shard`` are the **TorchTitan** mesh that parity resolves to. The
     names say whose the mesh is. Megatron is told neither; it gets a DP group
     size, and at ``ep > 1`` an ``expert_model_parallel_size`` that subdivides
@@ -734,7 +732,7 @@ def describe(
         "ep": spec.ep,
         "pp_schedule": spec.pp_schedule,
         "pp_microbatch_size": spec.pp_microbatch_size,
-        "dense_sharding": spec.dense_sharding,
+        "zero": spec.zero,
         "world_size": spec.world_size,
         "dp_replicate": replicate,
         "dp_shard": shard,
@@ -761,7 +759,7 @@ def validate_parallelism(
 
     Rules 8 and 9 were dead behind rule 14 while it refused every
     ``ep > 1``. Rule 14 now refuses an expert degree only under the
-    ``replicate`` parity, so both rules are reachable: a sharded spec with
+    ``zero 0`` parity, so both rules are reachable: a sharded spec with
     an illegal expert count reaches rule 8, and one whose expert degree does
     not divide ``dp`` reaches rule 9. They were kept through the whole
     refusal for exactly this, and neither had to be invented here.
@@ -1006,11 +1004,11 @@ def validate_parallelism(
     #     dense parameters replicated: apply_fsdp_to_decoder sends every
     #     non-expert parameter to Shard(0) on the dense mesh, and the expert
     #     mesh degree efsdp = dp_shard * cp * tp // ep needs dp_shard >= ep.
-    #     Megatron holds every parity. So an ep row under `replicate` would
+    #     Megatron holds every parity. So an ep row under `--zero 0` would
     #     compare EP plus sharding against EP plus replication, which is two
     #     changes rather than one.
     #
-    #     **The test is `!= "replicate"`, so zero1 and zero3 both pass.**
+    #     **The test is `== 0`, so levels 1 and 3 both pass.**
     #     titan_mesh gives both of them the whole data-parallel width as
     #     dp_shard, so dp_shard >= ep holds under either one.
     #
@@ -1018,13 +1016,13 @@ def validate_parallelism(
     #     the parity rather than the rule deriving one from ep, so that the
     #     sharded ep 1 control cell can be expressed and the ep row carries
     #     one change against it.
-    if spec.ep > 1 and spec.dense_sharding == "replicate":
+    if spec.ep > 1 and spec.zero == 0:
         raise ValueError(
-            f"expert degree {spec.ep} needs --dense-sharding zero1 or "
-            "--dense-sharding zero3. TorchTitan cannot split the experts and "
-            f"keep the dense parameters replicated, so under "
-            f"{spec.dense_sharding!r} it would shard them while Megatron "
-            "replicates them. The row would carry two changes rather than one"
+            f"expert degree {spec.ep} needs --zero 1 or --zero 3. "
+            "TorchTitan cannot split the experts and keep the dense "
+            f"parameters replicated, so under --zero {spec.zero} it would "
+            "shard them while Megatron replicates them. The row would carry "
+            "two changes rather than one"
         )
 
     # 15. DELETED, and the number is kept empty on purpose. The rule refused
@@ -1033,12 +1031,12 @@ def validate_parallelism(
     #
     #     **It refused the agreed 30B-A3B matrix.** That matrix is
     #     `dp 1 x pp 8`, which is the deepest split eight GPUs hold, and it
-    #     asks for zero1 to cut the optimizer states. Neither engine refuses
+    #     asks for --zero 1 to cut the optimizer states. Neither engine refuses
     #     that mesh: Megatron builds a DistributedOptimizer over one rank and
     #     TorchTitan skips its data-parallel path. A rule that blocks a legal
     #     run to protect a reader is the wrong tool.
     #
-    #     **A warning replaced it.** `dense_sharding_warnings` says the same
+    #     **A warning replaced it.** `zero_warnings` says the same
     #     thing to the same reader, at the same mesh, and takes no GPU away.
     #     The runner emits it and results.json records it.
     #
@@ -1065,8 +1063,8 @@ def validate_parallelism(
     #     shards under a pipeline through ``fully_shard`` and is unaffected,
     #     so ``run --arm`` selecting the TorchTitan arms alone passes it.
     #
-    #     **Rule 17 does not refuse ``zero1``, and the reason is the
-    #     argv.** The rule refuses ``zero3`` alone. ``zero1`` sends
+    #     **Rule 17 does not refuse level 1, and the reason is the
+    #     argv.** The rule refuses level 3 alone. Level 1 sends
     #     ``--use-distributed-optimizer`` and no ``--use-megatron-fsdp``, so
     #     Megatron takes the plain ``DistributedDataParallel`` branch and
     #     calls neither mesh builder. Nothing factors the world size, so the
@@ -1076,25 +1074,25 @@ def validate_parallelism(
     #     done.
     #
     #     **The expert degree needs no separate half here.** Rule 14 refuses
-    #     ``ep > 1`` under ``replicate``, so every expert run reaches this
-    #     rule as a sharded one and the ``zero3`` test already covers it.
+    #     ``ep > 1`` under level 0, so every expert run reaches this
+    #     rule as a sharded one and the level 3 test already covers it.
     #
     #     **There are two repairs, and each is a different measurement.**
     #     ``--dp 8 --pp 1`` satisfies both patterns at eight ranks, and it is
-    #     not comparable to a ``pp 4`` cell. ``--dense-sharding zero1`` holds
+    #     not comparable to a ``pp 4`` cell. ``--zero 1`` holds
     #     the pipeline, and it shards the optimizer states alone rather than
     #     the parameters. Say which one a number came from.
     fsdp_refused = engines & MEGATRON_FSDP_LAUNCHERS
-    if fsdp_refused and spec.dense_sharding == "zero3" and spec.pp > 1:
+    if fsdp_refused and spec.zero == 3 and spec.pp > 1:
         raise ValueError(
-            f"--dense-sharding zero3 with pp {spec.pp} is not buildable by "
+            f"--zero 3 with pp {spec.pp} is not buildable by "
             f"the {', '.join(sorted(fsdp_refused))} driver, which this run "
             "holds. That driver shards through Megatron-FSDP, whose device "
             "mesh factors the world size into dp_cp x ep x tp with no "
             f"pipeline term. The product is {spec.dp * spec.ep} and the "
             f"world is {spec.world_size}; the missing factor is exactly pp "
             f"{spec.pp}. Megatron dies in einops.rearrange before the "
-            "wrapper exists. Use --pp 1, or --dense-sharding zero1, which "
+            "wrapper exists. Use --pp 1, or --zero 1, which "
             "builds no Megatron-FSDP mesh, or run --arm to select the "
             "TorchTitan arms alone"
         )
