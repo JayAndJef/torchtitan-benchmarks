@@ -17,54 +17,11 @@ from dataclasses import dataclass
 
 import torch
 
-from benchmarks.execution.paths import TITAN_DIR
-
-C4_TEST_PATH = TITAN_DIR / "tests" / "assets" / "c4_test"
-TOKENIZER_PATH = TITAN_DIR / "tests" / "assets" / "tokenizer"
-
-
-def materialize_titan_samples(
-    *,
-    seq_len: int,
-    num_samples: int,
-    dp_rank: int = 0,
-    dp_world_size: int = 1,
-) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Drain the first num_samples (input, positions, label) triples from
-    torchtitan's c4_test dataset, exactly as the titan arms consume them.
-
-    ``dp_rank`` and ``dp_world_size`` are the data-parallel slice, and they
-    default to the whole stream, which is what every megatron number under
-    ``out/`` was measured on. They are forwarded to the stock dataset class
-    unchanged: it calls ``split_dataset_by_node(ds, dp_rank, dp_world_size)``
-    on the raw documents, which is the split torchtitan's own loader gives
-    its ranks. So this function reproduces the titan stream rank for rank
-    rather than reimplementing a split, which is what the parity between the
-    two engines rests on.
-
-    ``num_samples`` is PER RANK. A data-parallel rank reads a batch of its
-    own each step, so every rank drains the same count from a different
-    shard.
-    """
-    from torchtitan.components.tokenizer import HuggingFaceTokenizer
-    from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
-
-    tokenizer = HuggingFaceTokenizer(tokenizer_path=str(TOKENIZER_PATH))
-    dataset = HuggingFaceTextDataset(
-        dataset_name="c4_test",
-        dataset_path=str(C4_TEST_PATH),
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=True,
-    )
-    iterator = iter(dataset)
-    samples = []
-    for _ in range(num_samples):
-        inputs, label = next(iterator)
-        samples.append((inputs["input"], inputs["positions"], label))
-    return samples
+from benchmarks.e2e.megatron_stock.data import (  # noqa: F401
+    C4_TEST_PATH,
+    TOKENIZER_PATH,
+    materialize_titan_samples,
+)
 
 
 @dataclass
