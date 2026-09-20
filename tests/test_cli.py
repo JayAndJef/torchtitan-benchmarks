@@ -747,8 +747,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(execute.call_args_list, [])
         self.assertIn(
-            "skipped: --megatron-precision 'lean' needs --zero 1 or "
-            "--zero 3",
+            "skipped: --megatron-precision 'lean' needs --zero 1",
             result.output,
         )
 

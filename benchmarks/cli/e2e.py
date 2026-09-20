@@ -237,10 +237,10 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             "ep",
             type=click.IntRange(min=1),
             help=(
-                "Expert-parallel degree [default: 1]. Needs "
-                "--zero 1 or --zero 3, because TorchTitan cannot "
-                "split the experts and keep the dense parameters replicated. "
-                "ep takes its ranks out of the dp axis."
+                "Expert-parallel degree [default: 1]. Needs --zero 1, "
+                "because TorchTitan cannot split the experts and keep the "
+                "dense parameters replicated. ep takes its ranks out of "
+                "the dp axis."
             ),
         ),
         click.option(
@@ -265,10 +265,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             help=(
                 "The ZeRO level the run holds the dense parameters at "
                 f"[default: {DEFAULT_ZERO}]. 0 keeps a whole copy on every "
-                "rank. 1 shards the optimizer states. 3 shards the "
-                "parameters, the gradients and the optimizer states. An "
-                "expert degree needs 1 or 3. Results are only comparable "
-                "within one level."
+                "rank. 1 shards the optimizer states. An expert degree "
+                "needs 1. Results are only comparable within one level."
             ),
         ),
         # No envvar; the docstring above gives the reason.
@@ -309,10 +307,10 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 f"{DEFAULT_MEGATRON_PRECISION}]. stock is --bf16 alone, "
                 "which is 18 bytes per parameter. lean adds the "
                 "precision-aware optimizer with bf16 gradients and bf16 "
-                "Adam moments, which is 10. lean needs --zero 1 or "
-                "--zero 3, because Megatron asserts the distributed "
-                "optimizer under it, and it reaches the stock megatron arm "
-                "alone. Results are only comparable within one value."
+                "Adam moments, which is 10. lean needs --zero 1, because "
+                "Megatron asserts the distributed optimizer under it, and "
+                "it reaches the stock megatron arm alone. Results are only "
+                "comparable within one value."
             ),
         ),
     ]

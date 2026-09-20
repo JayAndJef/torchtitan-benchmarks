@@ -56,23 +56,22 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     ``--parallelism.data-parallel-shard-degree`` -- TorchTitan defaults
     ``data_parallel_shard_degree`` to ``-1`` (``config/configs.py``), which
     resolves to "every remaining rank". An omitted flag therefore turns a
-    dp 2 run into ZeRO-3 rather than the intended replication, and neither
-    the log nor the manifest would say so. ``titan_mesh`` decides the pair
-    and both halves are delivered.
+    dp 2 run into full sharding rather than the intended replication, and
+    neither the log nor the manifest would say so. ``titan_mesh`` decides
+    the pair and both halves are delivered.
 
     **The pair is gated on the mesh, not on ``dp``.** ``titan_mesh`` reads
-    ``spec.zero``: it returns ``(1, dp)`` under ``zero 1`` and
-    ``zero 3`` and ``(dp, 1)`` under ``zero 0``, at every expert degree.
-    So the shard
-    degree moves without ``dp`` moving, and a ``dp``-gated test would send a
-    sharded run no shard degree at all -- which is the silent ZeRO-3
-    substitution this whole paragraph exists to prevent. Gating on the mesh
-    also keeps the trivial spec's argv empty, because ``titan_mesh`` returns
-    ``(1, 1)`` there under every value.
+    ``spec.zero``: it returns ``(1, dp)`` at level 1 and ``(dp, 1)`` at
+    level 0, at every expert degree. So the shard degree moves without
+    ``dp`` moving, and a ``dp``-gated test would send a sharded run no
+    shard degree at all -- which is the silent substitution this whole
+    paragraph exists to prevent. Gating on the mesh also keeps the trivial
+    spec's argv empty, because ``titan_mesh`` returns ``(1, 1)`` there at
+    every level.
 
-    **``--parallelism.fsdp-reshard-after-forward`` is what makes ``zero 1``
-    ZeRO-1 here.** ``titan_mesh`` gives ``zero 1`` and ``zero 3`` the same
-    pair, so the mesh flags alone would build ZeRO-3 under both. The fork
+    **``--parallelism.fsdp-reshard-after-forward`` is what makes level 1
+    ZeRO-1 here.** The mesh flags alone would reshard every forward. The
+    fork
     types the field as ``Literal["default", "always", "never"]`` on its
     ``ParallelismConfig`` (``config/configs.py``), and
     ``get_fsdp_reshard_after_forward_policy`` reads it. Under ``never``

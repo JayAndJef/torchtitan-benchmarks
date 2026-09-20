@@ -211,11 +211,11 @@ class RequestTests(unittest.TestCase):
             "--dp",
             "2",
             "--zero",
-            3,
+            1,
         )
         self.assertEqual(
             request.parallelism,
-            ParallelismSpec(dp=2, zero=3),
+            ParallelismSpec(dp=2, zero=1),
         )
 
     def test_the_zero_option_refuses_an_undeclared_value(
@@ -223,18 +223,17 @@ class RequestTests(unittest.TestCase):
     ) -> None:
         """**Click refuses it, and the exit code is what says so.**
 
-        A nonzero exit proves nothing here: a legal ``--zero
-        zero3`` also exits nonzero, because the run then starts and fails on
-        this host for its own reasons. Click's usage error is exit 2, and
-        it names the roster. Without the ``click.Choice`` the string would
-        reach ``ParallelismSpec.__post_init__``, raise, and exit 1 -- a
-        refusal in the right direction under the wrong code, which this
-        assertion separates.
+        A nonzero exit proves nothing here: a legal ``--zero 1`` also
+        exits nonzero, because the run then starts and fails on this host
+        for its own reasons. Click's usage error is exit 2, and it names
+        the roster. Without the ``click.Choice`` the value would reach
+        ``ParallelismSpec.__post_init__``, raise, and exit 1 -- a refusal
+        in the right direction under the wrong code, which this assertion
+        separates.
 
-        **The value under test is ``shard``, which is the RETIRED
-        spelling.** Three recorded cells carry it, so an operator who reads
-        an old manifest can type it. It must reach the roster message rather
-        than the new ``zero 3`` behaviour.
+        **The value under test is 3, which is the RETIRED level.** Recorded
+        cells carry it, so an operator who reads an old manifest can type
+        it. It must reach the roster message.
         """
         result = CliRunner().invoke(
             cli,
@@ -246,11 +245,11 @@ class RequestTests(unittest.TestCase):
                 "--dp",
                 "2",
                 "--zero",
-                "2",
+                "3",
             ],
         )
         self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("'0', '1', '3'", result.output)
+        self.assertIn("'0', '1'", result.output)
 
     def test_the_pipeline_options_build_one_spec(self) -> None:
         request = self._request(
@@ -590,16 +589,16 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
     def test_a_sharded_spec_round_trips_through_json(self) -> None:
         """Both halves reach the file: the parity the operator asked for,
         and the TorchTitan mesh it resolves to."""
-        spec = ParallelismSpec(dp=2, zero=3)
+        spec = ParallelismSpec(dp=2, zero=1)
         recorded = json.loads(json.dumps(self._manifest(spec)))
         self.assertEqual(
             recorded["parallelism"], describe(spec, local_batch_size=4)
         )
-        self.assertEqual(recorded["parallelism"]["zero"], 3)
+        self.assertEqual(recorded["parallelism"]["zero"], 1)
         self.assertEqual(recorded["parallelism"]["dp_replicate"], 1)
         self.assertEqual(recorded["parallelism"]["dp_shard"], 2)
         self.assertEqual(
-            recorded["execution_model"], "2-gpu-plain-bf16-dp2-zero3"
+            recorded["execution_model"], "2-gpu-plain-bf16-dp2-zero1"
         )
 
     def test_an_omitted_parallelism_is_a_type_error(self) -> None:
@@ -957,7 +956,7 @@ class ResumeParallelismTests(unittest.TestCase):
         the moment ``describe`` records it.
         """
         recorded = ParallelismSpec(dp=2)
-        requested = ParallelismSpec(dp=2, zero=3)
+        requested = ParallelismSpec(dp=2, zero=1)
         self.assertIn(
             "parallelism", self._mismatches(self._manifest(recorded), requested)
         )
@@ -1183,9 +1182,9 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
                     self._mismatches(manifest, requested),
                 )
 
-    def test_a_zero3_record_resumes(self) -> None:
-        """The ZeRO-3 parity is a value of the axis like any other."""
-        spec = ParallelismSpec(dp=2, zero=3)
+    def test_a_sharded_record_resumes(self) -> None:
+        """A sharded level is a value of the axis like any other."""
+        spec = ParallelismSpec(dp=2, zero=1)
         manifest = self._manifest("stock", parallelism=spec)
         self.assertEqual(
             self._mismatches(manifest, "stock", parallelism=spec), []
@@ -1246,99 +1245,6 @@ class ResolveRunTests(unittest.TestCase):
                     RunRequest(gpu="0,1", scenario_name="engines"),
                     {"PATH": os.environ["PATH"]},
                 )
-
-
-class ConnectionLimitPreconditionTests(unittest.TestCase):
-    """The one host variable that stops a sharded Megatron run at parsing.
-
-    ``megatron/training/arguments.py`` asserts
-    ``CUDA_DEVICE_MAX_CONNECTIONS != "1"`` under ``--use-megatron-fsdp``,
-    and ``runtime_environment`` copies the host environment into the child.
-    So an operator's own shell can fail every sharded cell of a matrix for
-    a reason no log explains.
-
-    **The refusal reads the built argv, not the spec.** That is what keeps
-    it from drifting away from ``megatron_stock/flags.py``: the day a flag
-    list stops sending the flag, the refusal stops firing on its own.
-    """
-
-    def _resolve(self, environment: dict, **kwargs):
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", dict(_METADATA)),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ):
-            return _resolve_run(
-                RunRequest(
-                    gpu="0,1",
-                    scenario_name="engines",
-                    ac_mode="none",
-                    **kwargs,
-                ),
-                environment,
-            )
-
-    def _environment(self, value: str | None) -> dict:
-        environment = {"PATH": os.environ["PATH"]}
-        if value is not None:
-            environment["CUDA_DEVICE_MAX_CONNECTIONS"] = value
-        return environment
-
-    def test_the_sharded_stock_argv_really_carries_the_flag(self) -> None:
-        """The premise of every case below."""
-        resolved = self._resolve(
-            self._environment(None),
-            parallelism=ParallelismSpec(dp=2, zero=3),
-        )
-        self.assertIn("--use-megatron-fsdp", resolved[6]["megatron_stock"])
-
-    def test_the_forbidden_value_refuses_a_sharded_run(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError, "CUDA_DEVICE_MAX_CONNECTIONS"
-        ) as raised:
-            self._resolve(
-                self._environment("1"),
-                parallelism=ParallelismSpec(dp=2, zero=3),
-            )
-        # The refusal names its own repair, as every other refusal here does.
-        self.assertIn("Unset CUDA_DEVICE_MAX_CONNECTIONS", str(raised.exception))
-
-    def test_another_value_and_an_unset_variable_both_pass(self) -> None:
-        """Only the literal '1' is refused. Megatron asserts on that value
-        alone, so refusing more would refuse a run Megatron accepts."""
-        for value in ("8", None):
-            with self.subTest(value=value):
-                self._resolve(
-                    self._environment(value),
-                    parallelism=ParallelismSpec(dp=2, zero=3),
-                )
-
-    def test_a_zero1_run_is_untouched_by_the_variable(self) -> None:
-        """``zero 1`` shards through the optimizer, not through Megatron-FSDP.
-
-        The argv carries ``--use-distributed-optimizer`` and no
-        ``--use-megatron-fsdp``, so Megatron runs no assert on the variable
-        and the refusal goes inert on its own. The test reads both flags,
-        because a refusal that fired here would refuse a legal cell.
-        """
-        resolved = self._resolve(
-            self._environment("1"),
-            parallelism=ParallelismSpec(dp=2, zero=1),
-        )
-        argv = resolved[6]["megatron_stock"]
-        self.assertIn("--use-distributed-optimizer", argv)
-        self.assertNotIn("--use-megatron-fsdp", argv)
-
-    def test_a_replicated_run_is_untouched_by_the_variable(self) -> None:
-        """A replicated stock run sends no ``--use-megatron-fsdp``, so the
-        assert never runs and the variable is none of this repo's business.
-        Refusing it here would refuse a cell this suite has already run."""
-        resolved = self._resolve(
-            self._environment("1"), parallelism=ParallelismSpec(dp=2)
-        )
-        self.assertNotIn("--use-megatron-fsdp", resolved[6]["megatron_stock"])
 
 
 class RunBannerTests(unittest.TestCase):
@@ -1431,7 +1337,10 @@ class RunBannerTests(unittest.TestCase):
         """A warning that fired on the configuration this axis exists to run
         would teach an operator to ignore warnings."""
         self.assertEqual(
-            self._warnings(ParallelismSpec(dp=2, zero=3), "0,1"),
+            self._warnings(
+                ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B", zero=1),
+                "0,1,2,3",
+            ),
             [],
         )
 
@@ -1442,10 +1351,10 @@ class RunBannerTests(unittest.TestCase):
         would pass the test above and tell the operator nothing.
         """
         lines = self._summaries(
-            ParallelismSpec(dp=2, zero=3), "0,1"
+            ParallelismSpec(dp=2, zero=1), "0,1"
         )
         self.assertIn(
-            "parallelism: dp 2 x pp 1 (ep 1, world size 2, zero 3)",
+            "parallelism: dp 2 x pp 1 (ep 1, world size 2, zero 1)",
             lines,
         )
 

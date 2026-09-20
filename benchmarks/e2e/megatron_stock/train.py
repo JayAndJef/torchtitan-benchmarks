@@ -74,6 +74,7 @@ from benchmarks.e2e.megatron_stock.flags import (
     BENCH_PROFILER_WARMUP,
     BENCH_ROWS_PER_SAMPLE,
     BENCH_SEQ_LEN,
+    NO_SHARD_STRATEGY,
     SUPPORTED_PP_SCHEDULE,
 )
 from benchmarks.e2e.registry import (
@@ -143,16 +144,15 @@ PARALLELISM_LINE = (
 # picks one of three wrapper classes from the arguments (training.py).
 # Each of the three derives directly from _BaseDataParallel. None of them
 # derives from another. So the class name is what says which memory
-# strategy ran. The word "DistributedDataParallel" cannot be hardcoded
-# here, because it is wrong under --zero 3.
+# strategy ran, and it is read off the wrapper rather than hardcoded.
 #
 # **{sharding} is the strategy the run acts on, not the raw field.**
 # Megatron's argparse defaults data_parallel_sharding_strategy to
 # "optim_grads_params" and copies it into every ddp_config, but
-# megatron/core/optimizer/__init__.py reads it only under
-# use_megatron_fsdp. So the raw field says "optim_grads_params" on a
-# replicated run that shards nothing, and this line reports "no_shard"
-# there. Both halves are read off the wrapper's own config.
+# megatron/core/optimizer/__init__.py reads it only under a sharded
+# wrapper. This suite builds none, so the raw field says
+# "optim_grads_params" on a run that shards nothing and this line reports
+# "no_shard".
 #
 # **{expert} is the expert group's real width**, from
 # mpu.get_expert_model_parallel_world_size(). The expert degree carves its
@@ -164,19 +164,17 @@ PARALLELISM_LINE = (
 # train_step), so ncclDevKernel_AllReduce appears whether or not a gradient
 # was reduced.
 # **{optimizer} is the optimizer class Megatron really built**, and it is
-# what separates the two sharded values. --use-distributed-optimizer alone
+# what separates the two ZeRO levels. --use-distributed-optimizer alone
 # gives ZeRO-1, where the wrapper stays DistributedDataParallel exactly as
-# it is under replicate; the wrapper class therefore cannot tell replicate
-# from zero1, and this field can. Megatron picks the class in
+# it is at level 0; the wrapper class therefore cannot tell the two levels
+# apart, and this field can. Megatron picks the class in
 # megatron/core/optimizer/__init__.py: DistributedOptimizer under the
 # distributed optimizer, and Float16OptimizerWithFloat16Params without it.
 #
-# **replicate and zero1 get a CHAIN, and the chain's own name proves no
-# ZeRO level.** get_megatron_optimizer ends its standard path with an
-# unconditional ChainedOptimizer(optimizers), so both values carry one.
-# zero3 takes the Megatron-FSDP branch instead, which returns its one
-# optimizer bare at a single model chunk. A chain of
-# Float16OptimizerWithFloat16Params and a
+# **Both levels get a CHAIN, and the chain's own name proves no ZeRO
+# level.** get_megatron_optimizer ends its standard path with an
+# unconditional ChainedOptimizer(optimizers), and this suite takes no
+# other path. A chain of Float16OptimizerWithFloat16Params and a
 # chain of DistributedOptimizer print the same word, so
 # optimizer_class_name names the members. A real eight-GPU run failed this
 # rule on 2026-09-16, because the line said "ChainedOptimizer" alone.
@@ -640,10 +638,7 @@ CHAINED_OPTIMIZERS_ATTRIBUTE = "chained_optimizers"
 def optimizer_class_name(optimizer: Any) -> str:
     """The optimizer name the data-parallel line states.
 
-    A bare optimizer states its own class. The Megatron-FSDP branch
-    returns one, because it collapses its optimizer list where the list
-    holds one member, and this harness builds one group of model chunks
-    (``megatron/core/optimizer/__init__.py``).
+    A bare optimizer states its own class.
 
     **A chain states its members too.** The standard path ends with an
     unconditional ``ChainedOptimizer(optimizers)``, so ``zero 0`` and
@@ -717,9 +712,9 @@ def install_data_parallel_marker(
     **The sharding strategy printed is the one the run acts on.**
     ``data_parallel_sharding_strategy`` reaches every ``ddp_config``,
     because Megatron's argparse defaults it, but
-    ``megatron/core/optimizer/__init__.py`` reads it only under
-    ``use_megatron_fsdp``. A line built from the raw field would say a
-    replicated run sharded. Both fields come from the wrapper's own config.
+    ``megatron/core/optimizer/__init__.py`` reads it only under a sharded
+    wrapper. This suite builds none, so the line states ``no_shard``. A
+    line built from the raw field would say a replicated run sharded.
 
     **The expert degree is read from the group, and a disagreement
     raises.** ``initialize_model_parallel`` has run by the time this
@@ -801,11 +796,7 @@ def install_data_parallel_marker(
                 dp=data_parallel_size,
                 overlap=config.overlap_grad_reduce,
                 fp32=config.grad_reduce_in_fp32,
-                sharding=(
-                    config.data_parallel_sharding_strategy
-                    if config.use_megatron_fsdp
-                    else "no_shard"
-                ),
+                sharding=NO_SHARD_STRATEGY,
                 expert=built_expert_size,
                 optimizer=optimizer_class_name(optimizer),
             ),
