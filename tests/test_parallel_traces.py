@@ -57,8 +57,7 @@ def graph_name(graph_hash: str) -> str:
 def write_trace(path: Path, graphs: dict, extra_events: list = ()) -> Path:
     """Synthetic chrome trace, in the shape torch's profiler writes.
 
-    Deliberately the same construction ``tests/test_profile_regions.py`` uses:
-    one CPU ``user_annotation`` per invocation (nested in a
+    One CPU ``user_annotation`` per invocation (nested in a
     ``CompiledFunctionBackward`` frame when the phase is backward), one GPU
     ``gpu_user_annotation`` carrying the measured span, and one kernel event
     covering exactly half of it.
@@ -271,6 +270,111 @@ class PoolingStaysPerRankTests(unittest.TestCase):
         self.assertEqual(callers, ["benchmarks/traces/extraction.py"])
 
 
+class WindowReadingTests(unittest.TestCase):
+    """What one window reports, and what a pool of windows refuses.
+
+    These read the single-rank path that every per-rank number rides on: the
+    profiled-step count, the launch-latency average, the two-window pool and
+    the refusal of a trace the reader cannot parse.
+    """
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+
+    def test_profiled_steps_deduplicate_and_launch_latency_averages(self) -> None:
+        # All four launch APIs count (runtime and driver, plain and Ex
+        # variants); non-launch runtime calls do not.
+        extra = [
+            {"ph": "X", "cat": "cpu_op", "name": "ProfilerStep#21",
+             "tid": 1, "ts": 0, "dur": 100},
+            {"ph": "X", "cat": "python_function", "name": "ProfilerStep#21",
+             "tid": 2, "ts": 0, "dur": 100},
+            {"ph": "X", "cat": "cpu_op", "name": "ProfilerStep#22",
+             "tid": 1, "ts": 200, "dur": 100},
+            {"ph": "X", "cat": "cuda_runtime", "name": "cudaLaunchKernel",
+             "tid": 1, "ts": 10, "dur": 4.0},
+            {"ph": "X", "cat": "cuda_runtime", "name": "cudaLaunchKernelExC",
+             "tid": 1, "ts": 20, "dur": 8.0},
+            {"ph": "X", "cat": "cuda_driver", "name": "cuLaunchKernel",
+             "tid": 1, "ts": 30, "dur": 2.0},
+            {"ph": "X", "cat": "cuda_driver", "name": "cuLaunchKernelEx",
+             "tid": 1, "ts": 40, "dur": 2.0},
+            {"ph": "X", "cat": "cuda_runtime", "name": "cudaMemsetAsync",
+             "tid": 1, "ts": 50, "dur": 100.0},
+            {"ph": "X", "cat": "python_function", "name": "cuLaunchKernel",
+             "tid": 1, "ts": 60, "dur": 100.0},
+        ]
+        trace = write_trace(
+            self.root / "trace.json.gz",
+            {"bwd": ("backward", [100.0] * 4), "fwd": ("forward", [10.0] * 4)},
+            extra,
+        )
+        window = trace_window_metrics(trace)
+        self.assertEqual(window.profiled_steps, 2)
+        self.assertEqual(window.launch_count, 4)
+        self.assertEqual(window.launch_total_us, 16.0)
+
+    def test_mixed_stepped_and_stepless_windows_fail(self) -> None:
+        stepped = write_trace(
+            self.root / "iteration_20.json.gz",
+            {"bwd": ("backward", [100.0] * 4), "fwd": ("forward", [10.0] * 4)},
+            [{"ph": "X", "cat": "cpu_op", "name": "ProfilerStep#20",
+              "tid": 1, "ts": 0, "dur": 100}],
+        )
+        stepless = write_trace(
+            self.root / "iteration_40.json.gz",
+            {"bwd": ("backward", [100.0] * 4), "fwd": ("forward", [10.0] * 4)},
+        )
+        with self.assertRaisesRegex(ValueError, "per-step totals would be wrong"):
+            pooled_window_metrics([stepped, stepless])
+
+    def test_pools_measurements_across_two_windows(self) -> None:
+        steps = [
+            {"ph": "X", "cat": "cpu_op", "name": "ProfilerStep#20",
+             "tid": 1, "ts": 0, "dur": 100},
+        ]
+        window_20 = write_trace(
+            self.root / "iteration_20.json.gz",
+            {"bwd": ("backward", [100.0] * 4), "fwd": ("forward", [10.0] * 4)},
+            steps,
+        )
+        window_40 = write_trace(
+            self.root / "iteration_40.json.gz",
+            {"bwd": ("backward", [102.0] * 4), "fwd": ("forward", [12.0] * 4)},
+            steps,
+        )
+        pooled = pooled_window_metrics([window_20, window_40])
+        self.assertEqual(pooled.windows, 2)
+        self.assertEqual(pooled.profiled_steps, 2)
+        self.assertAlmostEqual(
+            pooled.kernel_total_us, (4 * 50.0 + 4 * 5.0) + (4 * 51.0 + 4 * 6.0)
+        )
+        self.assertAlmostEqual(
+            pooled.kernel_ms_per_step, pooled.kernel_total_us / 2 / 1000.0
+        )
+        self.assertIsNone(pooled.launch_latency_us)
+
+    def test_malformed_trace_fails(self) -> None:
+        not_gzip = self.root / "corrupt.json.gz"
+        not_gzip.write_bytes(b"this is not gzip data")
+        with self.assertRaisesRegex(ValueError, "unreadable profiler trace"):
+            trace_window_metrics(not_gzip)
+
+        not_json = self.root / "not_json.json.gz"
+        with gzip.open(not_json, "wt") as trace_file:
+            trace_file.write("{not json")
+        with self.assertRaisesRegex(ValueError, "unreadable profiler trace"):
+            trace_window_metrics(not_json)
+
+        no_events_key = self.root / "no_events.json.gz"
+        with gzip.open(no_events_key, "wt") as trace_file:
+            json.dump({"other": []}, trace_file)
+        with self.assertRaisesRegex(ValueError, "unreadable profiler trace"):
+            trace_window_metrics(no_events_key)
+
+
 class CollectiveAndBasisTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
@@ -421,8 +525,8 @@ class StepWallReadsTheHostAnnotationTests(unittest.TestCase):
     def test_a_device_annotation_cannot_set_the_wall(self) -> None:
         pooled = self._window([
             step_event(1000.0),
-            # The decoy tests/test_profile_regions.py already writes: a device
-            # annotation carrying the step's name and an absurd duration.
+            # The decoy: a device annotation that carries the step's name
+            # and an absurd duration.
             {"ph": "X", "cat": "gpu_user_annotation", "name": "ProfilerStep#20",
              "tid": 100, "ts": 0.0, "dur": 9e9},
         ])

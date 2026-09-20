@@ -34,10 +34,12 @@ from benchmarks.e2e.registry import SCENARIOS  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     evaluate_run,
     loss_visible_rank,
+    losses,
     per_rank_training_metrics,
     refuse_non_finite_trajectories,
     render_evaluation,
     training_metrics,
+    write_results,
 )
 from tests.test_parallel_traces import step_event, write_trace  # noqa: E402
 
@@ -592,6 +594,142 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
             log.unlink()
             # A missing log is a validation failure, not this guard's.
             refuse_non_finite_trajectories("baseline", log)
+
+
+class WholeEvaluationTests(unittest.TestCase):
+    """The published payload, read end to end on a synthetic run.
+
+    The assertions pin the loss parser, the host-latency warning, and the
+    machine-readable and human-readable halves of one evaluation.
+    """
+
+    def test_loss_parsing_flags_non_finite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "baseline.log"
+            log.write_text(
+                "step:  1  loss:  7.44780\n"
+                "step:  2  loss:  nan\n"
+            )
+            parsed = losses(log)
+        self.assertEqual(parsed[0], (1, 7.4478))
+        self.assertNotEqual(parsed[1][1], parsed[1][1])  # NaN
+
+    def test_uneven_host_latency_across_arms_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            manifest = {
+                "schema_version": MANIFEST_SCHEMA_VERSION,
+                "scenario": "synthetic",
+                "hardware": "test-gpu",
+                "workload": {},
+                "selected_arms": ["baseline", "optimized"],
+            }
+            (out_dir / "manifest.json").write_text(json.dumps(manifest))
+            for arm, launch_us in (("baseline", 4.0), ("optimized", 6.0)):
+                write_trace(
+                    out_dir
+                    / arm
+                    / "profiling/traces/iteration_20/rank0_trace.json.gz",
+                    {
+                        "backward": ("backward", [100.0] * 4),
+                        "forward": ("forward", [10.0] * 4),
+                    },
+                    [
+                        {"ph": "X", "cat": "cuda_runtime",
+                         "name": "cudaLaunchKernel",
+                         "tid": 1, "ts": 10, "dur": launch_us},
+                    ],
+                )
+                (out_dir / f"{arm}.log").write_text(
+                    "step: 2 loss: 1.0 memory: 3.00GiB tps: 1000\n"
+                )
+            result = evaluate_run(out_dir)
+        self.assertTrue(
+            any("host launch latency varies" in warning
+                for warning in result.warnings),
+            result.warnings,
+        )
+
+    def test_complete_evaluation_is_human_and_machine_readable(self) -> None:
+        step_events = [
+            {"ph": "X", "cat": "cpu_op", "name": "ProfilerStep#20",
+             "tid": 1, "ts": 0, "dur": 100},
+            {"ph": "X", "cat": "cuda_runtime", "name": "cudaLaunchKernel",
+             "tid": 1, "ts": 10, "dur": 6.0},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            manifest = {
+                "schema_version": MANIFEST_SCHEMA_VERSION,
+                "scenario": "synthetic",
+                "hardware": "test-gpu",
+                "workload": WORKLOAD,
+                "selected_arms": ["baseline", "optimized"],
+            }
+            (out_dir / "manifest.json").write_text(json.dumps(manifest))
+            for arm, backward, forward, tps, loss in (
+                (
+                    "baseline",
+                    [99.0, 100.0, 101.0, 100.0],
+                    [9.0, 10.0, 11.0, 10.0],
+                    1000,
+                    "1.0",
+                ),
+                (
+                    "optimized",
+                    [89.0, 90.0, 91.0, 90.0],
+                    [7.0, 8.0, 9.0, 8.0],
+                    1200,
+                    # Finite: evaluate_run refuses a non-finite trajectory
+                    # before it publishes anything, which
+                    # NonFiniteTrajectoryTests above pins.
+                    "0.9",
+                ),
+            ):
+                write_trace(
+                    out_dir
+                    / arm
+                    / "profiling/traces/iteration_20/rank0_trace.json.gz",
+                    {
+                        "backward": ("backward", backward),
+                        "forward": ("forward", forward),
+                    },
+                    step_events,
+                )
+                (out_dir / f"{arm}.log").write_text(
+                    f"step: 2 loss: {loss} grad_norm: 2.0 "
+                    f"memory: 3.00GiB tps: {tps}\n"
+                )
+
+            result = evaluate_run(out_dir)
+            results_path = write_results(result)
+            machine = json.loads(results_path.read_text())
+            report = render_evaluation(result)
+
+        self.assertEqual(machine["schema_version"], 5)
+        self.assertEqual(
+            machine["training"]["optimized"]["stable_tokens_per_second"], 1200
+        )
+        optimized_gpu = machine["gpu_time"]["optimized"]
+        self.assertAlmostEqual(
+            optimized_gpu["kernel_ms_per_step"], (4 * 45.0 + 4 * 4.0) / 1000.0
+        )
+        self.assertAlmostEqual(optimized_gpu["launch_latency_us"], 6.0)
+        self.assertAlmostEqual(
+            optimized_gpu["baseline_kernel_ratio"],
+            (4 * 45.0 + 4 * 4.0) / (4 * 50.0 + 4 * 5.0),
+        )
+        methodology = machine["significance_methodology"]
+        self.assertEqual(
+            methodology["interpretation"],
+            "invocation_distribution_diagnostic",
+        )
+        self.assertFalse(methodology["independence_assumption_met"])
+        self.assertEqual(methodology["sample_unit"], "compiled_region_invocation")
+        self.assertEqual(machine["losses"]["optimized"][0]["value"], 0.9)
+        self.assertIn("stable tokens/s", report)
+        self.assertIn("gpu kernel time", report)
+        self.assertIn("kernel ms/step", report)
 
 
 if __name__ == "__main__":

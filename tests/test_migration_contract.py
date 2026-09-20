@@ -1852,9 +1852,11 @@ TEST_CENSUS = {
     # disagree, and that the caption qualifies the ratio without
     # withholding it.
     # -6 with the deletion of the region extraction path.
-    "test_parallel_traces": 49,
-    # -11 with the deletion of the region extraction path.
-    "test_profile_regions": 8,
+    # +4 with the deletion of tests/test_profile_regions.py: the window
+    # reading it pinned and nothing else covers -- the profiled-step count
+    # and launch-latency average, the mixed stepped/stepless refusal, the
+    # two-window pool, and the unreadable-trace refusal.
+    "test_parallel_traces": 53,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
     # megatron arm ran is a property of the host and was recorded
@@ -2083,9 +2085,12 @@ TEST_CENSUS = {
     # +3 that the same two warnings reach results.json: both under zero1 at
     # dp 1, none under replicate, and a directory written before the rename
     # still evaluates rather than failing on a value the axis retired.
-    "test_throughput": 39,
+    # +3 with the deletion of tests/test_profile_regions.py: the loss
+    # parser, the host-latency warning, and one whole evaluation read as
+    # both JSON and a report.
+    "test_throughput": 42,
 }
-TEST_CENSUS_TOTAL = 1802
+TEST_CENSUS_TOTAL = 1801
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
