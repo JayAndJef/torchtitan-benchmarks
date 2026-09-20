@@ -54,7 +54,6 @@ from benchmarks.execution.affinity import resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
 from benchmarks.execution.environment import (
     add_compiler_environment,
-    refuse_megatron_fsdp_connection_limit,
     runtime_environment,
 )
 from benchmarks.execution.events import EventHandler, ProcessRunner, _emit
@@ -479,19 +478,6 @@ def _resolve_run(
         )
         for arm in arms
     }
-
-    # A host precondition, read off the argv this run will really start
-    # rather than re-derived from the spec. Megatron refuses to parse its
-    # own arguments under --use-megatron-fsdp when the shell sets
-    # CUDA_DEVICE_MAX_CONNECTIONS=1, and the child inherits this shell.
-    # Checked here, before the output directory exists, so the refusal
-    # costs nothing and names its own repair.
-    refuse_megatron_fsdp_connection_limit(
-        environment,
-        megatron_fsdp=any(
-            "--use-megatron-fsdp" in command for command in commands.values()
-        ),
-    )
 
     if existing_manifest is not None:
         mismatches = _resume_mismatches(

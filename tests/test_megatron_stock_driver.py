@@ -134,14 +134,10 @@ def value_after(emitted, flag):
 # tuple as the replicated roster.
 #
 # **What is checked, and what is not.** Megatron's argparse knows every
-# name here, and knows the five sharding flags too. Nothing in this suite
-# calls parse_and_validate_args, which is where four asserts live that stop
-# a sharded run at parsing: CUDA_DEVICE_MAX_CONNECTIONS, the checkpoint
-# format, the optimizer, and the two moe_single_grouped_* fields. Only
-# train.py calls it, at run time. The connection-limit assert is the one
-# this repo now guards parent-side, in
-# benchmarks/execution/environment.py. The other three are unexercised
-# until an eight-rank cell runs.
+# name here, and knows the sharding flag too. Nothing in this suite calls
+# parse_and_validate_args, where the asserts live that stop a run at
+# parsing. Only train.py calls it, at run time, so those asserts are
+# unexercised until an eight-rank cell runs.
 SECTION_7_FLAGS = (
     "--num-layers",
     "--hidden-size",
