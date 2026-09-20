@@ -250,7 +250,6 @@ BENCH_LOCAL_BATCH_SIZE = "--bench-local-batch-size"
 BENCH_PROFILE_FREQ = "--bench-profile-freq"
 BENCH_PROFILER_WARMUP = "--bench-profiler-warmup"
 BENCH_PROFILER_ACTIVE = "--bench-profiler-active"
-BENCH_MODE = "--bench-mode"
 BENCH_PP_SCHEDULE = "--bench-pp-schedule"
 BENCH_SEQ_LEN = "--bench-seq-len"
 BENCH_ROWS_PER_SAMPLE = "--bench-rows-per-sample"
@@ -266,7 +265,6 @@ BENCH_FLAGS: tuple[str, ...] = (
     BENCH_PROFILE_FREQ,
     BENCH_PROFILER_WARMUP,
     BENCH_PROFILER_ACTIVE,
-    BENCH_MODE,
     BENCH_PP_SCHEDULE,
     BENCH_SEQ_LEN,
     BENCH_ROWS_PER_SAMPLE,
@@ -982,7 +980,6 @@ def _bench_flags(
     *,
     arm_dir: str,
     model_size: str,
-    compile_mode: str,
     rows_per_sample: int,
     megatron_p2p_sync: str,
 ) -> list[str]:
@@ -1021,8 +1018,6 @@ def _bench_flags(
         str(workload.profiler_warmup),
         BENCH_PROFILER_ACTIVE,
         str(workload.profiler_active),
-        BENCH_MODE,
-        compile_mode,
         BENCH_SEQ_LEN,
         str(workload.seq_len),
         BENCH_ROWS_PER_SAMPLE,
@@ -1170,7 +1165,6 @@ def stock_megatron_flags(
             spec,
             arm_dir=arm_dir,
             model_size=model_size,
-            compile_mode=compile_mode,
             rows_per_sample=rows_per_sample,
             megatron_p2p_sync=megatron_p2p_sync,
         ),

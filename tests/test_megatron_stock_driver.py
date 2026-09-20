@@ -1345,7 +1345,7 @@ class ProfilerShimTest(unittest.TestCase):
 # Section 8.4 of PIPER_STOCK_MEGATRON_PLAN.md, transcribed. The validation
 # profile carries the same strings, and a one-character difference fails a
 # real run at validation time.
-PLAN_MODE_PREFIX = "Megatron-LM stock training loop (mode="
+PLAN_MODE_PREFIX = "Megatron-LM stock training loop ("
 PLAN_PARALLELISM_LINE = (
     "Megatron-LM stock parallelism: dp={dp} pp={pp} ep={ep} "
     "schedule={schedule} microbatches={microbatches} stages={stages}"
@@ -1378,7 +1378,6 @@ PLAN_NAN_GUARD_LINE = (
 def stock_args(**overrides):
     """An argument namespace shaped like the one Megatron resolves."""
     base = dict(
-        bench_mode="default",
         bench_pp_schedule=None,
         bench_batch_p2p_sync="on",
         check_for_nan_in_loss_and_grad=True,
@@ -1629,7 +1628,7 @@ class MarkerStringTest(unittest.TestCase):
 
     def test_the_mode_line_carries_the_declared_prefix(self) -> None:
         line = train.mode_line(stock_args())
-        self.assertTrue(line.startswith(PLAN_MODE_PREFIX + "default,"))
+        self.assertTrue(line.startswith(PLAN_MODE_PREFIX))
         for field in (
             "main_params_dtype=torch.float32",
             "main_grads_dtype=torch.float32",
@@ -1800,11 +1799,6 @@ class MarkerStringTest(unittest.TestCase):
 
 class DriverRefusalTest(unittest.TestCase):
     """A run this driver cannot honour must fail before it builds anything."""
-
-    def test_a_mode_other_than_default_is_refused(self) -> None:
-        with self.assertRaises(ValueError) as caught:
-            train.refuse_unsupported_run(stock_args(bench_mode="none"))
-        self.assertIn("--bench-mode", str(caught.exception))
 
     def test_a_schedule_other_than_1f1b_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
@@ -2913,7 +2907,6 @@ class HarnessArgumentTest(unittest.TestCase):
         self.assertEqual(parsed.bench_profile_freq, 20)
         self.assertEqual(parsed.bench_profiler_warmup, 5)
         self.assertEqual(parsed.bench_profiler_active, 5)
-        self.assertEqual(parsed.bench_mode, "default")
         self.assertEqual(parsed.bench_pp_schedule, "1F1B")
         self.assertEqual(parsed.bench_seq_len, BATCH_32.seq_len)
         self.assertEqual(parsed.bench_rows_per_sample, 4)

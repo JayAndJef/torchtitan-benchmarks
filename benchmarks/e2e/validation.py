@@ -640,9 +640,9 @@ VALIDATION_PROFILES = {
         completion_marker="Training completed",
         # The driver prints this on every rank. Megatron's own "after
         # training is done" line is rank 0 only, and arm rule 1 runs per
-        # rank. The trailing comma pins the mode token and leaves the four
-        # precision fields after it free to be read rather than matched.
-        mode_line=lambda mode: f"Megatron-LM stock training loop (mode={mode},",
+        # rank. The open bracket leaves the precision fields after it free
+        # to be read rather than matched.
+        mode_line=lambda mode: "Megatron-LM stock training loop (",
         # None on purpose: megatron-core binds jit_fuser = torch.compile
         # at import, so no log line proves this engine ran uncompiled. The
         # scenario declines the uncompiled modes, and validate_arm refuses
