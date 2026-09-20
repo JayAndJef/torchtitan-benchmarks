@@ -391,17 +391,17 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
                     {"PATH": os.environ["PATH"]},
                 )
 
-    def test_off_at_pp_one_is_refused_before_any_host_probe(self) -> None:
+    def test_on_at_pp_one_is_refused_before_any_host_probe(self) -> None:
         """No pipeline message exists, so the manifest would record a
         treatment the run did not have."""
         self._refused_before_any_probe(
             "no pipeline message",
             gpu="0",
             arm_names=("megatron_stock",),
-            megatron_p2p_sync="off",
+            megatron_p2p_sync="on",
         )
 
-    def test_off_without_a_megatron_arm_is_refused_before_any_host_probe(
+    def test_on_without_a_megatron_arm_is_refused_before_any_host_probe(
         self,
     ) -> None:
         """The value needs at least one arm that is not TorchTitan.
@@ -414,7 +414,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             gpu="0,1",
             arm_names=("titan_compiled",),
             parallelism=self.PP2,
-            megatron_p2p_sync="off",
+            megatron_p2p_sync="on",
         )
 
     def test_an_unknown_value_is_refused(self) -> None:
@@ -444,15 +444,27 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
         self.assertEqual(resolved[11], "off")
 
-    def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
-        for requested in (None, "on"):
+    def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
+        for requested in (None, "off"):
             with self.subTest(requested=requested):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_p2p_sync=requested
                 )
-                self.assertEqual(resolved[11], "on")
-                for name, command in resolved[6].items():
-                    self.assertEqual(_p2p_flags(command), [], name)
+                self.assertEqual(resolved[11], "off")
+                commands = resolved[6]
+                self.assertEqual(
+                    _p2p_flags(commands["megatron_stock"]),
+                    ["--bench-batch-p2p-sync"],
+                )
+                self.assertEqual(_p2p_flags(commands["titan_compiled"]), [])
+
+    def test_on_adds_no_token_to_any_command(self) -> None:
+        resolved = self._resolve(
+            ("megatron_stock", "titan_compiled"), megatron_p2p_sync="on"
+        )
+        self.assertEqual(resolved[11], "on")
+        for name, command in resolved[6].items():
+            self.assertEqual(_p2p_flags(command), [], name)
 
     def test_the_stock_scenario_takes_the_value_too(self) -> None:
         resolved = self._resolve(
@@ -657,21 +669,16 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                     {"PATH": os.environ["PATH"]},
                 )
 
-    def test_off_without_a_stock_megatron_arm_is_refused_before_any_probe(
+    def test_on_without_a_stock_megatron_arm_is_refused_before_any_probe(
         self,
     ) -> None:
         """A TorchTitan-only run gives the value nothing to reach."""
-        for scenario_name, names in (
-            ("engines", ("titan_compiled",)),
-            ("engines", ("titan_compiled",)),
-        ):
-            with self.subTest(scenario=scenario_name):
-                self._refused_before_any_probe(
-                    "reaches no arm",
-                    scenario_name,
-                    arm_names=names,
-                    megatron_nan_guard="off",
-                )
+        self._refused_before_any_probe(
+            "reaches no arm",
+            "engines",
+            arm_names=("titan_compiled",),
+            megatron_nan_guard="on",
+        )
 
     def test_an_unknown_value_is_refused(self) -> None:
         self._refused_before_any_probe(
@@ -698,15 +705,24 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
         self.assertEqual(resolved[12], "off")
 
-    def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
-        for requested in (None, "on"):
+    def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
+        for requested in (None, "off"):
             with self.subTest(requested=requested):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_nan_guard=requested
                 )
-                self.assertEqual(resolved[12], "on")
-                for name, command in resolved[6].items():
-                    self.assertNotIn(NO_NAN_CHECK, command, name)
+                self.assertEqual(resolved[12], "off")
+                commands = resolved[6]
+                self.assertIn(NO_NAN_CHECK, commands["megatron_stock"])
+                self.assertNotIn(NO_NAN_CHECK, commands["titan_compiled"])
+
+    def test_on_adds_no_token_to_any_command(self) -> None:
+        resolved = self._resolve(
+            ("megatron_stock", "titan_compiled"), megatron_nan_guard="on"
+        )
+        self.assertEqual(resolved[12], "on")
+        for name, command in resolved[6].items():
+            self.assertNotIn(NO_NAN_CHECK, command, name)
 
     def test_the_banner_names_the_value(self) -> None:
         """The banner names every comparability boundary, and this value
@@ -770,7 +786,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             )
         self.assertEqual(validate.call_count, 1)
         self.assertEqual(validate.call_args.kwargs["megatron_nan_guard"], "off")
-        self.assertEqual(validate.call_args.kwargs["megatron_p2p_sync"], "on")
+        self.assertEqual(validate.call_args.kwargs["megatron_p2p_sync"], "off")
 
     def _write_manifest(self, out_dir: Path, megatron_nan_guard: str) -> None:
         scenario = scenario_by_name("engines")
@@ -785,7 +801,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             "none",
             "1b",
             parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="on",
+            megatron_p2p_sync="off",
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision="stock",
         )
@@ -972,8 +988,8 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             "none",
             "1b",
             parallelism=parallelism,
-            megatron_p2p_sync="on",
-            megatron_nan_guard="on",
+            megatron_p2p_sync="off",
+            megatron_nan_guard="off",
             megatron_precision=megatron_precision,
         )
 

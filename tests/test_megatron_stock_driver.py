@@ -223,12 +223,12 @@ class FlagListTest(unittest.TestCase):
                         self.assertIn(flag, emitted)
 
     def test_the_harness_group_is_emitted(self) -> None:
-        """Every ``--bench-`` flag except the two a default argv omits.
+        """Every ``--bench-`` flag except the two a single-stage argv omits.
 
-        The schedule is absent at pipeline degree 1, where the driver
-        refuses it: a schedule there names a split that does not happen.
-        The p2p value is absent at ``on``, which restates Megatron's own
-        default. ``BENCH_FLAGS_OMITTED_BY_DEFAULT`` names both.
+        Both describe the pipeline. The schedule is absent at pipeline
+        degree 1, where the driver refuses it: a schedule there names a
+        split that does not happen. The p2p value is absent there for the
+        same reason. ``BENCH_FLAGS_OMITTED_BY_DEFAULT`` names both.
         """
         self.assertEqual(
             BENCH_FLAGS_OMITTED_BY_DEFAULT,
@@ -238,10 +238,7 @@ class FlagListTest(unittest.TestCase):
         pipelined = set(flags_for("1b", PP4_SPEC))
         for flag in BENCH_FLAGS:
             with self.subTest(flag=flag):
-                if flag == BENCH_BATCH_P2P_SYNC:
-                    self.assertNotIn(flag, pipelined)
-                else:
-                    self.assertIn(flag, pipelined)
+                self.assertIn(flag, pipelined)
                 if flag not in BENCH_FLAGS_OMITTED_BY_DEFAULT:
                     self.assertIn(flag, trivial)
         for flag in BENCH_FLAGS_OMITTED_BY_DEFAULT:
@@ -250,43 +247,37 @@ class FlagListTest(unittest.TestCase):
             value_after(flags_for("1b", PP4_SPEC), BENCH_PP_SCHEDULE), "1F1B"
         )
 
-    def test_the_default_p2p_value_changes_no_argv(self) -> None:
-        """``on`` is Megatron's own default, and every published cell's.
-
-        Passing it by name must build the argv a caller that passes nothing
-        builds, token for token, with no p2p flag in it.
-        """
-        for spec in (TRIVIAL_SPEC, PP4_SPEC, SHARDED_PP4_SPEC):
-            with self.subTest(pp=spec.pp, zero=spec.zero):
-                emitted = flags_for("1b", spec)
-                self.assertEqual(
-                    emitted, flags_for("1b", spec, megatron_p2p_sync="on")
-                )
-                self.assertNotIn(BENCH_BATCH_P2P_SYNC, emitted)
-
-    def test_p2p_sync_off_adds_exactly_one_flag(self) -> None:
-        """The off argv is the default argv plus one harness pair.
+    def test_the_default_p2p_value_adds_one_flag_above_pp_one(self) -> None:
+        """``off`` is the default here, and it is one harness pair.
 
         Megatron has no flag for the field, so nothing else in the argv
         may move: the driver sets the field on ``args`` from this one pair.
         """
         for spec in (PP4_SPEC, SHARDED_PP4_SPEC, EXPERT_PP4_SPEC):
             with self.subTest(zero=spec.zero, ep=spec.ep):
-                default = flags_for("1b", spec)
-                off = flags_for("1b", spec, megatron_p2p_sync="off")
-                self.assertEqual(
-                    off, default + [BENCH_BATCH_P2P_SYNC, "off"]
-                )
+                on = flags_for("1b", spec, megatron_p2p_sync="on")
+                off = flags_for("1b", spec)
+                self.assertEqual(off, on + [BENCH_BATCH_P2P_SYNC, "off"])
                 self.assertEqual(off.count(BENCH_BATCH_P2P_SYNC), 1)
+                self.assertNotIn(BENCH_BATCH_P2P_SYNC, on)
 
-    def test_p2p_sync_off_at_pipeline_degree_one_is_refused(self) -> None:
+    def test_no_p2p_flag_is_emitted_at_pipeline_degree_one(self) -> None:
+        """There is no message to synchronize, so the token would name a
+        treatment the run did not have."""
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
+            with self.subTest(dp=spec.dp):
+                self.assertNotIn(
+                    BENCH_BATCH_P2P_SYNC, flags_for("1b", spec)
+                )
+
+    def test_p2p_sync_on_at_pipeline_degree_one_is_refused(self) -> None:
         """The field is inert without a pipeline message."""
         for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
             with self.subTest(dp=spec.dp):
                 with self.assertRaisesRegex(
                     ValueError, "no pipeline message"
                 ):
-                    flags_for("1b", spec, megatron_p2p_sync="off")
+                    flags_for("1b", spec, megatron_p2p_sync="on")
 
     def test_an_unknown_p2p_value_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "not one of"):
@@ -294,18 +285,17 @@ class FlagListTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not one of"):
             refuse_unknown_p2p_sync("false")
 
-    def test_the_default_nan_guard_changes_no_argv(self) -> None:
-        """``on`` is Megatron's own default, and every published cell's."""
+    def test_the_nan_guard_on_argv_carries_no_token(self) -> None:
+        """``on`` is Megatron's own default, so it needs no flag."""
         for spec in (TRIVIAL_SPEC, PP4_SPEC, SHARDED_PP4_SPEC):
             with self.subTest(pp=spec.pp, zero=spec.zero):
-                emitted = flags_for("1b", spec)
-                self.assertEqual(
-                    emitted, flags_for("1b", spec, megatron_nan_guard="on")
+                self.assertNotIn(
+                    NO_CHECK_FOR_NAN_FLAG,
+                    flags_for("1b", spec, megatron_nan_guard="on"),
                 )
-                self.assertNotIn(NO_CHECK_FOR_NAN_FLAG, emitted)
 
-    def test_nan_guard_off_adds_exactly_the_one_megatron_flag(self) -> None:
-        """The off argv is the default argv plus Megatron's own token.
+    def test_the_default_nan_guard_adds_the_one_megatron_flag(self) -> None:
+        """``off`` is the default here, and it is Megatron's own token.
 
         Legal at every mesh, because the guard runs at every mesh. The
         token sits ahead of the harness group, whose tail a sibling test
@@ -314,8 +304,8 @@ class FlagListTest(unittest.TestCase):
         """
         for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2), PP4_SPEC, EXPERT_PP4_SPEC):
             with self.subTest(dp=spec.dp, pp=spec.pp, ep=spec.ep):
-                default = flags_for("1b", spec)
-                off = flags_for("1b", spec, megatron_nan_guard="off")
+                default = flags_for("1b", spec, megatron_nan_guard="on")
+                off = flags_for("1b", spec)
                 self.assertEqual(off.count(NO_CHECK_FOR_NAN_FLAG), 1)
                 self.assertEqual(
                     [token for token in off if token != NO_CHECK_FOR_NAN_FLAG],
@@ -2673,9 +2663,9 @@ class HarnessArgumentTest(unittest.TestCase):
         self.assertEqual(
             parsed.bench_min_trace_windows, BATCH_32.min_trace_windows
         )
-        # The default argv omits the p2p flag, and the parser fills in
-        # the value the flag list stands for.
-        self.assertEqual(parsed.bench_batch_p2p_sync, "on")
+        # The default argv carries the p2p flag above pp 1, and the
+        # parser reads the value the flag list emitted.
+        self.assertEqual(parsed.bench_batch_p2p_sync, "off")
 
     def test_the_group_parses_the_p2p_flag_and_refuses_another_value(
         self,

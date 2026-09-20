@@ -20,7 +20,13 @@ from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
 )
-from benchmarks.e2e.registry import ENGINES, SCENARIOS
+from benchmarks.e2e.registry import (
+    DEFAULT_AC_MODE,
+    DEFAULT_MEGATRON_NAN_GUARD,
+    DEFAULT_MEGATRON_P2P_SYNC,
+    ENGINES,
+    SCENARIOS,
+)
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import HUGE
@@ -334,10 +340,28 @@ class CliTests(unittest.TestCase):
             with mock.patch(
                 "benchmarks.cli.e2e.execute_run", return_value=completed
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
-                result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
+                result = self.runner.invoke(
+                    cli, ["run-all", "0", "--all-scenarios", "--ac", "sac"]
+                )
         self.assertEqual(result.exit_code, 0, result.output)
         execute.assert_not_called()
         self.assertIn("skipped: does not support ac mode 'sac'", result.output)
+
+    def test_the_cli_ac_default_is_the_registry_default(self) -> None:
+        """An omitted --ac resolves to the registry default, and the sweep
+        reads the same constant."""
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(DEFAULT_AC_MODE, "none")
+        self.assertEqual(
+            [call.args[0].scenario_name for call in execute.call_args_list],
+            list(SCENARIOS),
+        )
 
     def test_all_scenarios_at_ac_none_includes_the_megatron_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

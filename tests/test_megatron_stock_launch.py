@@ -240,8 +240,8 @@ def _command(
     ac_mode: str = "none",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     local_batch_size: int | None = None,
-    megatron_p2p_sync: str = "on",
-    megatron_nan_guard: str = "on",
+    megatron_p2p_sync: str = "off",
+    megatron_nan_guard: str = "off",
     megatron_precision: str = "stock",
 ) -> list[str]:
     scenario = scenario_by_name(SCENARIO_NAME)
@@ -443,8 +443,8 @@ class StockArgvTests(unittest.TestCase):
         parallelism,
         local_batch_size=None,
         model_size="1b",
-        megatron_p2p_sync="on",
-        megatron_nan_guard="on",
+        megatron_p2p_sync="off",
+        megatron_nan_guard="off",
         megatron_precision="stock",
     ):
         from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags

@@ -916,7 +916,7 @@ def _stock_log(
         *profile.parallelism_markers(
             spec, workload, megatron_precision
         ),
-        *profile.p2p_markers(spec, "on"),
+        *profile.p2p_markers(spec, "off"),
     ]
     if nan_guard_line is not None:
         lines.append(nan_guard_line)
@@ -1042,6 +1042,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
     """
 
     NAN_GUARD_ON = stock_train.NAN_GUARD_LINE.format(value=True)
+    NAN_GUARD_OFF = stock_train.NAN_GUARD_LINE.format(value=False)
 
     def test_the_stock_markers_are_the_driver_line_and_four_fields(
         self,
@@ -1107,7 +1108,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
                     fixture.write({
                         0: _stock_log(
                             TRIVIAL_SPEC,
-                            self.NAN_GUARD_ON,
+                            self.NAN_GUARD_OFF,
                             megatron_precision=logged,
                         )
                     })
@@ -1144,10 +1145,10 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
             )
             fixture.write({
                 0: _stock_log(
-                    PP2, self.NAN_GUARD_ON, megatron_precision="lean"
+                    PP2, self.NAN_GUARD_OFF, megatron_precision="lean"
                 ),
                 1: _stock_log(
-                    PP2, self.NAN_GUARD_ON, megatron_precision="stock"
+                    PP2, self.NAN_GUARD_OFF, megatron_precision="stock"
                 ),
             })
             with self.assertRaisesRegex(RuntimeError, "on rank 1"):

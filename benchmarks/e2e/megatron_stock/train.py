@@ -77,10 +77,7 @@ from benchmarks.e2e.megatron_stock.flags import (
     NO_SHARD_STRATEGY,
     SUPPORTED_PP_SCHEDULE,
 )
-from benchmarks.e2e.registry import (
-    DEFAULT_MEGATRON_P2P_SYNC,
-    MEGATRON_P2P_SYNC_MODES,
-)
+from benchmarks.e2e.registry import MEGATRON_P2P_SYNC_MODES
 
 # --------------------------------------------------------------------------
 # The log-line contract with benchmarks/e2e/validation.py's megatron_stock
@@ -287,13 +284,15 @@ def add_bench_args(parser: Any) -> Any:
     group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
     group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
     group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, required=True)
-    # Defaulted rather than required: the flag list omits it at ``on``, so
-    # the default argv reaches Megatron's own default for the field.
+    # Defaulted rather than required, and the default is the literal
+    # ``on``: the flag list omits the token at ``on``, so an argv without
+    # it reaches Megatron's own default for the field. The literal is what
+    # keeps that true when the harness axis default moves.
     group.add_argument(
         BENCH_BATCH_P2P_SYNC,
         type=str,
         choices=MEGATRON_P2P_SYNC_MODES,
-        default=DEFAULT_MEGATRON_P2P_SYNC,
+        default="on",
     )
     return parser
 
@@ -311,7 +310,7 @@ def apply_p2p_sync(args: Any) -> Any:
     default rules exactly as it did before the option existed. Returns
     ``args`` for the caller's convenience.
     """
-    if args.bench_batch_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+    if args.bench_batch_p2p_sync == "off":
         args.batch_p2p_sync = False
     return args
 
@@ -358,10 +357,7 @@ def refuse_unsupported_run(args: Any) -> None:
             f"{BENCH_PP_SCHEDULE} {args.bench_pp_schedule!r} was given at "
             "pipeline degree 1, where there is no pipeline to schedule"
         )
-    if (
-        pipeline_degree == 1
-        and args.bench_batch_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC
-    ):
+    if pipeline_degree == 1 and args.bench_batch_p2p_sync == "off":
         # The field is inert without a pipeline message, so the run would
         # print a treatment it did not have.
         raise ValueError(
