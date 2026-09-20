@@ -49,7 +49,6 @@ from benchmarks.e2e.megatron_stock.flags import (
     data_parallel_optimizer,
     grad_reduce_in_fp32,
     microbatch_geometry,
-    refuse_unknown_zero,
 )
 from benchmarks.e2e.schema import ParallelismSpec
 from benchmarks.e2e.parallelism import (
@@ -62,9 +61,6 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MEGATRON_PRECISION,
-    MEGATRON_NAN_GUARD_MODES,
-    MEGATRON_P2P_SYNC_MODES,
-    MEGATRON_PRECISION_MODES,
 )
 from benchmarks.e2e.schema import Arm, ValidationProfile, Workload
 from benchmarks.models.piper_qwen3.shape import shape_by_name
@@ -298,9 +294,6 @@ def _megatron_stock_parallelism_markers(
     # The one authority on this count. flags.py builds the argv from it, so
     # a marker taken from anything else could disagree with the run.
     _, microbatches, _ = microbatch_geometry(workload, spec)
-    # A garbage value would otherwise reach the three tables below and
-    # raise a bare KeyError, which names neither the value nor the flag.
-    refuse_unknown_zero(spec.zero)
     markers = [
         f"Megatron-LM stock parallelism: dp={spec.dp} pp={spec.pp} "
         f"ep={spec.ep} schedule=1F1B microbatches={microbatches} "
@@ -326,14 +319,12 @@ def _p2p_sync_token(megatron_p2p_sync: str) -> str:
     """The ``batch_p2p_sync`` token a built config prints for a value.
 
     Both drivers format the field with ``str`` on the config's own bool,
-    so ``on`` reads ``True`` and ``off`` reads ``False``. An unknown value
-    is refused here, before it becomes a marker no log can carry.
+    so ``on`` reads ``True`` and ``off`` reads ``False``.
+
+    ``_resolve_run`` refuses a value outside ``MEGATRON_P2P_SYNC_MODES``
+    before any arm starts, and ``tests/test_axes.py`` pins the CLI choice
+    list equal to that tuple, so no other value reaches this function.
     """
-    if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
-        raise ValueError(
-            f"unknown megatron p2p sync {megatron_p2p_sync!r}. Available: "
-            f"{', '.join(MEGATRON_P2P_SYNC_MODES)}"
-        )
     return str(megatron_p2p_sync == "on")
 
 
@@ -344,10 +335,8 @@ def _no_p2p_markers(
 
     ``--megatron-p2p-sync`` reaches the megatron command alone, and a
     TorchTitan argv is the same under either value. So no line is asked of
-    a titan rank, and its absence is not a failure. The value is still
-    checked, so an unknown one does not pass through a titan arm unseen.
+    a titan rank, and its absence is not a failure.
     """
-    _p2p_sync_token(megatron_p2p_sync)
     return ()
 
 
@@ -378,14 +367,12 @@ def _nan_guard_token(megatron_nan_guard: str) -> str:
     """The ``check_for_nan_in_loss_and_grad`` token a parsed value prints.
 
     The stock driver formats Megatron's own bool with ``str``, so ``on``
-    reads ``True`` and ``off`` reads ``False``. An unknown value is refused
-    here, before it becomes a marker no log can carry.
+    reads ``True`` and ``off`` reads ``False``.
+
+    ``_resolve_run`` refuses a value outside ``MEGATRON_NAN_GUARD_MODES``
+    before any arm starts, and ``tests/test_axes.py`` pins the CLI choice
+    list equal to that tuple, so no other value reaches this function.
     """
-    if megatron_nan_guard not in MEGATRON_NAN_GUARD_MODES:
-        raise ValueError(
-            f"unknown megatron nan guard {megatron_nan_guard!r}. Available: "
-            f"{', '.join(MEGATRON_NAN_GUARD_MODES)}"
-        )
     return str(megatron_nan_guard == "on")
 
 
@@ -393,10 +380,8 @@ def _no_nan_guard_markers(megatron_nan_guard: str) -> tuple[str, ...]:
     """TorchTitan has no Megatron NaN guard to prove.
 
     The value reaches the stock megatron command alone, and a TorchTitan
-    argv is the same under either value. The value is still checked, so
-    an unknown one does not pass through a titan arm unseen.
+    argv is the same under either value.
     """
-    _nan_guard_token(megatron_nan_guard)
     return ()
 
 
@@ -425,14 +410,12 @@ def _precision_tokens(megatron_precision: str) -> tuple[str, str]:
     the optimizer (``arguments.py``'s ``dtype_map``), so the log prints
     ``torch.bfloat16`` where the flag says ``bf16``. The first token is the
     ``use_precision_aware_optimizer`` bool and the second is the dtype the
-    three precision fields carry. An unknown value is refused here, before
-    it becomes a marker no log can carry.
+    three precision fields carry.
+
+    ``_resolve_run`` refuses a value outside ``MEGATRON_PRECISION_MODES``
+    before any arm starts, and ``tests/test_axes.py`` pins the CLI choice
+    list equal to that tuple, so no other value reaches this function.
     """
-    if megatron_precision not in MEGATRON_PRECISION_MODES:
-        raise ValueError(
-            f"unknown megatron precision {megatron_precision!r}. Available: "
-            f"{', '.join(MEGATRON_PRECISION_MODES)}"
-        )
     lean = megatron_precision == "lean"
     return str(lean), "torch.bfloat16" if lean else "torch.float32"
 
@@ -441,10 +424,8 @@ def _no_precision_markers(megatron_precision: str) -> tuple[str, ...]:
     """TorchTitan has no Megatron optimizer precision to prove.
 
     The value reaches the stock megatron command alone, and a TorchTitan
-    argv is the same under either value. The value is still checked, so an
-    unknown one does not pass through a titan arm unseen.
+    argv is the same under either value.
     """
-    _precision_tokens(megatron_precision)
     return ()
 
 
@@ -623,24 +604,22 @@ def _validate_log(
     # Arm rule 8, read both ways off the arm's own compile treatment. Never
     # relax the absence half into "skip the check" -- an arm that silently
     # compiled would then publish as eager.
-    if profile.compile_marker is None:
+    #
+    # A profile with no marker asks nothing, and only an eager arm may name
+    # such an engine. That pairing is a property of the registry, so
+    # ``tests/test_engines.py`` pins it instead of a refusal here.
+    if profile.compile_marker is not None:
         if arm.compile == "torch":
+            if profile.compile_marker not in log:
+                raise RuntimeError(
+                    f"{arm.name}: the arm asks for torch.compile and the "
+                    f"engine did not apply it{where}"
+                )
+        elif profile.compile_marker in log:
             raise RuntimeError(
-                f"{arm.name}: engine {arm.engine!r} cannot "
-                "prove a whole-block torch.compile; that engine compiles no "
-                "whole layer and exposes no switch for one"
+                f"{arm.name}: the arm runs eager and the engine compiled the "
+                f"model{where}"
             )
-    elif arm.compile == "torch":
-        if profile.compile_marker not in log:
-            raise RuntimeError(
-                f"{arm.name}: the arm asks for torch.compile and the engine "
-                f"did not apply it{where}"
-            )
-    elif profile.compile_marker in log:
-        raise RuntimeError(
-            f"{arm.name}: the arm runs eager and the engine compiled the "
-            f"model{where}"
-        )
     if profile.check_ac_line:
         # The AC policy logs its application; its presence must match the
         # requested mode or the run measured the wrong recompute treatment.
@@ -806,25 +785,17 @@ def validate_arm(
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     logs = logs_by_rank(log_path.read_text(errors="replace"))
     expected_ranks = set(range(parallelism.world_size))
-    # Arm rule 12 is consulted only where there is a mesh to prove. A profile
-    # that names no marker for a non-trivial spec cannot prove the run ran
-    # what it claims, and the run is refused rather than published -- the
-    # same reading arm rule 8 gives an engine that cannot prove eager
-    # execution.
+    # Arm rule 12 is consulted only where there is a mesh to prove. Every
+    # engine profile names at least the mesh line for a non-trivial spec,
+    # which ``tests/test_engines.py`` pins, so no run reaches this point
+    # with nothing to check.
     parallelism_markers: tuple[str, ...] = ()
     if parallelism.world_size > 1:
         parallelism_markers = engine_profile.parallelism_markers(
             parallelism, workload, megatron_precision
         )
-        if not parallelism_markers:
-            raise RuntimeError(
-                f"{arm.name}: engine {arm.engine!r} logs "
-                f"nothing that proves dp {parallelism.dp} x pp "
-                f"{parallelism.pp}; the run cannot be published under a mesh "
-                "no rule checked"
-            )
-        # The p2p half joins after the refusal above, because an empty
-        # tuple here is honest: a TorchTitan arm never receives the value.
+        # The p2p half may be empty and that is honest: a TorchTitan arm
+        # never receives the value.
         parallelism_markers += engine_profile.p2p_markers(
             parallelism, megatron_p2p_sync
         )

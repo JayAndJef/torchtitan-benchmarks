@@ -450,16 +450,15 @@ class FlagListTest(unittest.TestCase):
             flags_for("1b", dataclasses.replace(PP4_SPEC, ep=2))
 
     def test_an_unknown_zero_value_is_refused(self) -> None:
-        """A silent fall through would send the replicated argv under the
-        other label.
+        """``ParallelismSpec`` refuses the level, so no argv is built.
 
-        Level 3 is the retired ZeRO level. It is not declared any more, so
-        this module must refuse it rather than build a sharded argv for it.
+        Level 3 is the retired ZeRO level, and nothing declares it any
+        more. The spec is the one gate. ``tests/test_axes.py`` pins a flag
+        row for every level the spec does admit, so this module needs no
+        second refusal of its own.
         """
         with self.assertRaisesRegex(ValueError, "zero"):
             flags_for("1b", dataclasses.replace(PP4_SPEC, zero=3))
-        with self.assertRaisesRegex(ValueError, "zero"):
-            omitted_flags(3)
 
     def test_zero1_emits_the_distributed_optimizer_alone(self) -> None:
         """One flag, and nothing else.

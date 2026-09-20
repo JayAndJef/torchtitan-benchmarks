@@ -4,6 +4,11 @@
 them together. This module holds the property that grouping is worth
 having: the manifest records one key per field, and a new axis that nothing
 recorded fails here rather than in a published directory.
+
+It also holds the two roster agreements the harness used to re-check on
+every run: each ``click.Choice`` equals the axis tuple it came from, and
+every ZeRO level the spec admits has a row in each table that reads one.
+Both are pure functions of the registry, so a test settles them once.
 """
 
 import sys
@@ -11,12 +16,58 @@ import unittest
 from dataclasses import fields
 from pathlib import Path
 
+import click
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.manifests import AXIS_KEYS, manifest_data
-from benchmarks.e2e.parallelism import TRIVIAL_SPEC, describe
-from benchmarks.e2e.registry import scenario_by_name
-from benchmarks.e2e.schema import RequestedAxes, RunAxes
+from benchmarks.cli.e2e import run_command
+from benchmarks.e2e.megatron_stock.flags import (
+    DATA_PARALLEL_OPTIMIZERS,
+    DATA_PARALLEL_OVERLAP,
+    DATA_PARALLEL_WRAPPERS,
+    SHARDING_FLAGS_BY_VALUE,
+    SHARDING_STRATEGIES,
+)
+from benchmarks.e2e.parallelism import (
+    PP_SCHEDULE_CHOICES,
+    TRIVIAL_SPEC,
+    describe,
+)
+from benchmarks.e2e.registry import (
+    AC_MODES,
+    MEGATRON_NAN_GUARD_MODES,
+    MEGATRON_P2P_SYNC_MODES,
+    MEGATRON_PRECISION_MODES,
+    scenario_by_name,
+)
+from benchmarks.e2e.schema import RequestedAxes, RunAxes, ZERO_MODES
+from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
+
+
+# The roster every ``--flag`` with a closed value set takes, keyed by the
+# option's own parameter name. The CLI must offer exactly these values:
+# an option that offered more would accept a value no table below has a
+# row for, and one that offered fewer would refuse a legal run.
+_CHOICE_BY_OPTION: dict[str, tuple] = {
+    "ac_mode": AC_MODES,
+    "model_size": MODEL_SIZE_CHOICES,
+    "pp_schedule": PP_SCHEDULE_CHOICES,
+    "zero": ZERO_MODES,
+    "megatron_p2p_sync": MEGATRON_P2P_SYNC_MODES,
+    "megatron_nan_guard": MEGATRON_NAN_GUARD_MODES,
+    "megatron_precision": MEGATRON_PRECISION_MODES,
+}
+
+# Every table keyed by a ZeRO level. Each one answers a question about a
+# level, so a level with no row builds the wrong argv or the wrong marker.
+_ZERO_TABLES = {
+    "SHARDING_FLAGS_BY_VALUE": SHARDING_FLAGS_BY_VALUE,
+    "DATA_PARALLEL_WRAPPERS": DATA_PARALLEL_WRAPPERS,
+    "DATA_PARALLEL_OVERLAP": DATA_PARALLEL_OVERLAP,
+    "DATA_PARALLEL_OPTIMIZERS": DATA_PARALLEL_OPTIMIZERS,
+    "SHARDING_STRATEGIES": SHARDING_STRATEGIES,
+}
 
 
 _METADATA = {
@@ -112,6 +163,43 @@ class AxisRecordTests(unittest.TestCase):
         """A defaulted field would record a treatment the run did not have."""
         with self.assertRaises(TypeError):
             RunAxes()
+
+
+class ChoiceRosterTests(unittest.TestCase):
+    """Each ``click.Choice`` is the axis tuple, and nothing narrower."""
+
+    def test_every_choice_option_offers_its_own_axis_tuple(self) -> None:
+        """A copied roster could drift from the tuple the code reads.
+
+        The readers downstream -- the marker builders, the flag tables --
+        take the value as given, because the CLI already refused every
+        other one. That only holds while the two rosters agree.
+        """
+        found = {}
+        for parameter in run_command.params:
+            if isinstance(parameter.type, click.Choice):
+                found[parameter.name] = tuple(parameter.type.choices)
+        self.assertEqual(
+            set(found), set(_CHOICE_BY_OPTION), "a choice option is unpinned"
+        )
+        for name, choices in found.items():
+            with self.subTest(option=name):
+                self.assertEqual(choices, tuple(_CHOICE_BY_OPTION[name]))
+
+
+class ZeroTableTests(unittest.TestCase):
+    """Every declared ZeRO level has a row in every table that reads one."""
+
+    def test_each_level_has_a_row_in_each_table(self) -> None:
+        """A missing row was a refusal the flag builder made every run.
+
+        ``ParallelismSpec`` admits exactly ``ZERO_MODES``, so a level with
+        no row here would reach a table as a ``KeyError`` deep inside the
+        argv build. The test moves that failure to the registry.
+        """
+        for table_name, table in _ZERO_TABLES.items():
+            with self.subTest(table=table_name):
+                self.assertEqual(set(table), set(ZERO_MODES))
 
 
 if __name__ == "__main__":

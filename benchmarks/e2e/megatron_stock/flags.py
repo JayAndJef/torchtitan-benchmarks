@@ -73,7 +73,7 @@ and ``train.py`` prints the value Megatron parsed. The token is omitted at
 
 from __future__ import annotations
 
-from benchmarks.e2e.schema import ParallelismSpec, Workload, ZERO_MODES
+from benchmarks.e2e.schema import ParallelismSpec, Workload
 from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
@@ -308,21 +308,6 @@ LEAN_PRECISION_DTYPE = "bf16"
 MEGATRON_MAIN_GRADS_DTYPE_DEFAULT = "fp32"
 
 
-def refuse_unknown_zero(zero: int) -> None:
-    """Raise on a value this module cannot build a command line for.
-
-    ``ParallelismSpec`` is meant to refuse one first, and this module does
-    not depend on that: a caller may build a command line without a run,
-    and a silent fall through to the ``zero 0`` branch would send the
-    replicated argv under the sharded label.
-    """
-    if zero not in ZERO_MODES:
-        raise ValueError(
-            f"zero level {zero!r} is not one of "
-            + ", ".join(str(mode) for mode in ZERO_MODES)
-        )
-
-
 def data_parallel_optimizer(zero: int) -> str:
     """The optimizer name the data-parallel line must carry.
 
@@ -346,7 +331,6 @@ def data_parallel_optimizer(zero: int) -> str:
     function branched on ``shape.num_experts``, which expected a chain
     Megatron never builds.
     """
-    refuse_unknown_zero(zero)
     return f"{CHAINED_OPTIMIZER}[{DATA_PARALLEL_OPTIMIZERS[zero]}]"
 
 
@@ -503,7 +487,6 @@ def omitted_flags(zero: int) -> tuple[str, ...]:
     so a hand-written list here could say a level 1 run declines a flag its
     own argv carries.
     """
-    refuse_unknown_zero(zero)
     sent = SHARDING_FLAGS_BY_VALUE[zero]
     return ALWAYS_OMITTED_FLAGS + tuple(
         flag for flag in ZERO1_FLAGS if flag not in sent
@@ -766,11 +749,13 @@ def _sharding_flags(zero: int) -> list[str]:
 
     This module reads no environment variable, which is what keeps a test
     able to build the whole command line without a shell.
+
+    ``SHARDING_FLAGS_BY_VALUE`` answers the question, so an unrecorded
+    level raises here rather than falling through to one of two branches.
+    Every level ``ZERO_MODES`` names has a row, and
+    ``tests/test_axes.py`` pins that.
     """
-    refuse_unknown_zero(zero)
-    if zero == 0:
-        return []
-    return list(ZERO1_FLAGS)
+    return list(SHARDING_FLAGS_BY_VALUE[zero])
 
 
 def _data_flags(
@@ -989,7 +974,6 @@ def stock_megatron_flags(
             "the stock megatron arm needs a seeded workload: both engines "
             "must draw the same initial parameters"
         )
-    refuse_unknown_zero(spec.zero)
     if spec.ep > 1 and spec.zero == 0:
         raise ValueError(
             f"expert-parallel degree {spec.ep} needs --zero 1: TorchTitan "

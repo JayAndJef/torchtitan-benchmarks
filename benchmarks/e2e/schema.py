@@ -288,17 +288,16 @@ class ValidationProfile:
     be *present* when the arm declares ``compile="torch"``, and *absent*
     when it declares ``compile="none"``. A profile leaves it ``None`` when
     the engine compiles no whole block and exposes no switch for one. Rule
-    8 then checks nothing for that engine, and an arm of it that declares
-    ``"torch"`` is refused rather than published under a treatment nothing
-    checked.
+    8 then checks nothing for that engine, so no arm of it may declare
+    ``"torch"``. That pairing is a property of the registry, and
+    ``tests/test_engines.py`` pins it over every arm.
 
     ``parallelism_markers`` is arm rule 12: the log lines that prove this
     engine really ran the requested mesh. It is a callable rather than a
     string because every value in those lines comes from the spec, the
-    workload and the precision. An empty tuple means this engine logs
-    nothing that proves this spec, and ``validate_arm`` then refuses the
-    run rather than publishing a mesh nothing checked -- the same shape as
-    ``compile_marker`` above.
+    workload and the precision. Every profile must name at least the mesh
+    line for a mesh above one rank, or the run would be published under a
+    mesh nothing checked. ``tests/test_engines.py`` pins that too.
 
     **It takes the precision because one field of the stock data-parallel
     line moves with it, and a real run proved it.**
