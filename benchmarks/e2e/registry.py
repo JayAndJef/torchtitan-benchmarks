@@ -15,6 +15,7 @@ command construction (``benchmarks.e2e.launch``), validation
 """
 
 from dataclasses import dataclass, replace
+from typing import Literal
 
 from benchmarks.models.piper_qwen3.shape import PIPER_1B
 
@@ -189,10 +190,20 @@ class Arm:
     selects an arm-specific trainer config when the implementation
     difference must be expressed while building the model rather than as an
     override. When unset, the scenario workload config is used.
+
+    ``compile`` is the compile treatment of this arm, and it has no
+    default: every arm states it. ``"torch"`` asks for whole-block
+    ``torch.compile``, ``"none"`` runs the blocks eager. It is an arm
+    property and not a run axis, because two arms of one run may differ in
+    it -- that difference is what the ``engines`` scenario measures. The
+    manifest records it through ``asdict(arm)``, and validation rule 8
+    reads it: the compile log line must be present under ``"torch"`` and
+    absent under ``"none"``.
     """
 
     name: str
     description: str
+    compile: Literal["torch", "none"]
     config: str | None = None
     override_imports: tuple[str, ...] = ()
     # [Override] log lines expected per transformer block. validate_arm
@@ -309,14 +320,15 @@ ENGINES = Scenario(
                 "TorchTitan qwen3_piper_1b on the pre-tokenized replay "
                 "stream, with whole-block torch.compile"
             ),
+            compile="torch",
         ),
         Arm(
             name="titan_eager",
             description=(
-                "the same model and stream, and it runs eager once compile "
-                "is an arm property; today the run axis --compile-mode none "
-                "selects the eager treatment"
+                "the same model and the same stream, and it runs the blocks "
+                "eager"
             ),
+            compile="none",
         ),
         Arm(
             name="megatron_stock",
@@ -331,6 +343,8 @@ ENGINES = Scenario(
                 "8. The manifest's execution_model says plain-bf16 and "
                 "describes the other arms"
             ),
+            # The stock driver compiles no whole transformer layer.
+            compile="none",
             launcher="megatron_stock",
             validation="megatron_stock",
             # Both markers are MEASURED, on every rank. The dp 2 x pp 4

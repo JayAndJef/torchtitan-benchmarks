@@ -172,8 +172,8 @@ STOCK_OVERLAP_FRAGMENTS = {
     1: "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
 }
 
-# The rest of the mode line. ``ValidationProfile.mode_line`` stops at the
-# comma after the mode, so arm rule 8 reads none of these fields.
+# The rest of the driver's own line. The profile's first precision marker
+# stops at the open bracket, so no rule matches these fields twice.
 #
 # **Four of them carry a run-time rule now.** ``precision_markers`` is the
 # ``--megatron-precision`` half of arm rule 12, and it asks every rank for
@@ -742,10 +742,6 @@ class StockArgvRefusalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no Megatron parity"):
             _command(_stock_arm(), ac_mode="sac")
 
-    def test_the_uncompiled_mode_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "cannot apply to this arm"):
-            _command(_stock_arm(), compile_mode="none")
-
     def test_an_unseeded_workload_is_refused(self) -> None:
         scenario = scenario_by_name(SCENARIO_NAME)
         with self.assertRaisesRegex(ValueError, "seeded workload"):
@@ -790,33 +786,35 @@ class StockValidationProfileTests(unittest.TestCase):
             VALIDATION_PROFILES[_stock_arm().validation], self.profile
         )
 
-    def test_the_mode_line_is_the_stock_driver_prefix(self) -> None:
+    def test_the_driver_line_is_the_first_precision_marker(self) -> None:
+        """Rule 8 no longer holds this line, and it is still matched: the
+        precision markers ask every rank for it at every mesh."""
         self.assertEqual(
-            self.profile.mode_line("default"),
+            self.profile.precision_markers("stock")[0],
             "Megatron-LM stock training loop (",
         )
 
     def test_the_profile_does_not_check_the_ac_line(self) -> None:
         self.assertFalse(self.profile.check_ac_line)
 
-    def test_the_profile_cannot_prove_an_uncompiled_run(self) -> None:
-        """``compiled_marker`` is None, so ``--compile-mode none`` is refused.
+    def test_the_profile_cannot_prove_a_compiled_arm(self) -> None:
+        """``compile_marker`` is None, so a stock arm asking for
+        torch.compile is refused.
 
-        megatron-core binds ``jit_fuser = torch.compile`` at import, so no
-        log line proves this engine ran uncompiled. The absence of a marker
-        must refuse the run rather than skip the check.
+        megatron-core compiles no whole layer, so no log line proves the
+        treatment either way. The absence of a marker must refuse such an
+        arm rather than skip the check.
         """
-        self.assertIsNone(self.profile.compiled_marker)
+        self.assertIsNone(self.profile.compile_marker)
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text("Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "cannot prove"):
                 validate_arm(
-                    _stock_arm(),
+                    replace(_stock_arm(), compile="torch"),
                     Path(temporary),
                     log,
                     self.workload,
-                    compile_mode="none",
                     ac_mode="none",
                     model_size="1b",
                 )
@@ -1246,7 +1244,7 @@ class StockMarkerContractTests(unittest.TestCase):
         """The fragments cannot drift away from the profile."""
         built = [
             self.profile.completion_marker,
-            self.profile.mode_line("default"),
+            *self.profile.precision_markers("stock"),
             *self.profile.parallelism_markers(
                 MESH, self.workload, "stock"
             ),
@@ -1410,7 +1408,7 @@ class StockMarkerContractTests(unittest.TestCase):
     def test_the_driver_mode_line_starts_with_this_profile_marker(
         self,
     ) -> None:
-        """Arm rule 8 matches the prefix up to the first comma."""
+        """The first precision marker is the prefix up to the bracket."""
         from benchmarks.e2e.megatron_stock import train
 
         printed = train.MODE_LINE.format(
@@ -1424,7 +1422,9 @@ class StockMarkerContractTests(unittest.TestCase):
             cross_entropy_loss_fusion=False,
             dispatcher="alltoall",
         )
-        self.assertTrue(printed.startswith(self.profile.mode_line("default")))
+        self.assertTrue(
+            printed.startswith(self.profile.precision_markers("stock")[0])
+        )
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_prints_the_data_parallel_line_once(self) -> None:
@@ -1470,10 +1470,9 @@ class StockMarkerContractTests(unittest.TestCase):
 class StockRunResolutionTests(unittest.TestCase):
     """What ``run`` and ``run-all`` accept for this scenario.
 
-    Cell 1 of the run matrix runs both arms at ``--compile-mode default``.
-    Cell 2 runs the titan arm alone at ``--compile-mode none``. Both must
-    resolve, and every other combination must be refused before a GPU is
-    claimed.
+    The compiled and the eager treatment are arm properties now, so the
+    roster resolves at one compile mode. Every other combination must be
+    refused before a GPU is claimed.
     """
 
     def _resolve(self, names: tuple[str, ...], compile_mode: str, ac_mode: str):
@@ -1506,11 +1505,13 @@ class StockRunResolutionTests(unittest.TestCase):
         ):
             self._resolve((), "none", "none")
 
-    def test_the_uncompiled_mode_is_refused_for_the_megatron_arm(self) -> None:
-        """The subset exception is for TorchTitan-only selections alone."""
+    def test_the_uncompiled_mode_is_refused_for_every_subset(self) -> None:
+        """No selection wins the mode: eager is an arm property now."""
         for names in (
             ("megatron_stock",),
             ("megatron_stock", "titan_compiled"),
+            ("titan_compiled",),
+            ("titan_eager",),
         ):
             with self.subTest(names=names):
                 with self.assertRaisesRegex(
@@ -1518,13 +1519,12 @@ class StockRunResolutionTests(unittest.TestCase):
                 ):
                     self._resolve(names, "none", "none")
 
-    def test_the_uncompiled_mode_is_accepted_for_the_titan_arm_alone(
-        self,
-    ) -> None:
-        """Cell 2 of the run matrix. It needs no Megatron opponent."""
-        resolved = self._resolve(("titan_compiled",), "none", "none")
-        self.assertEqual([arm.name for arm in resolved[2]], ["titan_compiled"])
-        self.assertEqual(resolved[7], "none")
+    def test_the_eager_arm_resolves_on_its_own(self) -> None:
+        """Cell 2 of the run matrix: the eager arm needs no Megatron
+        opponent, and it names its own treatment."""
+        resolved = self._resolve(("titan_eager",), "default", "none")
+        self.assertEqual([arm.name for arm in resolved[2]], ["titan_eager"])
+        self.assertNotIn("--compile.enable", resolved[6]["titan_eager"])
 
 
 if __name__ == "__main__":

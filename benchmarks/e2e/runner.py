@@ -43,7 +43,6 @@ from benchmarks.e2e.registry import (
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
     SCENARIOS,
-    UNCOMPILED_COMPILE_MODES,
     Arm,
     Scenario,
     Workload,
@@ -344,21 +343,7 @@ def _resolve_run(
     shape = PIPER_SHAPES[model_size]
     scenario = replace(scenario, workload=workload)
     arms = select_arms(scenario, request.arm_names)
-    # A scenario's supported modes describe a run of its complete roster. An
-    # explicit subset may narrow away the engine that cannot honor a mode. The
-    # only such treatment today is ``none``: it removes TorchTitan's whole-
-    # block compile and has no truthful meaning for Megatron. Keep the subset
-    # exception as narrow as the treatment itself, so a future scenario mode
-    # does not become legal merely because ``--arm`` was present.
-    selected_titan_only_none = (
-        bool(request.arm_names)
-        and compile_mode in UNCOMPILED_COMPILE_MODES
-        and all(arm.launcher == "torchtitan" for arm in arms)
-    )
-    if (
-        compile_mode not in scenario.supported_compile_modes
-        and not selected_titan_only_none
-    ):
+    if compile_mode not in scenario.supported_compile_modes:
         raise ValueError(
             f"scenario {scenario.name!r} does not support compile mode "
             f"{compile_mode!r} (supported: "
@@ -687,7 +672,6 @@ def execute_run(
                     arm_dir,
                     log_path,
                     scenario.workload,
-                    compile_mode=compile_mode,
                     ac_mode=ac_mode,
                     model_size=model_size,
                     parallelism=parallelism,
@@ -752,7 +736,6 @@ def execute_run(
                 arm_dir,
                 log_path,
                 scenario.workload,
-                compile_mode=compile_mode,
                 ac_mode=ac_mode,
                 model_size=model_size,
                 parallelism=parallelism,

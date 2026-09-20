@@ -65,8 +65,6 @@ from benchmarks.e2e.registry import (
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
-    TORCH_COMPILE_MODE,
-    UNCOMPILED_COMPILE_MODES,
     Arm,
     Workload,
 )
@@ -123,17 +121,17 @@ class ValidationProfile:
 
     The engine-neutral rules (trace-window count, kernel markers, override
     counting when declared) are shared; these fields carry what differs:
-    the completion marker, the log line that proves the requested mode
-    actually applied, the phrases that mean a silent fallback, and whether
-    the SelectiveAC line is expected at all.
+    the completion marker, the log line that proves the arm's compile
+    treatment, the phrases that mean a silent fallback, and whether the
+    SelectiveAC line is expected at all.
 
-    ``compiled_marker`` is the other half of rule 8, and it is read the
-    other way round: ``mode_line`` must be *present* under a compiled mode,
-    and ``compiled_marker`` must be *absent* under an uncompiled one. A
-    profile leaves it ``None`` when the engine compiles code it exposes no
-    switch for, which is a statement that the engine cannot run uncompiled at
-    all; ``validate_arm`` then refuses such a run rather than publishing a
-    treatment nothing checked.
+    ``compile_marker`` is rule 8, and it is read both ways: the line must
+    be *present* when the arm declares ``compile="torch"``, and *absent*
+    when it declares ``compile="none"``. A profile leaves it ``None`` when
+    the engine compiles no whole block and exposes no switch for one. Rule
+    8 then checks nothing for that engine, and an arm of it that declares
+    ``"torch"`` is refused rather than published under a treatment nothing
+    checked.
 
     ``parallelism_markers`` is arm rule 12: the log lines that prove this
     engine really ran the requested mesh. It is a callable rather than a
@@ -141,7 +139,7 @@ class ValidationProfile:
     workload and the precision. An empty tuple means this engine logs
     nothing that proves this spec, and ``validate_arm`` then refuses the
     run rather than publishing a mesh nothing checked -- the same shape as
-    ``compiled_marker`` above.
+    ``compile_marker`` above.
 
     **It takes the precision because one field of the stock data-parallel
     line moves with it, and a real run proved it.**
@@ -157,9 +155,9 @@ class ValidationProfile:
     have been published as single-GPU. This pattern matches only a log that
     built a pipeline, and at ``pp`` 1 its presence fails the arm.
 
-    This is the inversion ``--compile-mode none`` already uses on
-    ``compiled_marker``: a run that silently compiled cannot be published as
-    eager, and a run that silently pipelined cannot be published as one GPU.
+    This is the inversion an eager arm already uses on ``compile_marker``:
+    a run that silently compiled cannot be published as eager, and a run
+    that silently pipelined cannot be published as one GPU.
     Measured before it was added: of 296 arm logs under ``out/``, exactly one
     matches, and it is a deliberate ``--pp 2`` run.
 
@@ -209,8 +207,7 @@ class ValidationProfile:
     """
 
     completion_marker: str
-    mode_line: Callable[[str], str]
-    compiled_marker: str | None
+    compile_marker: str | None
     failure_markers: tuple[str, ...]
     check_ac_line: bool
     parallelism_markers: Callable[
@@ -572,9 +569,16 @@ def _megatron_stock_precision_markers(
     ``main_params_dtype`` is deliberately absent. The recipe never sends
     ``--main-params-dtype``, so it reads ``torch.float32`` under both
     values and could separate neither.
+
+    The first marker is the line the four fields are printed on. The driver
+    prints it on every rank, where Megatron's own "after training is done"
+    line is rank 0 only. It carries no compile treatment, so rule 8 cannot
+    hold it; it stays here, with the fields it introduces. The open bracket
+    leaves those fields free to be read rather than matched twice.
     """
     precision_aware, dtype = _precision_tokens(megatron_precision)
     return (
+        "Megatron-LM stock training loop (",
         f"use_precision_aware_optimizer={precision_aware}",
         f"main_grads_dtype={dtype}",
         f"exp_avg_dtype={dtype}",
@@ -585,14 +589,10 @@ def _megatron_stock_precision_markers(
 VALIDATION_PROFILES = {
     "torchtitan": ValidationProfile(
         completion_marker="Training completed",
-        # apply_compile logs the torch-level mode name.
-        mode_line=lambda mode: (
-            f"with torch.compile (mode={TORCH_COMPILE_MODE[mode]})"
-        ),
-        # Carried by both of TorchTitan's compile log lines -- apply_compile's
-        # per-block line and the loss function's -- so one absence check
-        # covers every component --compile.enable switches on.
-        compiled_marker="with torch.compile",
+        # Carried by both of TorchTitan's compile log lines -- the per-block
+        # line and the loss function's -- so one check covers every
+        # component --compile.enable switches on, in both directions.
+        compile_marker="with torch.compile",
         failure_markers=("falling back to the PyTorch",),
         check_ac_line=True,
         parallelism_markers=_titan_parallelism_markers,
@@ -623,16 +623,13 @@ VALIDATION_PROFILES = {
     # the same strings.
     "megatron_stock": ValidationProfile(
         completion_marker="Training completed",
-        # The driver prints this on every rank. Megatron's own "after
-        # training is done" line is rank 0 only, and arm rule 1 runs per
-        # rank. The open bracket leaves the precision fields after it free
-        # to be read rather than matched.
-        mode_line=lambda mode: "Megatron-LM stock training loop (",
-        # None on purpose: megatron-core binds jit_fuser = torch.compile
-        # at import, so no log line proves this engine ran uncompiled. The
-        # scenario declines the uncompiled modes, and validate_arm refuses
-        # one that reaches here.
-        compiled_marker=None,
+        # None on purpose: megatron-core binds jit_fuser = torch.compile at
+        # import and compiles no whole layer, so no log line proves a
+        # whole-block treatment either way. Rule 8 therefore checks nothing
+        # here, and it refuses a stock arm that declares compile="torch".
+        # The driver's own line is still matched, by the first precision
+        # marker below.
+        compile_marker=None,
         failure_markers=(),
         check_ac_line=False,
         parallelism_markers=_megatron_stock_parallelism_markers,
@@ -678,7 +675,6 @@ def _validate_log(
     *,
     profile: ValidationProfile,
     shape,
-    compile_mode: str,
     ac_mode: str,
     model_size: str,
     parallelism_markers: tuple[str, ...] = (),
@@ -705,25 +701,26 @@ def _validate_log(
     """
     if profile.completion_marker not in log:
         raise RuntimeError(f"{arm.name}: training did not complete{where}")
-    if compile_mode in UNCOMPILED_COMPILE_MODES:
-        # Arm rule 8 inverts here: an uncompiled arm prints no compile line,
-        # so the proof is the absence of one. Never relax this into "skip the
-        # check" -- a run that silently compiled would then publish as eager.
-        if profile.compiled_marker is None:
+    # Arm rule 8, read both ways off the arm's own compile treatment. Never
+    # relax the absence half into "skip the check" -- an arm that silently
+    # compiled would then publish as eager.
+    if profile.compile_marker is None:
+        if arm.compile == "torch":
             raise RuntimeError(
                 f"{arm.name}: validation profile {arm.validation!r} cannot "
-                f"prove compile mode {compile_mode!r}; that engine compiles "
-                "code it exposes no switch for"
+                "prove a whole-block torch.compile; that engine compiles no "
+                "whole layer and exposes no switch for one"
             )
-        if profile.compiled_marker in log:
+    elif arm.compile == "torch":
+        if profile.compile_marker not in log:
             raise RuntimeError(
-                f"{arm.name}: compile mode {compile_mode!r} requested but the "
-                f"engine compiled the model{where}"
+                f"{arm.name}: the arm asks for torch.compile and the engine "
+                f"did not apply it{where}"
             )
-    # The engine reports which mode it actually applied.
-    elif profile.mode_line(compile_mode) not in log:
+    elif profile.compile_marker in log:
         raise RuntimeError(
-            f"{arm.name}: compile mode {compile_mode!r} did not apply{where}"
+            f"{arm.name}: the arm runs eager and the engine compiled the "
+            f"model{where}"
         )
     if profile.check_ac_line:
         # The AC policy logs its application; its presence must match the
@@ -825,7 +822,6 @@ def validate_arm(
     log_path: Path,
     workload: Workload,
     *,
-    compile_mode: str = "default",
     ac_mode: str = "sac",
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
@@ -912,7 +908,6 @@ def validate_arm(
             else f"; see {log_path}",
             profile=profile,
             shape=shape,
-            compile_mode=compile_mode,
             ac_mode=ac_mode,
             model_size=model_size,
             parallelism_markers=parallelism_markers,

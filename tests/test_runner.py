@@ -62,6 +62,7 @@ PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
 OVERRIDE_ARM = Arm(
     name="override_arm",
     description="a synthetic arm that swaps one config node per block",
+    compile="torch",
     override_imports=(PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
     overrides_per_block=1,
 )
@@ -183,7 +184,7 @@ class SelectedArmTests(unittest.TestCase):
     def test_compile_mode_acceptance_depends_on_the_selected_engines(self) -> None:
         cases = (
             (("megatron_stock", "titan_compiled"), "default", True),
-            (("titan_compiled",), "none", True),
+            (("titan_compiled",), "none", False),
             (("megatron_stock",), "none", False),
             (("megatron_stock", "titan_compiled"), "none", False),
             ((), "none", False),
@@ -1296,11 +1297,12 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--compile.mode", command)
         self.assertIn("--compile.enable", command)
 
-    def test_uncompiled_mode_drops_only_the_compile_flag(self) -> None:
-        # CompileConfig.enable is False in the fork, so the uncompiled command
-        # omits the flag rather than negating it. Everything else must be the
-        # command the default mode builds, token for token: this is the
-        # assertion that keeps the new mode from moving an existing default.
+    def test_an_eager_arm_drops_only_the_compile_flag(self) -> None:
+        # CompileConfig.enable is False in the fork, so an eager arm omits
+        # the flag rather than negating it. Everything else must be the
+        # command the compiled arm builds, token for token: this is the
+        # assertion that keeps the arm property from moving an existing
+        # default.
         compiled = command_for_arm(
             ENGINES.workload,
             ENGINES.arm("titan_compiled"),
@@ -1309,28 +1311,27 @@ class CommandTests(unittest.TestCase):
         )
         eager = command_for_arm(
             ENGINES.workload,
-            ENGINES.arm("titan_compiled"),
+            ENGINES.arm("titan_eager"),
             Path("/out/baseline"),
             [],
-            "none",
         )
         self.assertNotIn("--compile.enable", eager)
-        self.assertNotIn("--compile.mode", eager)
         self.assertEqual(
             eager, [token for token in compiled if token != "--compile.enable"]
         )
 
-    def test_a_megatron_command_refuses_an_uncompiled_mode(self) -> None:
+    def test_every_arm_declares_one_of_the_two_compile_values(self) -> None:
+        """The field is required, and only two values exist."""
+        for name, scenario in SCENARIOS.items():
+            for arm in scenario.arms:
+                with self.subTest(scenario=name, arm=arm.name):
+                    self.assertIn(arm.compile, ("torch", "none"))
+
+    def test_only_the_compiled_arm_asks_for_torch_compile(self) -> None:
         scenario = scenario_by_name("engines")
-        with self.assertRaisesRegex(ValueError, "cannot apply to this arm"):
-            command_for_arm(
-                scenario.workload,
-                scenario.arm("megatron_stock"),
-                Path("/out/baseline"),
-                [],
-                "none",
-                "none",
-            )
+        self.assertEqual(scenario.arm("titan_compiled").compile, "torch")
+        self.assertEqual(scenario.arm("titan_eager").compile, "none")
+        self.assertEqual(scenario.arm("megatron_stock").compile, "none")
 
     def test_ac_none_adds_the_subcommand_token_last(self) -> None:
         command = command_for_arm(
@@ -1558,8 +1559,8 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(titan_command[-2], "--dump-folder")
 
 
-class UncompiledRunTests(unittest.TestCase):
-    """What --compile-mode none records, and what it declines to claim."""
+class EagerArmTests(unittest.TestCase):
+    """What the eager arm records, and what it declines to claim."""
 
     def _run(self, out_dir: Path) -> dict:
         metadata = {
@@ -1595,9 +1596,8 @@ class UncompiledRunTests(unittest.TestCase):
                 RunRequest(
                     gpu="0",
                     scenario_name="engines",
-                    arm_names=("titan_compiled",),
+                    arm_names=("titan_eager",),
                     out_dir=out_dir,
-                    compile_mode="none",
                     ac_mode="none",
                 ),
                 process_runner=fake_process,
@@ -1605,28 +1605,26 @@ class UncompiledRunTests(unittest.TestCase):
             )
         return json.loads((out_dir / "manifest.json").read_text())
 
-    def test_an_uncompiled_run_records_the_mode(self) -> None:
+    def test_an_eager_arm_builds_no_compile_flag(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
         self.assertEqual(manifest["schema_version"], 17)
-        self.assertEqual(manifest["compile_mode"], "none")
-        self.assertNotIn("--compile.enable", manifest["commands"]["titan_compiled"])
+        self.assertNotIn("--compile.enable", manifest["commands"]["titan_eager"])
 
-    def test_a_resume_refuses_to_cross_the_uncompiled_boundary(self) -> None:
+    def test_the_manifest_records_each_arm_compile_treatment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary) / "run"
-            self._run(out_dir)
-            with self.assertRaisesRegex(Exception, "compile_mode"):
-                execute_run(
-                    RunRequest(
-                        gpu="0",
-                        arm_names=("titan_compiled",),
-                        resume_dir=out_dir,
-                        compile_mode="default",
-                    ),
-                    environment={"PATH": os.environ["PATH"]},
-                )
+            manifest = self._run(Path(temporary) / "run")
+
+        recorded = {arm["name"]: arm["compile"] for arm in manifest["arms"]}
+        self.assertEqual(
+            recorded,
+            {
+                "titan_compiled": "torch",
+                "titan_eager": "none",
+                "megatron_stock": "none",
+            },
+        )
 
 
 def _compiled_line(torch_mode: str) -> str:
@@ -1697,7 +1695,7 @@ class ValidationTests(unittest.TestCase):
                 trace_file.write("cudaLaunchKernel\n")
         return root / "baseline.log"
 
-    def test_default_run_requires_the_default_mode_line(self) -> None:
+    def test_a_compiled_arm_requires_the_compile_line(self) -> None:
         arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1708,14 +1706,25 @@ class ValidationTests(unittest.TestCase):
             )
             validate_arm(arm, root, log, ENGINES.workload)
 
-            log.write_text(
-                _compiled_line("max-autotune") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
-            )
-            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+            log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
+            with self.assertRaisesRegex(RuntimeError, "did not apply it"):
                 validate_arm(arm, root, log, ENGINES.workload)
 
+    def test_an_eager_arm_refuses_the_compile_line(self) -> None:
+        """Rule 8 inverts on an eager arm: a run that silently compiled
+        cannot be published as eager."""
+        arm = ENGINES.arm("titan_eager")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = self._rope_baseline_fixture(root)
+
             log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
-            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+            validate_arm(arm, root, log, ENGINES.workload)
+
+            log.write_text(
+                _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "compiled the model"):
                 validate_arm(arm, root, log, ENGINES.workload)
 
     def test_ac_mode_must_match_the_applied_treatment(self) -> None:
@@ -1939,20 +1948,6 @@ class ResumeTests(unittest.TestCase):
                     environment=environment,
                 )
 
-            conflicting_mode = RunRequest(
-                gpu="0",
-                scenario_name=None,
-                arm_names=("titan_compiled",),
-                resume_dir=out_dir,
-                compile_mode="none",
-            )
-            with self.assertRaisesRegex(ValueError, "compile_mode"):
-                execute_run(
-                    conflicting_mode,
-                    process_runner=fake_process,
-                    environment=environment,
-                )
-
             conflicting_size = RunRequest(
                 gpu="0",
                 scenario_name=None,
@@ -1967,7 +1962,7 @@ class ResumeTests(unittest.TestCase):
                     environment=environment,
                 )
 
-    def test_resume_rehydrates_the_recorded_compile_mode(self) -> None:
+    def test_resume_rehydrates_the_recorded_ac_mode(self) -> None:
         metadata = {
             "requested_gpu": "0",
             "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
@@ -1997,24 +1992,23 @@ class ResumeTests(unittest.TestCase):
                 RunRequest(
                     gpu="0",
                     scenario_name="engines",
-                    arm_names=("titan_compiled",),
+                    arm_names=("titan_eager",),
                     out_dir=out_dir,
-                    compile_mode=mode,
-                    ac_mode="none",
+                    ac_mode=mode,
                 ),
                 process_runner=fake_process,
                 environment=environment,
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
-            self.assertEqual(manifest["compile_mode"], mode)
+            self.assertEqual(manifest["ac_mode"], mode)
 
-            (out_dir / "titan_compiled.log").write_text("interrupted\n")
+            (out_dir / "titan_eager.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
                 RunRequest(
                     gpu="0",
                     scenario_name=None,
-                    arm_names=("titan_compiled",),
+                    arm_names=("titan_eager",),
                     resume_dir=out_dir,
                 ),
                 process_runner=retry_process,
@@ -2022,8 +2016,9 @@ class ResumeTests(unittest.TestCase):
             )
             retry_command = retry_process.call_args.args[0]
             self.assertNotIn("--compile.enable", retry_command)
+            self.assertIn("activation-checkpoint:none", retry_command)
             self.assertIn(
-                "Training completed", (out_dir / "titan_compiled.log").read_text()
+                "Training completed", (out_dir / "titan_eager.log").read_text()
             )
 
 
