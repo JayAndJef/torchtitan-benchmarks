@@ -1,0 +1,45 @@
+# CPU-only tests on a hosted runner.
+#
+# The list of modules below is explicit, not `unittest discover`. Three
+# properties of this repository make discovery unrunnable here:
+#
+#   * torch is pinned to an exact nightly build, which no hosted runner can
+#     install in a reasonable time;
+#   * the training engines are git submodules that this job does not fetch;
+#     and
+#   * the kernel tests need a GPU.
+#
+# Each listed module therefore imports the standard library, click, numpy and
+# scipy alone. `tests/test_tools.py` checks the list against the sources, so
+# a module that grows a torch import fails the suite before it fails here.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install the parent-side dependencies
+        run: python -m pip install click numpy scipy
+      - name: Run the CPU test modules
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: |
+          python -m unittest \
+            tests.test_axes \
+            tests.test_cli \
+            tests.test_docstrings \
+            tests.test_engines \
+            tests.test_import_boundaries \
+            tests.test_parallelism_plumbing \
+            tests.test_schema \
+            tests.test_warmup_steps
