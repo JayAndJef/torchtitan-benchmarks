@@ -64,7 +64,7 @@ from benchmarks.e2e.schema import (
     ZERO_MODES,
 )
 from benchmarks.e2e.parallelism import (
-    MEGATRON_LAUNCHERS,
+    MEGATRON_ENGINES,
     PP_SCHEDULE_CHOICES,
 )
 from benchmarks.e2e.registry import (
@@ -576,7 +576,7 @@ def run_all_command(
         # cannot honor ``off``, and ``_resolve_run`` refuses it; the sweep
         # skips such a scenario for the reason it skips a declined mode.
         if megatron_p2p_sync == "on" and not any(
-            arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms
+            arm.engine in MEGATRON_ENGINES for arm in scenario.arms
         ):
             click.echo(
                 f"\n===== scenario: {name} ====="

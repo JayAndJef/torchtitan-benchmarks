@@ -11,8 +11,9 @@ property.
 
 ``Workload``, ``Arm`` and ``Scenario`` describe a scenario.
 ``ParallelismSpec`` and ``PipelineSchedule`` describe the parallelism run
-axis. ``ValidationProfile`` describes one engine's share of validation, and
-``RunRequest`` describes what the operator asked for.
+axis. ``ValidationProfile`` describes one engine's share of validation, ``Engine``
+joins that profile to a command builder, and ``RunRequest`` describes what
+the operator asked for.
 """
 
 from __future__ import annotations
@@ -66,6 +67,10 @@ class Arm:
     manifest records it through ``asdict(arm)``, and validation rule 8
     reads it: the compile log line must be present under ``"torch"`` and
     absent under ``"none"``.
+
+    ``engine`` names the record that runs the arm. One string carries both
+    the command builder and the validation profile, so an arm cannot take
+    one engine's argv and another engine's log rules.
     """
 
     name: str
@@ -79,12 +84,11 @@ class Arm:
     overrides_per_block: int = 0
     trace_kernel_markers: tuple[str, ...] = ()
     requires_gcc_toolset: bool = False
-    # Which engine the runner launches and which validation profile applies.
-    # Plain strings (registry keys in benchmarks.e2e.launch /
-    # benchmarks.e2e.validation) so asdict(arm) stays JSON-serializable for
-    # the manifest.
-    launcher: str = "torchtitan"
-    validation: str = "torchtitan"
+    # Which engine runs this arm. It names a record in
+    # benchmarks.e2e.engines' ENGINES, which owns both the command builder
+    # and the validation profile. A plain string, so asdict(arm) stays
+    # JSON-serializable for the manifest.
+    engine: str = "torchtitan"
 
 
 @dataclass(frozen=True)
@@ -271,7 +275,7 @@ class ParallelismSpec:
 
 @dataclass(frozen=True)
 class ValidationProfile:
-    """Engine-specific pieces of validate_arm, selected by Arm.validation.
+    """Engine-specific pieces of validate_arm, carried by an Engine.
 
     The engine-neutral rules (trace-window count, kernel markers, override
     counting when declared) are shared; these fields carry what differs:
@@ -374,6 +378,34 @@ class ValidationProfile:
     precision_markers: Callable[[str], tuple[str, ...]]
 
 
+@dataclass(frozen=True)
+class Engine:
+    """One training engine: how to launch an arm, and how to validate it.
+
+    ``Arm.engine`` names a record of this type. The record is the one place
+    that joins the two halves, so an arm cannot take one engine's command
+    builder and another engine's validation profile. That pairing used to
+    be two independent strings on the arm.
+
+    ``command`` builds the argv for one arm. Every builder takes the same
+    parameters, including the megatron run axes an engine may ignore, so
+    the dispatcher passes one call through and no caller branches on the
+    engine.
+
+    ``is_megatron`` says whether this engine runs Megatron-LM. The
+    parallelism rules and the three megatron run axes read it. It is a
+    declared field rather than a name prefix: a prefix test fails open, and
+    an engine that spelled the library another way would walk past a rule
+    it needs.
+    """
+
+    name: str
+    command: Callable[..., list[str]]
+    validation: ValidationProfile
+    is_megatron: bool
+
+
+
 
 
 @dataclass(frozen=True)
@@ -432,11 +464,11 @@ class RunRequest:
     megatron_p2p_sync: str | None = None
     # Stock Megatron's NaN/Inf guard. ``None`` means "not requested", as
     # above: a resume inherits the recorded value and a fresh run takes
-    # ``on``. It reaches the stock megatron launcher alone.
+    # ``on``. It reaches the stock megatron command alone.
     megatron_nan_guard: str | None = None
     # Stock Megatron's optimizer precision. ``None`` means "not requested",
     # as above: a resume inherits the recorded value and a fresh run takes
-    # ``stock``. The value reaches the stock megatron launcher alone, and
+    # ``stock``. The value reaches the stock megatron command alone, and
     # ``lean`` needs a sharded dense value.
     megatron_precision: str | None = None
     # Whether the run collects profiler traces. ``None`` means "not

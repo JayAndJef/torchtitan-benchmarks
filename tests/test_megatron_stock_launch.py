@@ -35,10 +35,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from benchmarks.e2e.engines import ENGINES as ENGINE_RECORDS, command_for_arm
 from benchmarks.e2e.launch import (
     STOCK_MEGATRON_DRIVER_MODULE,
     STOCK_MEGATRON_PP_SCHEDULE,
-    command_for_arm,
 )
 from benchmarks.e2e.schema import Arm, ParallelismSpec, RunRequest
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
@@ -48,7 +48,8 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.runner import _resolve_run
 from benchmarks.e2e.validation import (
-    VALIDATION_PROFILES,
+    MEGATRON_STOCK_PROFILE,
+    TORCHTITAN_PROFILE,
     _megatron_stock_parallelism_markers,
     validate_arm,
 )
@@ -279,15 +280,13 @@ class StockScenarioDeclarationTests(unittest.TestCase):
             [arm.name for arm in scenario.arms], ["titan_compiled", "titan_eager", "megatron_stock"]
         )
 
-    def test_the_stock_arm_names_the_stock_launcher_and_profile(self) -> None:
+    def test_the_stock_arm_names_the_stock_engine(self) -> None:
         arm = _stock_arm()
-        self.assertEqual(arm.launcher, "megatron_stock")
-        self.assertEqual(arm.validation, "megatron_stock")
+        self.assertEqual(arm.engine, "megatron_stock")
 
     def test_the_titan_arm_is_a_plain_torchtitan_arm(self) -> None:
         arm = _titan_arm()
-        self.assertEqual(arm.launcher, "torchtitan")
-        self.assertEqual(arm.validation, "torchtitan")
+        self.assertEqual(arm.engine, "torchtitan")
         # It reuses the scenario workload's pre-tokenized config.
         self.assertIsNone(arm.config)
 
@@ -386,7 +385,7 @@ class TrivialSpecArgvTests(unittest.TestCase):
         """
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
-                if arm.launcher != "torchtitan":
+                if arm.engine != "torchtitan":
                     continue
                 with self.subTest(scenario=scenario.name, arm=arm.name):
                     omitted = command_for_arm(
@@ -656,7 +655,7 @@ class StockArgvTests(unittest.TestCase):
         division, and compares the answer to the marker. It fails whichever
         side moves.
         """
-        profile = VALIDATION_PROFILES["megatron_stock"]
+        profile = MEGATRON_STOCK_PROFILE
         scenario = scenario_by_name(SCENARIO_NAME)
         for spec, batch in (
             (TRIVIAL_SPEC, None),
@@ -767,15 +766,15 @@ class StockArgvRefusalTests(unittest.TestCase):
 
 class StockValidationProfileTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.profile = VALIDATION_PROFILES["megatron_stock"]
+        self.profile = MEGATRON_STOCK_PROFILE
         self.workload = replace(
             scenario_by_name(SCENARIO_NAME).workload, local_batch_size=32
         )
 
     def test_the_profile_is_registered_and_selected_by_the_arm(self) -> None:
-        self.assertIn("megatron_stock", VALIDATION_PROFILES)
+        self.assertIn("megatron_stock", ENGINE_RECORDS)
         self.assertIs(
-            VALIDATION_PROFILES[_stock_arm().validation], self.profile
+            ENGINE_RECORDS[_stock_arm().engine].validation, self.profile
         )
 
     def test_the_driver_line_is_the_first_precision_marker(self) -> None:
@@ -1225,7 +1224,7 @@ class StockMarkerContractTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.profile = VALIDATION_PROFILES["megatron_stock"]
+        self.profile = MEGATRON_STOCK_PROFILE
         self.workload = replace(
             scenario_by_name(SCENARIO_NAME).workload, local_batch_size=32
         )
@@ -1394,7 +1393,7 @@ class StockMarkerContractTests(unittest.TestCase):
         callable takes no spec and the same line is asked everywhere."""
         (line,) = self.profile.nan_guard_markers("on")
         self.assertIn("stock", line)
-        self.assertEqual(VALIDATION_PROFILES["torchtitan"].nan_guard_markers("off"), ())
+        self.assertEqual(TORCHTITAN_PROFILE.nan_guard_markers("off"), ())
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_mode_line_starts_with_this_profile_marker(

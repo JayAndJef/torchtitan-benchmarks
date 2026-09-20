@@ -186,7 +186,7 @@ class _RunFixture:
             "workload": WORKLOAD,
             "selected_arms": sorted(logs),
             "arms": [
-                {"name": arm, "launcher": "torchtitan"}
+                {"name": arm, "engine": "torchtitan"}
                 for arm in sorted(logs)
             ],
         }

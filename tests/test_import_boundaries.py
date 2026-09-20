@@ -77,6 +77,9 @@ PARENT_SIDE_MODULES = (
     # an illegal set, and it resolves none of them against a device.
     "benchmarks.e2e.parallelism",
     "benchmarks.e2e.launch",
+    # The engine records. Parent-side: each pairs a command builder with a
+    # validation profile, and the parent builds and validates.
+    "benchmarks.e2e.engines",
     # The stock Megatron-LM command line, as data. ``launch.py``
     # imports it to build one arm's argv, so it runs in the parent
     # and must stay as torch-free as the shape registry it reads.

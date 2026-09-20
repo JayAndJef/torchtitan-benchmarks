@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.cli.e2e import run_all_command, run_command
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import (
-    MEGATRON_LAUNCHERS,
+    MEGATRON_ENGINES,
 )
 from benchmarks.e2e.registry import (
     DEFAULT_AC_MODE,
@@ -498,7 +498,7 @@ class CliTests(unittest.TestCase):
         holds_megatron = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms)
+            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
         ]
         self.assertTrue(holds_megatron)
         with tempfile.TemporaryDirectory() as temporary:
@@ -593,7 +593,7 @@ class CliTests(unittest.TestCase):
         holds_stock = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms)
+            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
         ]
         self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:
@@ -681,7 +681,7 @@ class CliTests(unittest.TestCase):
         holds_stock = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms)
+            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
         ]
         self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:

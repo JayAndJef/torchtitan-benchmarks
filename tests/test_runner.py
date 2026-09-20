@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files
 from benchmarks.artifacts.manifests import write_manifest
-from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.schema import Arm, ParallelismSpec, RunRequest
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
@@ -1432,8 +1432,7 @@ class EnginesScenarioTests(unittest.TestCase):
             ["titan_compiled", "titan_eager", "megatron_stock"],
         )
         stock = scenario.arm("megatron_stock")
-        self.assertEqual(stock.launcher, "megatron_stock")
-        self.assertEqual(stock.validation, "megatron_stock")
+        self.assertEqual(stock.engine, "megatron_stock")
         self.assertIn("NOT PLAIN BF16", stock.description)
         self.assertEqual(
             stock.trace_kernel_markers,
@@ -1442,7 +1441,7 @@ class EnginesScenarioTests(unittest.TestCase):
         self.assertEqual(scenario.supported_ac_modes, ("none",))
         self.assertEqual(scenario.workload.seed, 42)
         for arm in scenario.arms[:2]:
-            self.assertEqual(arm.launcher, "torchtitan")
+            self.assertEqual(arm.engine, "torchtitan")
 
     def test_every_titan_arm_reads_the_replay_stream(self) -> None:
         import benchmarks.models.piper_qwen3.config_registry as registry
@@ -1452,7 +1451,7 @@ class EnginesScenarioTests(unittest.TestCase):
         config_names = {
             arm.config or scenario.workload.config
             for arm in scenario.arms
-            if arm.launcher == "torchtitan"
+            if arm.engine == "torchtitan"
         }
         for name in sorted(config_names):
             config = getattr(registry, name)()

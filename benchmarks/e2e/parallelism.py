@@ -5,8 +5,8 @@ and ``--ac`` each describe one. Every arm in one run
 shares it, so the world size, the pipeline schedule and the microbatch count
 are properties of the run rather than of an arm.
 
-The CLI, runner, launcher, manifest writer, validation, and evaluation paths
-all import this module. The spec is resolved and validated in the parent
+The CLI, runner, command builders, manifest writer, validation and
+evaluation all import this module. The spec is resolved and validated in the parent
 before any host probe, then the same object builds both engines' command lines
 and the manifest record. The rules remain torch-free and directly testable on
 a CPU.
@@ -160,24 +160,27 @@ MAX_PP = 8
 
 
 
-# The ``Arm.launcher`` values that drive Megatron-LM. Rules 5, 12 and the
+# The ``Arm.engine`` names that drive Megatron-LM. Rules 5, 12 and the
 # three megatron run axes read this set.
 #
-# **Declared one by one. Not a ``megatron`` prefix, and not "every launcher
-# that is not torchtitan".** A prefix fails OPEN: a launcher that names the
+# **Declared one by one. Not a ``megatron`` prefix, and not "every engine
+# that is not torchtitan".** A prefix fails OPEN: an engine that names the
 # library another way -- ``mcore``, ``nemo`` -- would walk past rule 5, and
 # the run would reach a schedule Megatron cannot run with no cross-engine
 # opponent for it. The complement fails the other way: it would apply
 # Megatron's restriction to an engine that is not Megatron, and refuse a
 # legal titan-only cell. A declared set is wrong in neither direction, and a
-# new launcher is then an edit here rather than a silent classification.
-# ``tests/test_parallelism.py`` refuses a registry launcher this set and
-# ``torchtitan`` do not name between them.
+# new engine is then an edit here rather than a silent classification.
+#
+# **It is stated here and not derived from ``ENGINES``.**
+# ``benchmarks/e2e/engines.py`` sits ABOVE this module, so this module
+# cannot read the records. ``tests/test_engines.py`` pins this set equal to
+# the engines whose ``is_megatron`` is true.
 #
 # One set covers every megatron axis. ``megatron_stock`` hands the run to
 # Megatron's own ``pretrain``, which implements the NaN guard, the
 # precision-aware optimizer, the sharded dense parity and an expert degree.
-MEGATRON_LAUNCHERS = frozenset({"megatron_stock"})
+MEGATRON_ENGINES = frozenset({"megatron_stock"})
 
 
 # The five schedules this repo can name. Two are targets and three are
@@ -348,7 +351,7 @@ def zero_warnings(
     not really have, so a reader who takes the level at face value reads
     the cell wrongly.
 
-    ``engines`` is the set of ``Arm.launcher`` values the run holds. The
+    ``engines`` is the set of ``Arm.engine`` names the run holds. The
     second warning is about TorchTitan's FSDP2 alone, so a run of megatron
     arms alone does not get it: Megatron builds a ``DistributedOptimizer``
     and holds ZeRO-1 exactly, at every mesh. An empty set therefore emits
@@ -373,7 +376,7 @@ def zero_warnings(
             "the dense parameters exactly as a replicated run holds them. "
             "Do not read this cell as a measurement of the sharded parity"
         )
-    titan = frozenset(engines) - MEGATRON_LAUNCHERS
+    titan = frozenset(engines) - MEGATRON_ENGINES
     if spec.zero == 1 and spec.pp == 1 and titan:
         warnings.append(
             "--zero 1 was requested at pp 1. One microbatch puts the "
@@ -539,7 +542,7 @@ def validate_parallelism(
 ) -> None:
     """Refuse a spec this run cannot honor. Each message names one cause.
 
-    ``engines`` is the set of ``Arm.launcher`` values the run will start, so
+    ``engines`` is the set of ``Arm.engine`` names the run will start, so
     the megatron restriction follows the arm roster rather than a scenario
     name. ``device_count`` is how many devices the operator asked for.
 
@@ -641,16 +644,16 @@ def validate_parallelism(
 
     # 5. A schedule Megatron does not implement has no cross-engine opponent,
     #    so a run holding a megatron arm cannot use it. The check reads the
-    #    launchers rather than the scenario name: a titan-only run may use a
+    #    engines rather than the scenario name: a titan-only run may use a
     #    PyTorch-only schedule.
     #
-    #    It reads MEGATRON_LAUNCHERS rather than one launcher name. A
+    #    It reads MEGATRON_ENGINES rather than one engine name. A
     #    command builder is not a spec rule: it runs after the manifest
     #    records the mesh, and it cannot refuse a mesh nobody builds a
     #    command for.
     if (
         schedule is not None
-        and engines & MEGATRON_LAUNCHERS
+        and engines & MEGATRON_ENGINES
         and not schedule.megatron_supported
     ):
         raise ValueError(
