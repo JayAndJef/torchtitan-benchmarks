@@ -5,9 +5,8 @@
 # -------------
 # A `run` over every scenario is fail-fast and refuses --resume above one
 # scenario, so one foreign job landing mid-sweep throws away every scenario
-# that already succeeded.
-# This runs one (size, ac, mode, scenario) cell per invocation under a shared
-# --out root, so a failure costs one cell and --resume picks it up.
+# that already succeeded. This runs one cell per invocation of `run` under a
+# shared --out root, so a failure costs one cell and --resume picks it up.
 #
 # More importantly, this box is shared with jobs that CYCLE: they appear,
 # take ~100 GB/GPU and drive the 1-minute load average past 400, then leave.
@@ -21,19 +20,36 @@
 # tokens/s even when we have the GPU to ourselves. Load is a first-class
 # contamination signal, not a nicety.
 #
+# Cells
+# -----
+# A cell is a quoted string of `run` flags, one per array entry. The script
+# word-splits it, so a cell string must contain no quotes and no space
+# inside a value. Each cell becomes:
+#
+#   ./run_bench.sh run <GPU> <cell flags> --steps <STEPS> --out <dir>
+#
+# The output directory is $ROOT/<slug of the cell>, where the slug drops the
+# `--` of each flag and joins the remaining words with `-`. Two cells that
+# slug the same are refused, because they would share one directory.
+#
 # Usage
 # -----
 #   GPU=4 nohup ./tools/run_matrix.sh > /dev/null 2>&1 &
 #   tail -f out/matrix-<utc>/sweep.log
 #
+#   DRY_RUN=1 GPU=4 ./tools/run_matrix.sh    # print the commands, run nothing
+#
 # Environment (all optional except GPU):
-#   GPU              PCI index; one GPU for the whole run (required)
+#   GPU              PCI index, or a comma list of them, for the whole matrix
+#                    (required). dp x pp of each cell must equal the count.
 #   ROOT             output root (default out/matrix-<utc>)
 #   PASSES           retry passes over failed/contaminated cells (default 3)
 #   STEPS            training steps per arm (default 80)
-#   CELLS            "huge", "1b", or "all" (default all; huge runs first).
-#                    "normal" is the retired spelling of "1b" and is accepted.
-#   IDLE_MEM_MIB     GPU memory below which the card counts as idle (2000)
+#   MATRIX_CELLS     newline-separated cell strings that replace the built-in
+#                    list. The tree is refused dirty, so this is how an
+#                    operator picks cells without a commit.
+#   DRY_RUN          1 prints each cell's command and runs nothing
+#   IDLE_MEM_MIB     GPU memory below which the cards count as idle (2000)
 #   IDLE_LOAD        1-min loadavg below which the host counts as idle (60)
 #   IDLE_SETTLE      consecutive idle samples required before starting (3)
 #   IDLE_POLL        seconds between idle samples (20)
@@ -49,16 +65,7 @@ GPU="${GPU:-}"
 ROOT="${ROOT:-out/matrix-$(date -u +%Y%m%dT%H%M%SZ)}"
 PASSES="${PASSES:-3}"
 STEPS="${STEPS:-80}"
-CELLS="${CELLS:-all}"
-# The 1B shape was called "normal" until it took the model's own name.
-# Accept both, and name the cell directory canonically, so a collected tree
-# agrees with the manifests inside it.
-if [ "$CELLS" = normal ]; then CELLS=1b; fi
-case "$CELLS" in
-    all|huge|1b) ;;
-    *) echo "run_matrix: unknown CELLS=$CELLS (want all, huge or 1b)" >&2
-       exit 2 ;;
-esac
+DRY_RUN="${DRY_RUN:-0}"
 IDLE_MEM_MIB="${IDLE_MEM_MIB:-2000}"
 IDLE_LOAD="${IDLE_LOAD:-60}"
 IDLE_SETTLE="${IDLE_SETTLE:-3}"
@@ -66,6 +73,22 @@ IDLE_POLL="${IDLE_POLL:-20}"
 CONTENDED_LOAD="${CONTENDED_LOAD:-150}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-43200}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-15}"
+
+# ------------------------------------------------------------- the cell list
+# Huge first: it is the larger measurement and the one a report is built
+# around. The engines scenario declares supported_ac_modes=("none",), so one
+# cell per size is legal.
+CELLS=(
+    "--scenario engines --model-size huge --ac none"
+    "--scenario engines --model-size 1b --ac none"
+)
+if [ -n "${MATRIX_CELLS:-}" ]; then
+    CELLS=()
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        CELLS+=("$line")
+    done <<<"$MATRIX_CELLS"
+fi
 
 # A stable, writable datasets cache. The shared HF_HOME is owned by another
 # user and every arm dies on a builder.lock PermissionError without this.
@@ -83,12 +106,36 @@ say() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$LOG"; }
 # ---------------------------------------------------------------- preflight
 fail() { echo "run_matrix.sh: $*" >&2; exit 1; }
 
-[ -n "$GPU" ] || fail "GPU is required (one PCI index for the whole matrix)"
+[ -n "$GPU" ] || fail "GPU is required (PCI index, or a comma list of them)"
 [ -x "$REPO/.venv/bin/python" ] || fail "no environment at $REPO/.venv/bin/python"
 # hardware_metadata records `git rev-parse HEAD`, which silently ignores
 # uncommitted edits, so a dirty tree would mislabel the whole matrix.
 [ -z "$(git -C "$REPO" status --porcelain)" ] || fail "working tree is dirty; commit first"
 command -v flock >/dev/null || fail "flock is required (single-instance lock)"
+[ "${#CELLS[@]}" -gt 0 ] || fail "the cell list is empty"
+
+IFS=',' read -r -a GPU_IDS <<<"$GPU"
+
+# The slug names the cell's directory, and --resume of a contaminated cell
+# finds it again by the same name.
+cell_slug() {
+    printf '%s' "$1" \
+        | sed -e 's/--//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+              -e 's/[[:space:]][[:space:]]*/-/g' -e 's/--*/-/g'
+}
+
+declare -A SLUG_OF
+declare -A SEEN_SLUG
+for cell in "${CELLS[@]}"; do
+    case "$cell" in
+        *\"*|*\'*) fail "cell has a quote, which word splitting cannot honor: $cell" ;;
+    esac
+    slug="$(cell_slug "$cell")"
+    [ -n "$slug" ] || fail "cell slugs to an empty directory name: $cell"
+    [ -z "${SEEN_SLUG[$slug]:-}" ] || fail "two cells share the directory $slug"
+    SEEN_SLUG["$slug"]=1
+    SLUG_OF["$cell"]="$slug"
+done
 
 exec 9>"$ROOT/.lock"
 flock -n 9 || fail "another run_matrix.sh already holds $ROOT/.lock"
@@ -119,7 +166,7 @@ is_ours() {
 say "=== run_matrix.sh ==="
 say "repo:        $REPO"
 say "git rev:     $(git -C "$REPO" rev-parse HEAD)"
-say "gpu:         $GPU -> $(nvidia-smi --id="$GPU" --query-gpu=index,name,uuid,driver_version --format=csv,noheader 2>&1)"
+say "gpu:         $GPU -> $(nvidia-smi --id="$GPU" --query-gpu=index,name,uuid,driver_version --format=csv,noheader 2>&1 | tr '\n' ';')"
 say "numactl:     $(command -v numactl || echo 'NOT AVAILABLE (runs will be unpinned)')"
 say "steps:       $STEPS"
 say "passes:      $PASSES"
@@ -128,33 +175,24 @@ say "watchdog:    every ${WATCH_INTERVAL}s; contended above load ${CONTENDED_LOA
 say "root:        $ROOT"
 say "supervisor:  pid $SUPERVISOR_PID (sid $SID, user $ME); foreign = any compute PID that is not a descendant"
 say "hf cache:    $HF_DATASETS_CACHE"
-
-# ------------------------------------------------------------- the cell list
-# "size|ac|scenario". Huge first: it is the new measurement and the one
-# the report is built around.
-# The engines scenario declares supported_ac_modes=("none",), so one cell
-# per size is legal.
-CELL_LIST=()
-if [ "$CELLS" = all ] || [ "$CELLS" = huge ]; then
-    CELL_LIST+=("huge|none|engines")
-fi
-if [ "$CELLS" = all ] || [ "$CELLS" = 1b ]; then
-    CELL_LIST+=("1b|none|engines")
-fi
-say "cells:       ${#CELL_LIST[@]}"
-for cell in "${CELL_LIST[@]}"; do say "  $cell"; done
+[ "$DRY_RUN" = 1 ] && say "DRY RUN:     printing commands only"
+say "cells:       ${#CELLS[@]}"
+for cell in "${CELLS[@]}"; do say "  ${SLUG_OF[$cell]}  <- $cell"; done
 
 # --------------------------------------------------------------- idle gating
-gpu_mem() {
-    local value
-    value=$(nvidia-smi --id="$GPU" --query-gpu=memory.used \
-            --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
-    # An unparseable answer is a broken query, not a busy GPU: returning a
-    # huge number here would stall the sweep for the whole timeout.
-    case "$value" in
-        ''|*[!0-9]*) echo "-1" ;;
-        *) echo "$value" ;;
-    esac
+gpu_mem() {   # summed over every GPU the matrix uses; -1 when unreadable
+    local total=0 value id
+    for id in "${GPU_IDS[@]}"; do
+        value=$(nvidia-smi --id="$id" --query-gpu=memory.used \
+                --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+        # An unparseable answer is a broken query, not a busy GPU: returning
+        # a huge number here would stall the sweep for the whole timeout.
+        case "$value" in
+            ''|*[!0-9]*) echo "-1"; return ;;
+        esac
+        total=$((total + value))
+    done
+    echo "$total"
 }
 load1() { awk '{printf "%.0f", $1}' /proc/loadavg; }
 
@@ -189,32 +227,35 @@ wait_for_idle() {   # -> 0 idle, 1 timed out
 # Writes one line per suspicious sample to $1. A non-empty file condemns the
 # cell. Two independent foreign-usage signals, because nvidia-smi does not
 # always expose other users' PIDs:
-#   FOREIGN_PID  a compute PID outside our session id
+#   FOREIGN_PID  a compute PID that is not a descendant of the supervisor
 #   FOREIGN_MEM  GPU memory that no PID of ours accounts for
 watchdog() {
     local watch_file="$1"
-    local mem load pid used ours residual mem_streak=0 noted=0
+    local mem load pid used ours residual id mem_streak=0 noted=0
     while :; do
         mem=$(gpu_mem); load=$(load1)
         ours=0
-        while IFS=',' read -r pid used; do
-            pid=$(echo "$pid" | tr -d ' ')
-            used=$(echo "$used" | tr -d ' MiB')
-            [ -z "$pid" ] && continue
-            case "$used" in ''|*[!0-9]*) used=0 ;; esac
-            if is_ours "$pid"; then
-                ours=$((ours + used))
-            elif ps -o pid= -p "$pid" >/dev/null 2>&1; then
-                # Still alive and not a descendant of ours: genuinely foreign.
-                # A pid that has already exited is skipped rather than
-                # flagged -- it is usually one of our own arms shutting down,
-                # and FOREIGN_MEM below still catches anything real.
-                echo "FOREIGN_PID pid=$pid user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')" \
-                     "sid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ') mem=${used}MiB $(date -u +%T)" \
-                    >>"$watch_file"
-            fi
-        done < <(nvidia-smi --id="$GPU" --query-compute-apps=pid,used_memory \
-                 --format=csv,noheader 2>/dev/null)
+        for id in "${GPU_IDS[@]}"; do
+            while IFS=',' read -r pid used; do
+                pid=$(echo "$pid" | tr -d ' ')
+                used=$(echo "$used" | tr -d ' MiB')
+                [ -z "$pid" ] && continue
+                case "$used" in ''|*[!0-9]*) used=0 ;; esac
+                if is_ours "$pid"; then
+                    ours=$((ours + used))
+                elif ps -o pid= -p "$pid" >/dev/null 2>&1; then
+                    # Still alive and not a descendant of ours: genuinely
+                    # foreign. A pid that has already exited is skipped
+                    # rather than flagged -- it is usually one of our own
+                    # arms shutting down, and FOREIGN_MEM below still
+                    # catches anything real.
+                    echo "FOREIGN_PID gpu=$id pid=$pid user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')" \
+                         "sid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ') mem=${used}MiB $(date -u +%T)" \
+                        >>"$watch_file"
+                fi
+            done < <(nvidia-smi --id="$id" --query-compute-apps=pid,used_memory \
+                     --format=csv,noheader 2>/dev/null)
+        done
         if [ "$noted" -eq 0 ] && [ "$ours" -gt 0 ]; then
             # INFO, not a flag: proves the attribution is working for this
             # cell. Written to the sweep log, never to the watch file.
@@ -245,15 +286,14 @@ watchdog() {
 
 # --------------------------------------------------------------- the sweep
 declare -A STATUS
-for cell in "${CELL_LIST[@]}"; do STATUS["$cell"]="PENDING"; done
+for cell in "${CELLS[@]}"; do STATUS["$cell"]="PENDING"; done
 
 for pass in $(seq 1 "$PASSES"); do
     say ""
     say "########## pass $pass/$PASSES ##########"
     remaining=0
-    for cell in "${CELL_LIST[@]}"; do
-        IFS='|' read -r size ac scenario <<<"$cell"
-        out="$ROOT/$size/ac-$ac/$scenario"
+    for cell in "${CELLS[@]}"; do
+        out="$ROOT/${SLUG_OF[$cell]}"
         # The marker lives NEXT TO the directory, so it survives an early
         # failure that never created the directory at all.
         marker="$out.CONTAMINATED"
@@ -266,6 +306,19 @@ for pass in $(seq 1 "$PASSES"); do
         remaining=$((remaining + 1))
 
         mkdir -p "$(dirname "$out")"
+
+        # Intentionally unquoted: the cell string is a flag list and the
+        # word split is what turns it into arguments.
+        # shellcheck disable=SC2206
+        args=(run "$GPU" $cell --steps "$STEPS")
+
+        if [ "$DRY_RUN" = 1 ]; then
+            say "DRY  $cell"
+            say "     ./run_bench.sh ${args[*]} --out $out"
+            STATUS["$cell"]="DRY-RUN"
+            continue
+        fi
+
         if ! wait_for_idle; then
             say "GAVE-UP $cell (no idle GPU within ${WAIT_TIMEOUT}s)"
             STATUS["$cell"]="SKIPPED-IDLE-TIMEOUT"
@@ -277,8 +330,6 @@ for pass in $(seq 1 "$PASSES"); do
         watch_file="$out.watch"
         : >"$watch_file"
 
-        args=(run "$GPU" --scenario "$scenario" --ac "$ac"
-              --model-size "$size" --steps "$STEPS")
         if [ -f "$out/manifest.json" ]; then
             # Gate on the manifest, not the directory: a crash between mkdir
             # and write_manifest leaves a directory --resume cannot use.
@@ -317,8 +368,8 @@ for pass in $(seq 1 "$PASSES"); do
         else
             say "OK   $cell"
             STATUS["$cell"]="OK"
-            # The launch-latency-spread warning is an in-band contamination
-            # signal; surface it rather than leaving it in results.json.
+            # An evaluation warning is an in-band contamination signal;
+            # surface it rather than leaving it in results.json.
             if [ -f "$out/results.json" ]; then
                 warn=$(.venv/bin/python -c "
 import json,sys
@@ -329,18 +380,18 @@ print('; '.join(w))" "$out/results.json" 2>/dev/null)
         fi
     done
     [ "$remaining" -eq 0 ] && { say "nothing left to run"; break; }
+    [ "$DRY_RUN" = 1 ] && break
 done
 
 # ---------------------------------------------------------------- summary
 say ""
 say "########## summary ##########"
 bad=0
-for cell in "${CELL_LIST[@]}"; do
-    IFS='|' read -r size ac mode scenario <<<"$cell"
-    out="$ROOT/$size/ac-$ac/$mode/$scenario"
+for cell in "${CELLS[@]}"; do
+    out="$ROOT/${SLUG_OF[$cell]}"
     say "$(printf '%-24s' "${STATUS[$cell]}") $cell  $out"
-    case "${STATUS[$cell]}" in OK|OK\(pre-existing\)) ;; *) bad=$((bad + 1)) ;; esac
+    case "${STATUS[$cell]}" in OK|OK\(pre-existing\)|DRY-RUN) ;; *) bad=$((bad + 1)) ;; esac
 done
-say "cells not OK: $bad / ${#CELL_LIST[@]}"
+say "cells not OK: $bad / ${#CELLS[@]}"
 say "SWEEP COMPLETE -> $ROOT"
 exit $(( bad > 0 ? 1 : 0 ))
