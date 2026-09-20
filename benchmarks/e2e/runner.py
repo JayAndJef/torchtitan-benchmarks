@@ -47,6 +47,7 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.schema import (
     Arm,
+    ResolvedRun,
     RunAxes,
     RunRequest,
     Scenario,
@@ -155,17 +156,13 @@ def _resolve_run(
     environment: Mapping[str, str],
     *,
     event_handler: EventHandler | None = None,
-) -> tuple[
-    RuntimePaths,
-    Scenario,
-    tuple[Arm, ...],
-    str,
-    dict[str, str],
-    Path,
-    dict[str, list[str]],
-    RunAxes,
-    bool,
-]:
+) -> ResolvedRun:
+    """Answer every question the request left open, and refuse the rest.
+
+    Whatever this returns is startable: the scenario, the arm subset, the
+    mesh, the three megatron axes and the resume comparison are all checked
+    on the way.
+    """
     requested = request.axes
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
@@ -479,16 +476,16 @@ def _resolve_run(
                 "resume request does not match the existing manifest: "
                 + ", ".join(mismatches)
             )
-    return (
-        paths,
-        scenario,
-        arms,
-        hardware,
-        metadata,
-        out_dir,
-        commands,
-        axes,
-        resumed,
+    return ResolvedRun(
+        paths=paths,
+        scenario=scenario,
+        arms=arms,
+        hardware=hardware,
+        metadata=metadata,
+        out_dir=out_dir,
+        commands=commands,
+        axes=axes,
+        resumed=resumed,
     )
 
 
@@ -573,31 +570,26 @@ def execute_run(
 ) -> RunResult:
     """Execute and validate the selected arms, preserving resumable state."""
     host_environment = dict(environment or os.environ)
-    (
-        paths,
-        scenario,
-        arms,
-        hardware,
-        metadata,
-        out_dir,
-        commands,
-        axes,
-        resumed,
-    ) = _resolve_run(request, host_environment, event_handler=event_handler)
-    parallelism = axes.parallelism
+    resolved = _resolve_run(
+        request, host_environment, event_handler=event_handler
+    )
+    axes = resolved.axes
+    # Two names for what the loop below reads on nearly every line.
+    arms = resolved.arms
+    out_dir = resolved.out_dir
 
-    if resumed:
+    if resolved.resumed:
         state = load_run_state(out_dir, arms)
         update_run_state(out_dir, state, status="running")
     else:
         out_dir.mkdir(parents=True, exist_ok=False)
         write_manifest(
             out_dir,
-            scenario,
+            resolved.scenario,
             arms,
-            commands,
-            hardware,
-            metadata,
+            resolved.commands,
+            resolved.hardware,
+            resolved.metadata,
             request.extra_args or (),
             axes=axes,
         )
@@ -605,12 +597,16 @@ def execute_run(
         update_run_state(out_dir, state, status="running")
 
     _emit(event_handler, "summary", f"GPU (PCI index): {request.gpu}")
-    _emit(event_handler, "summary", metadata["nvidia_smi"])
-    _emit(event_handler, "summary", f"cpu pinning: {metadata['cpu_pinning']}")
+    _emit(event_handler, "summary", resolved.metadata["nvidia_smi"])
     _emit(
         event_handler,
         "summary",
-        f"scenario: {scenario.name}   hardware: {hardware}",
+        f"cpu pinning: {resolved.metadata['cpu_pinning']}",
+    )
+    _emit(
+        event_handler,
+        "summary",
+        f"scenario: {resolved.scenario.name}   hardware: {resolved.hardware}",
     )
     _emit(
         event_handler,
@@ -622,9 +618,9 @@ def execute_run(
     _emit(
         event_handler,
         "summary",
-        f"parallelism: dp {parallelism.dp} x pp {parallelism.pp} "
-        f"(ep {parallelism.ep}, world size {parallelism.world_size}, "
-        f"zero {parallelism.zero})",
+        f"parallelism: dp {axes.parallelism.dp} x pp {axes.parallelism.pp} "
+        f"(ep {axes.parallelism.ep}, world size {axes.parallelism.world_size}, "
+        f"zero {axes.parallelism.zero})",
     )
     _emit(
         event_handler, "summary", f"megatron p2p sync: {axes.megatron_p2p_sync}"
@@ -647,21 +643,21 @@ def execute_run(
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
-        paths,
+        resolved.paths,
         request.gpu,
         environment=host_environment,
-        world_size=parallelism.world_size,
+        world_size=axes.parallelism.world_size,
     )
     for arm in arms:
         arm_dir = out_dir / arm.name
         log_path = out_dir / f"{arm.name}.log"
-        if resumed:
+        if resolved.resumed:
             try:
                 validate_arm(
                     arm,
                     arm_dir,
                     log_path,
-                    scenario.workload,
+                    resolved.scenario.workload,
                     ac_mode=axes.ac_mode,
                     model_size=axes.model_size,
                     parallelism=axes.parallelism,
@@ -691,7 +687,7 @@ def execute_run(
                 )
                 continue
 
-        command = commands[arm.name]
+        command = resolved.commands[arm.name]
         _emit(event_handler, "arm", f"=== arm: {arm.name} ===", arm.name)
         _emit(event_handler, "command", shlex.join(command), arm.name)
         update_run_state(out_dir, state, arm_name=arm.name, status="running")
@@ -699,19 +695,19 @@ def execute_run(
             arm_environment = base_environment
             if arm.requires_gcc_toolset:
                 arm_environment = add_compiler_environment(
-                    base_environment, paths.compiler_env
+                    base_environment, resolved.paths.compiler_env
                 )
             with log_path.open("w") as log:
                 log.write(
-                    f"# scenario={scenario.name} arm={arm.name} "
+                    f"# scenario={resolved.scenario.name} arm={arm.name} "
                     f"gpu_pci_index={request.gpu} "
                     f"{dt.datetime.now(dt.timezone.utc):%FT%TZ}\n"
                 )
-                log.write(metadata["nvidia_smi"] + "\n")
+                log.write(resolved.metadata["nvidia_smi"] + "\n")
                 log.flush()
                 completed = process_runner(
                     command,
-                    cwd=paths.titan_dir,
+                    cwd=resolved.paths.titan_dir,
                     env=arm_environment,
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -726,7 +722,7 @@ def execute_run(
                 arm,
                 arm_dir,
                 log_path,
-                scenario.workload,
+                resolved.scenario.workload,
                 ac_mode=axes.ac_mode,
                 model_size=axes.model_size,
                 parallelism=axes.parallelism,
@@ -750,4 +746,4 @@ def execute_run(
         _emit(event_handler, "validated", f"{arm.name}: validated", arm.name)
 
     update_run_state(out_dir, state, status="arms_completed")
-    return RunResult(out_dir, scenario, arms, resumed)
+    return RunResult(out_dir, resolved.scenario, arms, resolved.resumed)

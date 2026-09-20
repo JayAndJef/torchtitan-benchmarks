@@ -1505,14 +1505,14 @@ class StockRunResolutionTests(unittest.TestCase):
             ("titan_eager",),
         ):
             with self.subTest(names=names):
-                self.assertTrue(self._resolve(names, "none")[2])
+                self.assertTrue(self._resolve(names, "none").arms)
 
     def test_the_eager_arm_resolves_on_its_own(self) -> None:
         """Cell 2 of the run matrix: the eager arm needs no Megatron
         opponent, and it names its own treatment."""
         resolved = self._resolve(("titan_eager",), "none")
-        self.assertEqual([arm.name for arm in resolved[2]], ["titan_eager"])
-        self.assertNotIn("--compile.enable", resolved[6]["titan_eager"])
+        self.assertEqual([arm.name for arm in resolved.arms], ["titan_eager"])
+        self.assertNotIn("--compile.enable", resolved.commands["titan_eager"])
 
 
 if __name__ == "__main__":

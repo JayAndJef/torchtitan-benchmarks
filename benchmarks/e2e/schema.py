@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 
 @dataclass(frozen=True)
@@ -515,3 +515,44 @@ class RunRequest:
     compiler_env: Path | None = None
     # The eight global run axes, each one answered or left unrequested.
     axes: RequestedAxes = RequestedAxes()
+
+
+@dataclass(frozen=True)
+class ResolvedRun:
+    """One run, with every question the request left open answered.
+
+    ``_resolve_run`` builds this record and does every refusal on the way:
+    the scenario name, the arm subset, the mesh, the three megatron axes
+    and the resume comparison. Whatever it returns is startable, so the
+    caller reads fields instead of repeating checks.
+
+    Attributes:
+        paths: The resolved repository, cache and compiler-env locations.
+        scenario: The scenario, with the size overrides already applied to
+            its workload.
+        arms: The arms this run starts, in the order the operator asked
+            for.
+        hardware: The provenance label of the output directory.
+        metadata: The provenance block, including the CPU pinning.
+        out_dir: Where the run writes.
+        commands: One argv per arm name.
+        axes: The eight global run axes, resolved.
+        resumed: Whether the run continues a recorded directory.
+
+    ``paths`` is typed ``Any`` because its type lives in
+    ``benchmarks.execution.paths``, and this module imports nothing
+    first-party. The alternative is to move a record of filesystem
+    locations in beside the scenario declarations, where it does not
+    belong: the training subprocess reads that module for one path
+    constant and must not pay for the e2e types.
+    """
+
+    paths: Any
+    scenario: Scenario
+    arms: tuple[Arm, ...]
+    hardware: str
+    metadata: dict[str, str]
+    out_dir: Path
+    commands: dict[str, list[str]]
+    axes: RunAxes
+    resumed: bool
