@@ -784,7 +784,7 @@ class StockArgvRefusalTests(unittest.TestCase):
     ) -> None:
         """Parallelism rule 5 does not see this launcher.
 
-        Rule 5 reads ``"megatron" in engines``, so a schedule Megatron-LM
+        Rule 5 asks what Megatron-LM implements, so a schedule the library
         implements and this driver does not would otherwise reach the
         training subprocess. The refusal lands here instead.
         """
@@ -1143,48 +1143,6 @@ class StockValidationProfileTests(unittest.TestCase):
                     self.assertIn(roster[spec.dense_sharding], line)
                     self.assertNotIn(roster[other], line)
 
-    def test_neither_pattern_matches_the_tuned_arms_lines(self) -> None:
-        """The two drivers must not satisfy each other's rules.
-
-        A tuned log reaching this profile, or the reverse, would publish one
-        engine configuration under the other's label.
-        """
-        tuned = VALIDATION_PROFILES["megatron"]
-        tuned_lines = tuned.parallelism_markers(
-            MESH, self.workload, "stock"
-        )
-        for line in tuned_lines:
-            with self.subTest(line=line):
-                self.assertIsNone(
-                    self.profile.pipelined_pattern.search(line), line
-                )
-                self.assertIsNone(
-                    self.profile.data_parallel_pattern.search(line), line
-                )
-        for line in self.profile.parallelism_markers(
-            MESH, self.workload, "stock"
-        ):
-            with self.subTest(line=line):
-                self.assertIsNone(tuned.pipelined_pattern.search(line), line)
-                self.assertIsNone(
-                    tuned.data_parallel_pattern.search(line), line
-                )
-
-    def test_the_two_profiles_share_no_marker_string(self) -> None:
-        tuned = VALIDATION_PROFILES["megatron"]
-        self.assertNotEqual(
-            tuned.mode_line("default"), self.profile.mode_line("default")
-        )
-        self.assertEqual(
-            set(tuned.parallelism_markers(
-                MESH, self.workload, "stock"
-            ))
-            & set(self.profile.parallelism_markers(
-                MESH, self.workload, "stock"
-            )),
-            set(),
-        )
-
 
 # --------------------------------------------------------------------------
 # 4. The contract between this profile and the driver the other agent owns.
@@ -1488,27 +1446,10 @@ class StockMarkerContractTests(unittest.TestCase):
 
     def test_the_nan_guard_line_is_asked_at_every_mesh(self) -> None:
         """Unlike the p2p line: the guard runs at pp 1 and at dp 1, so the
-        callable takes no spec and the same line is asked everywhere. The
-        tuned profile asks for none and refuses off."""
+        callable takes no spec and the same line is asked everywhere."""
         (line,) = self.profile.nan_guard_markers("on")
         self.assertIn("stock", line)
-        tuned = VALIDATION_PROFILES["megatron"]
-        self.assertEqual(tuned.nan_guard_markers("on"), ())
-        with self.assertRaises(ValueError):
-            tuned.nan_guard_markers("off")
         self.assertEqual(VALIDATION_PROFILES["torchtitan"].nan_guard_markers("off"), ())
-
-    def test_the_tuned_p2p_line_does_not_satisfy_this_profile(self) -> None:
-        """The two drivers must not satisfy each other's p2p rule."""
-        tuned = VALIDATION_PROFILES["megatron"]
-        for value in ("on", "off"):
-            with self.subTest(value=value):
-                (tuned_line,) = tuned.p2p_markers(MESH, value)
-                (stock_line,) = self.profile.p2p_markers(MESH, value)
-                self.assertNotIn(tuned_line, stock_line)
-                self.assertNotIn(stock_line, tuned_line)
-                self.assertIn("stock", stock_line)
-                self.assertNotIn("stock", tuned_line)
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_mode_line_starts_with_this_profile_marker(
