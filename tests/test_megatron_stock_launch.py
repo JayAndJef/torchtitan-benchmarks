@@ -40,7 +40,12 @@ from benchmarks.e2e.launch import (
     STOCK_MEGATRON_DRIVER_MODULE,
     STOCK_MEGATRON_PP_SCHEDULE,
 )
-from benchmarks.e2e.schema import Arm, ParallelismSpec, RunRequest
+from benchmarks.e2e.schema import (
+    Arm,
+    ParallelismSpec,
+    RequestedAxes,
+    RunRequest,
+)
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
@@ -1476,11 +1481,13 @@ class StockRunResolutionTests(unittest.TestCase):
         ):
             return _resolve_run(
                 RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode=ac_mode,
+                    ),
                     gpu="0",
                     scenario_name=SCENARIO_NAME,
                     arm_names=names,
                     out_dir=Path(temporary) / "run",
-                    ac_mode=ac_mode,
                 ),
                 {"PATH": os.environ["PATH"]},
             )

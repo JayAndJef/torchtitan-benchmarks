@@ -31,6 +31,7 @@ from benchmarks.e2e.megatron_stock.flags import (
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
+from benchmarks.e2e.schema import RunAxes
 from benchmarks.e2e.registry import DEFAULT_PROFILE, ENGINES, scenario_by_name
 from benchmarks.e2e.runner import workload_with_overrides
 from benchmarks.e2e.validation import validate_arm
@@ -243,14 +244,16 @@ class ManifestTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
-            "none",
-            "1b",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="off",
-            megatron_nan_guard="off",
-            megatron_precision="stock",
-            profile=profile,
-            warmup_steps=None if profile else 10,
+            axes=RunAxes(
+                ac_mode="none",
+                model_size="1b",
+                parallelism=TRIVIAL_SPEC,
+                megatron_p2p_sync="off",
+                megatron_nan_guard="off",
+                megatron_precision="stock",
+                profile=profile,
+                warmup_steps=None if profile else 10,
+            ),
         )
 
     def test_the_manifest_records_the_axis_under_schema_seventeen(
@@ -277,14 +280,16 @@ class ManifestTests(unittest.TestCase):
                     "test-gpu",
                     _METADATA,
                     (),
-                    "none",
-                    "1b",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="off",
-                    megatron_nan_guard="off",
-                    megatron_precision="stock",
-                    profile=requested,
-                    warmup_steps=None if requested else 10,
+                    axes=RunAxes(
+                        ac_mode="none",
+                        model_size="1b",
+                        parallelism=TRIVIAL_SPEC,
+                        megatron_p2p_sync="off",
+                        megatron_nan_guard="off",
+                        megatron_precision="stock",
+                        profile=requested,
+                        warmup_steps=None if requested else 10,
+                    ),
                 )
                 if recorded == requested:
                     self.assertEqual(mismatches, [])

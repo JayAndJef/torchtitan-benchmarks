@@ -11,9 +11,9 @@ property.
 
 ``Workload``, ``Arm`` and ``Scenario`` describe a scenario.
 ``ParallelismSpec`` and ``PipelineSchedule`` describe the parallelism run
-axis. ``ValidationProfile`` describes one engine's share of validation, ``Engine``
-joins that profile to a command builder, and ``RunRequest`` describes what
-the operator asked for.
+axis. ``ValidationProfile`` describes one engine's share of validation, and
+``Engine`` joins that profile to a command builder. ``RequestedAxes``,
+``RunAxes`` and ``RunRequest`` describe what the operator asked for.
 """
 
 from __future__ import annotations
@@ -409,8 +409,84 @@ class Engine:
 
 
 @dataclass(frozen=True)
+class RequestedAxes:
+    """The global run axes, as the operator asked for them.
+
+    Every field is ``None``-able, and ``None`` means "not requested". A
+    resume then inherits the value the manifest recorded, and a fresh run
+    takes the axis default. ``_resolve_run`` reads this record and produces
+    a ``RunAxes``, in which no field is ``None``-able any more.
+
+    The two types are separate on purpose. One record can state "the
+    operator said nothing" and the other cannot, so a resolved axis set
+    cannot carry an unanswered question into the manifest.
+    """
+
+    ac_mode: str | None = None
+    model_size: str | None = None
+    parallelism: ParallelismSpec | None = None
+    megatron_p2p_sync: str | None = None
+    megatron_nan_guard: str | None = None
+    megatron_precision: str | None = None
+    profile: bool | None = None
+    warmup_steps: int | None = None
+
+
+@dataclass(frozen=True)
+class RunAxes:
+    """The global run axes of one run, every one of them resolved.
+
+    These eight values are the comparability boundaries of a run. The
+    manifest records each under its own key, and the resume check compares
+    each one, so two directories that disagree about any of them are not
+    one run.
+
+    **No field has a default, and none may gain one.** A defaulted field
+    would let a writer record ``dp 1 x pp 1`` for a run of any mesh, or
+    ``stock`` for a run that held ten bytes per parameter. Grouping the
+    axes in one record makes that rule one rule rather than eight.
+
+    Attributes:
+        ac_mode: The activation-checkpointing treatment of every arm.
+        model_size: The canonical model shape name.
+        parallelism: The mesh degrees and the pipeline settings.
+        megatron_p2p_sync: Whether Megatron synchronizes after a pipeline
+            message.
+        megatron_nan_guard: Whether stock Megatron keeps its NaN and Inf
+            check.
+        megatron_precision: How stock Megatron holds the optimizer state.
+        profile: Whether the run collects profiler traces.
+        warmup_steps: Steps an unprofiled run discards before it measures.
+            ``None`` under ``profile``, where the profiler schedule decides
+            the sample set instead.
+    """
+
+    ac_mode: str
+    model_size: str
+    parallelism: ParallelismSpec
+    megatron_p2p_sync: str
+    megatron_nan_guard: str
+    megatron_precision: str
+    profile: bool
+    warmup_steps: int | None
+
+
+@dataclass(frozen=True)
 class RunRequest:
-    """User-selected inputs for one benchmark execution."""
+    """User-selected inputs for one benchmark execution.
+
+    ``axes`` carries the eight global run axes. A resume inherits each
+    unanswered one from the manifest, except ``parallelism``.
+
+    **A resume does not inherit the parallelism spec, and that is not an
+    oversight.** The other axes are single values, so a resume can read one
+    back and rebuild the run from it. A spec is six fields that together
+    decide every arm's command line, and ``--resume`` compares no command
+    line -- so a reconstruction that dropped one field would relaunch the
+    arms differently and the gate would not see it. Omitting the flags on a
+    resume therefore asks for the trivial spec, which matches a single-GPU
+    directory and is refused against any other.
+    """
 
     # The ``<gpu>`` positional, kept exactly as the operator typed it. It
     # names a device *set* -- ``parse_devices`` splits it -- but the string
@@ -437,49 +513,5 @@ class RunRequest:
     timestamp: str | None = None
     cache_root: Path | None = None
     compiler_env: Path | None = None
-    # None means "not requested": a resume then inherits the recorded mode,
-    # while an explicit value is checked against the manifest.
-    ac_mode: str | None = None
-    model_size: str | None = None
-    # The fourth global run axis. ``None`` means "not requested" and resolves
-    # to ``TRIVIAL_SPEC``, exactly as the three above resolve to their own
-    # defaults.
-    #
-    # **A resume does not inherit it, and that is not an oversight.** The
-    # three axes above are single strings, so a resume can read one back and
-    # rebuild the run from it. A spec is five fields that together decide
-    # every arm's command line, and ``--resume`` compares no command line --
-    # so a reconstruction that dropped one field would relaunch the arms
-    # differently and the gate would not see it. Omitting the flags on a
-    # resume therefore asks for the trivial spec, which matches a
-    # single-GPU directory and is refused against any other. The stage that
-    # first runs a parallel job may add inheritance, with the round trip
-    # under test.
-    parallelism: ParallelismSpec | None = None
-    # The Megatron pipeline p2p sync treatment. ``None`` means "not
-    # requested": a resume inherits the recorded value, and a fresh run
-    # takes ``on``, exactly as ``ac_mode`` does. It is not a field of
-    # ``parallelism``, because it is a treatment of the pipeline messages
-    # and ``execution_model`` names degrees rather than mechanisms.
-    megatron_p2p_sync: str | None = None
-    # Stock Megatron's NaN/Inf guard. ``None`` means "not requested", as
-    # above: a resume inherits the recorded value and a fresh run takes
-    # ``on``. It reaches the stock megatron command alone.
-    megatron_nan_guard: str | None = None
-    # Stock Megatron's optimizer precision. ``None`` means "not requested",
-    # as above: a resume inherits the recorded value and a fresh run takes
-    # ``stock``. The value reaches the stock megatron command alone, and
-    # ``lean`` needs a sharded dense value.
-    megatron_precision: str | None = None
-    # Whether the run collects profiler traces. ``None`` means "not
-    # requested", as above: a resume inherits the recorded value and a
-    # fresh run takes ``DEFAULT_PROFILE``, which is off. It reaches both
-    # engines, the 40-step floor and every trace rule of
-    # ``benchmarks/e2e/validation.py``.
-    profile: bool | None = None
-    # How many steps an unprofiled run discards before it measures.
-    # ``None`` means "not requested": a resume inherits the recorded
-    # value, and a fresh run takes ``DEFAULT_WARMUP_STEPS``. It is refused
-    # beside ``--profile``, where the profiler schedule decides the sample
-    # set instead, and the manifest then records ``null``.
-    warmup_steps: int | None = None
+    # The eight global run axes, each one answered or left unrequested.
+    axes: RequestedAxes = RequestedAxes()

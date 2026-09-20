@@ -47,7 +47,7 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.schema import (
     Arm,
-    ParallelismSpec,
+    RunAxes,
     RunRequest,
     Scenario,
     Workload,
@@ -163,16 +163,10 @@ def _resolve_run(
     dict[str, str],
     Path,
     dict[str, list[str]],
-    str,
-    str,
-    ParallelismSpec,
+    RunAxes,
     bool,
-    str,
-    str,
-    str,
-    bool,
-    int | None,
 ]:
+    requested = request.axes
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
         compiler_env=request.compiler_env,
@@ -215,46 +209,46 @@ def _resolve_run(
         )
         ac_mode = (
             str(existing_manifest["ac_mode"])
-            if request.ac_mode is None
-            else request.ac_mode
+            if requested.ac_mode is None
+            else requested.ac_mode
         )
         model_size = (
             str(existing_manifest["model_size"])
-            if request.model_size is None
-            else request.model_size
+            if requested.model_size is None
+            else requested.model_size
         )
         megatron_p2p_sync = (
             str(existing_manifest["megatron_p2p_sync"])
-            if request.megatron_p2p_sync is None
-            else request.megatron_p2p_sync
+            if requested.megatron_p2p_sync is None
+            else requested.megatron_p2p_sync
         )
         megatron_nan_guard = (
             str(existing_manifest["megatron_nan_guard"])
-            if request.megatron_nan_guard is None
-            else request.megatron_nan_guard
+            if requested.megatron_nan_guard is None
+            else requested.megatron_nan_guard
         )
         megatron_precision = (
             str(existing_manifest["megatron_precision"])
-            if request.megatron_precision is None
-            else request.megatron_precision
+            if requested.megatron_precision is None
+            else requested.megatron_precision
         )
         profile = (
             bool(existing_manifest["profile"])
-            if request.profile is None
-            else request.profile
+            if requested.profile is None
+            else requested.profile
         )
         recorded_warmup = existing_manifest["warmup_steps"]
         # A request wins, and the mismatch check below refuses it against
         # another recorded value -- including a recorded ``null``, which is
         # what a profiled directory carries.
         warmup_steps = (
-            request.warmup_steps
-            if request.warmup_steps is not None
+            requested.warmup_steps
+            if requested.warmup_steps is not None
             else (None if recorded_warmup is None else int(recorded_warmup))
         )
     else:
         profile = (
-            DEFAULT_PROFILE if request.profile is None else request.profile
+            DEFAULT_PROFILE if requested.profile is None else requested.profile
         )
         # ``None`` under a profiled run: the profiler schedule decides the
         # sample set there, and the CLI refuses the two together.
@@ -263,8 +257,8 @@ def _resolve_run(
             if profile
             else (
                 DEFAULT_WARMUP_STEPS
-                if request.warmup_steps is None
-                else request.warmup_steps
+                if requested.warmup_steps is None
+                else requested.warmup_steps
             )
         )
         workload = workload_with_overrides(
@@ -277,16 +271,16 @@ def _resolve_run(
             warmup_steps=warmup_steps,
         )
         extra_args = request.extra_args or ()
-        ac_mode = request.ac_mode or DEFAULT_AC_MODE
-        model_size = request.model_size or DEFAULT_MODEL_SIZE
+        ac_mode = requested.ac_mode or DEFAULT_AC_MODE
+        model_size = requested.model_size or DEFAULT_MODEL_SIZE
         megatron_p2p_sync = (
-            request.megatron_p2p_sync or DEFAULT_MEGATRON_P2P_SYNC
+            requested.megatron_p2p_sync or DEFAULT_MEGATRON_P2P_SYNC
         )
         megatron_nan_guard = (
-            request.megatron_nan_guard or DEFAULT_MEGATRON_NAN_GUARD
+            requested.megatron_nan_guard or DEFAULT_MEGATRON_NAN_GUARD
         )
         megatron_precision = (
-            request.megatron_precision or DEFAULT_MEGATRON_PRECISION
+            requested.megatron_precision or DEFAULT_MEGATRON_PRECISION
         )
     if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
         raise ValueError(
@@ -331,7 +325,7 @@ def _resolve_run(
     # name. ``run --arm NAME`` narrows that set on purpose: a run of one
     # titan arm has no megatron opponent to match, and refusing it for the
     # sake of an arm nobody asked for would refuse a legal run.
-    parallelism = request.parallelism or TRIVIAL_SPEC
+    parallelism = requested.parallelism or TRIVIAL_SPEC
     devices = parse_devices(request.gpu)
     validate_parallelism(
         parallelism,
@@ -429,6 +423,20 @@ def _resolve_run(
     if refusal is not None:
         raise ValueError(refusal)
 
+    # Every axis is answered here, so the one record below carries them from
+    # this point on: to the command builder, to the manifest, to the resume
+    # check and to validation.
+    axes = RunAxes(
+        ac_mode=ac_mode,
+        model_size=model_size,
+        parallelism=parallelism,
+        megatron_p2p_sync=megatron_p2p_sync,
+        megatron_nan_guard=megatron_nan_guard,
+        megatron_precision=megatron_precision,
+        profile=profile,
+        warmup_steps=warmup_steps,
+    )
+
     requested_hardware = request.hardware
     if existing_manifest is not None and requested_hardware == "auto":
         requested_hardware = str(existing_manifest.get("hardware", "auto"))
@@ -445,13 +453,13 @@ def _resolve_run(
             arm,
             out_dir / arm.name,
             extra_args,
-            ac_mode,
-            model_size=model_size,
-            parallelism=parallelism,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision=megatron_precision,
-            profile=profile,
+            axes.ac_mode,
+            model_size=axes.model_size,
+            parallelism=axes.parallelism,
+            megatron_p2p_sync=axes.megatron_p2p_sync,
+            megatron_nan_guard=axes.megatron_nan_guard,
+            megatron_precision=axes.megatron_precision,
+            profile=axes.profile,
         )
         for arm in arms
     }
@@ -464,14 +472,7 @@ def _resolve_run(
             hardware,
             metadata,
             extra_args,
-            ac_mode,
-            model_size,
-            parallelism=parallelism,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision=megatron_precision,
-            profile=profile,
-            warmup_steps=warmup_steps,
+            axes=axes,
         )
         if mismatches:
             raise ValueError(
@@ -486,15 +487,8 @@ def _resolve_run(
         metadata,
         out_dir,
         commands,
-        ac_mode,
-        model_size,
-        parallelism,
+        axes,
         resumed,
-        megatron_p2p_sync,
-        megatron_nan_guard,
-        megatron_precision,
-        profile,
-        warmup_steps,
     )
 
 
@@ -587,16 +581,10 @@ def execute_run(
         metadata,
         out_dir,
         commands,
-        ac_mode,
-        model_size,
-        parallelism,
+        axes,
         resumed,
-        megatron_p2p_sync,
-        megatron_nan_guard,
-        megatron_precision,
-        profile,
-        warmup_steps,
     ) = _resolve_run(request, host_environment, event_handler=event_handler)
+    parallelism = axes.parallelism
 
     if resumed:
         state = load_run_state(out_dir, arms)
@@ -611,14 +599,7 @@ def execute_run(
             hardware,
             metadata,
             request.extra_args or (),
-            ac_mode,
-            model_size,
-            parallelism=parallelism,
-            megatron_p2p_sync=megatron_p2p_sync,
-            megatron_nan_guard=megatron_nan_guard,
-            megatron_precision=megatron_precision,
-            profile=profile,
-            warmup_steps=warmup_steps,
+            axes=axes,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -636,8 +617,8 @@ def execute_run(
         "summary",
         f"arms: {' '.join(arm.name for arm in arms)}",
     )
-    _emit(event_handler, "summary", f"ac mode: {ac_mode}")
-    _emit(event_handler, "summary", f"model size: {model_size}")
+    _emit(event_handler, "summary", f"ac mode: {axes.ac_mode}")
+    _emit(event_handler, "summary", f"model size: {axes.model_size}")
     _emit(
         event_handler,
         "summary",
@@ -645,16 +626,24 @@ def execute_run(
         f"(ep {parallelism.ep}, world size {parallelism.world_size}, "
         f"zero {parallelism.zero})",
     )
-    _emit(event_handler, "summary", f"megatron p2p sync: {megatron_p2p_sync}")
     _emit(
-        event_handler, "summary", f"megatron nan guard: {megatron_nan_guard}"
+        event_handler, "summary", f"megatron p2p sync: {axes.megatron_p2p_sync}"
     )
     _emit(
-        event_handler, "summary", f"megatron precision: {megatron_precision}"
+        event_handler,
+        "summary",
+        f"megatron nan guard: {axes.megatron_nan_guard}",
     )
-    _emit(event_handler, "summary", f"profile: {'on' if profile else 'off'}")
-    if warmup_steps is not None:
-        _emit(event_handler, "summary", f"warmup steps: {warmup_steps}")
+    _emit(
+        event_handler,
+        "summary",
+        f"megatron precision: {axes.megatron_precision}",
+    )
+    _emit(
+        event_handler, "summary", f"profile: {'on' if axes.profile else 'off'}"
+    )
+    if axes.warmup_steps is not None:
+        _emit(event_handler, "summary", f"warmup steps: {axes.warmup_steps}")
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
@@ -673,13 +662,13 @@ def execute_run(
                     arm_dir,
                     log_path,
                     scenario.workload,
-                    ac_mode=ac_mode,
-                    model_size=model_size,
-                    parallelism=parallelism,
-                    megatron_p2p_sync=megatron_p2p_sync,
-                    megatron_nan_guard=megatron_nan_guard,
-                    megatron_precision=megatron_precision,
-                    profile=profile,
+                    ac_mode=axes.ac_mode,
+                    model_size=axes.model_size,
+                    parallelism=axes.parallelism,
+                    megatron_p2p_sync=axes.megatron_p2p_sync,
+                    megatron_nan_guard=axes.megatron_nan_guard,
+                    megatron_precision=axes.megatron_precision,
+                    profile=axes.profile,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -738,13 +727,13 @@ def execute_run(
                 arm_dir,
                 log_path,
                 scenario.workload,
-                ac_mode=ac_mode,
-                model_size=model_size,
-                parallelism=parallelism,
-                megatron_p2p_sync=megatron_p2p_sync,
-                megatron_nan_guard=megatron_nan_guard,
-                megatron_precision=megatron_precision,
-                profile=profile,
+                ac_mode=axes.ac_mode,
+                model_size=axes.model_size,
+                parallelism=axes.parallelism,
+                megatron_p2p_sync=axes.megatron_p2p_sync,
+                megatron_nan_guard=axes.megatron_nan_guard,
+                megatron_precision=axes.megatron_precision,
+                profile=axes.profile,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

@@ -75,6 +75,8 @@ DECLARED_TYPES = (
     "ParallelismSpec",
     "ValidationProfile",
     "Engine",
+    "RequestedAxes",
+    "RunAxes",
     "RunRequest",
 )
 
