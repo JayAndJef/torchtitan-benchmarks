@@ -99,6 +99,7 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
 
     def test_the_manifest_names_what_a_tokens_per_second_figure_counts(self) -> None:

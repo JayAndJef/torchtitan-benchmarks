@@ -102,10 +102,14 @@ class StepFloorTests(unittest.TestCase):
 
     def test_a_profiled_run_keeps_the_forty_step_floor(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 40"):
-            workload_with_overrides(ENGINES, steps=12, profile=True)
+            workload_with_overrides(
+                ENGINES, steps=12, profile=True, warmup_steps=None
+            )
 
     def test_an_unprofiled_run_accepts_a_short_run(self) -> None:
-        workload = workload_with_overrides(ENGINES, steps=12, profile=False)
+        workload = workload_with_overrides(
+            ENGINES, steps=12, profile=False, warmup_steps=2
+        )
         self.assertEqual(workload.steps, 12)
 
 
@@ -246,6 +250,7 @@ class ManifestTests(unittest.TestCase):
             megatron_nan_guard="off",
             megatron_precision="stock",
             profile=profile,
+            warmup_steps=None if profile else 10,
         )
 
     def test_the_manifest_records_the_axis_under_schema_seventeen(
@@ -279,6 +284,7 @@ class ManifestTests(unittest.TestCase):
                     megatron_nan_guard="off",
                     megatron_precision="stock",
                     profile=requested,
+                    warmup_steps=None if requested else 10,
                 )
                 if recorded == requested:
                     self.assertEqual(mismatches, [])
@@ -293,6 +299,7 @@ class TracelessEvaluationTests(unittest.TestCase):
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "profile": False,
+            "warmup_steps": 3,
             "scenario": "engines",
             "hardware": "test-gpu",
             "workload": {

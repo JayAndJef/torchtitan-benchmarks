@@ -39,6 +39,7 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
     DEFAULT_PROFILE,
+    DEFAULT_WARMUP_STEPS,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
@@ -134,6 +135,12 @@ class RunRequest:
     # engines, the 40-step floor and every trace rule of
     # ``benchmarks/e2e/validation.py``.
     profile: bool | None = None
+    # How many steps an unprofiled run discards before it measures.
+    # ``None`` means "not requested": a resume inherits the recorded
+    # value, and a fresh run takes ``DEFAULT_WARMUP_STEPS``. It is refused
+    # beside ``--profile``, where the profiler schedule decides the sample
+    # set instead, and the manifest then records ``null``.
+    warmup_steps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -177,14 +184,18 @@ def workload_with_overrides(
     batch: int | None = None,
     environment: Mapping[str, str] | None = None,
     profile: bool,
+    warmup_steps: int | None,
 ) -> Workload:
     """Apply portable size overrides without changing scenario arms.
 
-    ``profile`` decides the step floor. Two profiler windows are what arm
-    rule 5 and the per-step trace metrics rest on, so a profiled run needs
-    ``profile_freq * min_trace_windows`` steps, which is 40. A run that
-    collects no trace has no window to fill, and the floor does not apply
-    to it.
+    ``profile`` decides which step floor applies. Two profiler windows are
+    what arm rule 5 and the per-step trace metrics rest on, so a profiled
+    run needs ``profile_freq * min_trace_windows`` steps, which is 40.
+
+    ``warmup_steps`` is the floor of an unprofiled run, and it is
+    ``None`` under ``--profile``, where the axis is refused. A run must
+    take at least one step after its warmup, or it measures nothing and
+    publishes an empty sample set as a throughput.
     """
     environment = environment or os.environ
     workload = scenario.workload
@@ -197,11 +208,18 @@ def workload_with_overrides(
         workload = replace(workload, steps=int(resolved_steps))
     if resolved_batch is not None:
         workload = replace(workload, local_batch_size=int(resolved_batch))
-    minimum_steps = workload.profile_freq * workload.min_trace_windows
-    if profile and workload.steps < minimum_steps:
+    if profile:
+        minimum_steps = workload.profile_freq * workload.min_trace_windows
+        if workload.steps < minimum_steps:
+            raise ValueError(
+                f"steps ({workload.steps}) must be at least {minimum_steps} to collect "
+                f"{workload.min_trace_windows} profiler windows"
+            )
+    elif warmup_steps is not None and workload.steps <= warmup_steps:
         raise ValueError(
-            f"steps ({workload.steps}) must be at least {minimum_steps} to collect "
-            f"{workload.min_trace_windows} profiler windows"
+            f"steps ({workload.steps}) must be more than the "
+            f"{warmup_steps} warmup step(s); a run that measures no step "
+            "publishes no throughput"
         )
     return workload
 
@@ -227,6 +245,7 @@ def _resolve_run(
     str,
     str,
     bool,
+    int | None,
 ]:
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
@@ -298,9 +317,29 @@ def _resolve_run(
             if request.profile is None
             else request.profile
         )
+        recorded_warmup = existing_manifest["warmup_steps"]
+        # A request wins, and the mismatch check below refuses it against
+        # another recorded value -- including a recorded ``null``, which is
+        # what a profiled directory carries.
+        warmup_steps = (
+            request.warmup_steps
+            if request.warmup_steps is not None
+            else (None if recorded_warmup is None else int(recorded_warmup))
+        )
     else:
         profile = (
             DEFAULT_PROFILE if request.profile is None else request.profile
+        )
+        # ``None`` under a profiled run: the profiler schedule decides the
+        # sample set there, and the CLI refuses the two together.
+        warmup_steps = (
+            None
+            if profile
+            else (
+                DEFAULT_WARMUP_STEPS
+                if request.warmup_steps is None
+                else request.warmup_steps
+            )
         )
         workload = workload_with_overrides(
             scenario,
@@ -309,6 +348,7 @@ def _resolve_run(
             batch=request.batch,
             environment=environment,
             profile=profile,
+            warmup_steps=warmup_steps,
         )
         extra_args = request.extra_args or ()
         ac_mode = request.ac_mode or DEFAULT_AC_MODE
@@ -505,6 +545,7 @@ def _resolve_run(
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
             profile=profile,
+            warmup_steps=warmup_steps,
         )
         if mismatches:
             raise ValueError(
@@ -527,6 +568,7 @@ def _resolve_run(
         megatron_nan_guard,
         megatron_precision,
         profile,
+        warmup_steps,
     )
 
 
@@ -627,6 +669,7 @@ def execute_run(
         megatron_nan_guard,
         megatron_precision,
         profile,
+        warmup_steps,
     ) = _resolve_run(request, host_environment, event_handler=event_handler)
 
     if resumed:
@@ -649,6 +692,7 @@ def execute_run(
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
             profile=profile,
+            warmup_steps=warmup_steps,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -683,6 +727,8 @@ def execute_run(
         event_handler, "summary", f"megatron precision: {megatron_precision}"
     )
     _emit(event_handler, "summary", f"profile: {'on' if profile else 'off'}")
+    if warmup_steps is not None:
+        _emit(event_handler, "summary", f"warmup steps: {warmup_steps}")
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
