@@ -87,110 +87,47 @@ from benchmarks.e2e.schema import ParallelismSpec, PipelineSchedule, Workload
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
-# The GPU budget for this pass, and the pipeline depth it targets. Named so
-# that lifting either is one edit here rather than a hunt through the rules.
-#
-# The budget is 8 because this host holds 8 devices. The depth is 8 because
-# one pipeline of eight stages is the deepest split those 8 devices hold, and
-# the suite runs that cell. Neither number is a property of an engine. Both
-# are a declaration of what somebody plans to run.
-#
-# **An earlier revision capped pp at 2 and gave a false reason.** It said the
-# two engines count layers the same way only at pp <= 2. They agree at every
-# degree, because ``benchmarks/e2e/launch.py`` always sends
-# ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
-# ``last`` twin. Those two flags make rule 7's arithmetic the right test. See
-# rule 7 below.
-#
-# The two conventions, measured rather than assumed: TorchTitan counts the
-# embedding and the output head as stages, through
-# ``pipeline_parallel_first/last_stage_less_layers``, which both default to
-# **1**. Megatron does not (``account_for_embedding/loss_in_pipeline_split``
-# default False) and divides ``config.num_layers`` alone. TorchTitan's own
-# splitter, run at weight 0 and at the default weight 1:
-#
-#     16 layers, 2 stages: [8, 8] either way.
-#     16 layers, 4 stages: [4, 4, 4, 4] against **[4, 5, 4, 3]**.
-#     16 layers, 8 stages: eight 2s against **[2, 3, 2, 2, 2, 2, 2, 1]**.
-#     24 layers, 4 stages: [6, 6, 6, 6] against **[6, 7, 6, 5]**.
-#     24 layers, 8 stages: eight 3s against **[3, 4, 3, 3, 3, 3, 3, 2]**.
-#
-# Megatron gives the weight 0 split in each row and does not raise. So the
-# disagreement is TorchTitan's uneven split under its own default, and the
-# harness removes it at every degree.
-#
-# Sixteen stages are reachable at pp 8, eight at pp 4 and four at pp 2,
-# because **four of the five registered schedules ask for two stages per
-# rank**: ``Interleaved1F1B``, ``InterleavedZeroBubble``, ``ZBVZeroBubble``
-# and ``DualPipeV``. Rule 7 reads ``pp * stages_per_rank`` for that reason.
-# An earlier revision of this comment said "either interleaved schedule",
-# which names two of the four.
-#
-# **The two caps are now equal, and that makes rule 2's order load-bearing.**
-# The world size is ``dp * pp``, which is never below ``pp``, so every spec
-# above the pipeline cap is also above the world-size cap. The pipeline half
-# therefore runs FIRST, and both halves still refuse every spec they refused
-# before. The pipeline message names the cap somebody has to lift, which is
-# what a reader of a ``pp 9`` refusal needs. Do not delete the pipeline half
-# to reach the same verdict: that removes the specific message rather than
-# choosing between two true ones.
-#
-# **The cap lift widens one recorded gap, and this comment records the
-# widening.** ``benchmarks/e2e/results.py``'s ``loss_visible_rank`` returns
-# ``(world_size // pp) * (pp - 1)``. That is right for the two schedules this
-# repo runs and wrong for the two V-shaped ones. TorchTitan's
-# ``_get_pp_rank_to_stage_indices_mapping`` gives rank 0 the pair
-# ``(0, num_stages - 1)`` under ``ZBVZeroBubble`` and ``DualPipeV``, so
-# **rank 0 holds the last stage and the loss**. TorchTitan's own
-# ``_get_metrics_rank`` special-cases ``ZBVZeroBubble`` and returns 0; it
-# does not special-case ``DualPipeV``, and this repo special-cases neither.
-# Rule 5 refuses a V-shaped schedule only beside a megatron arm, so a
-# titan-only run may still ask for one. The resolve-time refusal narrows
-# the exposure and does not close it: both V-shaped schedules set
-# ``requires_uncompiled``, so such a run holds eager arms alone.
-#
-# The gap already existed at ``dp 1`` and ``dp 2`` with ``pp 2``. The lift to
-# world size 8 and pp 4 added six ``(dp, pp)`` pairs: (1, 3), (1, 4), (2, 3),
-# (2, 4), (3, 2) and (4, 2). The lift to pp 8 adds four more, all of them at
-# ``dp`` 1: (1, 5), (1, 6), (1, 7) and (1, 8). No run has ever used a
-# V-shaped schedule. Read this before you run one, and repair
-# ``loss_visible_rank`` rather than the cap.
 MAX_WORLD_SIZE = 8
 MAX_PP = 8
+"""The GPU budget for this pass, and the pipeline depth it targets.
+
+Named so that lifting either is one edit here rather than a hunt through
+the rules. The budget is 8 because this host holds 8 devices, and the depth
+is 8 because one pipeline of eight stages is the deepest split those
+devices hold. Neither number is a property of an engine.
+
+The two caps are equal, which makes rule 2's order load-bearing: the world
+size is ``dp * pp``, so every spec above the pipeline cap is also above the
+world-size cap. The pipeline half runs first, because its message names the
+cap somebody has to lift. Do not delete that half to reach the same
+verdict.
+
+Before you run a V-shaped schedule, repair ``loss_visible_rank`` in the
+evaluation rather than this cap. It returns ``(world_size // pp) * (pp -
+1)``, which is right for the two schedules this repo runs and wrong for
+``ZBVZeroBubble`` and ``DualPipeV``, where rank 0 holds the last stage and
+the loss. No run has ever used one.
+
+Sixteen stages are reachable at pp 8, because four of the five registered
+schedules ask for two stages per rank. Rule 7 reads ``pp *
+stages_per_rank`` for that reason.
+"""
 
 
 
-# The ``Arm.engine`` names that drive Megatron-LM. Rules 5, 12 and the
-# three megatron run axes read this set.
-#
-# **Declared one by one. Not a ``megatron`` prefix, and not "every engine
-# that is not torchtitan".** A prefix fails OPEN: an engine that names the
-# library another way -- ``mcore``, ``nemo`` -- would walk past rule 5, and
-# the run would reach a schedule Megatron cannot run with no cross-engine
-# opponent for it. The complement fails the other way: it would apply
-# Megatron's restriction to an engine that is not Megatron, and refuse a
-# legal titan-only cell. A declared set is wrong in neither direction, and a
-# new engine is then an edit here rather than a silent classification.
-#
-# **It is stated here and not derived from ``ENGINES``.**
-# ``benchmarks/e2e/engines.py`` sits ABOVE this module, so this module
-# cannot read the records. ``tests/test_engines.py`` pins this set equal to
-# the engines whose ``is_megatron`` is true.
-#
-# One set covers every megatron axis. ``megatron_stock`` hands the run to
-# Megatron's own ``pretrain``, which implements the NaN guard, the
-# precision-aware optimizer, the sharded dense parity and an expert degree.
 MEGATRON_ENGINES = frozenset({"megatron_stock"})
+"""The ``Arm.engine`` names that drive Megatron-LM.
+
+Rules 5 and 12 and the three megatron run axes read this set. It is
+declared one by one, because a name prefix fails open and the complement of
+``torchtitan`` fails the other way; a new engine is an edit here rather
+than a silent classification. It is stated rather than derived from
+``ENGINES``, because that module sits above this one;
+``tests/test_engines.py`` pins the set equal to the engines whose
+``is_megatron`` is true.
+"""
 
 
-# The five schedules this repo can name. Two are targets and three are
-# declarations that the validator refuses; see each entry.
-#
-# The names are PyTorch's own, verified against the ``schedule_map`` in
-# ``torch/distributed/pipelining/schedules.py``'s ``get_schedule_class``.
-# PyTorch registers four more (``GPipe``, ``LoopedBFS``, and the two abstract
-# base classes) that are deliberately absent: a schedule is registered here
-# when somebody intends to run it.
 PP_SCHEDULES: dict[str, PipelineSchedule] = {
     "1F1B": PipelineSchedule(
         name="1F1B",
@@ -257,16 +194,29 @@ PP_SCHEDULES: dict[str, PipelineSchedule] = {
         ),
     ),
 }
+"""The five schedules this repo can name.
 
-# Every ``--pp-schedule`` value a command accepts. Derived from the registry
-# so that registering a schedule is one entry above and never a second edit
-# here -- the same rule ``MODEL_SIZE_CHOICES`` follows in ``shape.py``.
+Two are targets and three are declarations that the validator refuses; see
+each entry. The names are PyTorch's own, verified against its
+``get_schedule_class`` map. PyTorch registers four more that are
+deliberately absent: a schedule is registered here when somebody intends to
+run it.
+"""
+
 PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
+"""Every ``--pp-schedule`` value a command accepts.
+
+It is derived from the registry, so registering a schedule is one entry
+above and never a second edit here. ``MODEL_SIZE_CHOICES`` follows the same
+rule.
+"""
 
 
-# The single-GPU run: no data parallelism, no pipeline, no experts split.
-# Every number this repo has published was measured under this spec.
 TRIVIAL_SPEC = ParallelismSpec()
+"""The single-GPU run: no data parallelism, no pipeline, no experts split.
+
+Every number this repo has published was measured under this spec.
+"""
 
 
 def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:

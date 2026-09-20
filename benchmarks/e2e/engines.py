@@ -32,12 +32,6 @@ from benchmarks.e2e.validation import (
 )
 
 
-# Every engine an arm may name.
-#
-# Declared one by one, with ``is_megatron`` stated rather than read off the
-# name. A name test fails open: an engine that spelled the library another
-# way -- ``mcore``, ``nemo`` -- would walk past the parallelism rules and
-# the three megatron run axes.
 ENGINES: dict[str, Engine] = {
     "torchtitan": Engine(
         name="torchtitan",
@@ -52,6 +46,12 @@ ENGINES: dict[str, Engine] = {
         is_megatron=True,
     ),
 }
+"""Every engine an arm may name.
+
+Each record states ``is_megatron`` instead of reading it off the name. A
+name test fails open: an engine spelled ``mcore`` or ``nemo`` would walk
+past the parallelism rules and the three megatron run axes.
+"""
 
 
 def engine_for_arm(arm: Arm) -> Engine:

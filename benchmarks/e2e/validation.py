@@ -68,46 +68,29 @@ from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
 
-# Arm rule 13's marker: the device kernel a gradient all-reduce runs. Both
-# engines reduce over NCCL, so one string serves both.
-#
-# **It names the all-reduce and not NCCL in general, deliberately.** A
-# pipeline emits ``ncclDevKernel_SendRecv`` and
-# ``ncclDevKernel_Broadcast_RING_LL`` for its own point-to-point traffic, and
-# neither reduces a gradient, so a bare ``nccl`` would pass a dp run that
-# reduced nothing.
-#
-# **This marker is a necessary condition and not a sufficient one, and that
-# was measured rather than assumed.** A real ``pp 2, dp 1`` trace from this
-# harness carries ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL`` five times per
-# window on both ranks -- one per active step, from the gradient-norm
-# reduction over the pipeline group. Above ``dp`` 1 both engines also reduce
-# the loss over the data-parallel group on every logged step. So an
-# all-reduce kernel proves a collective ran, never which one. What names the
-# mechanism is arm rule 12's per-engine data-parallel log line, which each
-# engine prints only after it has really built the path: TorchTitan after
-# counting its FSDP units, megatron after the DDP wrapper exists. Read the
-# two rules together, and do not strengthen this one by guessing at a count.
-#
-# **The algorithm and protocol suffix is deliberately left off.** NCCL picks
-# those per message size and topology, so the ``_Sum_bf16_RING_LL`` spelling
-# above is one of several a correct run can produce, and pinning it whole
-# would fail an honest run whose buckets chose another. What is fixed is the
-# operation in the name.
-#
-# **Measured at the normal shape for megatron dp2 and dp2 x pp2, and still
-# capable of failing an honest run at another shape or bucketing.** mcore
-# issues its bucket reductions inside a ``_coalescing_manager``
-# (``param_and_grad_buffer.py``), and a grouped NCCL launch can surface as
-# ``ncclDevKernel_Generic`` rather than naming the operation. The two real
-# megatron meshes passed this marker on every rank, but that does not prove
-# every future bucket shape keeps the operation in its kernel name. The
-# failure is the safe direction -- the arm fails rather than publishing --
-# but read an arm rule 13 failure on the megatron arm as a question about
-# this string before reading it as a missing reduction, and settle it by
-# looking at the arm's own trace. Widening this to a bare ``nccl`` is not the
-# repair: see the paragraph above.
 ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
+"""Arm rule 13's marker: the device kernel a gradient all-reduce runs.
+
+Both engines reduce over NCCL, so one string serves both. It names the
+all-reduce and not NCCL in general, because a pipeline emits send-receive
+and broadcast kernels of its own and a bare ``nccl`` would pass a
+data-parallel run that reduced nothing. The algorithm and protocol suffix
+is left off, because NCCL picks those per message size and topology.
+
+The marker is a necessary condition and not a sufficient one, measured
+rather than assumed. A real ``pp 2, dp 1`` trace carries an all-reduce five
+times per window from the gradient-norm reduction over the pipeline group,
+and above ``dp`` 1 both engines also reduce the loss. So an all-reduce
+kernel proves a collective ran, never which one. Arm rule 12's per-engine
+data-parallel log line is what names the mechanism; read the two rules
+together and do not strengthen this one by guessing at a count.
+
+If the megatron arm fails arm rule 13, read it as a question about this
+string first. Megatron issues its bucket reductions inside a coalescing
+manager, and a grouped NCCL launch can surface under a generic kernel name.
+Settle it by looking at the arm's own trace. Widening this to a bare
+``nccl`` is not the repair.
+"""
 
 
 def _titan_parallelism_markers(
@@ -461,8 +444,6 @@ def _megatron_stock_precision_markers(
     )
 
 
-# The TorchTitan profile. ``benchmarks/e2e/engines.py`` puts it on the
-# ``torchtitan`` engine record; nothing else reads it.
 TORCHTITAN_PROFILE = ValidationProfile(
     completion_marker="Training completed",
     # Carried by both of TorchTitan's compile log lines -- the per-block
@@ -493,11 +474,11 @@ TORCHTITAN_PROFILE = ValidationProfile(
     nan_guard_markers=_no_nan_guard_markers,
     precision_markers=_no_precision_markers,
 )
+"""The TorchTitan profile.
 
-# The megatron arm of the engines scenario. It runs
-# megatron.training's own pretrain() through pretrain_gpt's providers.
-# Every marker below carries the word "stock", and the driver prints
-# the same strings.
+The ``torchtitan`` engine record carries it; nothing else reads it.
+"""
+
 MEGATRON_STOCK_PROFILE = ValidationProfile(
     completion_marker="Training completed",
     # None on purpose: megatron-core binds jit_fuser = torch.compile at
@@ -528,19 +509,25 @@ MEGATRON_STOCK_PROFILE = ValidationProfile(
     nan_guard_markers=_megatron_stock_nan_guard_markers,
     precision_markers=_megatron_stock_precision_markers,
 )
+"""The megatron arm of the ``engines`` scenario.
+
+It runs Megatron's own ``pretrain()`` through the stock providers. Every
+marker carries the word "stock", and the driver prints the same strings.
+"""
 
 
-# Which profile validates an arm of which engine.
-#
-# ``benchmarks/e2e/engines.py`` builds the same pairing on its own records,
-# from the same two constants, and ``tests/test_engines.py`` pins the two
-# against each other. The duplication is the price of the import direction:
-# this module sits BELOW ``engines.py``, because an engine record carries a
-# profile, so it cannot read the records back.
 _PROFILE_BY_ENGINE = {
     "torchtitan": TORCHTITAN_PROFILE,
     "megatron_stock": MEGATRON_STOCK_PROFILE,
 }
+"""Which profile validates an arm of which engine.
+
+``benchmarks/e2e/engines.py`` builds the same pairing on its own records,
+from the same two constants, and ``tests/test_engines.py`` pins the two
+against each other. The duplication is the price of the import direction:
+this module sits below ``engines.py``, because an engine record carries a
+profile, so it cannot read the records back.
+"""
 
 
 def profile_for_engine(engine: str) -> ValidationProfile:

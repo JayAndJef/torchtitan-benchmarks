@@ -68,15 +68,13 @@ if TYPE_CHECKING:
     from benchmarks.e2e.schema import Scenario
 
 
-# The prefix torchrun puts on every tee'd line. Two spellings reach a log
-# here and this matches both: torchrun's own default is
-# ``[${role_name}${local_rank}]:`` and TorchTitan's run_train.sh passes
-# ``--role rank``, which renders ``[rank0]:``; a multi-rank run additionally
-# sets TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE to ``[rank${rank}]:``, which
-# renders the same shape from the GLOBAL rank. The two agree on one node and
-# would not across nodes, which is why the multi-rank case names the global
-# rank rather than trusting the default.
 _LOG_LINE_RANK = re.compile(r"^\[rank(\d+)\]:")
+"""The rank prefix torchrun puts on every tee'd line.
+
+Two spellings reach a log here and this pattern matches both. A multi-rank
+run sets ``TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE`` to name the global rank,
+because the default local-rank spelling agrees with it only on one node.
+"""
 
 TRACE_FILE_GLOB = "rank*_trace.json.gz"
 """What a profiler window is called, on every rank and both engines."""

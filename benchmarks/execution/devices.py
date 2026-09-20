@@ -56,9 +56,11 @@ from __future__ import annotations
 import re
 
 
-# Decimal indices, single commas, nothing else. See the module docstring for
-# why every rejected spelling is rejected.
 DEVICE_LIST = re.compile(r"^\d+(,\d+)*$")
+"""Decimal indices, single commas, nothing else.
+
+The module docstring says why every rejected spelling is rejected.
+"""
 
 
 def parse_devices(gpu: str) -> tuple[str, ...]:

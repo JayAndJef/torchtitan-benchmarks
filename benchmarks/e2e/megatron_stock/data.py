@@ -100,10 +100,6 @@ def materialize_titan_samples(
     return samples
 
 
-# The keys one microbatch carries. ``pretrain_gpt.py``'s ``BATCH_KEYS``
-# names ten; a key this dict omits reaches ``get_batch`` as None, which is
-# what ``attention_mask`` and ``cu_seqlens_padded`` need. They are listed
-# here as None so a reader sees the whole contract in one place.
 MICROBATCH_KEYS: tuple[str, ...] = (
     "tokens",
     "labels",
@@ -114,6 +110,13 @@ MICROBATCH_KEYS: tuple[str, ...] = (
     "attention_mask",
     "cu_seqlens_padded",
 )
+"""The keys one microbatch carries.
+
+``pretrain_gpt.py``'s ``BATCH_KEYS`` names ten. A key this tuple omits
+reaches ``get_batch`` as None, which is what ``attention_mask`` and
+``cu_seqlens_padded`` need. The tuple names them so a reader sees the whole
+contract in one place.
+"""
 
 
 def document_offsets(positions: torch.Tensor, seq_len: int) -> torch.Tensor:

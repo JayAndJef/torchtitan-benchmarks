@@ -37,12 +37,14 @@ from benchmarks.models.piper_qwen3.megatron_bootstrap import (
     configure_te_environment,
 )
 
-# The one name the shim adds. Python 3.12 and above supply it themselves.
 SHIMMED_NAME = "override"
+"""The one name the shim adds. Python 3.12 and above supply it themselves."""
 
-# Tells "import typing_extensions for me" apart from "there is no such
-# module". A test needs the second case, and ``None`` alone cannot say it.
 _IMPORT_FOR_ME = object()
+"""Tells "import typing_extensions for me" from "there is no such module".
+
+A test needs the second case, and ``None`` alone cannot say it.
+"""
 
 
 def install_typing_override(

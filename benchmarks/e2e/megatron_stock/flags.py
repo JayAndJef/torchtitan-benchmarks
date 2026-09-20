@@ -84,32 +84,24 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
-# The one pipeline schedule the stock driver runs. Megatron's
-# forward_backward_pipelining_without_interleaving is 1F1B and nothing else.
 SUPPORTED_PP_SCHEDULE = "1F1B"
+"""The one pipeline schedule the stock driver runs.
 
-# The wrapper class Megatron builds for each level, and the sharding
-# strategy that wrapper then acts on. train.py prints both off the wrapper
-# it really got; benchmarks/e2e/validation.py reads this table to say what
-# each level must print.
-#
-# **Both levels build the SAME wrapper.** Megatron picks its sharded
-# wrapper on one flag that this suite sends at no level. So this table
-# cannot separate the two levels, and DATA_PARALLEL_OPTIMIZERS below is
-# what does.
-#
-# **The strategy is "no_shard" at both levels, and Megatron's own argparse
-# default is not.** args.data_parallel_sharding_strategy defaults to
-# "optim_grads_params" and reaches the DDP config whatever the wrapper is,
-# but megatron/core/optimizer/__init__.py reads it only under the sharded
-# wrapper. So the value the run acts on is "no_shard" here, and the raw
-# field is inert. A marker built from the raw field would say
-# a replicated run sharded. Level 1 shards the optimizer states through
-# the DistributedOptimizer, which is not this field.
+Megatron's ``forward_backward_pipelining_without_interleaving`` is 1F1B and
+nothing else.
+"""
+
 DATA_PARALLEL_WRAPPERS: dict[int, str] = {
     0: "DistributedDataParallel",
     1: "DistributedDataParallel",
 }
+"""The wrapper class Megatron builds for each ZeRO level.
+
+``train.py`` prints the wrapper it really got, and validation reads this
+table to say what each level must print. Both levels build the same
+wrapper, because Megatron picks its sharded one on a flag this suite sends
+at no level, so ``DATA_PARALLEL_OPTIMIZERS`` below is what separates them.
+"""
 NO_SHARD_STRATEGY = "no_shard"
 """The strategy every level of this suite acts on. ``train.py`` prints it."""
 
@@ -117,46 +109,47 @@ SHARDING_STRATEGIES: dict[int, str] = {
     0: NO_SHARD_STRATEGY,
     1: NO_SHARD_STRATEGY,
 }
+"""The sharding strategy each level acts on.
 
-# What ``overlap_grad_reduce`` reads on the wrapper, per level.
-#
-# False at both levels, and for two independent reasons. The argv omits
-# ``--overlap-grad-reduce`` at every level (see ``ALWAYS_OMITTED_FLAGS``),
-# so ``args`` carries False. And Megatron mutates that field only inside
-# its own sharded wrapper, which this suite never builds.
+Megatron's own argparse default is ``optim_grads_params``, but it reads
+that field only under the sharded wrapper, which this suite never builds.
+A marker built from the raw field would call a replicated run sharded.
+"""
+
 DATA_PARALLEL_OVERLAP: dict[int, bool] = {
     level: False for level in SHARDING_STRATEGIES
 }
+"""What ``overlap_grad_reduce`` reads on the wrapper, per level.
 
-# The optimizer class Megatron builds for each level.
-#
-# **This table is necessary, because the wrapper table above separates
-# neither level.** Both build a plain ``DistributedDataParallel``, so the
-# wrapper class alone cannot say which level ran. The optimizer can:
-# ``megatron/core/optimizer/__init__.py:656`` builds ``DistributedOptimizer``
-# under ``use_distributed_optimizer``, and ``:679`` builds
-# ``Float16OptimizerWithFloat16Params`` otherwise.
-#
-# So the two tables together pin both levels and neither does it alone:
-# level 0 is DDP plus the fp16 optimizer, and level 1 is DDP plus the
-# distributed optimizer.
+False at both levels, for two independent reasons. The argv omits
+``--overlap-grad-reduce`` everywhere (see ``ALWAYS_OMITTED_FLAGS``), and
+Megatron mutates that field only inside its sharded wrapper.
+"""
+
 DATA_PARALLEL_OPTIMIZERS: dict[int, str] = {
     0: "Float16OptimizerWithFloat16Params",
     1: "DistributedOptimizer",
 }
+"""The optimizer class Megatron builds for each level.
 
-# The outer class Megatron returns for a chain of optimizers
-# (``megatron/core/optimizer/optimizer.py``).
-#
-# **The table above names a class, and every level prints it inside a
-# chain.** ``get_megatron_optimizer`` ends its standard path with an
-# unconditional ``ChainedOptimizer(optimizers)``, and this suite takes no
-# other path. ``data_parallel_optimizer`` below is what a marker must
-# read; the raw table cannot state the line.
+The wrapper table above separates neither level, but this one does:
+Megatron builds ``DistributedOptimizer`` under ``use_distributed_optimizer``
+and ``Float16OptimizerWithFloat16Params`` otherwise. The two tables together
+pin both levels, and neither does it alone.
+"""
+
 CHAINED_OPTIMIZER = "ChainedOptimizer"
+"""The outer class Megatron returns for a chain of optimizers.
 
-# TorchTitan's own optimizer values, replicated flag for flag.
+``get_megatron_optimizer`` ends its standard path with an unconditional
+``ChainedOptimizer(optimizers)``, and this suite takes no other path, so
+every level prints its optimizer inside a chain. A marker must read
+``data_parallel_optimizer`` below, because the raw table cannot state the
+line.
+"""
+
 LEARNING_RATE = "8e-4"
+"""TorchTitan's own optimizer values, replicated flag for flag."""
 LR_WARMUP_ITERS = "2"
 ADAM_BETA1 = "0.9"
 ADAM_BETA2 = "0.95"
@@ -164,22 +157,28 @@ ADAM_EPS = "1e-8"
 WEIGHT_DECAY = "0.1"
 CLIP_GRAD = "1.0"
 
-# The RMSNorm epsilon the TorchTitan config carries.
 NORM_EPSILON = "1e-6"
+"""The RMSNorm epsilon the TorchTitan config carries."""
 
-# Piper's own initialization width.
 INIT_METHOD_STD = "0.01"
+"""Piper's own initialization width."""
 
-# The harness flag names. train.py declares the same names, and a test
-# compares the two lists, so a rename cannot reach only one side.
 BENCH_ARM_DIR = "--bench-arm-dir"
+"""The harness flag names.
+
+``train.py`` declares the same names, and a test compares the two lists, so
+a rename cannot reach only one side.
+"""
 BENCH_MODEL_SIZE = "--bench-model-size"
 BENCH_LOCAL_BATCH_SIZE = "--bench-local-batch-size"
-# The profiler switch, and the one token that states it. The four schedule
-# flags below travel with it and with nothing else: the driver refuses a
-# schedule flag without this token, so an argv cannot ask for a window it
-# also declines to collect.
+
 BENCH_PROFILE = "--bench-profile"
+"""The profiler switch, and the one token that states it.
+
+The four schedule flags below travel with this token and with nothing else.
+The driver refuses a schedule flag without it, so an argv cannot ask for a
+window it also declines to collect.
+"""
 BENCH_PROFILE_FREQ = "--bench-profile-freq"
 BENCH_PROFILER_WARMUP = "--bench-profiler-warmup"
 BENCH_PROFILER_ACTIVE = "--bench-profiler-active"
@@ -187,9 +186,13 @@ BENCH_PP_SCHEDULE = "--bench-pp-schedule"
 BENCH_SEQ_LEN = "--bench-seq-len"
 BENCH_ROWS_PER_SAMPLE = "--bench-rows-per-sample"
 BENCH_MIN_TRACE_WINDOWS = "--bench-min-trace-windows"
-# The pipeline point-to-point sync. Emitted only under ``off``, because
-# Megatron has no flag of its own for the field and ``on`` is its default.
+
 BENCH_BATCH_P2P_SYNC = "--bench-batch-p2p-sync"
+"""The pipeline point-to-point sync.
+
+The writer emits it only under ``off``, because Megatron has no flag of its
+own for the field and ``on`` is its default.
+"""
 
 BENCH_FLAGS: tuple[str, ...] = (
     BENCH_ARM_DIR,
@@ -206,45 +209,30 @@ BENCH_FLAGS: tuple[str, ...] = (
     BENCH_BATCH_P2P_SYNC,
 )
 
-# The two harness flags a single-stage argv omits. Both describe the
-# pipeline: the schedule names a split that does not happen at pp 1, and
-# the p2p value names a message that does not exist there. A test reads
-# this tuple, so a third such flag is an edit here rather than a silent gap
-# in the roster check.
 BENCH_FLAGS_OMITTED_BY_DEFAULT: tuple[str, ...] = (
     BENCH_PP_SCHEDULE,
     BENCH_BATCH_P2P_SYNC,
 )
+"""The two harness flags a single-stage argv omits.
 
-# The harness flags that describe a profiler window. ``_bench_flags`` emits
-# the whole group under ``--profile`` and none of it otherwise, and
-# ``train.py`` refuses any member of it without ``BENCH_PROFILE``. One
-# tuple, so the writer and the refusal cannot disagree about the group.
+Both describe the pipeline: the schedule names a split that does not happen
+at pp 1, and the p2p value names a message that does not exist there. A
+test reads this tuple, so a third such flag is an edit here.
+"""
+
 BENCH_PROFILE_SCHEDULE_FLAGS: tuple[str, ...] = (
     BENCH_PROFILE_FREQ,
     BENCH_PROFILER_WARMUP,
     BENCH_PROFILER_ACTIVE,
     BENCH_MIN_TRACE_WINDOWS,
 )
+"""The harness flags that describe a profiler window.
 
-# Flags this suite declines under EVERY ZeRO level, each for a
-# reason section 7 of PIPER_STOCK_MEGATRON_PLAN.md states. The tuple exists
-# so a test can assert their absence by name rather than by a hand-written
-# list that can drift from the reason.
-#
-# **--overlap-grad-reduce and --overlap-param-gather stay here at both
-# levels, and the reason is not the reason --use-distributed-optimizer
-# leaves.**
-#
-# The two overlap flags travel together: ``arguments.py`` asserts
-# ``--overlap-param-gather`` needs ``--overlap-grad-reduce``, so neither
-# can be sent alone. And ``training.py`` reads ``overlap_grad_reduce``
-# **before** it builds the wrapper, in ``resolve_ddp_bucket_size``, which
-# returns ``None`` when the value is False. So sending the pair moves the
-# gradient bucket size. That changes what the run does rather than what
-# the argv says, and this arm runs stock Megatron at its own defaults.
-#
-# The marker reads the resolved value instead. See DATA_PARALLEL_OVERLAP.
+``_bench_flags`` emits the whole group under ``--profile`` and none of it
+otherwise, and ``train.py`` refuses any member without ``BENCH_PROFILE``.
+One tuple keeps the writer and the refusal from disagreeing.
+"""
+
 ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--overlap-grad-reduce",
     "--overlap-param-gather",
@@ -257,55 +245,62 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--grad-reduce-in-bf16",
     "--profile-ranks",
 )
+"""The flags this suite declines under every ZeRO level.
 
-# **--use-precision-aware-optimizer LEFT this tuple**, because
-# --megatron-precision lean sends it. It is declined under the default
-# value alone, and _precision_flags is what decides that. A roster entry
-# here would say a lean run declines a flag its own argv carries.
-#
-# **--grad-reduce-in-bf16 STAYS**, under both precision values. Under
-# --bf16 Megatron turns fp32 accumulation on only when the main-grad dtype
-# is fp32 (arguments.py), so --main-grads-dtype bf16 leaves it off by
-# itself. Sending this flag too would state one fact twice, and a reader of
-# the argv could not tell which token did the work.
+The tuple exists so a test asserts their absence by name. The two overlap
+flags travel together and move the gradient bucket size, which changes what
+the run does rather than what the argv says; the marker reads the resolved
+value instead (see ``DATA_PARALLEL_OVERLAP``).
+``--use-precision-aware-optimizer`` is absent from this tuple because
+``--megatron-precision lean`` sends it, and ``_precision_flags`` declines it
+under the default value alone. ``--grad-reduce-in-bf16`` stays under both
+precision values, because ``--main-grads-dtype bf16`` already leaves fp32
+accumulation off, and two tokens for one fact hide which one did the work.
+"""
 
-# The flag NAMES each ZeRO level sends.
-#
-# **Level 1 is one flag.** --use-distributed-optimizer alone gives Megatron a
-# DistributedOptimizer beside a plain DistributedDataParallel, which shards
-# the optimizer states over the data-parallel group and nothing else. It
-# builds no device mesh, so the level holds a pipeline.
 ZERO1_FLAGS: tuple[str, ...] = ("--use-distributed-optimizer",)
+"""The flag names ZeRO level 1 sends.
 
-# What each level sends, as one table. ``_sharding_flags`` builds the tokens
-# and ``omitted_flags`` subtracts this from ``ZERO1_FLAGS``, so presence and
-# absence stay one fact and cannot drift apart.
+``--use-distributed-optimizer`` alone gives Megatron a
+``DistributedOptimizer`` beside a plain ``DistributedDataParallel``, which
+shards the optimizer states over the data-parallel group and nothing else.
+It builds no device mesh, so the level holds a pipeline.
+"""
+
 SHARDING_FLAGS_BY_VALUE: dict[int, tuple[str, ...]] = {
     0: (),
     1: ZERO1_FLAGS,
 }
+"""What each ZeRO level sends, as one table.
 
-# The flag NAMES --megatron-precision lean sends. The whole recipe, its
-# byte table and the two flags it must never send are stated once, above
-# MEGATRON_PRECISION_MODES in benchmarks/e2e/registry.py.
-#
-# The three dtype flags take a value token each, so the argv is eight
-# tokens. This tuple holds the names, which is what a test asserts absence
-# by under the default value.
+``_sharding_flags`` builds the tokens and ``omitted_flags`` subtracts this
+table from ``ZERO1_FLAGS``, so presence and absence stay one fact.
+"""
+
 LEAN_PRECISION_FLAGS: tuple[str, ...] = (
     "--use-precision-aware-optimizer",
     "--main-grads-dtype",
     "--exp-avg-dtype",
     "--exp-avg-sq-dtype",
 )
+"""The flag names ``--megatron-precision lean`` sends.
 
-# The dtype every lean flag carries. One name, so the three cannot drift
-# apart and a reader meets the recipe as one fact.
+``MEGATRON_PRECISION_MODES`` states the whole recipe once. The three dtype
+flags take a value token each, so the argv is eight tokens; this tuple holds
+the names a test asserts absence by under the default value.
+"""
+
 LEAN_PRECISION_DTYPE = "bf16"
+"""The dtype every lean flag carries.
 
-# Megatron's own default for ``--main-grads-dtype`` (``arguments.py``). The
-# stock recipe sends no dtype flag, so it runs this one.
+One name keeps the three from drifting apart and states the recipe once.
+"""
+
 MEGATRON_MAIN_GRADS_DTYPE_DEFAULT = "fp32"
+"""Megatron's own default for ``--main-grads-dtype``.
+
+The stock recipe sends no dtype flag, so it runs this one.
+"""
 
 
 def data_parallel_optimizer(zero: int) -> str:
@@ -334,13 +329,14 @@ def data_parallel_optimizer(zero: int) -> str:
     return f"{CHAINED_OPTIMIZER}[{DATA_PARALLEL_OPTIMIZERS[zero]}]"
 
 
-# Megatron's own switch for ``check_for_nan_in_loss_and_grad``
-# (``arguments.py``: ``action='store_false'``, so the flag turns the field
-# OFF). What the one field gates at Megatron-LM 59b72fa5, and why
-# ``--rerun-mode disabled`` is not enough, is stated once, above
-# ``MEGATRON_NAN_GUARD_MODES`` in ``benchmarks/e2e/registry.py``. A test
-# pins the spelling, the dest and both consumers against the pinned source.
 NO_CHECK_FOR_NAN_FLAG = "--no-check-for-nan-in-loss-and-grad"
+"""Megatron's own switch for ``check_for_nan_in_loss_and_grad``.
+
+The flag is ``action='store_false'``, so it turns the field off.
+``MEGATRON_NAN_GUARD_MODES`` states what the field gates and why
+``--rerun-mode disabled`` is not enough. A test pins the spelling, the dest
+and both consumers against the pinned source.
+"""
 
 
 def refuse_unknown_nan_guard(megatron_nan_guard: str) -> None:

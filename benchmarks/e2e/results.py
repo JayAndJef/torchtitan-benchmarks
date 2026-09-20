@@ -40,10 +40,14 @@ from benchmarks.e2e.parallelism import zero_warnings
 STEP_METRICS = re.compile(
     r"step:\s*(\d+).*?memory:\s*([0-9.]+)GiB.*?tps:\s*([0-9,]+)"
 )
-# The words before the digits, because the alternation is leftmost-first: a
-# ``-inf`` read by the digit class alone yields ``-``, and ``float`` then
-# raises where refuse_non_finite_trajectories should name the step.
 LOSS_METRIC = re.compile(r"step:\s*(\d+).*?loss:\s*(nan|-?inf|[0-9.eE+-]+)")
+"""The loss trajectory pattern.
+
+The words come before the digits, because the alternation is
+leftmost-first: the digit class alone reads ``-inf`` as ``-``, and
+``float`` then raises where ``refuse_non_finite_trajectories`` should name
+the step.
+"""
 GRAD_NORM_METRIC = re.compile(
     r"step:\s*(\d+).*?grad_norm:\s*(nan|-?inf|[0-9.eE+-]+)"
 )
@@ -218,11 +222,11 @@ def losses(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
     return _trajectory(_log_by_rank(log_path).get(rank, ""), LOSS_METRIC)
 
 
-# The two trajectories a step line carries, by the name a failure prints.
 _TRAJECTORY_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("loss", LOSS_METRIC),
     ("grad_norm", GRAD_NORM_METRIC),
 )
+"""The two trajectories a step line carries, by the name a failure prints."""
 
 
 def refuse_non_finite_trajectories(arm: str, log_path: Path) -> None:
