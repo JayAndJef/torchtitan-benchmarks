@@ -13,7 +13,7 @@ it silently relocates ``out/``, the caches, and the git-rev lookups.
 These constants are split out from the rest of ``execution/`` because they
 have consumers that are not the runners. ``benchmarks.artifacts.layout``
 takes ``BENCH_DIR`` alone to root the default output directory, and
-``benchmarks.e2e.megatron.data`` -- which executes inside the *training*
+``benchmarks.e2e.megatron_stock.data`` -- which executes inside the *training*
 subprocess rather than the supervisor -- takes ``TITAN_DIR`` alone to find
 torchtitan's ``c4_test`` assets. Neither should have to import
 subprocess-launching machinery to spell a path.

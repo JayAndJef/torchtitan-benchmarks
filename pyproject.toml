@@ -16,7 +16,7 @@ dependencies = [
 
 [dependency-groups]
 # Transformer Engine for the Megatron baseline arm
-# (benchmarks/e2e/megatron/ and benchmarks/models/piper_qwen3/).
+# (benchmarks/e2e/megatron_stock/ and benchmarks/models/piper_qwen3/).
 # core-cu13 is a prebuilt wheel; the torch binding compiles at install
 # against the pinned torch nightly, hence no-build-isolation below.
 megatron = [

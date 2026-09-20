@@ -163,31 +163,11 @@ class BlankPartsSignatureTests(unittest.TestCase):
         self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
         self.assertEqual(parameter.default, ())
 
-    def test_the_e2e_driver_and_the_parity_tool_never_blank(self) -> None:
-        """Both need the whole model, and neither may acquire the argument.
-
-        ``benchmarks/e2e/megatron/train.py`` trains the model and
-        ``tools/megatron_parity_check.py`` matches its logits against
-        TorchTitan's. A blanked part would make either one measure a
-        different network under the same label.
-        """
-        root = Path(__file__).resolve().parent.parent
-        for relative in (
-            "benchmarks/e2e/megatron/train.py",
-            "tools/megatron_parity_check.py",
-        ):
-            with self.subTest(caller=relative):
-                self.assertNotIn(
-                    "blank_parts", (root / relative).read_text()
-                )
-
-
 class PipelineSplitSignatureTests(unittest.TestCase):
     """The pipeline arguments default to the whole model on one rank.
 
-    Twelve kernel builders and ``tools/megatron_parity_check.py`` build one
-    process and pass none of the three. A default that split anything would
-    change what every one of them measures.
+    Twelve kernel builders build one process and pass none of the three. A
+    default that split anything would change what they measure.
     """
 
     def test_every_pipeline_argument_defaults_to_one_whole_model(self) -> None:

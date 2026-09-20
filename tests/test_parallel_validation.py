@@ -26,7 +26,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import logs_by_rank
-from benchmarks.e2e.megatron import train
 from benchmarks.e2e.megatron_stock import train as stock_train
 from benchmarks.e2e.parallelism import (
     ParallelismSpec,
@@ -825,67 +824,6 @@ class ArmRuleTwelveTests(unittest.TestCase):
                         parallelism=DP2,
                     )
 
-    def test_the_megatron_marker_is_the_line_the_driver_prints(self) -> None:
-        """The validator and the driver state one line in two places.
-
-        MODE_LINE already carries that cost, and the same comment. This test
-        is the link: the driver formats its own constants with the values
-        ``pipeline_settings`` gives it, and the strings must be equal.
-
-        The dp-only cell is the one that would have gone wrong quietly: the
-        driver runs ONE microbatch at ``pp`` 1 and ``n_microbatches``
-        describes the split a pipeline would make, so a validator that read
-        the latter would fail every honest dp run.
-        """
-        for spec, schedule in ((PP2, "1F1B"), (DP2, None)):
-            with self.subTest(spec=spec):
-                args = SimpleNamespace(
-                    batch=4, pp=spec.pp, pp_microbatch_size=1
-                )
-                _, microbatches = train.pipeline_settings(args)
-                printed = [
-                    train.PARALLELISM_LINE.format(
-                        dp=spec.dp,
-                        pp=spec.pp,
-                        schedule=schedule,
-                        microbatches=microbatches,
-                        stages=spec.pp,
-                    )
-                ]
-                if spec.dp > 1:
-                    printed.append(
-                        train.DATA_PARALLEL_LINE.format(
-                            dp=spec.dp, overlap=True, fp32=False
-                        )
-                    )
-                self.assertEqual(
-                    VALIDATION_PROFILES["megatron"].parallelism_markers(
-                        spec, ENGINES.workload, "stock"
-                    ),
-                    tuple(printed),
-                )
-
-    def test_both_engines_move_the_same_number_of_microbatches(self) -> None:
-        """The named hazard of this stage, stated as one assertion.
-
-        TorchTitan derives ``local_batch_size // pipeline_parallel_microbatch
-        _size`` inside ``_build_pipeline_schedule``; the megatron driver
-        derives its own count in ``pipeline_settings``. A disagreement runs
-        two schedules under one label, and no correctness gate could see it.
-        """
-        for batch, microbatch_size in ((4, 1), (8, 2), (8, 1)):
-            with self.subTest(batch=batch, microbatch_size=microbatch_size):
-                spec = ParallelismSpec(
-                    pp=2, pp_schedule="1F1B", pp_microbatch_size=microbatch_size
-                )
-                titan = n_microbatches(spec, local_batch_size=batch)
-                _, megatron = train.pipeline_settings(
-                    SimpleNamespace(
-                        batch=batch, pp=2, pp_microbatch_size=microbatch_size
-                    )
-                )
-                self.assertEqual(titan, megatron)
-
     def test_a_profile_that_can_prove_nothing_refuses_the_run(self) -> None:
         """An empty marker tuple is a refusal, never a pass.
 
@@ -914,37 +852,6 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     )
 
 
-def _megatron_log(spec: ParallelismSpec, p2p_line: str | None) -> str:
-    """One rank's tuned-driver output: every line the rules read.
-
-    The mesh lines come from the profile the validator uses, exactly as
-    ``_titan_log`` builds them. The p2p line is the argument, so a test can
-    give a rank the wrong value or no line at all.
-    """
-    profile = VALIDATION_PROFILES["megatron"]
-    lines = [
-        "Megatron-LM training loop (mode=default, graphs=none)",
-        _SIZE_LINE.rstrip("\n"),
-        *profile.parallelism_markers(
-            spec, ENGINES.workload, "stock"
-        ),
-    ]
-    if p2p_line is not None:
-        lines.append(p2p_line)
-    lines.append("Training completed")
-    return "\n".join(lines)
-
-
-# The tuned megatron driver has no registered arm. Its validation profile
-# is still live, so the rules that read it run against a synthetic arm.
-TUNED_MEGATRON_ARM = Arm(
-    name="tuned_megatron",
-    description="the tuned megatron driver, which no scenario selects",
-    launcher="megatron",
-    validation="megatron",
-)
-
-
 class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     """The ``--megatron-p2p-sync`` half of arm rule 12.
 
@@ -953,15 +860,6 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     ``batch_p2p_sync`` token the requested value implies, so a run that
     ignored the flag cannot be published under the label it was asked for.
     """
-
-    def test_the_megatron_line_is_pinned_to_the_driver_constant(self) -> None:
-        """The validator and the driver state one line in two places."""
-        for value, sync in (("on", True), ("off", False)):
-            with self.subTest(value=value):
-                self.assertEqual(
-                    VALIDATION_PROFILES["megatron"].p2p_markers(PP2, value),
-                    (train.P2P_LINE.format(comm=True, sync=sync),),
-                )
 
     def test_no_line_is_asked_below_a_pipeline(self) -> None:
         """Below ``pp`` 1 there is no message to synchronize, and ``off``
@@ -985,90 +883,6 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
             with self.subTest(profile=name):
                 with self.assertRaisesRegex(ValueError, "unknown megatron p2p"):
                     VALIDATION_PROFILES[name].p2p_markers(PP2, "sometimes")
-
-    def test_a_pipelined_megatron_log_must_carry_the_requested_value(
-        self,
-    ) -> None:
-        """The line is read on every rank, against the requested value.
-
-        A log at ``True`` passes the default and fails ``off``; a log at
-        ``False`` passes ``off`` and fails ``on``; a log with no line fails
-        both. The failure names the token the log lacked.
-        """
-        scenario = scenario_by_name("engines")
-        arm = TUNED_MEGATRON_ARM
-        on_line = train.P2P_LINE.format(comm=True, sync=True)
-        off_line = train.P2P_LINE.format(comm=True, sync=False)
-        cases = (
-            (on_line, "on", None),
-            (on_line, "off", "batch_p2p_sync=False"),
-            (off_line, "off", None),
-            (off_line, "on", "batch_p2p_sync=True"),
-            (None, "on", "batch_p2p_sync=True"),
-            (None, "off", "batch_p2p_sync=False"),
-        )
-        for p2p_line, value, refused in cases:
-            with self.subTest(line=p2p_line, value=value):
-                with tempfile.TemporaryDirectory() as temporary:
-                    fixture = _ArmFixture(
-                        Path(temporary), markers=arm.trace_kernel_markers
-                    )
-                    log = _megatron_log(PP2, p2p_line)
-                    fixture.write({0: log, 1: log})
-                    keywords = dict(
-                        compile_mode="default",
-                        ac_mode="none",
-                        model_size="1b",
-                        parallelism=PP2,
-                        megatron_p2p_sync=value,
-                    )
-                    if refused is None:
-                        validate_arm(
-                            arm,
-                            fixture.root,
-                            fixture.log,
-                            scenario.workload,
-                            **keywords,
-                        )
-                    else:
-                        with self.assertRaisesRegex(RuntimeError, refused):
-                            validate_arm(
-                                arm,
-                                fixture.root,
-                                fixture.log,
-                                scenario.workload,
-                                **keywords,
-                            )
-
-    def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
-        """The rule runs per rank, so a stage that kept the sync under an
-        ``off`` label is caught even when the other stage dropped it."""
-        scenario = scenario_by_name("engines")
-        arm = TUNED_MEGATRON_ARM
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = _ArmFixture(
-                Path(temporary), markers=arm.trace_kernel_markers
-            )
-            fixture.write({
-                0: _megatron_log(
-                    PP2, train.P2P_LINE.format(comm=True, sync=False)
-                ),
-                1: _megatron_log(
-                    PP2, train.P2P_LINE.format(comm=True, sync=True)
-                ),
-            })
-            with self.assertRaisesRegex(RuntimeError, "on rank 1"):
-                validate_arm(
-                    arm,
-                    fixture.root,
-                    fixture.log,
-                    scenario.workload,
-                    compile_mode="default",
-                    ac_mode="none",
-                    model_size="1b",
-                    parallelism=PP2,
-                    megatron_p2p_sync="off",
-                )
 
 
 def _stock_log(
@@ -1136,34 +950,6 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
             with self.subTest(profile=name):
                 with self.assertRaisesRegex(ValueError, "unknown megatron nan"):
                     VALIDATION_PROFILES[name].nan_guard_markers("sometimes")
-
-    def test_the_tuned_profile_asks_for_nothing_at_on_and_refuses_off(
-        self,
-    ) -> None:
-        """No guard in that driver: nothing to prove at ``on``, and no line
-        of its log could prove ``off``."""
-        tuned = VALIDATION_PROFILES["megatron"]
-        self.assertEqual(tuned.nan_guard_markers("on"), ())
-        with self.assertRaisesRegex(ValueError, "no NaN guard"):
-            tuned.nan_guard_markers("off")
-        scenario = scenario_by_name("engines")
-        arm = TUNED_MEGATRON_ARM
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = _ArmFixture(
-                Path(temporary), ranks=(0,), markers=arm.trace_kernel_markers
-            )
-            fixture.write({0: _megatron_log(TRIVIAL_SPEC, None)})
-            keywords = dict(compile_mode="default", ac_mode="none")
-            validate_arm(arm, fixture.root, fixture.log, scenario.workload, **keywords)
-            with self.assertRaisesRegex(ValueError, "no NaN guard"):
-                validate_arm(
-                    arm,
-                    fixture.root,
-                    fixture.log,
-                    scenario.workload,
-                    megatron_nan_guard="off",
-                    **keywords,
-                )
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,

@@ -4,7 +4,8 @@ Wraps the stock torchtitan c4_test pipeline (same dataset class, same
 tokenizer), drains the first ``replay_steps x local_batch_size`` samples at
 construction, and replays the materialized tensors during training. Measured
 steps therefore carry ~zero data-host cost, matching the Megatron driver's
-treatment (benchmarks/e2e/megatron/data.py drains the identical class), so
+treatment (benchmarks/e2e/megatron_stock/data.py drains the identical
+class), so
 the two engines see bit-identical token streams and identical per-step host
 work.
 

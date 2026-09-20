@@ -1243,27 +1243,6 @@ class CommandTests(unittest.TestCase):
             command[command.index("--bench-model-size") + 1], "huge"
         )
 
-    def test_megatron_driver_accepts_the_flag(self) -> None:
-        from benchmarks.e2e.megatron.train import parse_args
-
-        parsed = parse_args(
-            [
-                "--seq-len", "1024", "--steps", "80", "--batch", "4",
-                "--seed", "42", "--profile-freq", "20",
-                "--profiler-warmup", "5", "--profiler-active", "5",
-                "--mode", "default", "--model-size", "huge", "/tmp/arm",
-            ]
-        )
-        self.assertEqual(parsed.model_size, "huge")
-        self.assertEqual(parse_args(
-            [
-                "--seq-len", "1024", "--steps", "40", "--batch", "4",
-                "--seed", "42", "--profile-freq", "20",
-                "--profiler-warmup", "5", "--profiler-active", "5",
-                "--mode", "default", "/tmp/arm",
-            ]
-        ).model_size, "1b")
-
 
 class RegionDerivationTests(unittest.TestCase):
     def test_the_factory_reproduces_the_historical_counts(self) -> None:

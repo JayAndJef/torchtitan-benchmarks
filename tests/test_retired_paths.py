@@ -232,7 +232,7 @@ RETIRED_FORMS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         # snake_case package name with no frozen-identifier twin anywhere in
         # the repo. Prose says "the Megatron baseline", with a space.
         re.compile(_LEFT + r"megatron_baseline" + _RIGHT),
-        "benchmarks/e2e/megatron/ and benchmarks/models/piper_qwen3/",
+        "benchmarks/e2e/megatron_stock/ and benchmarks/models/piper_qwen3/",
     ),
     (
         "analysis/ scripts",
