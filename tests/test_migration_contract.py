@@ -1849,8 +1849,10 @@ TEST_CENSUS = {
     # on one rank each, two that agree on the busiest rank, two that
     # disagree, and that the caption qualifies the ratio without
     # withholding it.
-    "test_parallel_traces": 55,
-    "test_profile_regions": 19,
+    # -6 with the deletion of the region extraction path.
+    "test_parallel_traces": 49,
+    # -11 with the deletion of the region extraction path.
+    "test_profile_regions": 8,
     # New with the cuDNN identity fields. TransformerEngine binds the
     # loader's cuDNN while torch expects the wheel's, so which cuDNN a
     # megatron arm ran is a property of the host and was recorded
@@ -2080,7 +2082,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1824
+TEST_CENSUS_TOTAL = 1807
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

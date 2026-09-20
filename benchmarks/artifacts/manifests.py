@@ -134,13 +134,13 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
     PIPER_1B_REGIONS,
+    Region,
     Workload,
 )
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
     shape_by_name,
 )
-from benchmarks.traces.schema import Region
 
 if TYPE_CHECKING:
     from benchmarks.e2e.registry import Arm, Scenario

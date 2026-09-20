@@ -9,9 +9,10 @@ dragged ``benchmarks.e2e.registry`` -- every scenario, arm and workload
 declaration in the repository -- into the kernel system's import graph for a
 four-line JSON writer. ``benchmarks.e2e.validation`` and
 ``tools/collect_matrix.py`` are in the same position for ``trace_files``.
-(``benchmarks.traces.schema`` is the one first-party import here. It is a
-frozen dataclass, a regex and a glob string, with no first-party imports of
-its own, and it owns the trace file-name grammar this module globs.)
+(This module owns the trace file-name grammar it globs. Both engines write
+one trace per rank per profiler window, named ``rank<n>_trace.json.gz``.
+``benchmarks.traces.extraction`` reads the same token to refuse a pooling
+call that mixes two ranks.)
 
 ``trace_files`` returns **every rank's** traces. That is not the unit any
 measurement is taken over: pooling two ranks' windows into one figure gives
@@ -62,7 +63,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from benchmarks.execution.paths import BENCH_DIR
-from benchmarks.traces.schema import TRACE_FILE_GLOB, rank_of_trace
 
 if TYPE_CHECKING:
     from benchmarks.e2e.registry import Scenario
@@ -77,6 +77,25 @@ if TYPE_CHECKING:
 # would not across nodes, which is why the multi-rank case names the global
 # rank rather than trusting the default.
 _LOG_LINE_RANK = re.compile(r"^\[rank(\d+)\]:")
+
+TRACE_FILE_GLOB = "rank*_trace.json.gz"
+"""What a profiler window is called, on every rank and both engines."""
+
+_TRACE_FILE_NAME = re.compile(r"\Arank(\d+)_trace\.json\.gz\Z")
+
+
+def rank_of_trace(path: Path) -> int | None:
+    """The rank that wrote this trace, or ``None`` when the name does not say.
+
+    ``None`` is a real answer, not an error: the synthetic traces the tests
+    write carry whatever name the test chose, and a caller that only wants to
+    know whether two paths came from *different* ranks must be able to say
+    "this one does not claim a rank" without failing. A caller that needs the
+    rank -- ``trace_files_by_rank`` -- raises on ``None`` itself, because
+    there the name matched ``TRACE_FILE_GLOB`` and must therefore parse.
+    """
+    match = _TRACE_FILE_NAME.match(Path(path).name)
+    return int(match.group(1)) if match else None
 
 
 def trace_files(arm_dir: Path) -> list[Path]:

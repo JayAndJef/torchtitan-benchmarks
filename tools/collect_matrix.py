@@ -77,7 +77,7 @@ def launch_counts(cell_dir: Path, arms: list[str]) -> dict[str, float]:
         if not by_rank:
             continue
         try:
-            pooled = per_rank_pooled_metrics(by_rank, ())
+            pooled = per_rank_pooled_metrics(by_rank)
         except ValueError:
             continue
         per_step = [
