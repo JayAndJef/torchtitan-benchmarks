@@ -311,6 +311,8 @@ class TracelessEvaluationTests(unittest.TestCase):
                 "profile_freq": 20,
                 "profiler_warmup": 5,
                 "profiler_active": 5,
+                "local_batch_size": 4,
+                "seq_len": 1024,
             },
             "selected_arms": ["titan_eager"],
             "arms": [{"name": "titan_eager", "engine": "torchtitan"}],
@@ -334,11 +336,10 @@ class TracelessEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             result = evaluate_run(self._out_dir(Path(temporary)))
         self.assertEqual(
-            result.training["titan_eager"].stable_tokens_per_second, 1000
+            result.results["titan_eager"].stable_tokens_per_second, 1000
         )
-        self.assertEqual(result.gpu_time, {})
-        self.assertEqual(result.trace_windows, {})
-        self.assertEqual(result.to_dict()["gpu_time"], {})
+        # Schema 6 publishes no kernel time in either profile mode.
+        self.assertNotIn("gpu_time", result.to_dict())
         self.assertNotIn("gpu kernel time", render_evaluation(result))
 
 

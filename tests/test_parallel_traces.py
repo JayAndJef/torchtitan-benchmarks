@@ -1,12 +1,15 @@
 """Rank-aware trace reading.
 
-**Two ranks cannot become a mean.** This module drives two ranks through the
-publication path and pins the maximum, the sum and the per-rank vector, and
-pins that the one-rank pooler refuses a two-rank call outright.
+**Two ranks cannot become a mean.** This module pins that each rank is
+grouped, pooled and validated on its own, and that the one-rank pooler
+refuses a two-rank call outright.
 
 The mean is the failure this module exists to prevent. It is neither one
 rank's cost nor the step's total, it passes every other check silently, and
 widening a glob is all it takes to introduce it.
+
+The traces feed validation and ``tools/collect_matrix.py`` alone. Evaluation
+reads the logs, so no assertion here runs ``evaluate_run``.
 """
 
 import gzip
@@ -21,13 +24,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files, trace_files_by_rank
-from benchmarks.artifacts.manifests import MANIFEST_SCHEMA_VERSION
-from benchmarks.artifacts.summaries import summarize
-from benchmarks.e2e.results import (
-    busiest_rank,
-    evaluate_run,
-    render_evaluation,
-)
 from benchmarks.e2e.registry import scenario_by_name
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.traces.extraction import (
@@ -125,20 +121,6 @@ def two_rank_arm(arm_dir: Path) -> None:
         {"bwd": ("backward", [200.0] * 4), "fwd": ("forward", [20.0] * 4)},
         [step_event(1500.0), collective_event(60.0)],
     )
-
-
-def two_rank_run(out_dir: Path) -> None:
-    manifest = {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
-        "profile": True,
-        "parallelism": {"world_size": 1},
-        "scenario": "synthetic_parallel",
-        "hardware": "test-gpu",
-        "workload": {},
-        "selected_arms": ["baseline"],
-    }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest))
-    two_rank_arm(out_dir / "baseline")
 
 
 class RankGroupingTests(unittest.TestCase):
@@ -441,12 +423,11 @@ class CollectiveAndBasisTests(unittest.TestCase):
 
 
 class SteplessRankTests(unittest.TestCase):
-    """A rank the profiler never measured must not be silently dropped.
+    """A rank the profiler never measured reports no per-step figure.
 
     ``kernel_ms_per_step`` is ``None`` when a rank's windows carry no
-    ``ProfilerStep`` annotation. Ranking ``None`` as zero would exclude that
-    rank from a maximum, and the excluded rank may be the busiest one -- the
-    same wrongness the reduction exists to prevent, arriving by another door.
+    ``ProfilerStep`` annotation. Reading it as a zero would make a rank
+    nothing measured look like the cheapest one in the mesh.
     """
 
     def setUp(self) -> None:
@@ -456,16 +437,6 @@ class SteplessRankTests(unittest.TestCase):
 
     def _mixed_run(self) -> Path:
         """Rank 1 does ten times rank 0's work and declares no step."""
-        manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "profile": True,
-            "parallelism": {"world_size": 1},
-            "scenario": "synthetic_parallel",
-            "hardware": "test-gpu",
-            "workload": {},
-            "selected_arms": ["baseline"],
-        }
-        (self.out_dir / "manifest.json").write_text(json.dumps(manifest))
         arm = self.out_dir / "baseline"
         write_trace(
             arm / "profiling/traces/iteration_20/rank0_trace.json.gz",
@@ -482,31 +453,11 @@ class SteplessRankTests(unittest.TestCase):
         )
         return arm
 
-    def test_a_mixture_of_stepped_and_stepless_ranks_is_refused(self) -> None:
+    def test_a_stepless_rank_reports_none_and_not_a_zero(self) -> None:
         arm = self._mixed_run()
         per_rank = per_rank_pooled_metrics(trace_files_by_rank(arm))
         self.assertEqual(per_rank[0].kernel_ms_per_step, 0.220)
         self.assertIsNone(per_rank[1].kernel_ms_per_step)
-        with self.assertRaisesRegex(ValueError, r"ranks \[1\] carry no"):
-            busiest_rank(per_rank)
-
-    def test_evaluate_run_names_the_arm_and_does_not_publish(self) -> None:
-        self._mixed_run()
-        with self.assertRaisesRegex(ValueError, "baseline: ranks"):
-            evaluate_run(self.out_dir)
-
-    def test_a_run_nothing_profiled_keeps_its_old_answer(self) -> None:
-        """All-``None`` is not a mixture; it is a run with no steps at all."""
-        arm = self.out_dir / "baseline"
-        for rank in (0, 1):
-            write_trace(
-                arm / f"profiling/traces/iteration_20/rank{rank}_trace.json.gz",
-                {},
-                [{"ph": "X", "cat": "kernel", "name": "a",
-                  "pid": 0, "tid": 100, "ts": 0.0, "dur": 220.0}],
-            )
-        per_rank = per_rank_pooled_metrics(trace_files_by_rank(arm))
-        self.assertEqual(busiest_rank(per_rank), 0)
 
 
 class StepWallReadsTheHostAnnotationTests(unittest.TestCase):
@@ -543,153 +494,6 @@ class StepWallReadsTheHostAnnotationTests(unittest.TestCase):
         ])
         self.assertEqual(pooled.profiled_steps, 1)
         self.assertIsNone(pooled.wall_ms_per_step)
-
-
-class PublishedNumberIsTheMaximumTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self._temporary.cleanup)
-        self.out_dir = Path(self._temporary.name)
-        two_rank_run(self.out_dir)
-        self.result = evaluate_run(self.out_dir)
-        self.gpu = self.result.gpu_time["baseline"]
-
-    def test_the_step_cost_is_the_busiest_rank_not_the_mean(self) -> None:
-        self.assertAlmostEqual(self.gpu.kernel_ms_per_step, 0.500)
-        self.assertNotAlmostEqual(self.gpu.kernel_ms_per_step, 0.360)
-        self.assertEqual(self.gpu.rank_reduction, "max_over_ranks")
-        self.assertEqual(self.gpu.published_rank, 1)
-
-    def test_the_sum_over_ranks_is_recorded_beside_it(self) -> None:
-        self.assertAlmostEqual(
-            self.gpu.kernel_ms_per_step_summed_over_ranks, 0.720
-        )
-
-    def test_the_per_rank_vector_is_recorded(self) -> None:
-        self.assertEqual(self.gpu.ranks, (0, 1))
-        self.assertEqual([row.rank for row in self.gpu.per_rank], [0, 1])
-        self.assertAlmostEqual(self.gpu.per_rank[0].kernel_ms_per_step, 0.220)
-        self.assertAlmostEqual(self.gpu.per_rank[1].kernel_ms_per_step, 0.500)
-
-    def test_the_split_columns_come_from_the_published_rank(self) -> None:
-        self.assertAlmostEqual(self.gpu.collective_ms_per_step, 0.060)
-        self.assertAlmostEqual(self.gpu.compute_ms_per_step, 0.440)
-        self.assertAlmostEqual(self.gpu.wall_ms_per_step, 1.5)
-
-    def test_the_busiest_rank_helper_breaks_ties_toward_the_lowest(self) -> None:
-        per_rank = per_rank_pooled_metrics(
-            trace_files_by_rank(self.out_dir / "baseline")
-        )
-        self.assertEqual(busiest_rank(per_rank), 1)
-        self.assertEqual(busiest_rank({3: per_rank[0], 7: per_rank[0]}), 3)
-
-    def test_the_report_names_the_reduction_and_shows_each_rank(self) -> None:
-        report = render_evaluation(self.result)
-        self.assertIn("MAX over ranks, never the mean", report)
-        self.assertIn("per-rank gpu time", report)
-
-    def test_the_written_file_declares_schema_five(self) -> None:
-        machine = self.result.to_dict()
-        self.assertEqual(machine["schema_version"], 5)
-        gpu = machine["gpu_time"]["baseline"]
-        self.assertEqual(gpu["ranks"], [0, 1])
-        self.assertEqual([row["rank"] for row in gpu["per_rank"]], [0, 1])
-
-
-class TheBaselineRatioSaysWhichRanksItDividedTests(unittest.TestCase):
-    """Each side of the ratio names its own busiest rank.
-
-    That is the right comparison of step costs, because the schedule holds
-    the ranks together. It is not one component against itself once the two
-    rank indices hold different partitions of the model, so the file says so
-    rather than leaving the reader to derive it.
-
-    Captioned rather than pinned: pinning to one rank index would divide two
-    ranks nobody chose for being busy, and it would move the ratio a
-    single-GPU run has always published.
-    """
-
-    def _evaluate(self, out_dir: Path, arms: tuple[str, ...]):
-        manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "profile": True,
-            "parallelism": {"world_size": 1},
-            "scenario": "synthetic_parallel",
-            "hardware": "test-gpu",
-            "workload": {},
-            "selected_arms": list(arms),
-        }
-        (out_dir / "manifest.json").write_text(json.dumps(manifest))
-        return evaluate_run(out_dir)
-
-    def _arm(self, arm_dir: Path, *, busiest: int) -> None:
-        """One arm, two ranks, with the named rank the expensive one."""
-        heavy = {"bwd": ("backward", [200.0] * 4), "fwd": ("forward", [20.0] * 4)}
-        light = {"bwd": ("backward", [100.0] * 4), "fwd": ("forward", [10.0] * 4)}
-        for rank in (0, 1):
-            write_trace(
-                arm_dir
-                / f"profiling/traces/iteration_20/rank{rank}_trace.json.gz",
-                heavy if rank == busiest else light,
-                [step_event(1500.0 if rank == busiest else 1000.0)],
-            )
-
-    def test_two_arms_on_one_rank_each_raise_no_caption(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary)
-            for arm in ("baseline", "optimized"):
-                write_trace(
-                    out_dir
-                    / arm
-                    / "profiling/traces/iteration_20/rank0_trace.json.gz",
-                    {"bwd": ("backward", [100.0] * 4),
-                     "fwd": ("forward", [10.0] * 4)},
-                    [step_event(1000.0)],
-                )
-            result = self._evaluate(out_dir, ("baseline", "optimized"))
-        self.assertEqual(
-            [line for line in result.warnings if "vs base" in line], []
-        )
-
-    def test_two_arms_that_agree_on_the_busiest_rank_raise_no_caption(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary)
-            self._arm(out_dir / "baseline", busiest=1)
-            self._arm(out_dir / "optimized", busiest=1)
-            result = self._evaluate(out_dir, ("baseline", "optimized"))
-        self.assertEqual(result.gpu_time["baseline"].published_rank, 1)
-        self.assertEqual(result.gpu_time["optimized"].published_rank, 1)
-        self.assertEqual(
-            [line for line in result.warnings if "vs base" in line], []
-        )
-
-    def test_two_arms_that_disagree_name_both_ranks(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary)
-            self._arm(out_dir / "baseline", busiest=1)
-            self._arm(out_dir / "optimized", busiest=0)
-            result = self._evaluate(out_dir, ("baseline", "optimized"))
-            report = render_evaluation(result)
-        self.assertEqual(result.gpu_time["baseline"].published_rank, 1)
-        self.assertEqual(result.gpu_time["optimized"].published_rank, 0)
-        warning = next(
-            line for line in result.warnings if "vs base" in line
-        )
-        self.assertIn("optimized", warning)
-        self.assertIn("rank 0", warning)
-        self.assertIn("baseline rank 1", warning)
-        self.assertIn(warning, report)
-
-    def test_the_ratio_is_still_published(self) -> None:
-        """The caption qualifies the number. It does not withhold it."""
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary)
-            self._arm(out_dir / "baseline", busiest=1)
-            self._arm(out_dir / "optimized", busiest=0)
-            result = self._evaluate(out_dir, ("baseline", "optimized"))
-        self.assertAlmostEqual(
-            result.gpu_time["optimized"].baseline_kernel_ratio, 1.0
-        )
 
 
 class ValidationRulesGotStricterTests(unittest.TestCase):

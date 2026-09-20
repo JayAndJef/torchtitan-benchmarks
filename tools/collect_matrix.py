@@ -1,8 +1,8 @@
 """Merge a run_matrix.sh output tree into one machine-readable JSON.
 
 One object per cell: the manifest's provenance/workload/model_shape/axes
-joined to results.json's throughput, gpu_time, comparisons and warnings,
-plus the supervisor's contamination verdict for that cell.
+joined to results.json's per-arm throughput, step cost and warnings, plus
+the supervisor's contamination verdict for that cell.
 
     .venv/bin/python tools/collect_matrix.py out/matrix-<utc> \\
         [--size huge] [--launch-counts] [--out huge-matrix.json]
