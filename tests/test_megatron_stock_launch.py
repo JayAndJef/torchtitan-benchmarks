@@ -64,7 +64,7 @@ STOCK_DRIVER_MODULE = f"{STOCK_PACKAGE}.train"
 
 # The mesh of the run matrix: two pipelines of four stages, eight GPUs.
 MESH = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4)
-# The same mesh under the other dense-sharding value, plus the expert
+# The same mesh under the other zero value, plus the expert
 # split that value makes legal. Every marker the profile builds moves
 # between the two, so a test that reads only MESH proves half the
 # contract.
@@ -74,7 +74,7 @@ SHARDED_MESH = ParallelismSpec(
     ep=2,
     pp_schedule="1F1B",
     pp_microbatch_size=4,
-    dense_sharding="zero3",
+    zero=3,
 )
 
 # Every mesh the argv checks below sweep, with the batch each needs.
@@ -136,14 +136,14 @@ STOCK_LOG_FRAGMENTS = (
     "Megatron-LM stock data parallel: ",
     " ranks (overlap_grad_reduce=",
     ", grad_reduce_in_fp32=True, ",
-    # The overlap VALUE is not here: it moves with the dense-sharding
+    # The overlap VALUE is not here: it moves with the zero
     # value. STOCK_OVERLAP_FRAGMENTS below pins it per value, so the
     # roster still says which token sits between the two above.
     "sharding_strategy=",
     "expert_parallel=",
     # The optimizer class. It is what separates zero1 from replicate,
     # because both keep the DistributedDataParallel wrapper. The VALUE
-    # moves with --dense-sharding, so only the field name sits here.
+    # moves with --zero, so only the field name sits here.
     "optimizer=",
     # The p2p line, printed off the built config on every rank. The sync
     # VALUE is not here: it moves with --megatron-p2p-sync, and the
@@ -156,13 +156,13 @@ STOCK_LOG_FRAGMENTS = (
 )
 
 # The wrapper class name is the half of the data-parallel line that moves
-# with --dense-sharding, so it cannot sit in the roster above. Megatron
+# with --zero, so it cannot sit in the roster above. Megatron
 # picks the class from --use-megatron-fsdp alone, and the two classes are
 # siblings rather than one a subclass of the other, so the name is what
 # says which memory strategy ran.
 STOCK_WRAPPER_FRAGMENTS = {
-    "replicate": "Megatron-LM stock data parallel: DistributedDataParallel ",
-    "zero3": (
+    0: "Megatron-LM stock data parallel: DistributedDataParallel ",
+    3: (
         "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
     ),
 }
@@ -174,8 +174,8 @@ STOCK_WRAPPER_FRAGMENTS = {
 # roster entry that stopped at the "=" would no longer say which token
 # follows it.
 STOCK_OVERLAP_FRAGMENTS = {
-    "replicate": "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
-    "zero3": "(overlap_grad_reduce=True, grad_reduce_in_fp32=True,",
+    0: "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
+    3: "(overlap_grad_reduce=True, grad_reduce_in_fp32=True,",
 }
 
 # The rest of the mode line. ``ValidationProfile.mode_line`` stops at the
@@ -847,7 +847,7 @@ class StockValidationProfileTests(unittest.TestCase):
         )
 
     def test_the_sharded_markers_name_the_other_wrapper(self) -> None:
-        """``--dense-sharding zero3`` moves three fields of two lines.
+        """``--zero 3`` moves three fields of two lines.
 
         Megatron picks ``FullyShardedDataParallelV1`` from
         ``--use-megatron-fsdp`` alone, and the strategy it then acts on is
@@ -874,7 +874,7 @@ class StockValidationProfileTests(unittest.TestCase):
     def test_the_two_values_share_no_data_parallel_marker(self) -> None:
         """A replicated log must not satisfy a sharded arm's rule.
 
-        The manifest records the dense-sharding value. If one log could
+        The manifest records the zero value. If one log could
         satisfy both markers, a run that ignored the sharding flags would
         publish under the sharded label.
         """
@@ -892,20 +892,20 @@ class StockValidationProfileTests(unittest.TestCase):
         """The standard path chains, and the marker names the members.
 
         ``get_megatron_optimizer`` ends its standard path with an
-        unconditional ``ChainedOptimizer(optimizers)``, so ``replicate``
-        and ``zero1`` both print a chain. The ``30b-a3b`` cell of
+        unconditional ``ChainedOptimizer(optimizers)``, so ``zero 0``
+        and ``zero 1`` both print a chain. The ``30b-a3b`` cell of
         2026-09-16 printed the outer class alone, and arm rule 12 refused
         it.
         """
         line = _megatron_stock_parallelism_markers(
-            replace(MESH, dense_sharding="zero1"), self.workload, "stock"
+            replace(MESH, zero=1), self.workload, "stock"
         )[1]
         self.assertIn(
             "optimizer=ChainedOptimizer[DistributedOptimizer])", line
         )
 
     def test_the_sharded_marker_names_a_bare_optimizer(self) -> None:
-        """``zero3`` takes the Megatron-FSDP branch, which does not chain.
+        """``zero 3`` takes the Megatron-FSDP branch, which does not chain.
 
         That branch collapses its optimizer list at a single model chunk,
         which is what this harness builds. A marker that expected a chain
@@ -926,7 +926,7 @@ class StockValidationProfileTests(unittest.TestCase):
         what a run that lost ``--use-distributed-optimizer`` builds.
         """
         zero1 = _megatron_stock_parallelism_markers(
-            replace(MESH, dense_sharding="zero1"),
+            replace(MESH, zero=1),
             self.workload,
             "stock",
         )[1]
@@ -950,7 +950,7 @@ class StockValidationProfileTests(unittest.TestCase):
         and the wrapper carries ``grad_reduce_in_fp32=False``. This marker
         pinned True before 2026-09-16, and the real cell failed on it.
         """
-        sharded = replace(MESH, dense_sharding="zero1")
+        sharded = replace(MESH, zero=1)
         stock = _megatron_stock_parallelism_markers(
             sharded, self.workload, "stock"
         )[1]
@@ -1095,7 +1095,7 @@ class StockValidationProfileTests(unittest.TestCase):
 
     def test_the_data_parallel_pattern_sees_the_wrapper_line(self) -> None:
         for spec in (MESH, SHARDED_MESH):
-            with self.subTest(dense_sharding=spec.dense_sharding):
+            with self.subTest(zero=spec.zero):
                 line = self.profile.parallelism_markers(
                     spec, self.workload, "stock"
                 )[1]
@@ -1108,21 +1108,21 @@ class StockValidationProfileTests(unittest.TestCase):
 
         The class name is the only field of this line that Megatron picks
         from ``--use-megatron-fsdp`` alone, so it is the field that proves
-        the dense-sharding value.
+        the zero value.
         """
         for spec in (MESH, SHARDED_MESH):
-            with self.subTest(dense_sharding=spec.dense_sharding):
+            with self.subTest(zero=spec.zero):
                 line = self.profile.parallelism_markers(
                     spec, self.workload, "stock"
                 )[1]
                 other = (
-                    "zero3" if spec.dense_sharding == "replicate"
-                    else "replicate"
+                    3 if spec.zero == 0
+                    else 0
                 )
                 for roster in (
                     STOCK_WRAPPER_FRAGMENTS, STOCK_OVERLAP_FRAGMENTS
                 ):
-                    self.assertIn(roster[spec.dense_sharding], line)
+                    self.assertIn(roster[spec.zero], line)
                     self.assertNotIn(roster[other], line)
 
 
@@ -1161,13 +1161,13 @@ STOCK_MESH_CASES = (
     (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), 8),
     (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B"), 32),
     (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B"), 8),
-    # The dense-sharding control cell of the matrix, and the expert split
+    # The zero control cell of the matrix, and the expert split
     # it makes legal. Both lines carry a field that moves between the two
     # values, so a diff over the replicated cells alone proves half of it.
-    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", dense_sharding="zero3"), 32),
+    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", zero=3), 32),
     (
         ParallelismSpec(
-            dp=2, pp=4, ep=2, pp_schedule="1F1B", dense_sharding="zero3"
+            dp=2, pp=4, ep=2, pp_schedule="1F1B", zero=3
         ),
         32,
     ),
@@ -1184,17 +1184,17 @@ def _geometry(workload, spec):
 
 
 def _driver_data_parallel_line(
-    dense_sharding: str,
+    zero: str,
     *,
     dp: int,
     ep: int,
     megatron_precision: str = "stock",
 ) -> str:
-    """The driver's data-parallel line for one dense-sharding value.
+    """The driver's data-parallel line for one zero value.
 
     ``install_data_parallel_marker`` fills these five fields from the
     wrapper, the optimizer and the expert group. This helper states the
-    values Megatron resolves for each ``--dense-sharding`` value, so the
+    values Megatron resolves for each ``--zero`` value, so the
     diff below reads the driver's own template.
 
     **The optimizer field names a chain**, because Megatron builds one
@@ -1212,13 +1212,13 @@ def _driver_data_parallel_line(
     )
 
     return train.DATA_PARALLEL_LINE.format(
-        wrapper=DATA_PARALLEL_WRAPPERS[dense_sharding],
+        wrapper=DATA_PARALLEL_WRAPPERS[zero],
         dp=dp,
-        overlap=DATA_PARALLEL_OVERLAP[dense_sharding],
+        overlap=DATA_PARALLEL_OVERLAP[zero],
         fp32=grad_reduce_in_fp32(megatron_precision),
-        sharding=SHARDING_STRATEGIES[dense_sharding],
+        sharding=SHARDING_STRATEGIES[zero],
         expert=ep,
-        optimizer=data_parallel_optimizer(dense_sharding),
+        optimizer=data_parallel_optimizer(zero),
     )
 
 
@@ -1241,8 +1241,8 @@ def _driver_lines() -> list[str]:
             dispatcher="alltoall",
         ),
         *train.parallelism_lines(_StockArgs(spec), microbatches=8),
-        _driver_data_parallel_line("replicate", dp=2, ep=1),
-        _driver_data_parallel_line("zero3", dp=2, ep=2),
+        _driver_data_parallel_line(0, dp=2, ep=1),
+        _driver_data_parallel_line(3, dp=2, ep=2),
         train.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
         train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
         train.P2P_LINE.format(comm=True, sync=True),
@@ -1375,7 +1375,7 @@ class StockMarkerContractTests(unittest.TestCase):
                     local_batch_size=batch,
                 )
                 printed = _driver_data_parallel_line(
-                    spec.dense_sharding, dp=spec.dp, ep=spec.ep
+                    spec.zero, dp=spec.dp, ep=spec.ep
                 )
                 markers = self.profile.parallelism_markers(
                     spec, workload, "stock"

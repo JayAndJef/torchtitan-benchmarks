@@ -27,7 +27,7 @@ from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
     ParallelismSpec,
     TRIVIAL_SPEC,
-    dense_sharding_warnings,
+    zero_warnings,
     validate_parallelism,
 )
 from benchmarks.e2e.registry import (
@@ -402,11 +402,13 @@ def _resolve_run(
     # calls ``hardware_metadata``. So the operator reads the warning before
     # the run claims a GPU, and a run that dies later still printed it.
     #
-    # ``dense_sharding_warnings`` is the one statement of both facts, and
+    # ``zero_warnings`` is the one statement of both facts, and
     # ``benchmarks/e2e/results.py`` appends the same strings to
     # ``results.json``. A second copy of the text here could drift from the
     # copy the artifact carries.
-    for warning in dense_sharding_warnings(parallelism):
+    for warning in zero_warnings(
+        parallelism, engines=[arm.launcher for arm in arms]
+    ):
         _emit(event_handler, "summary", f"WARNING: {warning}")
 
     # The p2p sync treatment, refused parent-side for two reasons that each
@@ -446,7 +448,7 @@ def _resolve_run(
     # --all-scenarios sweep reads too, so a skipped scenario and a refused
     # run state one reason.
     refusal = megatron_precision_refusal(
-        arms, megatron_precision, parallelism.dense_sharding
+        arms, megatron_precision, parallelism.zero
     )
     if refusal is not None:
         raise ValueError(refusal)
@@ -532,19 +534,19 @@ def _resolve_run(
 
 
 def megatron_precision_refusal(
-    arms: Iterable[Arm], megatron_precision: str, dense_sharding: str
+    arms: Iterable[Arm], megatron_precision: str, zero: int
 ) -> str | None:
     """Why ``--megatron-precision lean`` cannot reach ``arms``, or ``None``.
 
     Two refusals, each naming its repair, checked from the narrowest
     fact outward. A run with no stock megatron arm gives the value nothing
-    to reach. And ``lean`` under ``replicate`` asks Megatron for a
+    to reach. And ``lean`` under ``zero 0`` asks Megatron for a
     precision-aware optimizer without the distributed optimizer it
     asserts.
 
     **The second is the one that could not exist before this axis.**
     ``optimizer_config.py`` asserts ``use_distributed_optimizer`` under
-    ``--use-precision-aware-optimizer``, and ``--dense-sharding`` is the
+    ``--use-precision-aware-optimizer``, and ``--zero`` is the
     one owner of that flag. Refused here, the operator reads the repair
     parent-side; unrefused, Megatron dies in its own config validation
     minutes into a subprocess and names neither axis.
@@ -563,13 +565,13 @@ def megatron_precision_refusal(
             "the stock megatron arm, or leave the option at "
             f"{DEFAULT_MEGATRON_PRECISION!r}"
         )
-    if dense_sharding == "replicate":
+    if zero == 0:
         return (
             f"--megatron-precision {megatron_precision!r} needs "
-            "--dense-sharding zero1 or --dense-sharding zero3: Megatron "
-            "asserts use_distributed_optimizer under "
-            "--use-precision-aware-optimizer, and the dense-sharding value "
-            "is the one owner of that flag"
+            "--zero 1 or --zero 3: Megatron asserts "
+            "use_distributed_optimizer under "
+            "--use-precision-aware-optimizer, and the zero level is the one "
+            "owner of that flag"
         )
     return None
 
@@ -673,7 +675,7 @@ def execute_run(
         "summary",
         f"parallelism: dp {parallelism.dp} x pp {parallelism.pp} "
         f"(ep {parallelism.ep}, world size {parallelism.world_size}, "
-        f"dense sharding {parallelism.dense_sharding})",
+        f"zero {parallelism.zero})",
     )
     _emit(event_handler, "summary", f"megatron p2p sync: {megatron_p2p_sync}")
     _emit(

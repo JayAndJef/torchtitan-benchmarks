@@ -813,7 +813,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         names: tuple[str, ...],
         *,
         megatron_precision: str | None = "lean",
-        dense_sharding: str = "zero1",
+        zero: str = 1,
         scenario_name: str = "engines",
     ):
         with mock.patch(
@@ -831,7 +831,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                     out_dir=Path("/tmp/precision-test"),
                     ac_mode="none",
                     parallelism=ParallelismSpec(
-                        dp=1, dense_sharding=dense_sharding
+                        dp=1, zero=zero
                     ),
                     megatron_precision=megatron_precision,
                 ),
@@ -964,9 +964,9 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         refusal names the field.
 
         The recorded mesh is sharded, because an inherited ``lean`` under
-        ``replicate`` would meet the parent-side refusal before this gate.
+        ``zero 0`` would meet the parent-side refusal before this gate.
         """
-        spec = ParallelismSpec(dp=1, dense_sharding="zero1")
+        spec = ParallelismSpec(dp=1, zero=1)
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary) / "run"
             out_dir.mkdir()

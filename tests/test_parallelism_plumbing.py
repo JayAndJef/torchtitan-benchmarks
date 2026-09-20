@@ -117,7 +117,7 @@ class ExecutionOptionTests(unittest.TestCase):
         "--ep",
         "--pp-schedule",
         "--pp-microbatch-size",
-        "--dense-sharding",
+        "--zero",
     )
 
     def _parameters(self) -> dict:
@@ -140,7 +140,7 @@ class ExecutionOptionTests(unittest.TestCase):
         self.assertEqual(
             tuple(name for name, _ in _PARALLELISM_OPTIONS),
             ("dp", "pp", "ep", "pp_schedule", "pp_microbatch_size",
-             "dense_sharding"),
+             "zero"),
         )
         self.assertEqual(
             len(_PARALLELISM_OPTIONS), len(self.PARALLELISM_OPTIONS)
@@ -203,27 +203,27 @@ class RequestTests(unittest.TestCase):
                 self.assertEqual(request.gpu, value)
                 self.assertIsInstance(request.gpu, str)
 
-    def test_the_dense_sharding_option_reaches_the_spec(self) -> None:
+    def test_the_zero_option_reaches_the_spec(self) -> None:
         request = self._request(
             "0,1",
             "--scenario",
             "engines",
             "--dp",
             "2",
-            "--dense-sharding",
-            "zero3",
+            "--zero",
+            3,
         )
         self.assertEqual(
             request.parallelism,
-            ParallelismSpec(dp=2, dense_sharding="zero3"),
+            ParallelismSpec(dp=2, zero=3),
         )
 
-    def test_the_dense_sharding_option_refuses_an_undeclared_value(
+    def test_the_zero_option_refuses_an_undeclared_value(
         self,
     ) -> None:
         """**Click refuses it, and the exit code is what says so.**
 
-        A nonzero exit proves nothing here: a legal ``--dense-sharding
+        A nonzero exit proves nothing here: a legal ``--zero
         zero3`` also exits nonzero, because the run then starts and fails on
         this host for its own reasons. Click's usage error is exit 2, and
         it names the roster. Without the ``click.Choice`` the string would
@@ -234,7 +234,7 @@ class RequestTests(unittest.TestCase):
         **The value under test is ``shard``, which is the RETIRED
         spelling.** Three recorded cells carry it, so an operator who reads
         an old manifest can type it. It must reach the roster message rather
-        than the new ``zero3`` behaviour.
+        than the new ``zero 3`` behaviour.
         """
         result = CliRunner().invoke(
             cli,
@@ -245,12 +245,12 @@ class RequestTests(unittest.TestCase):
                 "engines",
                 "--dp",
                 "2",
-                "--dense-sharding",
-                "shard",
+                "--zero",
+                "2",
             ],
         )
         self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("'replicate', 'zero1', 'zero3'", result.output)
+        self.assertIn("'0', '1', '3'", result.output)
 
     def test_the_pipeline_options_build_one_spec(self) -> None:
         request = self._request(
@@ -584,18 +584,18 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
         fact the other cannot state."""
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
         self.assertEqual(
-            recorded["parallelism"]["dense_sharding"], "replicate"
+            recorded["parallelism"]["zero"], 0
         )
 
     def test_a_sharded_spec_round_trips_through_json(self) -> None:
         """Both halves reach the file: the parity the operator asked for,
         and the TorchTitan mesh it resolves to."""
-        spec = ParallelismSpec(dp=2, dense_sharding="zero3")
+        spec = ParallelismSpec(dp=2, zero=3)
         recorded = json.loads(json.dumps(self._manifest(spec)))
         self.assertEqual(
             recorded["parallelism"], describe(spec, local_batch_size=4)
         )
-        self.assertEqual(recorded["parallelism"]["dense_sharding"], "zero3")
+        self.assertEqual(recorded["parallelism"]["zero"], 3)
         self.assertEqual(recorded["parallelism"]["dp_replicate"], 1)
         self.assertEqual(recorded["parallelism"]["dp_shard"], 2)
         self.assertEqual(
@@ -950,14 +950,14 @@ class ResumeParallelismTests(unittest.TestCase):
             "parallelism", self._mismatches(self._manifest(recorded), requested)
         )
 
-    def test_the_dense_sharding_value_alone_refuses_a_resume(self) -> None:
+    def test_the_zero_value_alone_refuses_a_resume(self) -> None:
         """It is a comparability boundary: the two parities hold different
         amounts of optimizer state per rank and exchange different tensors.
         ``_resume_mismatches`` compares the whole record, so the key is gated
         the moment ``describe`` records it.
         """
         recorded = ParallelismSpec(dp=2)
-        requested = ParallelismSpec(dp=2, dense_sharding="zero3")
+        requested = ParallelismSpec(dp=2, zero=3)
         self.assertIn(
             "parallelism", self._mismatches(self._manifest(recorded), requested)
         )
@@ -968,15 +968,15 @@ class ResumeParallelismTests(unittest.TestCase):
     def test_a_block_without_the_key_cannot_claim_the_default_parity(
         self,
     ) -> None:
-        """A block without ``dense_sharding`` cannot claim a parity.
+        """A block without ``zero`` cannot claim a parity.
 
-        Reading its absence as ``replicate`` would be an inference. The safe
+        Reading its absence as ``zero 0`` would be an inference. The safe
         direction is to refuse the resume rather than to record a parity the
         file never carried. ``_resume_mismatches`` compares the whole
         ``parallelism`` block, so the missing key alone is what refuses this.
         """
         manifest = self._manifest(TRIVIAL_SPEC)
-        del manifest["parallelism"]["dense_sharding"]
+        del manifest["parallelism"]["zero"]
         self.assertIn("parallelism", self._mismatches(manifest, TRIVIAL_SPEC))
 
 
@@ -1185,7 +1185,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
 
     def test_a_zero3_record_resumes(self) -> None:
         """The ZeRO-3 parity is a value of the axis like any other."""
-        spec = ParallelismSpec(dp=2, dense_sharding="zero3")
+        spec = ParallelismSpec(dp=2, zero=3)
         manifest = self._manifest("stock", parallelism=spec)
         self.assertEqual(
             self._mismatches(manifest, "stock", parallelism=spec), []
@@ -1290,7 +1290,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         """The premise of every case below."""
         resolved = self._resolve(
             self._environment(None),
-            parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
+            parallelism=ParallelismSpec(dp=2, zero=3),
         )
         self.assertIn("--use-megatron-fsdp", resolved[6]["megatron_stock"])
 
@@ -1300,7 +1300,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         ) as raised:
             self._resolve(
                 self._environment("1"),
-                parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
+                parallelism=ParallelismSpec(dp=2, zero=3),
             )
         # The refusal names its own repair, as every other refusal here does.
         self.assertIn("Unset CUDA_DEVICE_MAX_CONNECTIONS", str(raised.exception))
@@ -1312,11 +1312,11 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
             with self.subTest(value=value):
                 self._resolve(
                     self._environment(value),
-                    parallelism=ParallelismSpec(dp=2, dense_sharding="zero3"),
+                    parallelism=ParallelismSpec(dp=2, zero=3),
                 )
 
     def test_a_zero1_run_is_untouched_by_the_variable(self) -> None:
-        """``zero1`` shards through the optimizer, not through Megatron-FSDP.
+        """``zero 1`` shards through the optimizer, not through Megatron-FSDP.
 
         The argv carries ``--use-distributed-optimizer`` and no
         ``--use-megatron-fsdp``, so Megatron runs no assert on the variable
@@ -1325,7 +1325,7 @@ class ConnectionLimitPreconditionTests(unittest.TestCase):
         """
         resolved = self._resolve(
             self._environment("1"),
-            parallelism=ParallelismSpec(dp=2, dense_sharding="zero1"),
+            parallelism=ParallelismSpec(dp=2, zero=1),
         )
         argv = resolved[6]["megatron_stock"]
         self.assertIn("--use-distributed-optimizer", argv)
@@ -1346,7 +1346,7 @@ class RunBannerTests(unittest.TestCase):
 
     A boundary the manifest records and the screen does not is one the
     operator cannot see while the run is starting. ``--resume`` refuses a
-    changed ``parallelism`` record, and ``dense_sharding`` sits inside it,
+    changed ``parallelism`` record, and ``zero`` sits inside it,
     so the banner has to name the parity beside the three degrees.
 
     The run is made to fail at once: the banner prints before any arm
@@ -1390,8 +1390,7 @@ class RunBannerTests(unittest.TestCase):
     def test_the_trivial_spec_banner_names_the_replicated_parity(self) -> None:
         lines = self._summaries(TRIVIAL_SPEC, "0")
         self.assertIn(
-            "parallelism: dp 1 x pp 1 (ep 1, world size 1, "
-            "dense sharding replicate)",
+            "parallelism: dp 1 x pp 1 (ep 1, world size 1, zero 0)",
             lines,
         )
 
@@ -1406,7 +1405,7 @@ class RunBannerTests(unittest.TestCase):
         """Legal, and a reader must not take the value at face value. The
         shard degree is 1 there, and one microbatch puts the gradient
         reduce-scatter inside the only backward pass."""
-        warnings = self._warnings(ParallelismSpec(dense_sharding="zero1"), "0")
+        warnings = self._warnings(ParallelismSpec(zero=1), "0")
         self.assertEqual(len(warnings), 2)
         self.assertTrue(any("at dp 1" in line for line in warnings))
         self.assertTrue(any("ZeRO-2" in line for line in warnings))
@@ -1415,7 +1414,7 @@ class RunBannerTests(unittest.TestCase):
         """``_resolve_run`` emits them before it probes the host, so they
         reach the operator before the run claims a GPU. The banner is
         filled in by that probe, so it is the marker to sort against."""
-        lines = self._summaries(ParallelismSpec(dense_sharding="zero1"), "0")
+        lines = self._summaries(ParallelismSpec(zero=1), "0")
         first_warning = min(
             index
             for index, line in enumerate(lines)
@@ -1432,22 +1431,21 @@ class RunBannerTests(unittest.TestCase):
         """A warning that fired on the configuration this axis exists to run
         would teach an operator to ignore warnings."""
         self.assertEqual(
-            self._warnings(ParallelismSpec(dp=2, dense_sharding="zero3"), "0,1"),
+            self._warnings(ParallelismSpec(dp=2, zero=3), "0,1"),
             [],
         )
 
     def test_the_sharded_parity_reaches_the_banner(self) -> None:
         """The line has to MOVE with the value.
 
-        A banner that named the parity but always printed ``replicate``
+        A banner that named the parity but always printed ``zero 0``
         would pass the test above and tell the operator nothing.
         """
         lines = self._summaries(
-            ParallelismSpec(dp=2, dense_sharding="zero3"), "0,1"
+            ParallelismSpec(dp=2, zero=3), "0,1"
         )
         self.assertIn(
-            "parallelism: dp 2 x pp 1 (ep 1, world size 2, "
-            "dense sharding zero3)",
+            "parallelism: dp 2 x pp 1 (ep 1, world size 2, zero 3)",
             lines,
         )
 

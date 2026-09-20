@@ -144,7 +144,7 @@ PARALLELISM_LINE = (
 # Each of the three derives directly from _BaseDataParallel. None of them
 # derives from another. So the class name is what says which memory
 # strategy ran. The word "DistributedDataParallel" cannot be hardcoded
-# here, because it is wrong under --dense-sharding zero3.
+# here, because it is wrong under --zero 3.
 #
 # **{sharding} is the strategy the run acts on, not the raw field.**
 # Megatron's argparse defaults data_parallel_sharding_strategy to
@@ -646,8 +646,8 @@ def optimizer_class_name(optimizer: Any) -> str:
     (``megatron/core/optimizer/__init__.py``).
 
     **A chain states its members too.** The standard path ends with an
-    unconditional ``ChainedOptimizer(optimizers)``, so ``replicate`` and
-    ``zero1`` both reach this function with a chain. That path always
+    unconditional ``ChainedOptimizer(optimizers)``, so ``zero 0`` and
+    ``zero 1`` both reach this function with a chain. That path always
     holds the dense optimizer. It adds a second member where
     TransformerEngine marked a weight for the expert process groups, which
     this argv reaches above expert degree 1 alone. Every member takes
@@ -712,7 +712,7 @@ def install_data_parallel_marker(
 
     Accepting the base class alone would prove less than the narrow check
     did. Printing ``type(chunk).__name__`` restores that and adds what the
-    dense-sharding value needs: the class name says which mechanism ran.
+    ZeRO level needs: the class name says which mechanism ran.
 
     **The sharding strategy printed is the one the run acts on.**
     ``data_parallel_sharding_strategy`` reaches every ``ddp_config``,
@@ -735,7 +735,7 @@ def install_data_parallel_marker(
     **The optimizer class is read here too, and it raises when it is
     absent.** ``setup_model_and_optimizer`` returns the optimizer beside
     the model, and its class is the one observation that separates
-    ``zero1`` from ``replicate``: both keep the ``DistributedDataParallel``
+    ``zero 1`` from ``zero 0``: both keep the ``DistributedDataParallel``
     wrapper, so the wrapper name proves nothing about the optimizer state.
     A run that lost ``--use-distributed-optimizer`` builds
     ``Float16OptimizerWithFloat16Params`` and fails arm rule 12 here,
@@ -743,7 +743,7 @@ def install_data_parallel_marker(
 
     **A mixture of experts gets a ``ChainedOptimizer``, and the line names
     its members.** ``optimizer_class_name`` does that. The outer class is
-    the same under every dense-sharding value, so the chain's own name
+    the same under every ZeRO level, so the chain's own name
     separates none of them.
     """
     if data_parallel_size <= 1:

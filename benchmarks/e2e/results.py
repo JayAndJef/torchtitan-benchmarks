@@ -38,9 +38,9 @@ from benchmarks.artifacts.layout import (
 from benchmarks.artifacts.manifests import load_run
 from benchmarks.artifacts.summaries import _value
 from benchmarks.e2e.parallelism import (
-    DEFAULT_DENSE_SHARDING,
+    DEFAULT_ZERO,
     ParallelismSpec,
-    dense_sharding_warnings,
+    zero_warnings,
 )
 from benchmarks.traces.extraction import PooledMetrics, per_rank_pooled_metrics
 
@@ -586,25 +586,30 @@ def evaluate_run(
     # The declared mesh, read back from the manifest.
     recorded_parallelism = manifest["parallelism"]
     world_size = int(recorded_parallelism.get("world_size", 1))
-    # The two dense-sharding warnings reach the artifact as well as the
+    # The two ZeRO-level warnings reach the artifact as well as the
     # console. The runner says them when the run starts, and a reader of
     # results.json was not there. The file is what a report quotes.
     #
-    # ``dense_sharding_warnings`` reads a spec, so the record becomes a spec
+    # ``zero_warnings`` reads a spec, so the record becomes a spec
     # again. Only the fields that function reads are rebuilt: a record also
     # carries keys the spec derives for itself, such as ``world_size``.
+    #
+    # It also reads the engines the evaluated arms run on, because one
+    # warning is about TorchTitan's FSDP2 alone. The manifest arm records
+    # carry the launcher, so the file states the same facts the console did.
     warnings.extend(
-        dense_sharding_warnings(
+        zero_warnings(
             ParallelismSpec(
                 dp=int(recorded_parallelism.get("dp", 1)),
                 pp=int(recorded_parallelism.get("pp", 1)),
                 ep=int(recorded_parallelism.get("ep", 1)),
-                dense_sharding=str(
-                    recorded_parallelism.get(
-                        "dense_sharding", DEFAULT_DENSE_SHARDING
-                    )
-                ),
-            )
+                zero=int(recorded_parallelism.get("zero", DEFAULT_ZERO)),
+            ),
+            engines=[
+                str(record.get("launcher", ""))
+                for record in manifest.get("arms", ())
+                if record.get("name") in set(arms)
+            ],
         )
     )
     raw_training = {

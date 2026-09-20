@@ -34,11 +34,11 @@ plain-bf16 model above.
 configured value to see it.** ``data_parallel_shard_degree`` defaults to
 **-1** in TorchTitan (``config/configs.py``), which means "take every
 remaining rank". A dp 2 run whose command line omitted the flag therefore
-shards the parameters, and the manifest still records the dense-sharding
+shards the parameters, and the manifest still records the zero
 value the harness asked for.
 
 **The refusal reads the raw value and not the resolved mesh, because the
-harness now asks for both meshes.** Under a sharded ``--dense-sharding``
+harness now asks for both meshes.** Under a sharded ``--zero``
 value ``titan_mesh`` returns ``(1, dp)``, so ``dp_shard`` above 1 is an honest
 request; a refusal written on the resolved mesh would refuse every sharded
 run and would still pass a dropped flag whenever the remainder resolved to
@@ -57,9 +57,9 @@ the flag", and nothing else means that.
 
 **A mesh that replicates AND shards is refused too.** The harness asks for
 one treatment at a time: ``titan_mesh`` is meant to return ``(dp, 1)``
-under ``replicate`` and ``(1, dp)`` under ``zero1`` and ``zero3``. So no
+under ``zero 0`` and ``(1, dp)`` under ``zero 1`` and ``zero 3``. So no
 spec asks for HSDP. A passthrough flag can build one, and the manifest
-carries no dense-sharding value that names it.
+carries no ZeRO level that names it.
 
 **This module cannot check ``titan_mesh``, and nothing here can.** It runs
 in the training subprocess and reads only the mesh TorchTitan resolved. A
@@ -146,7 +146,7 @@ def parallelize_piper1b(
                 "--parallelism.data-parallel-shard-degree: TorchTitan reads "
                 "an omitted one as every remaining rank, so this run shards "
                 "the parameters while the manifest records the "
-                "dense-sharding value the harness asked for (got "
+                "ZeRO level the harness asked for (got "
                 "data_parallel_shard_degree="
                 f"{parallelism.data_parallel_shard_degree})"
             )
@@ -155,7 +155,7 @@ def parallelize_piper1b(
             raise RuntimeError(
                 "piper1b benchmark configs run one data-parallel treatment "
                 "at a time, replication or sharding; this mesh does both "
-                "and the manifest carries no dense-sharding value that "
+                "and the manifest carries no ZeRO level that "
                 f"names it (got dp_replicate={parallel_dims.dp_replicate}, "
                 f"dp_shard={parallel_dims.dp_shard})"
             )

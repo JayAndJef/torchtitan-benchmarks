@@ -183,6 +183,10 @@ class _RunFixture:
             "hardware": "test-gpu",
             "workload": WORKLOAD,
             "selected_arms": sorted(logs),
+            "arms": [
+                {"name": arm, "launcher": "torchtitan"}
+                for arm in sorted(logs)
+            ],
         }
         manifest["parallelism"] = (
             {"world_size": 1, "dp": 1, "pp": 1, "ep": 1}
@@ -239,7 +243,7 @@ class SingleRankIsUnchangedTests(unittest.TestCase):
         self.assertEqual(result.warnings, ())
 
 
-class DenseShardingWarningsReachTheArtifactTests(unittest.TestCase):
+class ZeroWarningsReachTheArtifactTests(unittest.TestCase):
     """The runner says them when the run starts. A reader of results.json
     was not there, and the file is what a report quotes.
     """
@@ -259,7 +263,7 @@ class DenseShardingWarningsReachTheArtifactTests(unittest.TestCase):
                 "dp": 1,
                 "pp": 1,
                 "ep": 1,
-                "dense_sharding": "zero1",
+                "zero": 1,
             }
         )
         self.assertEqual(len(warnings), 2)
@@ -274,7 +278,7 @@ class DenseShardingWarningsReachTheArtifactTests(unittest.TestCase):
                     "dp": 1,
                     "pp": 1,
                     "ep": 1,
-                    "dense_sharding": "replicate",
+                    "zero": 0,
                 }
             ),
             [],

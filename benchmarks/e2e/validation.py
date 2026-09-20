@@ -49,7 +49,7 @@ from benchmarks.e2e.megatron_stock.flags import (
     data_parallel_optimizer,
     grad_reduce_in_fp32,
     microbatch_geometry,
-    refuse_unknown_dense_sharding,
+    refuse_unknown_zero,
 )
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
@@ -333,19 +333,19 @@ def _megatron_stock_parallelism_markers(
     degree from the group ``initialize_model_parallel`` built. So a run
     whose wrapper went missing dies there and prints no line.
 
-    **The class name is what proves the dense-sharding value.** Megatron
-    picks ``DistributedDataParallel`` under ``replicate`` and
-    ``FullyShardedDataParallelV1`` under ``zero3``, from
+    **The class name is what proves the ZeRO level.** Megatron
+    picks ``DistributedDataParallel`` under ``zero 0`` and
+    ``FullyShardedDataParallelV1`` under ``zero 3``, from
     ``--use-megatron-fsdp`` alone (``training.py``), and the two are
     siblings rather than one a subclass of the other. So a run that lost
     the sharding flags prints the other class name here and fails this
     rule. ``DATA_PARALLEL_WRAPPERS`` is the table, and it lives beside the
     flags that produce it so the two cannot drift.
 
-    **The optimizer class is what proves ``zero1``, and the wrapper class
+    **The optimizer class is what proves ``zero 1``, and the wrapper class
     cannot.** ``--use-distributed-optimizer`` alone gives ZeRO-1, and it
     leaves the wrapper at ``DistributedDataParallel`` -- the same class
-    ``replicate`` gets. So the two values print the same wrapper name, and
+    ``zero 0`` gets. So the two values print the same wrapper name, and
     only the optimizer separates them: Megatron builds
     ``DistributedOptimizer`` under that flag and
     ``Float16OptimizerWithFloat16Params`` without it
@@ -359,7 +359,7 @@ def _megatron_stock_parallelism_markers(
     ``data_parallel_sharding_strategy`` to ``optim_grads_params`` and
     copies it into every ``ddp_config``, but its optimizer reads it only
     under ``use_megatron_fsdp``. ``SHARDING_STRATEGIES`` therefore names
-    ``no_shard`` under ``replicate``, and the driver derives the printed
+    ``no_shard`` under ``zero 0``, and the driver derives the printed
     value the same way.
 
     **The expert degree here is an observation and the mesh line's is
@@ -368,7 +368,7 @@ def _megatron_stock_parallelism_markers(
     and refuses a disagreement, so the two statements of the degree cannot
     differ in a run that reaches this rule.
 
-    **``overlap_grad_reduce`` is a function of the dense-sharding value,
+    **``overlap_grad_reduce`` is a function of the ZeRO level,
     and the flag list is not what decides it.** The argv omits
     ``--overlap-grad-reduce`` under both values, so ``args`` carries False
     either way -- but ``MegatronFSDP.__init__`` then sets
@@ -389,10 +389,10 @@ def _megatron_stock_parallelism_markers(
     the derivation, and the driver prints what the wrapper really carries.
 
     **The optimizer field names the members of a CHAIN under two of the
-    three values, and the dense-sharding value is what decides it.**
+    three values, and the ZeRO level is what decides it.**
     ``get_megatron_optimizer`` ends its standard path with an unconditional
-    ``ChainedOptimizer(optimizers)``, so ``replicate`` and ``zero1`` always
-    chain. ``zero3`` takes the Megatron-FSDP branch instead, which returns
+    ``ChainedOptimizer(optimizers)``, so ``zero 0`` and ``zero 1`` always
+    chain. ``zero 3`` takes the Megatron-FSDP branch instead, which returns
     its one optimizer bare at a single model chunk. A chain's own name
     proves no ZeRO
     level, because both chained values carry it, so the marker names the
@@ -418,7 +418,7 @@ def _megatron_stock_parallelism_markers(
     _, microbatches, _ = microbatch_geometry(workload, spec)
     # A garbage value would otherwise reach the three tables below and
     # raise a bare KeyError, which names neither the value nor the flag.
-    refuse_unknown_dense_sharding(spec.dense_sharding)
+    refuse_unknown_zero(spec.zero)
     markers = [
         f"Megatron-LM stock parallelism: dp={spec.dp} pp={spec.pp} "
         f"ep={spec.ep} schedule=1F1B microbatches={microbatches} "
@@ -427,15 +427,15 @@ def _megatron_stock_parallelism_markers(
     if spec.dp > 1:
         markers.append(
             "Megatron-LM stock data parallel: "
-            f"{DATA_PARALLEL_WRAPPERS[spec.dense_sharding]} over "
+            f"{DATA_PARALLEL_WRAPPERS[spec.zero]} over "
             f"{spec.dp} ranks (overlap_grad_reduce="
-            f"{DATA_PARALLEL_OVERLAP[spec.dense_sharding]}, "
+            f"{DATA_PARALLEL_OVERLAP[spec.zero]}, "
             "grad_reduce_in_fp32="
             f"{grad_reduce_in_fp32(megatron_precision)}, "
             "sharding_strategy="
-            f"{SHARDING_STRATEGIES[spec.dense_sharding]}, "
+            f"{SHARDING_STRATEGIES[spec.zero]}, "
             f"expert_parallel={spec.ep}, optimizer="
-            f"{data_parallel_optimizer(spec.dense_sharding)})"
+            f"{data_parallel_optimizer(spec.zero)})"
         )
     return tuple(markers)
 

@@ -666,7 +666,7 @@ class CliTests(unittest.TestCase):
 
     def test_megatron_precision_takes_no_environment_variable(self) -> None:
         """``lean`` has to agree with ``--scenario``, ``--arm`` AND
-        ``--dense-sharding``. An exported value would fail every replicated
+        ``--zero``. An exported value would fail every replicated
         run on a flag the operator never passed.
         """
         for command in (run_command, run_all_command):
@@ -705,8 +705,8 @@ class CliTests(unittest.TestCase):
                         "--all-scenarios",
                         "--ac",
                         "none",
-                        "--dense-sharding",
-                        "zero1",
+                        "--zero",
+                        1,
                         "--megatron-precision",
                         "lean",
                     ],
@@ -720,11 +720,11 @@ class CliTests(unittest.TestCase):
             {request.megatron_precision for request in requests}, {"lean"}
         )
 
-    def test_all_scenarios_at_lean_under_replicate_skips_everything(
+    def test_all_scenarios_at_lean_under_zero_zero_skips_everything(
         self,
     ) -> None:
         """Megatron asserts the distributed optimizer under the
-        precision-aware optimizer, and ``--dense-sharding`` is the one
+        precision-aware optimizer, and ``--zero`` is the one
         owner of that flag. No scenario can honour lean without it.
         """
         with tempfile.TemporaryDirectory() as temporary:
@@ -747,8 +747,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(execute.call_args_list, [])
         self.assertIn(
-            "skipped: --megatron-precision 'lean' needs --dense-sharding "
-            "zero1 or --dense-sharding zero3",
+            "skipped: --megatron-precision 'lean' needs --zero 1 or "
+            "--zero 3",
             result.output,
         )
 
