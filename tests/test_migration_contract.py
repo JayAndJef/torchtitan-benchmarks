@@ -1488,14 +1488,6 @@ class GoldenCommandTests(unittest.TestCase):
         self.assertNotIn("--dp", command)
         self.assertNotIn("--pp", command)
 
-    def test_the_megatron_driver_module_is_importable_as_a_module(self) -> None:
-        # python -m needs the module to exist under the runner's PYTHONPATH;
-        # a wrong -m target fails only once the subprocess starts.
-        self.assertIsNotNone(
-            _find_spec(MEGATRON_DRIVER_MODULE),
-            f"python -m {MEGATRON_DRIVER_MODULE} would fail to start",
-        )
-
 
 # --------------------------------------------------------------------------
 # 6. --module resolves the way TorchTitan will resolve it.
@@ -1980,36 +1972,8 @@ TEST_CENSUS = {
     # False moves exactly one field, that no profile carries the field, and
     # that the builder forwards it.
     "test_mcore_profiles": 27,
-    # +6 with the data-parallel slice: that two ranks read different tokens
-    # and that each engine reads the same shard on the same rank, plus the
-    # four that pin one static cu_seqlens length -- per rank, across two
-    # ranks when the maximum is global, that the padding adds no document,
-    # and that a maximum below a pack is refused.
-    # -4 with the move of the c4 materializer into the stock driver: the
-    # four stream-parity tests moved to test_megatron_stock_data, which is
-    # a new module and therefore carries no pinned count.
-    "test_megatron_data": 7,
-    # The megatron driver's pipeline handling, which needs two GPUs to run
-    # and none to check: how a batch splits into microbatches, which
-    # pipeline requests the driver refuses (an interleaved schedule by
-    # name, a world size that is not the pipeline degree), and that every
-    # branch it grew takes the single-rank value at --pp 1 -- no repack, no
-    # collective, and the trace file named for the rank that wrote it.
-    # +4 that the microbatch loss reduction is a sum: one microbatch, four
-    # microbatches against the mean this replaced, an empty stage, and the
-    # detach aliasing the sum depends on, pinned against torch. +1 that the
-    # Materialized log line is the recorded one at the trivial spec.
-    # +7 with the data-parallel degree: that --dp defaults to 1, that dp 2
-    # and dp 2 x pp 2 are accepted, that a rank the mesh does not name and a
-    # degree below 1 are refused, that every DDP branch is guarded on
-    # --dp > 1, that graph mode leaves the main_grad buffers to DDP, that the
-    # parameter sum is taken over one pipeline, and that the global token
-    # line multiplies by dp. The norm-reduction test now names the pipeline
-    # degree and its group rather than the world size.
-    # +7 with --batch-p2p-sync: the default, an unknown value, off refused
-    # at pp 1 and accepted under a pipeline, the line read off the built
-    # config, its template, and the build call plus the unguarded print.
-    "test_megatron_driver": 36,
+    # test_megatron_data and test_megatron_driver are gone with the tuned
+    # megatron driver they covered.
     # The stock Megatron-LM driver package, checked on the CPU: the flag
     # list it builds, the flags it deliberately omits by name, the
     # microbatch geometry it packs, the eight keys of one microbatch dict,
@@ -2122,7 +2086,7 @@ TEST_CENSUS = {
     # +2 with the 30b-a3b shape: its geometry against piper's case and its
     # counts against the tensor list, and its split at pp 4, pp 8 and
     # every expert degree eight GPUs hold.
-    "test_model_shape": 58,
+    "test_model_shape": 57,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -2194,7 +2158,7 @@ TEST_CENSUS = {
     # +2 with the schema-16 field: a resume inheriting the recorded
     # precision and refusing another, and a schema-15 directory reading as
     # stock.
-    "test_runner": 82,
+    "test_runner": 81,
     "test_swiglu": 4,
     "test_te_rope": 1,
     # New with the in-process titan build: 3 that pin the override count
@@ -2216,7 +2180,7 @@ TEST_CENSUS = {
     # one whole model on one rank, that only the shape and the profile are
     # required, and that the degree reaches the config while the two ends
     # reach GPTModel.
-    "test_megatron_model": 29,
+    "test_megatron_model": 28,
     # The parallelism run axis, landed before anything imports it. Every one
     # of the sixteen validator rules in both directions, the two
     # preconditions on the arguments it borrows, the spec's own positivity
@@ -2361,7 +2325,7 @@ TEST_CENSUS = {
     # fields per value, the titan profile's silence, the tuned profile's
     # refusal of lean, a log that must carry the requested value, and one
     # rank of a pipeline that carries the other one.
-    "test_parallel_validation": 64,
+    "test_parallel_validation": 58,
     # What a tokens/s figure counts, at the three places that decide it: the
     # megatron driver's own arithmetic, the manifest key that records the
     # definition, and evaluation's min-over-ranks publication with its
@@ -2379,7 +2343,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1908
+TEST_CENSUS_TOTAL = 1856
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

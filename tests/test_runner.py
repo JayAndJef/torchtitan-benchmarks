@@ -2021,16 +2021,6 @@ class ValidationTests(unittest.TestCase):
                 _compiled_line(TORCH_COMPILE_MODE[mode]),
             )
 
-    def test_megatron_mode_line_matches_the_driver_constant(self) -> None:
-        # The validation profile and the driver define the contract in two
-        # places; this pins them together without importing megatron.
-        from benchmarks.e2e.megatron.train import MODE_LINE
-        from benchmarks.e2e.validation import VALIDATION_PROFILES
-
-        for mode in ("default", "cuda-graph"):
-            rendered = MODE_LINE.format(mode=mode, impl="anything")
-            self.assertIn(VALIDATION_PROFILES["megatron"].mode_line(mode), rendered)
-
     def test_ac_mode_must_match_the_applied_treatment(self) -> None:
         arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:

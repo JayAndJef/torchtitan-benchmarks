@@ -153,7 +153,6 @@ WORKER_SIDE_MODULES = (
     # torchtitan at module scope by construction.
     "benchmarks.models.piper_qwen3.titan_model",
     "benchmarks.e2e.data.piper_qwen3",
-    "benchmarks.e2e.megatron.data",
     "benchmarks.e2e.megatron_stock.data",
     "benchmarks.e2e.megatron_stock.profiling",
     # The counting GPT builder. Megatron's own
@@ -191,8 +190,8 @@ WORKER_SIDE_MODULES = (
 # module scope, because each defers its heavy imports into a function body.
 # That deferral is load-bearing rather than stylistic:
 #
-# * ``e2e.megatron.train`` is a ``python -m`` entry point, so ``--help`` must
-#   not pay for torch, exactly as ``kernel.worker`` does not; and
+# * ``e2e.megatron_stock.train`` is a ``python -m`` entry point, so ``--help``
+#   must not pay for torch, exactly as ``kernel.worker`` does not; and
 # * ``models.piper_qwen3.megatron_model`` *cannot* import Megatron at module
 #   scope, because ``megatron_bootstrap`` has to put Megatron on ``sys.path``
 #   first. Hoisting its imports would not be a style regression, it would
@@ -204,7 +203,6 @@ WORKER_SIDE_MODULES = (
 # dynamic ML-free probe that the parent-side modules get -- the deferral is
 # the property worth locking.
 WORKER_SIDE_DEFERRED_MODULES = (
-    "benchmarks.e2e.megatron.train",
     "benchmarks.e2e.megatron_stock.train",
     # The typing shim and the Megatron path setup. It runs in the
     # worker, it imports no ML stack, and it *cannot*: it is what

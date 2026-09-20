@@ -9,9 +9,8 @@ engines read the same c4_test stream rank for rank.
 
 The model builder, the optimizer, the learning-rate schedule, the
 distributed setup, the forward step, the embedding-rank rule and the
-training loop all stay Megatron's. That is the point of the arm, and it is
-what makes it different from ``benchmarks/e2e/megatron/train.py``, which
-replicates the TorchTitan treatment step by step.
+training loop all stay Megatron's. That is the point of the arm: the
+driver replicates none of the TorchTitan treatment.
 
 **No file under ``third_party/`` is edited.** Three shims run in this
 process instead:

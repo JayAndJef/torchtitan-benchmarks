@@ -27,8 +27,7 @@ Three rules govern the iterator, and each answers a way a run can be wrong:
 
 **One microbatch is one packed sequence, never a batch of rows.** The
 iterator concatenates ``rows_per_sample`` titan rows into a single
-``(1, rows * seq_len)`` sample, which is what the tuned driver's
-``thd_batches`` already does. ``benchmarks/e2e/megatron_stock/flags.py``'s
+``(1, rows * seq_len)`` sample. ``benchmarks/e2e/megatron_stock/flags.py``'s
 ``microbatch_geometry`` gives the reason: Megatron flattens a ``(m, S)``
 microbatch to ``(1, m*S)`` and then allocates its pipeline receive buffer
 as ``(S, m, H)``, so a batched microbatch reaches the next stage permuted.
@@ -325,9 +324,8 @@ def train_valid_test_datasets_provider(
     # marker line arm rule 12 matches states the first. The token slice
     # below uses the second. A disagreement would put the wrong shard on
     # this rank while the log named the right mesh, and every rule would
-    # pass. The tuned driver makes the same check
-    # (``benchmarks/e2e/megatron/train.py``). This is where the stock
-    # driver can, because ``pretrain()`` owns ``initialize_model_parallel``.
+    # pass. This is where the stock driver makes the check, because
+    # ``pretrain()`` owns ``initialize_model_parallel``.
     # It is not the first of our code to run after that call -- the model
     # provider and install_data_parallel_marker's wrapper run first -- but
     # it is before any token is read, which is the property that matters.

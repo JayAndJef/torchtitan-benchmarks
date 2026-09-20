@@ -23,8 +23,8 @@ its rules are declared in one place rather than beside the scenarios. **It
 does import that module**, for the three compile-mode constants, so an
 importer pays for the scenario declarations as well. That cost is a few
 torch-free dataclasses today. Should it ever matter -- the likely caller is
-``benchmarks/e2e/megatron/train.py``, a worker that must stay cheap to
-import -- move those constants into a module both can read, rather than
+a worker that must stay cheap to import -- move those constants into a
+module both can read, rather than
 copying them here: two spellings of the compile-mode sets would let rules 6
 and 13 disagree with the axis they gate.
 
@@ -310,7 +310,7 @@ class PipelineSchedule:
     it", and rule 5 deliberately asks the library's question.**
     ``Interleaved1F1B`` is the case where the two answers differ: Megatron-LM
     implements it, so a cross-engine row is possible in principle, but
-    ``benchmarks/e2e/megatron/train.py`` has no model-chunk list and raises.
+    our stock driver refuses a virtual pipeline degree.
     Rule 5 therefore lets that spec through and the driver fails it -- the
     declaration-without-a-builder pattern the kernel spans already use, where
     the failure lands at the place that owns the missing work rather than at

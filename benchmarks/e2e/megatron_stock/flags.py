@@ -227,8 +227,7 @@ DATA_PARALLEL_OPTIMIZERS: dict[str, str] = {
 # table cannot state the line.
 CHAINED_OPTIMIZER = "ChainedOptimizer"
 
-# TorchTitan's own optimizer values, replicated flag for flag. The source is
-# benchmarks/e2e/megatron/train.py, which replicates the TorchTitan trainer.
+# TorchTitan's own optimizer values, replicated flag for flag.
 LEARNING_RATE = "8e-4"
 LR_WARMUP_ITERS = "2"
 ADAM_BETA1 = "0.9"
@@ -646,9 +645,8 @@ def microbatch_geometry(
 
     The row count follows the other engine at both meshes. Under a pipeline
     the microbatch size is the split TorchTitan is given. Without one
-    neither engine splits, so the whole batch is one pack -- which is what
-    ``benchmarks/e2e/megatron/train.py``'s ``pipeline_settings`` returns and
-    what every published megatron number was measured on.
+    neither engine splits, so the whole batch is one pack, which is what
+    every published megatron number was measured on.
     """
     if spec.pp > 1:
         rows_per_sample = spec.pp_microbatch_size
