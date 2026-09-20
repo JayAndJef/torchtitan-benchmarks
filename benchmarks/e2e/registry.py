@@ -34,24 +34,16 @@ from benchmarks.traces.schema import Region
 # mixed precision.
 EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
 
-# Engine-neutral compile modes selectable per run. "cuda-graph" replaced the
-# torch-level name "reduce-overhead" in schema 8; TORCH_COMPILE_MODE maps it
-# back to the --compile.mode value the TorchTitan fork applies per block.
-# The two max-autotune modes were removed in schema 8 after the full matrix
-# showed them to be GPU-time regressions at these shapes (see
-# reports/20260807-mode-matrix-plain-bf16.md); schema <= 7 manifests may
-# still record them and the old reduce-overhead name.
+# Engine-neutral compile modes selectable per run. TORCH_COMPILE_MODE maps a
+# compiled mode to the --compile.mode value the TorchTitan fork applies per
+# block.
 #
 # "none" runs every arm eager. It is a value of this axis rather than a flag
 # of its own, because the axis already carries what an uncompiled run needs:
 # the manifest records it, --resume gates it, and it is a stated
-# comparability boundary. A separate boolean would also make "uncompiled
-# plus cuda-graph" expressible, and that cell means nothing. The manifest
-# schema stays 9: no field is renamed or reinterpreted, and an older reader
-# refuses the new value loudly as an unknown compile mode.
-COMPILE_MODES = ("default", "cuda-graph", "none")
-TORCH_COMPILE_MODE = {"default": "default", "cuda-graph": "reduce-overhead"}
-CUDAGRAPH_COMPILE_MODES = frozenset({"cuda-graph"})
+# comparability boundary.
+COMPILE_MODES = ("default", "none")
+TORCH_COMPILE_MODE = {"default": "default"}
 
 # Modes that apply no torch.compile at all. Such a run has no torch-level
 # mode name, so TORCH_COMPILE_MODE deliberately holds no entry for one: a

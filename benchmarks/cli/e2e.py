@@ -185,9 +185,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             show_envvar=True,
             help=(
                 "Compile mode applied to every arm in the run [default: "
-                "default]. cuda-graph maps to torch.compile reduce-overhead "
-                "for TorchTitan arms; none runs them eager and declares no "
-                "compiled regions. Results are only comparable within one "
+                "default]. none runs the TorchTitan arms eager and declares "
+                "no compiled regions. Results are only comparable within one "
                 "mode."
             ),
         ),

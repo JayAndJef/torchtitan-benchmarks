@@ -21,7 +21,7 @@ no recorded value is hand-edited):
 * ``tests/fixtures/legacy/e2e_schema8/{manifest,run_state}.json``
   from ``out/20260807T175156Z/piper1b_megatron/nvidia-h200/`` -- an e2e
   manifest at schema 8 (current is 9), scenario ``piper1b_megatron``,
-  ``compile_mode=cuda-graph``, ``ac_mode=none``, recorded on
+  a retired compile-mode value, ``ac_mode=none``, recorded on
   ``benchmarks_git_rev`` ``de8bc295f5``. Chosen because it is the richest
   single artifact for this purpose: it names ``piper1b`` as a workload
   module, ``megatron_baseline.train`` in argv, and

@@ -97,10 +97,10 @@ class CliTests(unittest.TestCase):
             "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
-                cli, ["run", "2", "--compile-mode", "cuda-graph", "--ac", "none"]
+                cli, ["run", "2", "--compile-mode", "none", "--ac", "none"]
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].compile_mode, "cuda-graph")
+        self.assertEqual(execute.call_args.args[0].compile_mode, "none")
         self.assertEqual(execute.call_args.args[0].ac_mode, "none")
 
     def test_compile_mode_defaults_to_unrequested(self) -> None:

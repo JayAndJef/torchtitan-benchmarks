@@ -3,8 +3,8 @@
 ``validate_arm`` is the gate every arm passes before its numbers are
 published. Engine differences live in the ``VALIDATION_PROFILES`` registry,
 selected by ``Arm.validation``; the structural rules -- trace-window count,
-kernel markers, ``cudaGraphLaunch`` under cuda-graph mode, override counting,
-and the parameter-count line -- are shared. Compiled-region structure is
+kernel markers, override counting, and the parameter-count line -- are
+shared. Compiled-region structure is
 *not*: it is a per-profile field (``check_regions``), because the megatron
 arm has no Inductor graph annotations to match.
 
@@ -61,7 +61,6 @@ from benchmarks.e2e.parallelism import (
     titan_mesh,
 )
 from benchmarks.e2e.registry import (
-    CUDAGRAPH_COMPILE_MODES,
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MEGATRON_PRECISION,
@@ -126,9 +125,8 @@ ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
 class ValidationProfile:
     """Engine-specific pieces of validate_arm, selected by Arm.validation.
 
-    The engine-neutral rules (trace-window count, kernel markers,
-    cudaGraphLaunch under cuda-graph mode, override counting when declared)
-    are shared; these fields carry what differs: the completion marker, the
+    The engine-neutral rules (trace-window count, kernel markers, override
+    counting when declared) are shared; these fields carry what differs: the completion marker, the
     log line that proves the requested mode actually applied, the phrases
     that mean a silent fallback, and whether the SelectiveAC line and the
     compiled-region structure are expected at all.
@@ -970,13 +968,11 @@ def validate_arm(
                 "profiler windows, "
                 f"found {len(rank_traces)} {where}"
             )
-    # Arm rules 6 and 9 read every rank's traces as one set, which is what
-    # they already did when one rank was all there was. They are deliberately
-    # NOT per rank, and this stage does not change either.
+    # Arm rule 6 reads every rank's traces as one set, which is what it
+    # already did when one rank was all there was. It is deliberately NOT
+    # per rank, and this stage does not change it.
     #
-    # Arm rule 9 is unreachable: parallelism rule 13 refuses cuda-graph for
-    # every parallel run, and this rule fires only under cuda-graph. Arm rule
-    # 6 IS reachable, and its reading stays "any rank" for now. Under PP a
+    # Its reading stays "any rank" for now. Under PP a
     # stage holds some of the layers, so a marker kernel can be legitimately
     # absent from a rank: "every rank" would fail an honest run, and "any
     # rank" passes a run where one stage silently degraded.
@@ -994,13 +990,8 @@ def validate_arm(
             raise RuntimeError(
                 f"{arm.name}: marker kernel {marker!r} absent from profiler traces"
             )
-    if compile_mode in CUDAGRAPH_COMPILE_MODES and not any(
-        _trace_contains(path, "cudaGraphLaunch") for path in traces
-    ):
-        raise RuntimeError(
-            f"{arm.name}: compile mode {compile_mode!r} enables CUDA graphs but "
-            f"no cudaGraphLaunch appears in the profiler traces under {arm_dir}"
-        )
+    # Arm rule 9 is DELETED. It required a graph launch in the traces under
+    # the graph-capture compile mode, and that mode no longer exists.
     # Arm rule 13. **Every rank**, and that reading is provable here where
     # arm rule 6's is not: at dp above 1 every rank sits in a data-parallel
     # group of that size, so every rank reduces. A rank whose traces carry no

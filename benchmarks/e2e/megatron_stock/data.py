@@ -225,9 +225,7 @@ class StockReplayIterator:
         # One padded width for the whole run, taken over this rank's own
         # packs. Every rank holds different documents, so this number is a
         # per-rank number -- and it may be, because Megatron strips the
-        # padding inside each rank and no collective reads the width. The
-        # tuned driver takes a global maximum instead, because a captured
-        # CUDA graph needs one static shape across the mesh.
+        # padding inside each rank and no collective reads the width.
         self._padded_documents = max(
             document_offsets(
                 torch.cat([row[1] for row in group]), self._packed_len

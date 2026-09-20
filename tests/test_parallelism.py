@@ -1476,23 +1476,7 @@ class Rule12MicrobatchesCoverTheWarmupTest(unittest.TestCase):
         check(TRIVIAL_SPEC, batch=2)
 
 
-class Rule13CudaGraphTest(unittest.TestCase):
-    def test_a_single_gpu_run_keeps_every_compile_mode(self):
-        for mode in ("default", "cuda-graph", "none"):
-            with self.subTest(compile_mode=mode):
-                check(TRIVIAL_SPEC, compile_mode=mode)
-
-    def test_a_pipeline_run_is_refused_under_cuda_graph(self):
-        with self.assertRaisesRegex(ValueError, "cuda-graph"):
-            check(PP2, compile_mode="cuda-graph")
-
-    def test_a_data_parallel_run_is_refused_under_cuda_graph(self):
-        with self.assertRaisesRegex(ValueError, "cuda-graph"):
-            check(ParallelismSpec(dp=2), compile_mode="cuda-graph")
-
-    def test_a_parallel_run_keeps_the_other_two_modes(self):
-        check(PP2, compile_mode="default")
-        check(PP2, compile_mode="none")
+# Rule 13 is DELETED with the graph-capture compile mode.
 
 
 class Rule14ExpertParallelismNeedsTheShardedParityTest(unittest.TestCase):
@@ -1802,16 +1786,7 @@ class TheEightGpuCellTest(unittest.TestCase):
                 ):
                     check(DP2_PP4, batch=8, device_count=device_count)
 
-    def test_the_cell_is_refused_under_cuda_graph(self):
-        """Rule 13 reads the world size, so it grows with the mesh."""
-        with self.assertRaisesRegex(
-            ValueError, r"refused at world size 8"
-        ):
-            check(
-                DP2_PP4, batch=8, device_count=8, compile_mode="cuda-graph"
-            )
-
-    def test_the_cell_keeps_the_other_two_compile_modes(self):
+    def test_the_cell_keeps_every_compile_mode(self):
         for mode in ("default", "none"):
             with self.subTest(compile_mode=mode):
                 check(DP2_PP4, batch=8, device_count=8, compile_mode=mode)
@@ -1930,14 +1905,10 @@ class PreconditionsOnTheBorrowedArgumentsTest(unittest.TestCase):
                 check(TRIVIAL_SPEC, compile_mode=mode)
 
     def test_an_unknown_compile_mode_is_refused(self):
-        """Rules 6 and 13 read the mode in OPPOSITE directions: rule 6
-        refuses anything outside the uncompiled set and so fails safe on an
-        unknown name, while rule 13 refuses only names inside the cudagraph
-        set and so fails OPEN on one. Without this precondition,
-        ``reduce-overhead`` -- the torch-level spelling of ``cuda-graph``,
-        which schema <= 7 manifests record -- would slip a graph-capturing
-        run past rule 13."""
-        for mode in ("reduce-overhead", "max-autotune", "", "eager"):
+        """Rule 6 refuses anything outside the uncompiled set, so it must
+        know that the name is a real mode. A name no axis holds is a caller
+        error, and the run would record a treatment it never had."""
+        for mode in ("max-autotune", "", "eager"):
             with self.subTest(compile_mode=mode):
                 with self.assertRaisesRegex(ValueError, "Unknown compile mode"):
                     check(PP2, compile_mode=mode)

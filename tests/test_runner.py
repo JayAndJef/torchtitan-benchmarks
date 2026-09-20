@@ -1349,19 +1349,6 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--compile.enable", command)
         self.assertIn("--profiler.enable_profiling", command)
 
-    def test_compile_mode_reaches_torchtitan_as_the_torch_level_name(self) -> None:
-        command = command_for_arm(
-            ENGINES.workload,
-            ENGINES.arm("titan_compiled"),
-            Path("/out/baseline"),
-            [],
-            "cuda-graph",
-        )
-        self.assertEqual(
-            command[command.index("--compile.mode") + 1], "reduce-overhead"
-        )
-        self.assertEqual(command[-2:], ["--dump-folder", "/out/baseline"])
-
     def test_default_compile_mode_leaves_the_command_untouched(self) -> None:
         command = command_for_arm(
             ENGINES.workload,
@@ -1603,7 +1590,7 @@ class ManifestTests(unittest.TestCase):
                 "rtx-a6000",
                 metadata,
                 extra_args,
-                "cuda-graph",
+                "none",
                 "none",
                 "1b",
                 parallelism=TRIVIAL_SPEC,
@@ -1614,7 +1601,7 @@ class ManifestTests(unittest.TestCase):
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
         self.assertEqual(manifest["schema_version"], 16)
-        self.assertEqual(manifest["compile_mode"], "cuda-graph")
+        self.assertEqual(manifest["compile_mode"], "none")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
         self.assertEqual(manifest["megatron_p2p_sync"], "on")
@@ -1714,9 +1701,7 @@ class UncompiledRunTests(unittest.TestCase):
 def _compiled_line(torch_mode: str) -> str:
     """The apply_compile log line validate_arm matches, as torchtitan emits it.
 
-    Takes the torch-level mode name ("default"/"reduce-overhead"), which is
-    what reaches the log; the harness-level "cuda-graph" maps onto
-    "reduce-overhead".
+    Takes the torch-level mode name, which is what reaches the log.
     """
     return (
         "[titan] - root - INFO - Compiling each TransformerBlock with "
@@ -1773,50 +1758,19 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, ENGINES.workload)
 
-    def _rope_baseline_fixture(self, root: Path, *, cudagraphs: bool) -> Path:
+    def _rope_baseline_fixture(self, root: Path) -> Path:
         for iteration in ("iteration_20", "iteration_40"):
             trace = root / "profiling" / "traces" / iteration / "rank0_trace.json.gz"
             trace.parent.mkdir(parents=True, exist_ok=True)
             with gzip.open(trace, "wt") as trace_file:
                 trace_file.write("cudaLaunchKernel\n")
-                if cudagraphs:
-                    trace_file.write("cudaGraphLaunch\n")
         return root / "baseline.log"
-
-    def test_the_applied_mode_must_match_the_requested_one(self) -> None:
-        arm = ENGINES.arm("titan_compiled")
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            log = self._rope_baseline_fixture(root, cudagraphs=True)
-
-            # cuda-graph is delivered to torch.compile as reduce-overhead, so
-            # that is the name the log must carry.
-            log.write_text(
-                _compiled_line("reduce-overhead") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
-            )
-            validate_arm(
-                arm, root, log, ENGINES.workload, compile_mode="cuda-graph"
-            )
-
-            log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
-            with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(
-                    arm, root, log, ENGINES.workload, compile_mode="cuda-graph"
-                )
-
-            log.write_text(
-                _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
-            )
-            with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(
-                    arm, root, log, ENGINES.workload, compile_mode="cuda-graph"
-                )
 
     def test_default_run_requires_the_default_mode_line(self) -> None:
         arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            log = self._rope_baseline_fixture(root, cudagraphs=False)
+            log = self._rope_baseline_fixture(root)
 
             log.write_text(
                 _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
@@ -1824,44 +1778,20 @@ class ValidationTests(unittest.TestCase):
             validate_arm(arm, root, log, ENGINES.workload)
 
             log.write_text(
-                _compiled_line("reduce-overhead") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
+                _compiled_line("max-autotune") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(arm, root, log, ENGINES.workload)
 
-    def test_cudagraph_mode_requires_a_graph_launch_in_the_traces(self) -> None:
-        arm = ENGINES.arm("titan_compiled")
-        applied = _compiled_line("reduce-overhead") + _SAC_LINE
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            log = self._rope_baseline_fixture(root, cudagraphs=False)
-            log.write_text(applied + _SIZE_LINE + "Training completed\n")
-            with self.assertRaisesRegex(RuntimeError, "cudaGraphLaunch"):
-                validate_arm(
-                    arm,
-                    root,
-                    log,
-                    ENGINES.workload,
-                    compile_mode="cuda-graph",
-                )
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            log = self._rope_baseline_fixture(root, cudagraphs=True)
-            log.write_text(applied + _SIZE_LINE + "Training completed\n")
-            validate_arm(
-                arm,
-                root,
-                log,
-                ENGINES.workload,
-                compile_mode="cuda-graph",
-            )
+            log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
+            with self.assertRaisesRegex(RuntimeError, "did not apply"):
+                validate_arm(arm, root, log, ENGINES.workload)
 
     def test_ac_mode_must_match_the_applied_treatment(self) -> None:
         arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            log = self._rope_baseline_fixture(root, cudagraphs=False)
+            log = self._rope_baseline_fixture(root)
 
             # sac requested, SelectiveAC absent: the run measured no-AC.
             log.write_text(_compiled_line("default") + _SIZE_LINE + "Training completed\n")
@@ -1911,7 +1841,7 @@ class TrainingMetricsTests(unittest.TestCase):
         )
 
 
-def _write_block_traces(arm_dir: Path, *, cudagraphs: bool = False) -> None:
+def _write_block_traces(arm_dir: Path) -> None:
     """Write two profiler windows with the region structure the runner expects."""
     for iteration in (20, 40):
         trace = (
@@ -1956,17 +1886,6 @@ def _write_block_traces(arm_dir: Path, *, cudagraphs: bool = False) -> None:
                         },
                     )
                 )
-        if cudagraphs:
-            trace_events.append(
-                {
-                    "ph": "X",
-                    "cat": "cuda_runtime",
-                    "name": "cudaGraphLaunch",
-                    "tid": 1,
-                    "ts": 0,
-                    "dur": 5,
-                }
-            )
         with gzip.open(trace, "wt") as trace_file:
             json.dump({"traceEvents": trace_events}, trace_file)
 

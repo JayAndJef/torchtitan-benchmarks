@@ -94,7 +94,6 @@ from dataclasses import dataclass
 
 from benchmarks.e2e.registry import (
     COMPILE_MODES,
-    CUDAGRAPH_COMPILE_MODES,
     UNCOMPILED_COMPILE_MODES,
     Workload,
 )
@@ -779,13 +778,11 @@ def validate_parallelism(
     # Preconditions on the two arguments this module does not own, checked
     # before the numbered rules so those rules may assume them.
     #
-    # The compile mode is checked because rules 6 and 13 read it in OPPOSITE
-    # directions: rule 6 refuses anything outside UNCOMPILED_COMPILE_MODES
-    # and so fails safe on an unknown name, while rule 13 refuses only names
-    # inside CUDAGRAPH_COMPILE_MODES and so fails OPEN on one. An unknown
-    # mode would therefore slip a graph-capturing run past rule 13. The CLI
-    # spells the axis as a click.Choice today, so nothing reaches this from a
-    # command line -- but a caller with a bare string does.
+    # The compile mode is checked because rule 6 refuses anything outside
+    # UNCOMPILED_COMPILE_MODES and so must know that the name is a real
+    # mode. The CLI spells the axis as a click.Choice today, so nothing
+    # reaches this from a command line -- but a caller with a bare string
+    # does.
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
             f"Unknown compile mode {compile_mode!r}. Available: "
@@ -1003,23 +1000,8 @@ def validate_parallelism(
             "--pp-microbatch-size"
         )
 
-    # 13. No parallel CUDA-graph run has ever been captured. The DP case has
-    #     a recorded reason -- FSDP2 frees and reallocates the unsharded
-    #     parameters each step, which moves their addresses and forces a
-    #     re-capture every step -- and the failure mode is slow rather than
-    #     broken, so
-    #     validation rule 9 would still pass and the report would publish a
-    #     slow number under a cuda-graph label. PP has no such record and is
-    #     refused with it: one rule reads more clearly than two, and a
-    #     single-GPU run keeps all three compile modes either way.
-    if spec.world_size > 1 and compile_mode in CUDAGRAPH_COMPILE_MODES:
-        raise ValueError(
-            f"compile mode {compile_mode!r} is refused at world size "
-            f"{spec.world_size}: no multi-rank run has been shown to capture "
-            "its graphs once, and a repeated capture is slow rather than "
-            "broken, so the run would publish a slow number under a "
-            "cuda-graph label"
-        )
+    # 13. DELETED. It refused a parallel run under the graph-capture
+    #     compile mode, and that mode no longer exists.
 
     # 14. Expert parallelism needs the sharded dense parity, on both
     #     engines. TorchTitan cannot split the experts while it keeps the
