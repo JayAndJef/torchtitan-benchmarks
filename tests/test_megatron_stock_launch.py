@@ -8,7 +8,7 @@ Three things join here, and each can fail silently:
 2. The ``megatron_stock`` validation profile must prove the mesh. A profile
    that proves nothing passes, which is worse than no profile.
 3. The scenario must decline every mode its Megatron arm cannot honor, and
-   must still admit a TorchTitan-only subset at ``--compile-mode none``.
+   must still admit a TorchTitan-only subset.
 
 **The golden argv tests live here and not in
 ``tests/test_migration_contract.py``.** That module holds the goldens for
@@ -237,7 +237,6 @@ def _command(
     arm: Arm,
     *,
     model_size: str = "1b",
-    compile_mode: str = "default",
     ac_mode: str = "none",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     local_batch_size: int | None = None,
@@ -254,7 +253,6 @@ def _command(
         arm,
         Path("/tmp/arm-dir"),
         (),
-        compile_mode,
         ac_mode,
         model_size=model_size,
         parallelism=parallelism,
@@ -292,10 +290,9 @@ class StockScenarioDeclarationTests(unittest.TestCase):
         # It reuses the scenario workload's pre-tokenized config.
         self.assertIsNone(arm.config)
 
-    def test_the_axes_the_megatron_arm_cannot_honor_are_declined(self) -> None:
+    def test_the_axis_the_megatron_arm_cannot_honor_is_declined(self) -> None:
         scenario = scenario_by_name(SCENARIO_NAME)
         self.assertEqual(scenario.supported_ac_modes, ("none",))
-        self.assertEqual(scenario.supported_compile_modes, ("default",))
 
     def test_the_stock_arm_declares_no_permute_marker(self) -> None:
         """``--moe-permute-fusion`` is off, so its kernel must not be pinned.
@@ -396,7 +393,6 @@ class TrivialSpecArgvTests(unittest.TestCase):
                         arm,
                         Path("/tmp/arm-dir"),
                         (),
-                        "default",
                         "none",
                     )
                     named = command_for_arm(
@@ -404,7 +400,6 @@ class TrivialSpecArgvTests(unittest.TestCase):
                         arm,
                         Path("/tmp/arm-dir"),
                         (),
-                        "default",
                         "none",
                         parallelism=TRIVIAL_SPEC,
                     )
@@ -448,7 +443,6 @@ class StockArgvTests(unittest.TestCase):
         parallelism,
         local_batch_size=None,
         model_size="1b",
-        compile_mode="default",
         megatron_p2p_sync="on",
         megatron_nan_guard="on",
         megatron_precision="stock",
@@ -465,7 +459,6 @@ class StockArgvTests(unittest.TestCase):
                 parallelism,
                 arm_dir="/tmp/arm-dir",
                 model_size=model_size,
-                compile_mode=compile_mode,
                 megatron_p2p_sync=megatron_p2p_sync,
                 megatron_nan_guard=megatron_nan_guard,
                 megatron_precision=megatron_precision,
@@ -734,7 +727,6 @@ class StockArgvRefusalTests(unittest.TestCase):
                 _stock_arm(),
                 Path("/tmp/arm-dir"),
                 ("--training.steps", "5"),
-                "default",
                 "none",
             )
 
@@ -750,7 +742,6 @@ class StockArgvRefusalTests(unittest.TestCase):
                 _stock_arm(),
                 Path("/tmp/arm-dir"),
                 (),
-                "default",
                 "none",
             )
 
@@ -1471,11 +1462,11 @@ class StockRunResolutionTests(unittest.TestCase):
     """What ``run`` and ``run-all`` accept for this scenario.
 
     The compiled and the eager treatment are arm properties now, so the
-    roster resolves at one compile mode. Every other combination must be
+    roster resolves without a compile axis. Every other combination must be
     refused before a GPU is claimed.
     """
 
-    def _resolve(self, names: tuple[str, ...], compile_mode: str, ac_mode: str):
+    def _resolve(self, names: tuple[str, ...], ac_mode: str):
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", dict(_METADATA)),
@@ -1489,7 +1480,6 @@ class StockRunResolutionTests(unittest.TestCase):
                     scenario_name=SCENARIO_NAME,
                     arm_names=names,
                     out_dir=Path(temporary) / "run",
-                    compile_mode=compile_mode,
                     ac_mode=ac_mode,
                 ),
                 {"PATH": os.environ["PATH"]},
@@ -1497,32 +1487,23 @@ class StockRunResolutionTests(unittest.TestCase):
 
     def test_sac_is_refused_for_the_whole_scenario(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
-            self._resolve((), "default", "sac")
+            self._resolve((), "sac")
 
-    def test_the_uncompiled_mode_is_refused_for_the_whole_roster(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError, "does not support compile mode"
-        ):
-            self._resolve((), "none", "none")
-
-    def test_the_uncompiled_mode_is_refused_for_every_subset(self) -> None:
-        """No selection wins the mode: eager is an arm property now."""
+    def test_every_subset_resolves_at_ac_none(self) -> None:
         for names in (
+            (),
             ("megatron_stock",),
             ("megatron_stock", "titan_compiled"),
             ("titan_compiled",),
             ("titan_eager",),
         ):
             with self.subTest(names=names):
-                with self.assertRaisesRegex(
-                    ValueError, "does not support compile mode"
-                ):
-                    self._resolve(names, "none", "none")
+                self.assertTrue(self._resolve(names, "none")[2])
 
     def test_the_eager_arm_resolves_on_its_own(self) -> None:
         """Cell 2 of the run matrix: the eager arm needs no Megatron
         opponent, and it names its own treatment."""
-        resolved = self._resolve(("titan_eager",), "default", "none")
+        resolved = self._resolve(("titan_eager",), "none")
         self.assertEqual([arm.name for arm in resolved[2]], ["titan_eager"])
         self.assertNotIn("--compile.enable", resolved[6]["titan_eager"])
 

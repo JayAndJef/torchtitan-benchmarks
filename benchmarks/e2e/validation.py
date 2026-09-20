@@ -966,8 +966,8 @@ def validate_arm(
             raise RuntimeError(
                 f"{arm.name}: marker kernel {marker!r} absent from profiler traces"
             )
-    # Arm rule 9 is DELETED. It required a graph launch in the traces under
-    # the graph-capture compile mode, and that mode no longer exists.
+    # Arm rule 9 is DELETED. It required a graph launch in the traces
+    # under graph capture, and graph capture no longer exists.
     # Arm rule 13. **Every rank**, and that reading is provable here where
     # arm rule 6's is not: at dp above 1 every rank sits in a data-parallel
     # group of that size, so every rank reduces. A rank whose traces carry no

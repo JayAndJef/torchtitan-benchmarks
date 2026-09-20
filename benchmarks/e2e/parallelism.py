@@ -1,7 +1,7 @@
 """The parallelism run axis: the degrees, the schedules and the validator.
 
-One ``ParallelismSpec`` describes a whole run, exactly as ``--model-size``,
-``--compile-mode`` and ``--ac`` each describe one. Every arm in one run
+One ``ParallelismSpec`` describes a whole run, exactly as ``--model-size``
+and ``--ac`` each describe one. Every arm in one run
 shares it, so the world size, the pipeline schedule and the microbatch count
 are properties of the run rather than of an arm.
 
@@ -20,13 +20,11 @@ command line.
 
 It is a separate module from ``benchmarks/e2e/registry.py`` so the spec and
 its rules are declared in one place rather than beside the scenarios. **It
-does import that module**, for the three compile-mode constants, so an
-importer pays for the scenario declarations as well. That cost is a few
-torch-free dataclasses today. Should it ever matter -- the likely caller is
-a worker that must stay cheap to import -- move those constants into a
-module both can read, rather than
-copying them here: two spellings of the compile-mode sets would let rules 6
-and 13 disagree with the axis they gate.
+does import that module**, for ``Workload``, so an importer pays for the
+scenario declarations as well. That cost is a few torch-free dataclasses
+today. Should it ever matter -- the likely caller is a worker that must
+stay cheap to import -- move that type into a module both can read, rather
+than copying it here.
 
 Terms, used here with these meanings only:
 
@@ -88,11 +86,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from benchmarks.e2e.registry import (
-    COMPILE_MODES,
-    UNCOMPILED_COMPILE_MODES,
-    Workload,
-)
+from benchmarks.e2e.registry import Workload
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
@@ -156,7 +150,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # Rule 5 refuses a V-shaped schedule only beside a megatron arm, so a
 # titan-only run may still ask for one. Rule 6 narrows the exposure and does
 # not close it: both V-shaped schedules set ``requires_uncompiled``, so such
-# a run also has to ask for ``--compile-mode none``.
+# a run holds eager arms alone.
 #
 # The gap already existed at ``dp 1`` and ``dp 2`` with ``pp 2``. The lift to
 # world size 8 and pp 4 added six ``(dp, pp)`` pairs: (1, 3), (1, 4), (2, 3),
@@ -699,7 +693,7 @@ def validate_parallelism(
     *,
     shape: PiperShape,
     workload: Workload,
-    compile_mode: str,
+    compiled: bool,
     engines: Iterable[str],
     device_count: int,
 ) -> None:
@@ -707,7 +701,9 @@ def validate_parallelism(
 
     ``engines`` is the set of ``Arm.launcher`` values the run will start, so
     the megatron restriction follows the arm roster rather than a scenario
-    name. ``device_count`` is how many devices the operator asked for.
+    name. ``compiled`` says whether any selected arm asks for whole-block
+    ``torch.compile``; rule 6 reads it. ``device_count`` is how many
+    devices the operator asked for.
 
     Rules 8 and 9 were dead behind rule 14 while it refused every
     ``ep > 1``. Rule 14 now refuses an expert degree only under the
@@ -723,19 +719,9 @@ def validate_parallelism(
     engines = frozenset(engines)
     local_batch_size = workload.local_batch_size
 
-    # Preconditions on the two arguments this module does not own, checked
-    # before the numbered rules so those rules may assume them.
+    # A precondition on the one argument this module does not own, checked
+    # before the numbered rules so those rules may assume it.
     #
-    # The compile mode is checked because rule 6 refuses anything outside
-    # UNCOMPILED_COMPILE_MODES and so must know that the name is a real
-    # mode. The CLI spells the axis as a click.Choice today, so nothing
-    # reaches this from a command line -- but a caller with a bare string
-    # does.
-    if compile_mode not in COMPILE_MODES:
-        raise ValueError(
-            f"Unknown compile mode {compile_mode!r}. Available: "
-            + ", ".join(COMPILE_MODES)
-        )
     # The batch is the one integer the microbatch arithmetic divides, and
     # neither Workload nor workload_with_overrides bounds it -- --batch takes
     # a bare int. Without this, batch 0 and batch -4 pass every rule at pp 1
@@ -838,16 +824,10 @@ def validate_parallelism(
     # 6. PyTorch's zero-bubble and DualPipeV classes call
     #    _check_torch_compile_compatibility, which raises on a compiled stage
     #    module. Refusing here beats failing inside the training subprocess.
-    if (
-        schedule is not None
-        and schedule.requires_uncompiled
-        and compile_mode not in UNCOMPILED_COMPILE_MODES
-    ):
+    if schedule is not None and schedule.requires_uncompiled and compiled:
         raise ValueError(
             f"pipeline schedule {schedule.name!r} raises on a compiled stage "
-            f"module, so it needs an uncompiled compile mode (one of "
-            f"{', '.join(sorted(UNCOMPILED_COMPILE_MODES))}), not "
-            f"{compile_mode!r}"
+            "module, so every arm of the run must run eager"
         )
 
     # 7. Every stage holds the same number of transformer layers. An uneven
@@ -948,8 +928,8 @@ def validate_parallelism(
             "--pp-microbatch-size"
         )
 
-    # 13. DELETED. It refused a parallel run under the graph-capture
-    #     compile mode, and that mode no longer exists.
+    # 13. DELETED. It refused a parallel run under graph capture, and
+    #     graph capture no longer exists.
 
     # 14. Expert parallelism needs the sharded dense parity, on both
     #     engines. TorchTitan cannot split the experts while it keeps the

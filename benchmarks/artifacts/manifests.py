@@ -1,8 +1,8 @@
 """``manifest.json``: what a run is, and whether it may be resumed.
 
 Everything here serializes one run's *identity* -- scenario, arms, the
-command line each arm was launched with, the four global axes
-(``compile_mode`` / ``ac_mode`` / ``model_size`` / ``parallelism``), the
+command line each arm was launched with, the three global axes
+(``ac_mode`` / ``model_size`` / ``parallelism``), the
 resolved model shape, the execution model, and the provenance block -- reads
 one back, and decides whether a recorded run is the same run the caller is
 now asking for.
@@ -124,7 +124,6 @@ def manifest_data(
     hardware: str,
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
-    compile_mode: str,
     ac_mode: str,
     # No default. This value is what the manifest *claims* the run was, and
     # _resume_mismatches below already requires it explicitly; a writer that
@@ -135,7 +134,7 @@ def manifest_data(
     # No default either, and for the same reason one step further: an omitted
     # argument would record dp 1 x pp 1 for a run of any mesh, which is a
     # single-GPU claim about a job that was not one. Keyword-only because the
-    # nine positional parameters above are the schema-9 signature.
+    # eight positional parameters above are the historical signature.
     parallelism: ParallelismSpec,
     # No default, for the reason the two above have none: a writer that
     # defaulted it would record ``on`` for a run that turned the sync off,
@@ -162,7 +161,6 @@ def manifest_data(
         "selected_arms": [arm.name for arm in selected_arms],
         "commands": commands,
         "extra_torchtitan_args": list(extra_args),
-        "compile_mode": compile_mode,
         "ac_mode": ac_mode,
         "model_size": model_size,
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
@@ -183,7 +181,6 @@ def write_manifest(
     hardware: str,
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
-    compile_mode: str,
     ac_mode: str,
     model_size: str,
     *,
@@ -201,7 +198,6 @@ def write_manifest(
             hardware,
             metadata,
             extra_args,
-            compile_mode,
             ac_mode,
             model_size,
             parallelism=parallelism,
@@ -237,7 +233,6 @@ def _resume_mismatches(
     hardware: str,
     metadata: dict[str, str],
     extra_args: tuple[str, ...],
-    compile_mode: str,
     ac_mode: str,
     model_size: str,
     *,
@@ -252,7 +247,6 @@ def _resume_mismatches(
         "selected_arms": [arm.name for arm in arms],
         "hardware": hardware,
         "extra_torchtitan_args": list(extra_args),
-        "compile_mode": compile_mode,
         "ac_mode": ac_mode,
         "megatron_p2p_sync": megatron_p2p_sync,
         "megatron_nan_guard": megatron_nan_guard,

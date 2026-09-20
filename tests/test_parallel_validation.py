@@ -388,8 +388,8 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
     ``parallelism_markers`` proves the engine built the mesh that was asked
     for. It asks nothing when nothing was asked for, so a log from a real
     pipeline passed validation against the trivial spec and the run would
-    have been published as single-GPU. This is the same inversion
-    ``--compile-mode none`` applies to the compile marker.
+    have been published as single-GPU. This is the same inversion an
+    eager arm applies to the compile marker.
 
     Both engines are checked, because both had the hole. Measured on real
     output before the rule was written: of 296 arm logs under ``out/``,

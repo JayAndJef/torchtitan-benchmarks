@@ -788,26 +788,21 @@ class FlagListTest(unittest.TestCase):
             "seeded": (
                 dataclasses.replace(BATCH_32, seed=None),
                 TRIVIAL_SPEC,
-                "default",
                 "seeded",
             ),
-            "mode": (BATCH_32, TRIVIAL_SPEC, "none", "compile mode"),
             "expert": (
                 BATCH_32,
                 ParallelismSpec(dp=2, ep=2),
-                "default",
                 "expert-parallel",
             ),
             "schedule": (
                 BATCH_32,
                 ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
-                "default",
                 "pipeline schedule",
             ),
             "divides": (
                 dataclasses.replace(BATCH_32, local_batch_size=6),
                 PP4_SPEC,
-                "default",
                 "does not divide",
             ),
             "divides_trivial": (
@@ -815,11 +810,10 @@ class FlagListTest(unittest.TestCase):
                 ParallelismSpec(
                     pp=4, pp_schedule="1F1B", pp_microbatch_size=4
                 ),
-                "default",
                 "does not divide",
             ),
         }
-        for label, (workload, spec, mode, phrase) in cases.items():
+        for label, (workload, spec, phrase) in cases.items():
             with self.subTest(case=label):
                 with self.assertRaises(ValueError) as caught:
                     stock_megatron_flags(
@@ -828,7 +822,6 @@ class FlagListTest(unittest.TestCase):
                         spec,
                         arm_dir="/tmp/arm",
                         model_size="1b",
-                        compile_mode=mode,
                     )
                 self.assertIn(phrase, str(caught.exception))
 

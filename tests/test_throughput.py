@@ -92,7 +92,6 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             "test-gpu",
             {"requested_gpu": "0"},
             (),
-            "default",
             "none",
             "1b",
             parallelism=TRIVIAL_SPEC,

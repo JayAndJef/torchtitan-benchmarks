@@ -88,11 +88,6 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
-# The one compile mode this arm accepts. Megatron compiles no whole
-# transformer layer, so there is no treatment to turn off, and the scenario
-# declares this mode alone.
-SUPPORTED_MODE = "default"
-
 # The one pipeline schedule the stock driver runs. Megatron's
 # forward_backward_pipelining_without_interleaving is 1F1B and nothing else.
 SUPPORTED_PP_SCHEDULE = "1F1B"
@@ -890,7 +885,6 @@ def stock_megatron_flags(
     *,
     arm_dir: str,
     model_size: str,
-    compile_mode: str = SUPPORTED_MODE,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
@@ -938,12 +932,6 @@ def stock_megatron_flags(
         raise ValueError(
             "the stock megatron arm needs a seeded workload: both engines "
             "must draw the same initial parameters"
-        )
-    if compile_mode != SUPPORTED_MODE:
-        raise ValueError(
-            f"compile mode {compile_mode!r} names a whole-block "
-            "torch.compile treatment, and Megatron never has one; the stock "
-            f"arm runs at {SUPPORTED_MODE!r} alone"
         )
     refuse_unknown_zero(spec.zero)
     if spec.ep > 1 and spec.zero == 0:
