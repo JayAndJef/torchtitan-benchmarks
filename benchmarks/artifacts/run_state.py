@@ -10,7 +10,7 @@ attempt count and a UTC stamp per transition" has needed to change since it
 was written. Splitting them means a manifest schema bump no longer touches
 the file whose schema is not bumping.
 
-Two of its properties are what make ``run-all --resume`` safe rather than
+Two of its properties are what make ``run --resume`` safe rather than
 merely convenient. Every transition is rewritten through
 ``atomic_write_json``, so a run interrupted between arms leaves a readable
 ledger and not a truncated one; and ``update_run_state`` increments

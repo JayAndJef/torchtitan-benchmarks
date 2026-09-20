@@ -175,7 +175,9 @@ class CliRefusalTests(unittest.TestCase):
     def _run(self, *arguments: str):
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=self.completed
-        ) as execute:
+        ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"), mock.patch(
+            "benchmarks.cli.e2e.record_evaluation_status"
+        ):
             result = self.runner.invoke(cli, ["run", "2", *arguments])
         return result, execute
 

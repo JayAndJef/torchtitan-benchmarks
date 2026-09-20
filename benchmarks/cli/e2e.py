@@ -1,24 +1,22 @@
-"""The end-to-end command family: ``run``, ``run-all`` and ``evaluate``.
+"""The end-to-end command family: ``run`` and ``evaluate``.
 
 Everything the declarative scenario runs need from the CLI, and nothing the
 kernel benchmarks do. ``_execution_options`` is the reason this is a module:
-the eleven options every execution command shares are the largest single
-block in the CLI, they are applied to exactly two commands, and both are
-here. Sitting two hundred lines above ``kernel-bench``'s own option stack it
-was not readable which surface a given ``click.option`` belonged to.
+the nineteen options ``run`` takes are the largest single block in the CLI.
+Sitting two hundred lines above ``kernel-bench``'s own option stack it was
+not readable which surface a given ``click.option`` belonged to.
 
 **The duplicate ``--model-size`` is deliberate and must stay duplicated.**
 This module declares it with ``envvar="MODEL_SIZE"`` and no default, so an
 unrequested size reaches ``RunRequest`` as ``None`` -- which is what lets
-``run-all --resume`` tell "inherit the size recorded in the manifest" from
+``run --resume`` tell "inherit the size recorded in the manifest" from
 "the caller asked for ``1b``". ``benchmarks/cli/kernel.py`` declares its
 own with ``default="1b"`` and no envvar, because ``kernel-bench`` takes
 flags only, so that an ``OUT``/``SEQ``/``BATCH`` environment exported for an
-end-to-end shell cannot leak into a kernel measurement (CLAUDE.md,
-"Kernel-isolation benchmarks"). They are two different options that share a
-spelling, and unifying them would change behavior on one side or the other.
-Separating the modules is what makes the asymmetry visible instead of
-hiding it behind two hundred lines.
+end-to-end shell cannot leak into a kernel measurement. They are two
+different options that share a spelling, and unifying them would change
+behavior on one side or the other. Separating the modules is what makes the
+asymmetry visible instead of hiding it behind two hundred lines.
 
 The commands are declared with plain ``@click.command`` and attached to the
 group by ``benchmarks/cli/main.py`` with ``cli.add_command``. Binding them
@@ -27,19 +25,18 @@ with ``@cli.command`` instead would require importing the group from
 ``__main__.py`` and both CLI test modules do -- would yield a group holding
 only whichever commands some other import had already loaded.
 
-**There is no default scenario, and this module must not add one.**
-``_request`` passes ``--scenario`` through unchanged, so an omitted flag
-reaches ``RunRequest`` as ``None``. ``benchmarks/e2e/runner.py`` holds the
-rule in one place: a resume reads the scenario from the manifest, and every
-other run is refused. A default here could only be reached by an omission,
-and would then measure one scenario under whatever label the operator
-assumed. Click cannot state the rule instead, because ``_execution_options``
-is shared with ``run-all``, whose ``--all-scenarios`` and ``--resume`` both
-supply the scenario themselves; ``required=True`` would refuse both.
+**``run`` is one command, and it always evaluates.** ``--scenario``
+narrows a default that is every scenario, so an omitted flag runs the whole
+roster rather than one scenario under a label the operator assumed. Three
+options name a single directory -- ``--out``, ``--resume`` and
+``--results`` -- so each one needs exactly one selected scenario.
+``benchmarks/e2e/runner.py`` still holds the rule that a run without a
+scenario name is refused: a resume reads the name from the manifest, and
+this module passes ``None`` for that case alone.
 
 The private helpers are the CLI's whole share of run logic: ``_request``
-turns option keywords into a ``RunRequest``, ``_execute`` narrows the
-runner's exceptions to
+turns option keywords into a ``RunRequest``, ``_axes`` builds the run-axis
+record inside it, ``_execute`` narrows the runner's exceptions to
 ``ClickException``, ``_evaluate`` renders an evaluation and says where the
 machine-readable copy landed, and ``_run_and_evaluate`` records an evaluation
 failure in ``run_state.json`` so a later ``--resume`` retries it. The tests
@@ -98,7 +95,7 @@ PASSTHROUGH_CONTEXT = {
 
 
 def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
-    """The option block ``run`` and ``run-all`` share.
+    """The option block ``run`` takes beside its own four options.
 
     **The six parallelism options take no environment variable, and the
     three older axes do.** The asymmetry is deliberate and the reason is
@@ -158,14 +155,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     ``MODEL_SIZE`` are exported for.
     """
     options = [
-        click.option(
-            "--scenario",
-            help=(
-                "Declarative benchmark scenario name. Required, because there "
-                "is no default; run-all supplies it from --all-scenarios or "
-                "from the manifest of --resume."
-            ),
-        ),
         click.option(
             "--hardware",
             default="auto",
@@ -448,12 +437,11 @@ def _request(
     gpu: str,
     torchtitan_args: tuple[str, ...],
     *,
+    scenario_name: str | None,
     arm_names: tuple[str, ...] = (),
     resume_dir: Path | None = None,
     **options: Any,
 ) -> RunRequest:
-    # Popped before the ``**options`` expansion below, which must not see it.
-    scenario_name = options.pop("scenario")
     axes = _axes(options)
     return RunRequest(
         gpu=gpu,
@@ -488,25 +476,190 @@ def _evaluate(out_dir: Path, arms: tuple[str, ...], results_path: Path | None) -
 @click.command("run", context_settings=PASSTHROUGH_CONTEXT)
 @click.argument("gpu")
 @click.option(
+    "--scenario",
+    "scenario_names",
+    multiple=True,
+    help=(
+        "Scenario to run; repeat per scenario. Omit to run every scenario "
+        "in sequence."
+    ),
+)
+@click.option(
     "--arm",
     "arm_names",
     multiple=True,
-    help="Arm subset; repeat per arm. Omit to run every arm.",
+    help=(
+        "Arm subset; repeat per arm. It applies to every selected scenario, "
+        "so each one must declare each name. Omit to run every arm."
+    ),
+)
+@click.option(
+    "--resume",
+    "resume_dir",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    help="Resume an interrupted output directory and retry incomplete arms.",
+)
+@click.option(
+    "--results",
+    "results_path",
+    type=click.Path(path_type=Path),
+    help="JSON destination; defaults to <output-dir>/results.json.",
 )
 @_execution_options
 @click.argument("torchtitan_args", nargs=-1, type=click.UNPROCESSED)
 def run_command(
     gpu: str,
+    scenario_names: tuple[str, ...],
     arm_names: tuple[str, ...],
+    resume_dir: Path | None,
+    results_path: Path | None,
     torchtitan_args: tuple[str, ...],
     **options: Any,
 ) -> None:
-    """Run and validate selected arms; pass TorchTitan arguments after --."""
-    result = _execute(_request(gpu, torchtitan_args, arm_names=arm_names, **options))
-    click.echo(f"\nAll selected arms validated: {result.out_dir}")
-    selected_names = tuple(arm.name for arm in result.selected_arms)
-    if "baseline" in selected_names or len(selected_names) == 1:
-        click.echo(f"Evaluate with: run_bench.sh evaluate {result.out_dir}")
+    """Run, validate and evaluate arms; pass TorchTitan arguments after --.
+
+    Every scenario runs unless ``--scenario`` narrows the set. The sweep is
+    fail-fast: the first failing arm stops it, and the scenarios behind it
+    never start.
+    """
+    requested = bool(scenario_names)
+    selected = scenario_names if requested else tuple(SCENARIOS)
+    _refuse_unknown_scenarios(selected)
+    _refuse_a_missing_arm(selected, arm_names)
+    _refuse_a_single_run_option(
+        selected,
+        (
+            ("--out", options["out_dir"]),
+            ("--resume", resume_dir),
+            ("--results", results_path),
+        ),
+    )
+
+    # One stamp for the whole sweep, so every scenario lands under the same
+    # out/<stamp>/ root. A single scenario takes none and the layout builds
+    # its own.
+    timestamp = run_timestamp() if len(selected) > 1 else None
+    for name in selected:
+        if not requested and _skipped(name, options):
+            continue
+        if len(selected) > 1:
+            click.echo(f"\n===== scenario: {name} =====")
+        # A copy per scenario: ``_axes`` pops the axis options out of it.
+        scenario_options: dict[str, Any] = dict(options)
+        _run_and_evaluate(
+            _request(
+                gpu,
+                torchtitan_args,
+                # A resume reads the scenario from the manifest, so an
+                # operator who named none leaves the question to it.
+                scenario_name=(
+                    name if requested or resume_dir is None else None
+                ),
+                arm_names=arm_names,
+                resume_dir=resume_dir,
+                timestamp=timestamp,
+                **scenario_options,
+            ),
+            results_path,
+        )
+
+
+def _refuse_unknown_scenarios(selected: tuple[str, ...]) -> None:
+    unknown = [name for name in selected if name not in SCENARIOS]
+    if unknown:
+        raise click.UsageError(
+            "no such scenario: "
+            + ", ".join(repr(name) for name in unknown)
+            + f". Available: {', '.join(SCENARIOS)}"
+        )
+
+
+def _refuse_a_missing_arm(
+    selected: tuple[str, ...], arm_names: tuple[str, ...]
+) -> None:
+    """Refuse an ``--arm`` name that any selected scenario lacks.
+
+    The option applies to every selected scenario, so a name one of them
+    does not declare would run a smaller matrix than the operator asked
+    for. Refused here, before a GPU is claimed.
+    """
+    for name in selected:
+        available = {arm.name for arm in SCENARIOS[name].arms}
+        missing = [arm for arm in arm_names if arm not in available]
+        if missing:
+            raise click.UsageError(
+                f"scenario {name!r} has no arm(s) "
+                + ", ".join(repr(arm) for arm in missing)
+                + f". Available: {', '.join(sorted(available))}"
+            )
+
+
+def _refuse_a_single_run_option(
+    selected: tuple[str, ...], given: tuple[tuple[str, Any], ...]
+) -> None:
+    """Refuse the options that name one directory, above one scenario.
+
+    ``--out``, ``--resume`` and ``--results`` each name a single path. Two
+    scenarios sharing one would overwrite each other's manifest and
+    results, so the count has to be one.
+    """
+    if len(selected) == 1:
+        return
+    for flag, value in given:
+        if value is not None:
+            raise click.UsageError(
+                f"{flag} names one directory, and this run selects "
+                f"{len(selected)} scenarios ({', '.join(selected)}); "
+                "pass --scenario once"
+            )
+
+
+def _skipped(name: str, options: dict[str, Any]) -> bool:
+    """Whether a swept scenario declines one of the global axes.
+
+    A sweep skips such a scenario and says why, rather than aborting: the
+    restriction is a declaration, not a fault. A ``--scenario`` that names
+    the scenario gets the matching refusal from ``_resolve_run`` instead.
+    """
+    scenario = SCENARIOS[name]
+    ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
+    megatron_p2p_sync = (
+        options.get("megatron_p2p_sync") or DEFAULT_MEGATRON_P2P_SYNC
+    )
+    megatron_nan_guard = (
+        options.get("megatron_nan_guard") or DEFAULT_MEGATRON_NAN_GUARD
+    )
+    megatron_precision = (
+        options.get("megatron_precision") or DEFAULT_MEGATRON_PRECISION
+    )
+    # Read rather than popped: ``_axes`` pops it from the per-scenario copy,
+    # and this needs the value alone.
+    zero = options.get("zero")
+    if zero is None:
+        zero = DEFAULT_ZERO
+
+    if ac_mode not in scenario.supported_ac_modes:
+        reason = (
+            f"does not support ac mode {ac_mode!r} "
+            f"(supported: {', '.join(scenario.supported_ac_modes)})"
+        )
+    elif megatron_p2p_sync == "on" and not any(
+        arm.engine in MEGATRON_ENGINES for arm in scenario.arms
+    ):
+        reason = (
+            f"--megatron-p2p-sync {megatron_p2p_sync!r} reaches no arm of "
+            "this scenario (every arm runs on TorchTitan)"
+        )
+    else:
+        reason = megatron_nan_guard_refusal(
+            scenario.arms, megatron_nan_guard
+        ) or megatron_precision_refusal(
+            scenario.arms, megatron_precision, zero
+        )
+    if reason is None:
+        return False
+    click.echo(f"\n===== scenario: {name} =====\nskipped: {reason}")
+    return True
 
 
 @click.command("evaluate")
@@ -525,117 +678,6 @@ def evaluate_command(
 ) -> None:
     """Report throughput and GPU-time metrics for a finished run."""
     _evaluate(out_dir, arms, results_path)
-
-
-@click.command("run-all", context_settings=PASSTHROUGH_CONTEXT)
-@click.argument("gpu")
-@click.option(
-    "--all-scenarios",
-    "all_scenarios",
-    is_flag=True,
-    help="Run every scenario in sequence, stopping at the first failure.",
-)
-@click.option(
-    "--resume",
-    "resume_dir",
-    type=click.Path(path_type=Path, exists=True, file_okay=False),
-    help="Resume an interrupted output directory and retry incomplete arms.",
-)
-@click.option(
-    "--results",
-    "results_path",
-    type=click.Path(path_type=Path),
-    help="JSON destination; defaults to <output-dir>/results.json.",
-)
-@_execution_options
-@click.argument("torchtitan_args", nargs=-1, type=click.UNPROCESSED)
-def run_all_command(
-    gpu: str,
-    all_scenarios: bool,
-    resume_dir: Path | None,
-    results_path: Path | None,
-    torchtitan_args: tuple[str, ...],
-    **options: Any,
-) -> None:
-    """Run, validate, and evaluate every arm in one or every scenario."""
-    if not all_scenarios:
-        _run_and_evaluate(
-            _request(gpu, torchtitan_args, resume_dir=resume_dir, **options),
-            results_path,
-        )
-        return
-
-    for flag, value in (
-        ("--scenario", options["scenario"]),
-        ("--out", options["out_dir"]),
-        ("--resume", resume_dir),
-        ("--results", results_path),
-    ):
-        if value is not None:
-            raise click.UsageError(f"--all-scenarios cannot be combined with {flag}")
-
-    # One stamp for the sweep so every scenario lands under out/<stamp>/.
-    timestamp = run_timestamp()
-    ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
-    megatron_p2p_sync = (
-        options.get("megatron_p2p_sync") or DEFAULT_MEGATRON_P2P_SYNC
-    )
-    megatron_nan_guard = (
-        options.get("megatron_nan_guard") or DEFAULT_MEGATRON_NAN_GUARD
-    )
-    megatron_precision = (
-        options.get("megatron_precision") or DEFAULT_MEGATRON_PRECISION
-    )
-    # Read rather than popped: ``_parallelism`` pops it from the per-scenario
-    # copy below, and the sweep only needs its value to ask the refusal.
-    zero = options.get("zero")
-    if zero is None:
-        zero = DEFAULT_ZERO
-    for name, scenario in SCENARIOS.items():
-        # A sweep skips a scenario that declines a global axis, rather than
-        # aborting: the axis restriction is a declaration, not a fault.
-        if ac_mode not in scenario.supported_ac_modes:
-            click.echo(
-                f"\n===== scenario: {name} ====="
-                f"\nskipped: does not support ac mode {ac_mode!r} "
-                f"(supported: {', '.join(scenario.supported_ac_modes)})"
-            )
-            continue
-        # The p2p value reaches megatron arms alone. A scenario with none
-        # cannot honor ``off``, and ``_resolve_run`` refuses it; the sweep
-        # skips such a scenario for the reason it skips a declined mode.
-        if megatron_p2p_sync == "on" and not any(
-            arm.engine in MEGATRON_ENGINES for arm in scenario.arms
-        ):
-            click.echo(
-                f"\n===== scenario: {name} ====="
-                f"\nskipped: --megatron-p2p-sync {megatron_p2p_sync!r} "
-                "reaches no arm of this scenario (every arm runs on "
-                "TorchTitan)"
-            )
-            continue
-        # The NaN-guard value reaches the stock megatron arm alone, and
-        # _resolve_run would refuse a scenario it cannot reach. The sweep
-        # prints that same reason and skips, as it does above.
-        refusal = megatron_nan_guard_refusal(scenario.arms, megatron_nan_guard)
-        if refusal is not None:
-            click.echo(f"\n===== scenario: {name} =====\nskipped: {refusal}")
-            continue
-        # The precision value reaches the stock megatron arm alone, and
-        # ``lean`` needs a sharded dense value. ``_resolve_run`` refuses
-        # both cases; the sweep prints the same reason and skips.
-        refusal = megatron_precision_refusal(
-            scenario.arms, megatron_precision, zero
-        )
-        if refusal is not None:
-            click.echo(f"\n===== scenario: {name} =====\nskipped: {refusal}")
-            continue
-        click.echo(f"\n===== scenario: {name} =====")
-        scenario_options: dict[str, Any] = {**options, "scenario": name}
-        _run_and_evaluate(
-            _request(gpu, torchtitan_args, timestamp=timestamp, **scenario_options),
-            None,
-        )
 
 
 def _run_and_evaluate(request: RunRequest, results_path: Path | None) -> None:

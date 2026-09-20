@@ -43,8 +43,8 @@ EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
 AC_MODES = ("sac", "none")
 
 # Default values of the global run axes.
-# ``_resolve_run`` (benchmarks.e2e.runner) and the ``run-all
-# --all-scenarios`` pre-pass (benchmarks.cli.e2e) read these constants.
+# ``_resolve_run`` (benchmarks.e2e.runner) and the sweep pre-pass
+# (benchmarks.cli.e2e) read these constants.
 # Neither site repeats the literal value now.
 DEFAULT_AC_MODE = "none"
 DEFAULT_MODEL_SIZE = "1b"

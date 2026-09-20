@@ -1464,7 +1464,7 @@ class StockMarkerContractTests(unittest.TestCase):
 
 
 class StockRunResolutionTests(unittest.TestCase):
-    """What ``run`` and ``run-all`` accept for this scenario.
+    """What ``run`` accepts for this scenario.
 
     The compiled and the eager treatment are arm properties now, so the
     roster resolves without a compile axis. Every other combination must be

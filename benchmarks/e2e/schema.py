@@ -97,8 +97,9 @@ class Scenario:
 
     ``supported_ac_modes`` restricts the global ``--ac`` axis: a scenario
     whose arms cannot honor a mode (e.g. an engine with no SAC-parity
-    recompute) lists only the modes it supports; ``run-all --all-scenarios``
-    skips unsupported combinations and a direct request errors.
+    recompute) lists only the modes it supports. A ``run`` over every
+    scenario skips an unsupported combination, and a ``--scenario`` that
+    names the scenario errors.
     """
 
     name: str

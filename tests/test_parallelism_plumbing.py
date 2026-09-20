@@ -352,15 +352,7 @@ class RequestTests(unittest.TestCase):
         ):
             result = CliRunner().invoke(
                 cli,
-                [
-                    "run-all",
-                    "0,1",
-                    "--all-scenarios",
-                    "--ac",
-                    "none",
-                    "--dp",
-                    "2",
-                ],
+                ["run", "0,1", "--ac", "none", "--dp", "2"],
             )
         self.assertEqual(result.exit_code, 0, result.output)
         # Every swept scenario carries the same spec.

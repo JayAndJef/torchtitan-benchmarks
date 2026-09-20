@@ -3,8 +3,9 @@
 #
 # Why it exists
 # -------------
-# `run-all --all-scenarios` is fail-fast and refuses --resume, so one foreign
-# job landing mid-sweep throws away every scenario that already succeeded.
+# A `run` over every scenario is fail-fast and refuses --resume above one
+# scenario, so one foreign job landing mid-sweep throws away every scenario
+# that already succeeded.
 # This runs one (size, ac, mode, scenario) cell per invocation under a shared
 # --out root, so a failure costs one cell and --resume picks it up.
 #
@@ -276,7 +277,7 @@ for pass in $(seq 1 "$PASSES"); do
         watch_file="$out.watch"
         : >"$watch_file"
 
-        args=(run-all "$GPU" --scenario "$scenario" --ac "$ac"
+        args=(run "$GPU" --scenario "$scenario" --ac "$ac"
               --model-size "$size" --steps "$STEPS")
         if [ -f "$out/manifest.json" ]; then
             # Gate on the manifest, not the directory: a crash between mkdir
