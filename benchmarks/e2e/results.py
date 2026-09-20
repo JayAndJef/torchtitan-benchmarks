@@ -594,65 +594,36 @@ def _render_trajectory(values: list[tuple[int, float]], nonfinite_label: str) ->
     return rendered
 
 
-def _render_rank_throughput(result: EvaluationResult) -> list[str]:
-    """Each rank's own tokens/s.
-
-    Printed only when a run holds more than one rank. Every run recorded
-    before this existed held one, so a single-GPU report is unchanged,
-    character for character.
-    """
-    if not any(len(result.results[arm].per_rank) > 1 for arm in result.arms):
-        return []
-    lines = [
-        "",
-        "per-rank tokens/s (published figure is the MIN over ranks, never "
-        "the mean):",
-        "  " + f"{'arm':22s} {'rank':>4s} {'tokens/s':>12s} {'n':>4s}",
-    ]
-    for arm in result.arms:
-        summary = result.results[arm]
-        for rank in summary.per_rank:
-            marker = "*" if rank.rank == summary.published_rank else " "
-            lines.append(
-                f"  {arm:22s} {rank.rank:>3d}{marker} "
-                f"{_value(rank.stable_tokens_per_second, 12)} "
-                f"{rank.stable_sample_count:4d}"
-            )
-    lines.append(
-        "* = the published rank. Every tokens/s here is that rank's own "
-        "figure, per device."
-    )
-    return lines
-
-
 def render_evaluation(result: EvaluationResult) -> str:
-    """Render the throughput, step cost and trajectory report."""
+    """Render one scenario's table, its trajectories and its warnings.
+
+    One row per arm, and every figure is absolute. The arms of the
+    ``engines`` scenario share no implementation, so a ratio between two of
+    them would name a difference no component of either arm owns.
+    """
     lines = [
         f"== {result.output_dir} ==",
         f"scenario: {result.scenario}   hardware: {result.hardware}",
+        "",
+        "benchmark summary:",
+        "  "
+        + f"{'arm':22s} {'tokens/s':>12s} {'n':>4s} "
+        + f"{'step ms':>9s} {'p95 ms':>9s} {'peak GiB':>9s}",
     ]
-    lines.extend(f"WARNING: {warning}" for warning in result.warnings)
-
-    lines.extend(
-        [
-            "",
-            "benchmark summary:",
-            "  "
-            + f"{'arm':22s} {'stable tokens/s':>15s} {'n':>4s} "
-            + f"{'step ms':>9s} {'peak GiB':>9s}",
-        ]
-    )
     for arm in result.arms:
         summary = result.results[arm]
         lines.append(
             f"  {arm:22s} "
-            f"{_value(summary.stable_tokens_per_second, 15)} "
+            f"{_value(summary.stable_tokens_per_second, 12)} "
             f"{summary.stable_sample_count:4d} "
             f"{_value(summary.step_ms.median, 9, 2)} "
+            f"{_value(summary.step_ms.p95, 9, 2)} "
             f"{_value(summary.peak_memory_gib, 9, 2)}"
         )
-
-    lines.extend(_render_rank_throughput(result))
+    lines.append(
+        "tokens/s is per device, taken at the slowest rank; 'step ms' is "
+        "that rank's median step."
+    )
 
     lines.extend(["", "loss trajectories (sanity check, not a measurement):"])
     for arm in result.arms:
@@ -665,5 +636,9 @@ def render_evaluation(result: EvaluationResult) -> str:
             f"  {arm:22s} "
             f"{_render_trajectory(result.gradient_norms[arm], 'GRAD NORM')}"
         )
+
+    if result.warnings:
+        lines.append("")
+        lines.extend(f"WARNING: {warning}" for warning in result.warnings)
 
     return "\n".join(lines)
