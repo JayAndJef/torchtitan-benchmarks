@@ -82,21 +82,14 @@ from benchmarks.models.piper_qwen3.shape import (
 
 MANIFEST_SCHEMA_VERSION = 17
 
-# What the ``tps`` figure in every step log line, and therefore
-# ``stable_tokens_per_second`` in ``results.json``, counts.
-#
-# Both engines divide one rank's own token count by ``cp * tp * pp``: the
-# ranks of one pipeline share a batch, and each data-parallel rank reads a
-# batch of its own, so the data-parallel degree is absent from the divisor
-# and the value is per device either way. Recorded rather than assumed
-# because tensor and context parallelism would each move the divisor again,
-# and a reader of an old directory cannot tell which definition produced its
-# numbers.
-#
-# It is not resume-gated. The value follows from this code rather than from
-# an operator's choice, so two directories written by one revision cannot
-# disagree, and gating a constant would refuse nothing.
 THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
+"""What the ``tps`` step-log figure, and ``stable_tokens_per_second``, count.
+
+Both engines divide one rank's own token count by ``cp * tp * pp``, so the
+value is per device. The manifest records the definition because a later
+tensor or context parallel degree would move the divisor again. It is not
+resume-gated: one revision cannot write two definitions.
+"""
 
 
 def _parallelism_record(

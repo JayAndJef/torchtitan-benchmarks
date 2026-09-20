@@ -36,15 +36,18 @@ from typing import Any, Callable
 
 import torch
 
-# The trace layout both engines write and benchmarks/artifacts/layout.py
-# reads back.
-# Megatron calls ``prof.step()`` at the top of its training loop and
-# TorchTitan calls it at the bottom, so a given training step runs under a
-# schedule index that differs by one between the engines. This many skipped
-# steps put them back on the same index. See ``install_profiler_shim``.
 PROFILER_STEP_OFFSET = 1
+"""How many steps the megatron profiler shim skips.
+
+Megatron calls ``prof.step()`` at the top of its training loop and
+TorchTitan calls it at the bottom, so one training step runs under schedule
+indices that differ by one between the engines. This many skipped steps put
+them back on the same index. See ``install_profiler_shim``.
+"""
 
 TRACE_SUBDIR = "profiling/traces"
+"""The trace layout both engines write and the artifact layout reads back."""
+
 WINDOW_DIR = "iteration_{step}"
 TRACE_NAME = "rank{rank}_trace.json.gz"
 

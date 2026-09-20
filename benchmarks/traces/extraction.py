@@ -51,27 +51,22 @@ PROFILER_STEP_TAG = "ProfilerStep#"
 LAUNCH_CATEGORIES = frozenset({"cuda_runtime", "cuda_driver"})
 LAUNCH_PREFIXES = ("cudaLaunchKernel", "cuLaunchKernel")
 KERNEL_CATEGORIES = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
-# What a communication kernel is called. ``ncclDevKernel`` is the form torch's
-# profiler emits today and is already covered by ``nccl``; both are named so a
-# rename of the longer one is visible here rather than silently reclassifying
-# every collective as compute.
-#
-# **Confirmed against a real multi-rank trace.** A ``pp 2`` megatron run of
-# this harness carries 35 collective device kernels per window on each of its
-# two ranks, of 21,885 and 21,581 kernel-category events. Every one of them
-# begins with ``ncclDevKernel_``, so the ``nccl`` entry matches all of them,
-# and every one carries ``cat: "kernel"`` -- which is what would put a
-# pipeline's wait time into the compute total without this split. The three
-# names there are ``ncclDevKernel_SendRecv``,
-# ``ncclDevKernel_Broadcast_RING_LL`` and
-# ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL``.
-#
-# **A false positive would silently shrink a published number** rather than
-# only mis-split a new one. The evidence that it does not, today: a scan of
-# 367 arm directories under ``out/`` found no device kernel whose name
-# begins with ``nccl`` on either engine. Re-run that scan before you widen
-# this tuple.
 COLLECTIVE_KERNEL_PREFIXES = ("nccl", "ncclDevKernel")
+"""What a communication kernel is called.
+
+``ncclDevKernel`` is the form torch's profiler emits today and ``nccl``
+already covers it. Both are named so a rename of the longer one is visible
+here rather than a silent reclassification of every collective as compute.
+
+Confirmed against a real multi-rank trace: a ``pp 2`` megatron run carries
+35 collective device kernels per window on each rank, and every one begins
+with ``ncclDevKernel_`` under ``cat: "kernel"``. Without this split a
+pipeline's wait time lands in the compute total.
+
+Warning: before you widen this tuple, re-scan the arm directories for a
+device kernel whose name begins with ``nccl``. A false positive shrinks a
+published number silently rather than mis-splitting a new one alone.
+"""
 
 
 def busy_union(intervals: Iterable[tuple[float, float]]) -> float:

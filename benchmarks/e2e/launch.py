@@ -34,14 +34,18 @@ from benchmarks.e2e.registry import (
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 
-# What ``python -m`` starts for the stock Megatron arm. Named once, so a test
-# and the command builder cannot drift apart.
 STOCK_MEGATRON_DRIVER_MODULE = "benchmarks.e2e.megatron_stock.train"
+"""What ``python -m`` starts for the stock Megatron arm.
 
-# The one pipeline schedule the stock driver implements. Megatron-LM itself
-# implements more, and this driver builds no model-chunk list, so it runs
-# ``forward_backward_pipelining_without_interleaving`` alone.
+Named once, so a test and the command builder cannot drift apart.
+"""
+
 STOCK_MEGATRON_PP_SCHEDULE = "1F1B"
+"""The one pipeline schedule the stock driver implements.
+
+Megatron-LM implements more, but this driver builds no model-chunk list, so
+it runs ``forward_backward_pipelining_without_interleaving`` alone.
+"""
 
 
 def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:

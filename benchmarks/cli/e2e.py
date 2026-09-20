@@ -345,16 +345,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     return command
 
 
-# The six option names that make up one ``ParallelismSpec``, paired with
-# the spec's own default for each. ``_parallelism`` pops all six, so a
-# renamed option here is a renamed keyword there and nowhere else.
-#
-# **Five of the six defaults are written out a second time here.** The spec
-# owns them, and a copy can drift. ``zero`` reads ``DEFAULT_ZERO``
-# instead, because that default is the one
-# ``benchmarks/e2e/parallelism.py`` names as a reversal point. A test
-# compares every row against ``ParallelismSpec()``, so a drift fails rather
-# than building a spec the operator did not ask for.
 _PARALLELISM_OPTIONS = (
     ("dp", 1),
     ("pp", 1),
@@ -363,6 +353,12 @@ _PARALLELISM_OPTIONS = (
     ("pp_microbatch_size", 1),
     ("zero", DEFAULT_ZERO),
 )
+"""The six option names of one ``ParallelismSpec``, each with its default.
+
+``_parallelism`` pops all six, so a renamed option here is a renamed keyword
+there and nowhere else. Five defaults are a second copy of the spec's own,
+which can drift; a test compares every row against ``ParallelismSpec()``.
+"""
 
 
 def _parallelism(options: dict[str, Any]) -> ParallelismSpec | None:
@@ -404,10 +400,6 @@ def _refuse_warmup_under_profile(options: dict[str, Any]) -> None:
         )
 
 
-# The seven option names that ``RequestedAxes`` takes directly, alongside
-# the parallelism spec ``_parallelism`` builds from six more. ``_axes`` pops
-# all seven, so an option renamed here is a keyword renamed there and
-# nowhere else.
 _AXIS_OPTIONS = (
     "ac_mode",
     "model_size",
@@ -417,6 +409,11 @@ _AXIS_OPTIONS = (
     "profile",
     "warmup_steps",
 )
+"""The seven option names ``RequestedAxes`` takes directly.
+
+``_parallelism`` builds the spec from six more. ``_axes`` pops all seven, so
+an option renamed here is a keyword renamed there and nowhere else.
+"""
 
 
 def _axes(options: dict[str, Any]) -> RequestedAxes:

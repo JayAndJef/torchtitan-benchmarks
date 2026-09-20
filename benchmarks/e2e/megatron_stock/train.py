@@ -81,27 +81,6 @@ from benchmarks.e2e.megatron_stock.flags import (
 )
 from benchmarks.e2e.registry import MEGATRON_P2P_SYNC_MODES
 
-# --------------------------------------------------------------------------
-# The log-line contract with benchmarks/e2e/validation.py's megatron_stock
-# validation profile and benchmarks/e2e/results.py's STEP_METRICS regex.
-# A one-character difference fails a real run at validation time. A test
-# compares these constants against the profile's own strings.
-# --------------------------------------------------------------------------
-
-# Arm rule 8. The profile matches the prefix up to the first field.
-#
-# **The four precision fields are the --megatron-precision half of arm rule
-# 12.** Megatron resolves every one of them before it builds the optimizer,
-# and it maps each dtype string to a torch.dtype (arguments.py's dtype_map),
-# so this line prints "torch.bfloat16" where the flag says "bf16". The
-# profile asks for the four under both values: a run whose argv lost the
-# lean flags prints fp32 under a lean label, and a run that gained them
-# prints bf16 under a stock label. Either fails.
-#
-# main_params_dtype stays torch.float32 under both values on purpose. The
-# recipe never sends --main-params-dtype, which Megatron restricts to fp32
-# and fp16, and store_param_remainders already holds the master copy at 2
-# bytes for each parameter.
 MODE_LINE = (
     "Megatron-LM stock training loop ("
     "main_params_dtype={main_params_dtype}, "
@@ -113,144 +92,146 @@ MODE_LINE = (
     "cross_entropy_loss_fusion={cross_entropy_loss_fusion}, "
     "moe_token_dispatcher_type={dispatcher})"
 )
+"""Arm rule 8, and the head of this module's log-line contract.
 
-# Arm rule 12. Every rank prints it above world size 1.
-#
-# ``dp`` and ``microbatches`` are what Megatron itself resolved. ``pp`` and
-# ``ep`` are the two degrees it takes verbatim from the command line, and
-# ``schedule`` and ``stages`` are literals the driver refuses every other
-# value of. The titan mesh line names ``ep`` too, so arm rule 12 reads the
-# same three degrees on both engines.
-#
-# **``ep`` here restates the argv, and the data-parallel line below proves
-# it.** ``install_data_parallel_marker`` reads the expert group
-# ``initialize_model_parallel`` really built and refuses a disagreement.
-# This line cannot do that itself: it prints before ``pretrain()`` runs, so
-# no process group exists yet.
+The constants below carry the contract with the ``megatron_stock``
+validation profile and with the ``STEP_METRICS`` regex of the evaluation. A
+one-character difference fails a real run at validation time, so a test
+compares these constants against the profile's own strings.
+
+The profile matches this line's prefix up to the first field. The four
+precision fields are the ``--megatron-precision`` half of arm rule 12:
+Megatron resolves each one before it builds the optimizer, and it maps each
+dtype string to a ``torch.dtype``, so the line prints ``torch.bfloat16``
+where the flag says ``bf16``. The profile asks for the four under both
+values, so an argv that lost or gained the lean flags fails.
+``main_params_dtype`` stays ``torch.float32`` under both values, because
+the recipe never sends ``--main-params-dtype`` and
+``store_param_remainders`` already holds the master copy at 2 bytes for
+each parameter.
+"""
+
 PARALLELISM_LINE = (
     "Megatron-LM stock parallelism: dp={dp} pp={pp} ep={ep} "
     "schedule={schedule} microbatches={microbatches} stages={stages}"
 )
+"""Arm rule 12. Every rank prints it above world size 1.
 
-# The data-parallel half of arm rule 12, printed above dp 1.
-#
-# **Every value in it observes the wrapper or the group.**
-# install_data_parallel_marker reads the object Megatron really built, and
-# its real ddp_config, after setup_model_and_optimizer returns. A run whose
-# wrapper went missing raises there rather than printing the line.
-#
-# **{wrapper} is the class name, and it names the mechanism.** Megatron
-# picks one of three wrapper classes from the arguments (training.py).
-# Each of the three derives directly from _BaseDataParallel. None of them
-# derives from another. So the class name is what says which memory
-# strategy ran, and it is read off the wrapper rather than hardcoded.
-#
-# **{sharding} is the strategy the run acts on, not the raw field.**
-# Megatron's argparse defaults data_parallel_sharding_strategy to
-# "optim_grads_params" and copies it into every ddp_config, but
-# megatron/core/optimizer/__init__.py reads it only under a sharded
-# wrapper. This suite builds none, so the raw field says
-# "optim_grads_params" on a run that shards nothing and this line reports
-# "no_shard".
-#
-# **{expert} is the expert group's real width**, from
-# mpu.get_expert_model_parallel_world_size(). The expert degree carves its
-# ranks out of the data-parallel axis, so this is its line.
-#
-# Arm rule 13 cannot cover for a declared line, which is why every value
-# here is an observation: stock Megatron all-reduces the loss over its
-# data-parallel group on every last-stage rank every step (training.py's
-# train_step), so ncclDevKernel_AllReduce appears whether or not a gradient
-# was reduced.
-# **{optimizer} is the optimizer class Megatron really built**, and it is
-# what separates the two ZeRO levels. --use-distributed-optimizer alone
-# gives ZeRO-1, where the wrapper stays DistributedDataParallel exactly as
-# it is at level 0; the wrapper class therefore cannot tell the two levels
-# apart, and this field can. Megatron picks the class in
-# megatron/core/optimizer/__init__.py: DistributedOptimizer under the
-# distributed optimizer, and Float16OptimizerWithFloat16Params without it.
-#
-# **Both levels get a CHAIN, and the chain's own name proves no ZeRO
-# level.** get_megatron_optimizer ends its standard path with an
-# unconditional ChainedOptimizer(optimizers), and this suite takes no
-# other path. A chain of Float16OptimizerWithFloat16Params and a
-# chain of DistributedOptimizer print the same word, so
-# optimizer_class_name names the members. A real eight-GPU run failed this
-# rule on 2026-09-16, because the line said "ChainedOptimizer" alone.
+``dp`` and ``microbatches`` are what Megatron resolved. ``pp`` and ``ep``
+come verbatim from the command line, and ``schedule`` and ``stages`` are
+literals the driver refuses every other value of. The titan mesh line names
+``ep`` too, so arm rule 12 reads the same three degrees on both engines.
+
+``ep`` here restates the argv, and the data-parallel line below proves it:
+``install_data_parallel_marker`` reads the expert group that
+``initialize_model_parallel`` really built. This line cannot do that
+itself, because it prints before ``pretrain()`` runs and no process group
+exists yet.
+"""
+
 DATA_PARALLEL_LINE = (
     "Megatron-LM stock data parallel: {wrapper} over {dp} "
     "ranks (overlap_grad_reduce={overlap}, grad_reduce_in_fp32={fp32}, "
     "sharding_strategy={sharding}, expert_parallel={expert}, "
     "optimizer={optimizer})"
 )
+"""The data-parallel half of arm rule 12, printed above dp 1.
 
-# The pipeline point-to-point sync treatment, printed on every rank at every
-# mesh. Both values come from the BUILT config, never from ``args``:
-# megatron guards its per-message torch.cuda.synchronize() on
-# ``batch_p2p_comm and batch_p2p_sync`` (p2p_communication.py), and
-# ``batch_p2p_comm`` is derived from ``overlap_p2p_comm`` inside
-# ``core_transformer_config_from_args``. A line built from the arguments
-# could not show either.
+Every value observes the wrapper or the group, because arm rule 13 cannot
+cover for a declared line: stock Megatron all-reduces the loss over its
+data-parallel group on every last-stage rank every step, so an all-reduce
+kernel appears whether or not a gradient was reduced.
+``install_data_parallel_marker`` reads the object Megatron really built,
+and its real ``ddp_config``, after ``setup_model_and_optimizer`` returns.
+
+``{wrapper}`` names the mechanism. Megatron picks one of three wrapper
+classes, each derived directly from ``_BaseDataParallel``, so the class
+name says which memory strategy ran.
+
+``{sharding}`` is the strategy the run acts on, not the raw field.
+Megatron's argparse default reaches every ``ddp_config``, but Megatron
+reads it only under a sharded wrapper, and this suite builds none.
+
+``{expert}`` is the expert group's real width. The expert degree carves its
+ranks out of the data-parallel axis, so this is its line.
+
+``{optimizer}`` is the optimizer class Megatron really built, and it
+separates the two ZeRO levels, which the wrapper class cannot. Both levels
+get a chain, and the chain's own name proves no level, so
+``optimizer_class_name`` names the members. A real eight-GPU run failed
+this rule on 2026-09-16, because the line said ``ChainedOptimizer`` alone.
+"""
+
 P2P_LINE = (
     "Megatron-LM stock p2p: batch_p2p_comm={comm} batch_p2p_sync={sync}"
 )
+"""The pipeline point-to-point sync treatment, on every rank at every mesh.
 
-# Stock Megatron's NaN/Inf guard, printed on every rank at every mesh from
-# the value Megatron's parser resolved. The field is a bool, so ``on`` reads
-# True and ``off`` reads False. It is read off ``args`` and not off a built
-# config, because Megatron copies it into two places -- pretrain_gpt.py's
-# loss_func reads ``args`` directly, and training.py copies it into
-# ddp_config.check_for_nan_in_grad -- and ``args`` is the one value both
-# consumers descend from. Megatron itself sets the field False under fp16
-# with dynamic loss scaling and under a fake process group
-# (arguments.py); this arm runs neither, and the line would show it.
+Both values come from the built config, never from ``args``. Megatron
+guards its per-message ``torch.cuda.synchronize()`` on ``batch_p2p_comm and
+batch_p2p_sync``, and it derives ``batch_p2p_comm`` from
+``overlap_p2p_comm`` while it builds the transformer config. A line built
+from the arguments could show neither.
+"""
+
 NAN_GUARD_LINE = (
     "Megatron-LM stock nan guard: check_for_nan_in_loss_and_grad={value}"
 )
+"""Stock Megatron's NaN/Inf guard, on every rank at every mesh.
 
-# Arm rule 1. Megatron's own completion line is rank 0 only
-# (training.py's "after training is done"), and the rule runs per rank.
+The field is a bool, so ``on`` reads True and ``off`` reads False. The line
+reads ``args`` rather than a built config, because Megatron copies the
+field into two consumers and ``args`` is the value both descend from.
+Megatron itself sets the field False under fp16 with dynamic loss scaling
+and under a fake process group; this arm runs neither, and the line would
+show it.
+"""
+
 TRAINING_COMPLETED = "Training completed"
+"""Arm rule 1.
 
-# The two parameter lines CountingGPTModelBuilder prints. They live here,
-# with the other three marker groups, because this module is the log-line
-# contract and because it imports no megatron: a test can read all four
-# groups without a Megatron-LM checkout. ``model_builder.py`` imports them
-# from here. Arm rule 11 matches the second one, which is why the total
-# carries a thousands separator.
+Megatron's own completion line is rank 0 only, and the rule runs per rank.
+"""
+
 STAGE_SIZE_LINE = (
     "stock-megatron stage {stage}/{stages} local size: {count} parameters"
 )
 MODEL_SIZE_LINE = (
     "Model qwen3_piper_{size} stock-megatron size: {total} total parameters"
 )
+"""The two parameter lines ``CountingGPTModelBuilder`` prints.
 
-# The step line benchmarks/e2e/results.py parses, in the shape the tuned
-# megatron driver and the TorchTitan trainer both print.
+They live here with the other marker groups, because this module is the
+log-line contract and imports no megatron: a test reads every group without
+a Megatron-LM checkout. ``model_builder.py`` imports them from here. Arm
+rule 11 matches the second line, which is why the total carries a thousands
+separator.
+"""
+
 STEP_LINE = (
     "step: {step:2}  loss: {loss:8.5f}  grad_norm: {grad_norm:7.4f}  "
     "memory: {memory:5.2f}GiB({percent:.2f}%)  tps: {tps:,}  "
     "tflops: {tflops:,.2f}  mfu: {mfu:.2f}%"
 )
-# The same line on a rank that holds no loss. Under a pipeline split only
-# the last stage computes one, and broadcast_pipeline_loss gives it to every
-# rank of that pipeline, so a training step never reaches this line. It
-# stays because the shim must print a step line whatever Megatron hands it:
-# the field is then absent rather than filled with a sentinel, and a
-# sentinel is what benchmarks/e2e/results.py would parse as a loss.
+"""The step line the evaluation parses, in the shape TorchTitan prints."""
+
 STEP_LINE_NO_LOSS = (
     "step: {step:2}  grad_norm: {grad_norm:7.4f}  "
     "memory: {memory:5.2f}GiB({percent:.2f}%)  tps: {tps:,}  "
     "tflops: {tflops:,.2f}  mfu: {mfu:.2f}%"
 )
+"""The same line on a rank that holds no loss.
 
-# The peak the mfu column divides by. The same constant the tuned driver
-# uses, so the two megatron arms report one definition.
+Under a pipeline split only the last stage computes a loss, and
+``broadcast_pipeline_loss`` gives it to every rank of that pipeline, so a
+training step never reaches this line. It stays because the shim must print
+a step line whatever Megatron hands it. The field is then absent rather
+than a sentinel, which the evaluation would parse as a loss.
+"""
+
 H100_CLASS_BF16_PEAK_FLOPS = 989e12
+"""The peak the mfu column divides by."""
 
-# The first eight parameters of megatron's training_log, in order. The step
-# shim forwards them positionally, so a submodule bump that reorders them
-# must fail loudly rather than print the wrong number in the wrong column.
 TRAINING_LOG_HEAD = (
     "loss_dict",
     "total_loss_dict",
@@ -261,6 +242,12 @@ TRAINING_LOG_HEAD = (
     "skipped_iter",
     "grad_norm",
 )
+"""The first eight parameters of megatron's ``training_log``, in order.
+
+The step shim forwards them positionally, so a submodule bump that reorders
+them must fail loudly rather than print the wrong number in the wrong
+column.
+"""
 
 
 def add_bench_args(parser: Any) -> Any:
@@ -658,13 +645,14 @@ def install_step_log_shim(
     return uninstall
 
 
-# Megatron's own attribute for the members of a chain
-# (megatron/core/optimizer/optimizer.py: ChainedOptimizer.__init__ sets
-# self.chained_optimizers). The name is read off Megatron rather than
-# guessed. A submodule bump that renames it makes a chained run print the
-# outer class alone. Arm rule 12 then refuses the run, because the
-# expected string names the members.
 CHAINED_OPTIMIZERS_ATTRIBUTE = "chained_optimizers"
+"""Megatron's own attribute for the members of a chain.
+
+``ChainedOptimizer.__init__`` sets it, so the name is read off Megatron
+rather than guessed. A submodule bump that renames it makes a chained run
+print the outer class alone, and arm rule 12 then refuses the run, because
+the expected string names the members.
+"""
 
 
 def optimizer_class_name(optimizer: Any) -> str:

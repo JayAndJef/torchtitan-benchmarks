@@ -171,44 +171,36 @@ class PipelineSchedule:
     description: str
 
 
-# How the run holds the DENSE parameters -- every parameter that is not a
-# routed expert weight. Each value names one ZeRO level, and the number is
-# that level.
-#
-# ``0`` is ZeRO-0: each rank keeps a whole copy of everything. ``1`` shards
-# the optimizer states alone.
-#
-# **What ``--zero 1`` asks each engine for.** Megatron gets
-# ``--use-distributed-optimizer`` alone, which is a plain
-# ``DistributedDataParallel`` plus a ``DistributedOptimizer``. TorchTitan
-# gets the whole data-parallel width as ``dp_shard`` plus
-# ``--parallelism.fsdp-reshard-after-forward never``, so FSDP2 gathers the
-# parameters once and keeps them through the step. The two engines then move
-# the same bytes per step: one parameter all-gather and one gradient
-# reduce-scatter.
-#
-# **Two statements this axis must not make.** Communication volume does not
-# separate ZeRO-1 from ZeRO-2. Both move 2x the parameters, and only the
-# gradient lifetime differs. And no ZeRO level shards the activation
-# gradients: FSDP accumulates per parameter, each rank owns its own
-# microbatch, and the pipeline still sends whole boundary gradients.
-# Activation memory belongs to the ``--ac`` axis and does not move with this
-# value.
-#
-# **It is a comparability boundary at any expert degree**, because it decides
-# how much optimizer state one rank holds and what the ranks exchange each
-# step. Every number this repo has published was measured under
-# ``zero 0``, which is why that is the default.
-#
-# **It is also what makes an expert degree legal.** The reason is a
-# TorchTitan constraint rather than a preference. TorchTitan cannot split
-# the experts while it keeps the dense parameters replicated:
-# ``apply_fsdp_to_decoder`` sends every non-expert parameter to ``Shard(0)``
-# on the dense mesh, and the expert mesh degree
-# ``efsdp = dp_shard * cp * tp // ep`` needs ``dp_shard >= ep``. Megatron
-# holds every parity. So the two engines compare under an expert degree only
-# when both shard, and spec rule 14 refuses the replicated combination.
 ZERO_MODES: tuple[int, ...] = (0, 1)
+"""How the run holds the dense parameters.
+
+A dense parameter is every parameter that is not a routed expert weight.
+Each value names one ZeRO level, and the number is that level. ``0`` keeps
+a whole copy of everything on each rank. ``1`` shards the optimizer states
+alone.
+
+Under ``1`` Megatron gets ``--use-distributed-optimizer`` alone, and
+TorchTitan gets the whole data-parallel width as ``dp_shard`` plus
+``--parallelism.fsdp-reshard-after-forward never``. The two engines then
+move the same bytes per step: one parameter all-gather and one gradient
+reduce-scatter.
+
+Two statements this axis must not make. Communication volume does not
+separate ZeRO-1 from ZeRO-2, because both move twice the parameters and
+only the gradient lifetime differs. And no ZeRO level shards the activation
+gradients, which belong to the ``--ac`` axis.
+
+It is a comparability boundary at any expert degree, because it decides how
+much optimizer state one rank holds and what the ranks exchange each step.
+Every published number was measured under ``zero 0``, which is the default.
+
+It is also what makes an expert degree legal, for a TorchTitan reason
+rather than a preference: TorchTitan cannot split the experts while it
+keeps the dense parameters replicated, because the expert mesh degree
+``efsdp = dp_shard * cp * tp // ep`` needs ``dp_shard >= ep``. Megatron
+holds every parity, so the two engines compare under an expert degree only
+when both shard, and spec rule 14 refuses the replicated combination.
+"""
 DEFAULT_ZERO = 0
 
 

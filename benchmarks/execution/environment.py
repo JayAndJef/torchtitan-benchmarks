@@ -57,24 +57,21 @@ from typing import Mapping
 from benchmarks.execution.paths import RuntimePaths
 
 
-# What a multi-rank run adds, and nothing else does.
-#
-# ``LOG_RANK`` is TorchTitan's own variable: ``run_train.sh`` forwards it to
-# ``torchrun --local-ranks-filter``, and it defaults to ``0`` there -- so
-# without this every rank but the first writes to a console nobody reads,
-# and a kernel that degraded on rank 1 alone is invisible.
-#
-# ``TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE`` names the **global** rank on
-# every tee'd line. torchrun's own default is
-# ``[${role_name}${local_rank}]:``, which renders the same shape on one node
-# and a colliding one across nodes. ``benchmarks.artifacts.layout``'s
-# ``logs_by_rank`` reads what this produces.
-#
-# **Neither is set at world size 1**, so a single-GPU log is byte for byte
-# the log this repo has always written -- torchrun still prefixes it
-# ``[rank0]:`` through its own default, and ``logs_by_rank`` returns such a
-# log whole.
 LOG_RANK_TEMPLATE = "[rank${rank}]:"
+"""What a multi-rank run adds, and nothing else does.
+
+``LOG_RANK`` is TorchTitan's own variable and defaults to ``0``, so without
+it every rank but the first writes to a console nobody reads and a kernel
+that degraded on rank 1 alone is invisible.
+
+``TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE`` names the global rank on every
+tee'd line. torchrun's own default names the local rank, which renders the
+same shape on one node and a colliding one across nodes.
+``logs_by_rank`` reads what this produces.
+
+Neither variable is set at world size 1, so a single-GPU log is byte for
+byte the log this repo has always written.
+"""
 
 
 def _rank_logging(world_size: int) -> dict[str, str]:
