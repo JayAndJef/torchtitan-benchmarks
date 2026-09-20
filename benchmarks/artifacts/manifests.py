@@ -106,12 +106,6 @@ the run's own mesh and lives in ``benchmarks/e2e/parallelism.py``, so
 ``Workload`` is now the single genuinely structural edge. The move itself is
 deferred rather than made permanent.
 
-A **second and unrelated** ``e2e`` edge exists here: ``load_run`` imports
-``PIPER_1B_REGIONS`` to infer regions for schema-<8 manifests. That
-contradicts the rule that missing historical fields stay explicitly unknown
-rather than being inferred from current declarations, and it is a known
-defect. It is preserved byte-identical here because fixing it is a behavior
-change; when it is fixed, this edge disappears on its own.
 """
 
 from __future__ import annotations
@@ -133,8 +127,6 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
-    PIPER_1B_REGIONS,
-    Region,
     Workload,
 )
 from benchmarks.models.piper_qwen3.shape import (
@@ -228,7 +220,6 @@ def manifest_data(
         "hardware": hardware,
         "hardware_metadata": metadata,
         "workload": asdict(scenario.workload),
-        "regions": [asdict(region) for region in scenario.regions],
         "arms": [asdict(arm) for arm in scenario.arms],
         "selected_arms": [arm.name for arm in selected_arms],
         "commands": commands,
@@ -434,30 +425,17 @@ def _resume_workload(
 
 def load_run(
     out_dir: Path, arms_override: list[str] | tuple[str, ...] | None
-) -> tuple[dict[str, Any], list[str], tuple[Region, ...], list[str]]:
+) -> tuple[dict[str, Any], list[str], list[str]]:
     """Load current and legacy manifests without hiding compatibility warnings."""
     warnings: list[str] = []
     manifest_path = out_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     if not manifest:
-        warnings.append(f"no manifest.json under {out_dir}; assuming piper-1B regions")
-    manifest_regions = manifest.get("regions", [])
-    if manifest_regions and not all("phase" in region for region in manifest_regions):
-        warnings.append(
-            f"{manifest_path} predates phase-based regions "
-            f"(schema {manifest.get('schema_version')}); assuming piper-1B regions"
-        )
-        manifest_regions = []
-    regions = tuple(Region(**region) for region in manifest_regions)
-    if not regions and int(manifest.get("schema_version") or 0) < 8:
-        # Pre-schema-8 manifests never declared empty regions on purpose;
-        # from schema 8 on, an empty list is an honest declaration (the
-        # megatron scenario) and must not be second-guessed.
-        regions = PIPER_1B_REGIONS
+        warnings.append(f"no manifest.json under {out_dir}")
     arms = list(
         arms_override
         or manifest.get("selected_arms")
         or [arm["name"] for arm in manifest.get("arms", [])]
         or ["baseline", "helion", "te"]
     )
-    return manifest, arms, regions, warnings
+    return manifest, arms, warnings

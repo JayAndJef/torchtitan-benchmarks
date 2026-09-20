@@ -4,9 +4,7 @@
 published. Engine differences live in the ``VALIDATION_PROFILES`` registry,
 selected by ``Arm.validation``; the structural rules -- trace-window count,
 kernel markers, override counting, and the parameter-count line -- are
-shared. Compiled-region structure is
-*not*: it is a per-profile field (``check_regions``), because the megatron
-arm has no Inductor graph annotations to match.
+shared.
 
 **The log rules run once per rank.** One ``<arm>.log`` holds every rank's
 output, so a rule read against the whole file asks "did some rank do this".
@@ -70,7 +68,6 @@ from benchmarks.e2e.registry import (
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
-    Region,
     Workload,
 )
 from benchmarks.models.piper_qwen3.shape import shape_by_name
@@ -125,15 +122,15 @@ class ValidationProfile:
     """Engine-specific pieces of validate_arm, selected by Arm.validation.
 
     The engine-neutral rules (trace-window count, kernel markers, override
-    counting when declared) are shared; these fields carry what differs: the completion marker, the
-    log line that proves the requested mode actually applied, the phrases
-    that mean a silent fallback, and whether the SelectiveAC line and the
-    compiled-region structure are expected at all.
+    counting when declared) are shared; these fields carry what differs:
+    the completion marker, the log line that proves the requested mode
+    actually applied, the phrases that mean a silent fallback, and whether
+    the SelectiveAC line is expected at all.
 
     ``compiled_marker`` is the other half of rule 8, and it is read the
     other way round: ``mode_line`` must be *present* under a compiled mode,
     and ``compiled_marker`` must be *absent* under an uncompiled one. A
-    profile leaves it ``None`` when the engine compiles regions it exposes no
+    profile leaves it ``None`` when the engine compiles code it exposes no
     switch for, which is a statement that the engine cannot run uncompiled at
     all; ``validate_arm`` then refuses such a run rather than publishing a
     treatment nothing checked.
@@ -216,7 +213,6 @@ class ValidationProfile:
     compiled_marker: str | None
     failure_markers: tuple[str, ...]
     check_ac_line: bool
-    check_regions: bool
     parallelism_markers: Callable[
         [ParallelismSpec, Workload, str], tuple[str, ...]
     ]
@@ -608,7 +604,6 @@ VALIDATION_PROFILES = {
         compiled_marker="with torch.compile",
         failure_markers=("falling back to the PyTorch",),
         check_ac_line=True,
-        check_regions=True,
         parallelism_markers=_titan_parallelism_markers,
         # TorchTitan logs this from _build_pipeline_schedule, which
         # runs only when the pipeline degree is above 1.
@@ -649,9 +644,6 @@ VALIDATION_PROFILES = {
         compiled_marker=None,
         failure_markers=(),
         check_ac_line=False,
-        # Stock Megatron emits no Inductor whole-block annotation, and the
-        # scenario declares no regions.
-        check_regions=False,
         parallelism_markers=_megatron_stock_parallelism_markers,
         # The driver prints its own resolved degrees. Any pipeline degree
         # other than 1 is what this must not see at the trivial spec.
@@ -730,7 +722,7 @@ def _validate_log(
             raise RuntimeError(
                 f"{arm.name}: validation profile {arm.validation!r} cannot "
                 f"prove compile mode {compile_mode!r}; that engine compiles "
-                "regions it exposes no switch for"
+                "code it exposes no switch for"
             )
         if profile.compiled_marker in log:
             raise RuntimeError(
@@ -842,7 +834,6 @@ def validate_arm(
     log_path: Path,
     workload: Workload,
     *,
-    regions: tuple[Region, ...] = (),
     compile_mode: str = "default",
     ac_mode: str = "sac",
     model_size: str = "1b",

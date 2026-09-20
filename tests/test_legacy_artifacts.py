@@ -159,7 +159,7 @@ IMPORT_PROBE = textwrap.dedent(
     # Everything the decoder itself pulls in, before it has seen an artifact.
     baseline = set(sys.modules)
 
-    manifest, arms, regions, warnings = load_run(Path({e2e!r}), None)
+    manifest, arms, warnings = load_run(Path({e2e!r}), None)
     kernel_manifest = json.loads(
         (Path({kernel!r}) / "manifest.json").read_text()
     )
@@ -170,7 +170,6 @@ IMPORT_PROBE = textwrap.dedent(
         "schema_version": manifest.get("schema_version"),
         "scenario": manifest.get("scenario"),
         "arms": arms,
-        "region_count": len(regions),
         "warnings": warnings,
         "workload_module": manifest["workload"]["module"],
         "workload_module_type": type(manifest["workload"]["module"]).__name__,
@@ -192,7 +191,7 @@ class LegacyDecodeTests(unittest.TestCase):
     """Property: legacy artifacts decode as data, and only as data."""
 
     def test_load_run_decodes_the_schema_8_manifest(self) -> None:
-        manifest, arms, regions, warnings = load_run(E2E_SCHEMA_8, None)
+        manifest, arms, warnings = load_run(E2E_SCHEMA_8, None)
         self.assertEqual(manifest["schema_version"], 8)
         self.assertEqual(manifest["scenario"], "piper1b_megatron")
         self.assertEqual(
@@ -205,10 +204,6 @@ class LegacyDecodeTests(unittest.TestCase):
                 "titan_swiglu_lm_head",
             ],
         )
-        # Schema 8 is the first version where an empty region list is an
-        # honest declaration (the megatron scenario), so it must not be
-        # second-guessed into PIPER_1B_REGIONS.
-        self.assertEqual(regions, ())
         self.assertEqual(warnings, [])
 
     def test_decoding_never_imports_what_the_artifact_records(self) -> None:
@@ -231,7 +226,6 @@ class LegacyDecodeTests(unittest.TestCase):
         # It really decoded.
         self.assertEqual(report["schema_version"], 8)
         self.assertEqual(report["scenario"], "piper1b_megatron")
-        self.assertEqual(report["region_count"], 0)
 
         # Reading the artifact imported nothing at all. This is the strong
         # form: not "it did not import the bad ones", but "it did not import".

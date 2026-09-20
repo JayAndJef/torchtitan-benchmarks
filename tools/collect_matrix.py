@@ -121,7 +121,6 @@ def main() -> None:
             "schema_version": manifest.get("schema_version"),
             "workload": manifest.get("workload"),
             "model_shape": manifest.get("model_shape"),
-            "regions": manifest.get("regions"),
             "execution_model": manifest.get("execution_model"),
             "hardware": manifest.get("hardware"),
             "hardware_metadata": manifest.get("hardware_metadata"),

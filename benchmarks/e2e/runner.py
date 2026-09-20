@@ -47,7 +47,6 @@ from benchmarks.e2e.registry import (
     Arm,
     Scenario,
     Workload,
-    piper_block_regions,
     scenario_by_name,
 )
 from benchmarks.e2e.validation import validate_arm
@@ -474,44 +473,6 @@ def _resolve_run(
     if refusal is not None:
         raise ValueError(refusal)
 
-    if scenario.regions:
-        # A regioned scenario declares the per-block regions of the model it
-        # actually runs. Three runs declare none instead. A shape whose block
-        # graph is not structurally identifiable declares none (see
-        # piper_block_regions), an uncompiled run declares none because it
-        # emits no compiled-graph annotations at all, and a pipelined run
-        # declares none because no rank holds every block -- the same honest
-        # reason the megatron scenario declares none. Validation rule 7 then
-        # guards none of the three, and arm rules 8, 10, 11 and 12 do.
-        #
-        # The pipeline condition is about the invocation count that IS the
-        # region's identity. ``piper_block_regions`` asks for
-        # ``n_layers * profiler_active`` invocations per window, and a rank
-        # of a pipeline holds ``n_layers / pp`` blocks and runs each of them
-        # once per microbatch. So the count a rank really reaches is
-        # ``(n_layers / pp) * n_microbatches * profiler_active``, which is a
-        # different number and is not the same number on every rank under an
-        # interleaved schedule. Deriving a per-rank count instead would be
-        # rule 7 rewritten rather than rule 7 applied. Real pipelined traces
-        # exist, but no trace analysis has established a unique per-rank
-        # invocation identity that could replace this declaration safely.
-        regions_apply = (
-            shape.supports_block_regions
-            and compile_mode not in UNCOMPILED_COMPILE_MODES
-            and parallelism.pp == 1
-        )
-        scenario = replace(
-            scenario,
-            regions=(
-                piper_block_regions(
-                    n_layers=shape.n_layers,
-                    profiler_active=workload.profiler_active,
-                )
-                if regions_apply
-                else ()
-            ),
-        )
-
     requested_hardware = request.hardware
     if existing_manifest is not None and requested_hardware == "auto":
         requested_hardware = str(existing_manifest.get("hardware", "auto"))
@@ -761,7 +722,6 @@ def execute_run(
                     arm_dir,
                     log_path,
                     scenario.workload,
-                    regions=scenario.regions,
                     compile_mode=compile_mode,
                     ac_mode=ac_mode,
                     model_size=model_size,
@@ -827,7 +787,6 @@ def execute_run(
                 arm_dir,
                 log_path,
                 scenario.workload,
-                regions=scenario.regions,
                 compile_mode=compile_mode,
                 ac_mode=ac_mode,
                 model_size=model_size,

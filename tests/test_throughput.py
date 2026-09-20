@@ -164,7 +164,8 @@ class _RunFixture:
     """A minimal output directory: a manifest, a log and traces per arm.
 
     The traces exist because evaluation refuses an arm that has none. They
-    declare no region, so every assertion here reads the throughput half.
+    declare no trace metric, so every assertion here reads the throughput
+    half.
     """
 
     @staticmethod
@@ -179,7 +180,6 @@ class _RunFixture:
             "scenario": "synthetic",
             "hardware": "test-gpu",
             "workload": WORKLOAD,
-            "regions": [],
             "selected_arms": sorted(logs),
         }
         if parallelism is not None:
@@ -317,7 +317,6 @@ class BaselineFreeSingletonTests(unittest.TestCase):
         self.assertIsNone(result.training["titan_stock"].baseline_ratio)
         self.assertIsNone(result.gpu_time["titan_stock"].baseline_kernel_ratio)
         self.assertEqual(result.comparisons, {})
-        self.assertNotIn("compiled-region distributions", report)
         self.assertNotIn("Significance limitation", report)
         machine = result.to_dict()
         self.assertIsNone(machine["training"]["titan_stock"]["baseline_ratio"])

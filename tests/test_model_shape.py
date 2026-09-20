@@ -2,7 +2,7 @@
 
 Covers the shape arithmetic (pinned against the numbers a real run logs),
 the closure of every scenario arm's config over every registered size, the
-derivation of regions and override counts from the shape, and the
+derivation of the override counts from the shape, and the
 manifest/resume plumbing.
 """
 
@@ -28,7 +28,6 @@ from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
-    piper_block_regions,
     scenario_by_name,
 )
 from benchmarks.e2e.runner import RunRequest, execute_run
@@ -1244,28 +1243,6 @@ class CommandTests(unittest.TestCase):
         )
 
 
-class RegionDerivationTests(unittest.TestCase):
-    def test_the_factory_reproduces_the_historical_counts(self) -> None:
-        self.assertEqual(
-            [
-                (r.name, r.phase, r.invocations_per_window)
-                for r in piper_block_regions(n_layers=16, profiler_active=5)
-            ],
-            [("backward_block", "backward", 80), ("forward_block", "forward", 80)],
-        )
-
-    def test_one_layer_regions_would_collide_so_huge_declares_none(self) -> None:
-        # At one layer the block graph runs profiler_active times per window,
-        # which the loss-side partitions also do -- the reason
-        # supports_block_regions is False rather than rescaled to 5.
-        self.assertEqual(
-            piper_block_regions(n_layers=1, profiler_active=5)[0]
-            .invocations_per_window,
-            5,
-        )
-        self.assertFalse(HUGE.supports_block_regions)
-
-
 def _size_line(shape) -> str:
     return (
         "[titan] - root - INFO - Model qwen3 piper_1B "
@@ -1392,7 +1369,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                 environment={"PATH": os.environ["PATH"]},
             )
 
-    def test_huge_run_declares_no_regions_and_records_the_shape(self) -> None:
+    def test_a_huge_run_records_the_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary) / "run"
             self._run(
@@ -1407,9 +1384,6 @@ class ManifestAndResumeTests(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], 16)
         self.assertEqual(manifest["model_size"], "huge")
         self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=1024))
-        # Rule 7's structural matcher cannot identify a 1-layer block graph,
-        # so the run says so instead of claiming a region it cannot verify.
-        self.assertEqual(manifest["regions"], [])
         command = manifest["commands"]["titan_compiled"]
         self.assertEqual(
             command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"

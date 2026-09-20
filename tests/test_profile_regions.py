@@ -190,7 +190,6 @@ class EvaluationTests(unittest.TestCase):
                 "scenario": "synthetic",
                 "hardware": "test-gpu",
                 "workload": {},
-                "regions": [],
                 "selected_arms": ["baseline", "optimized"],
             }
             (out_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -237,7 +236,6 @@ class EvaluationTests(unittest.TestCase):
                     "profiler_warmup": 5,
                     "profiler_active": 5,
                 },
-                "regions": [],
                 "selected_arms": ["baseline", "optimized"],
             }
             (out_dir / "manifest.json").write_text(json.dumps(manifest))

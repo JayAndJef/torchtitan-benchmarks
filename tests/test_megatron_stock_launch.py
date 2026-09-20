@@ -298,15 +298,6 @@ class StockScenarioDeclarationTests(unittest.TestCase):
         # It reuses the scenario workload's pre-tokenized config.
         self.assertIsNone(arm.config)
 
-    def test_the_scenario_declares_no_regions(self) -> None:
-        """Rule 7 guards nothing here, so it must not claim to.
-
-        Region pooling reads Inductor's whole-block annotations. Stock
-        Megatron has none, and a pipelined run of either engine reaches a
-        different invocation count per rank.
-        """
-        self.assertEqual(scenario_by_name(SCENARIO_NAME).regions, ())
-
     def test_the_axes_the_megatron_arm_cannot_honor_are_declined(self) -> None:
         scenario = scenario_by_name(SCENARIO_NAME)
         self.assertEqual(scenario.supported_ac_modes, ("none",))
@@ -811,11 +802,8 @@ class StockValidationProfileTests(unittest.TestCase):
             "Megatron-LM stock training loop (",
         )
 
-    def test_the_profile_checks_neither_the_ac_line_nor_the_regions(
-        self,
-    ) -> None:
+    def test_the_profile_does_not_check_the_ac_line(self) -> None:
         self.assertFalse(self.profile.check_ac_line)
-        self.assertFalse(self.profile.check_regions)
 
     def test_the_profile_cannot_prove_an_uncompiled_run(self) -> None:
         """``compiled_marker`` is None, so ``--compile-mode none`` is refused.

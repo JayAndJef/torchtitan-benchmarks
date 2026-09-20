@@ -1794,8 +1794,9 @@ TEST_CENSUS = {
     # ChainedOptimizer, reads a bare optimizer under zero3, refuses a
     # replicated chain under a zero1 label, and follows
     # --megatron-precision on the gradient reduction.
-    # -2 with the deletion of the graph-capture compile mode.
-    "test_megatron_stock_launch": 66,
+    # -2 with the deletion of the graph-capture compile mode, -1 with the
+    # deletion of the region declarations.
+    "test_megatron_stock_launch": 65,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1827,7 +1828,8 @@ TEST_CENSUS = {
     # +2 with the 30b-a3b shape: its geometry against piper's case and its
     # counts against the tensor list, and its split at pp 4, pp 8 and
     # every expert degree eight GPUs hold.
-    "test_model_shape": 57,
+    # -2 with the deletion of the region declarations.
+    "test_model_shape": 55,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -2020,7 +2022,8 @@ TEST_CENSUS = {
     # 'shard' record names it, and a current 'zero3' record resumes.
     # +1 with the review repair: a zero1 stock run passes the connection
     # limit precondition, because its argv sends no --use-megatron-fsdp.
-    "test_parallelism_plumbing": 86,
+    # -2 with the deletion of the region declarations.
+    "test_parallelism_plumbing": 84,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2082,7 +2085,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1807
+TEST_CENSUS_TOTAL = 1802
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
