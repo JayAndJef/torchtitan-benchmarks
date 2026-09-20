@@ -37,8 +37,6 @@ from benchmarks.e2e.parallelism import (
     MAX_WORLD_SIZE,
     MEGATRON_FSDP_LAUNCHERS,
     MEGATRON_LAUNCHERS,
-    NAN_GUARD_LAUNCHERS,
-    REPLICATE_ONLY_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
@@ -146,7 +144,7 @@ class ParallelismSpecTest(unittest.TestCase):
         self.assertEqual(fields & {"tp", "cp"}, set())
 
     def test_a_degree_below_one_is_refused_at_construction(self):
-        """The precondition the sixteen rules assume.
+        """The precondition the fifteen rules assume.
 
         Without it ``dp=-1, pp=-1`` has world size 1 and walks past rule 1
         on a one-GPU box, which is exactly the illegal mesh the rules exist
@@ -1022,7 +1020,7 @@ class Rule04ScheduleIsRegisteredTest(unittest.TestCase):
 
 class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
     def test_a_supported_schedule_reaches_a_megatron_run(self):
-        check(PP2, engines=("torchtitan", "megatron"))
+        check(PP2, engines=("torchtitan", "megatron_stock"))
 
     def test_a_pytorch_only_schedule_reaches_a_titan_only_run(self):
         """Rule 5 reads the launchers, not the scenario name, so a run with
@@ -1050,7 +1048,7 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
         check(
             ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
             batch=8,
-            engines=("torchtitan", "megatron"),
+            engines=("torchtitan", "megatron_stock"),
         )
 
     def test_a_pytorch_only_schedule_is_refused_beside_a_megatron_arm(self):
@@ -1061,7 +1059,7 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
                         ParallelismSpec(pp=2, pp_schedule=name),
                         batch=8,
                         compile_mode="none",
-                        engines=("torchtitan", "megatron"),
+                        engines=("torchtitan", "megatron_stock"),
                     )
 
 
@@ -1103,30 +1101,10 @@ class MegatronLauncherSetTest(unittest.TestCase):
             for scenario in SCENARIOS.values()
             for arm in scenario.arms
         }
-        # The tuned driver keeps its launcher name until the driver itself
-        # is deleted; no arm selects it.
-        self.assertEqual(MEGATRON_LAUNCHERS - launchers, {"megatron"})
+        self.assertEqual(MEGATRON_LAUNCHERS - launchers, set())
 
     def test_the_set_does_not_hold_the_titan_launcher(self):
         self.assertNotIn("torchtitan", MEGATRON_LAUNCHERS)
-
-    def test_the_nan_guard_set_names_the_stock_launcher_alone(self):
-        """``--megatron-nan-guard`` reaches these launchers and no other.
-
-        A subset of the Megatron set, because the guard is Megatron's; and
-        the tuned driver is not in it, because it never calls
-        ``validate_result`` and has no guard under either value. A launcher
-        the registry does not declare would be a stale name here.
-        """
-        self.assertEqual(NAN_GUARD_LAUNCHERS, frozenset({"megatron_stock"}))
-        self.assertTrue(NAN_GUARD_LAUNCHERS <= MEGATRON_LAUNCHERS)
-        self.assertNotIn("megatron", NAN_GUARD_LAUNCHERS)
-        launchers = {
-            arm.launcher
-            for scenario in SCENARIOS.values()
-            for arm in scenario.arms
-        }
-        self.assertEqual(NAN_GUARD_LAUNCHERS - launchers, set())
 
     def test_rule_five_reads_every_member_of_the_set(self):
         """Each Megatron-LM launcher alone must trip rule 5.
@@ -1642,188 +1620,6 @@ class Rule15WasDeletedAndAWarningReplacedItTest(unittest.TestCase):
         check(PP2)
 
 
-class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
-    """``benchmarks/e2e/megatron/train.py`` implements neither the sharded
-    parity nor an expert degree, and its command line carries no flag for
-    either. So a spec that asks for one would be ignored by that arm and
-    recorded by the manifest anyway.
-
-    **Both halves became reachable in this pass.** Rule 14 refused every
-    expert degree before it, and the parity did not exist. Without this rule
-    a cross-engine row would put a sharded, expert-split TorchTitan arm
-    against a replicated, unsplit Megatron arm, under one manifest claiming
-    both sides had the same mesh.
-    """
-
-    TUNED = ("torchtitan", "megatron")
-    STOCK = ("torchtitan", "megatron_stock")
-
-    def test_the_set_names_the_tuned_driver_alone(self):
-        """It is a fact about one driver's source, not about Megatron-LM.
-        ``megatron_stock`` hands the run to Megatron's own ``pretrain``,
-        which implements both."""
-        self.assertEqual(REPLICATE_ONLY_LAUNCHERS, frozenset({"megatron"}))
-        self.assertIn("megatron", MEGATRON_LAUNCHERS)
-        self.assertNotIn("megatron_stock", REPLICATE_ONLY_LAUNCHERS)
-        self.assertNotIn("torchtitan", REPLICATE_ONLY_LAUNCHERS)
-
-    # Every launcher the registry runs, and whether its driver implements
-    # the sharded parity and an expert degree. Written out rather than
-    # derived: the answer is a fact about each driver's source, and a
-    # derivation would agree with the set by construction and check nothing.
-    IMPLEMENTS_NEITHER = {
-        "torchtitan": False,
-        "megatron": True,
-        "megatron_stock": False,
-    }
-
-    def test_the_set_is_the_declared_classification(self):
-        """A launcher this set does not name is one rule 16 admits, so a new
-        launcher must not pass quietly.
-
-        The table above is the classification, and this asserts the set is
-        exactly its true half. ``MegatronLauncherSetTest`` already checks
-        that every registry launcher is a known one; the point here is that
-        an author who adds a launcher there still has to answer this
-        question, and cannot make the suite green by editing one set.
-        """
-        launchers = {
-            arm.launcher
-            for scenario in SCENARIOS.values()
-            for arm in scenario.arms
-        }
-        # "megatron" is the tuned driver, which no arm selects today; the
-        # table still classifies it until the driver is deleted.
-        self.assertEqual(
-            set(self.IMPLEMENTS_NEITHER) - {"megatron"},
-            launchers,
-            "classify every registry launcher in IMPLEMENTS_NEITHER: say "
-            "whether its driver implements the sharded parity and an "
-            "expert degree, then make REPLICATE_ONLY_LAUNCHERS agree",
-        )
-        self.assertEqual(
-            REPLICATE_ONLY_LAUNCHERS,
-            frozenset(
-                name
-                for name, neither in self.IMPLEMENTS_NEITHER.items()
-                if neither
-            ),
-            "REPLICATE_ONLY_LAUNCHERS disagrees with the table above",
-        )
-
-    def test_the_tuned_arm_refuses_an_expert_degree(self):
-        with self.assertRaisesRegex(
-            ValueError, r"expert degree 2 is not implemented by the megatron"
-        ):
-            check(
-                ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
-                engines=self.TUNED,
-            )
-
-    def test_the_tuned_arm_refuses_the_sharded_parity(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            r"--dense-sharding zero3 is not implemented by the megatron",
-        ):
-            check(
-                ParallelismSpec(dp=2, dense_sharding="zero3"),
-                engines=self.TUNED,
-            )
-
-    def test_the_expert_half_names_the_expert_degree_and_not_the_parity(self):
-        """It is checked first on purpose. Rule 14 already ties an expert
-        degree to the sharded parity, so the shard half alone would refuse
-        every expert spec that reached here -- under a message about
-        sharding, which is not what the operator asked for."""
-        with self.assertRaisesRegex(ValueError, "expert degree") as raised:
-            check(
-                ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
-                engines=self.TUNED,
-            )
-        self.assertNotIn("--dense-sharding zero3 is not", str(raised.exception))
-
-    def test_the_stock_arm_takes_both(self):
-        """Stock Megatron implements both, so the rule must not reach it."""
-        check(ParallelismSpec(dp=2, dense_sharding="zero3"), engines=self.STOCK)
-        check(
-            ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
-            engines=self.STOCK,
-        )
-
-    def test_each_half_names_the_repair_under_its_own_message(self):
-        """Rule 14's own comment sets the standard: the refusal names the
-        flag that repairs it.
-
-        **Each half is matched by its own opening words.** A bare
-        ``assertIn("--arm", ...)`` passes when one half is deleted, because
-        the surviving half catches the other spec and its message also holds
-        the word. Measured: with the expert half removed, both cases below
-        fell through to the shard half and both still passed.
-
-        It matches ``run --arm`` rather than ``--arm``. ``run-all`` carries
-        PASSTHROUGH_CONTEXT and forwards an unknown flag to the training
-        subprocess, so a message naming the bare flag would send a
-        ``run-all`` operator to a flag that command ignores.
-        """
-        for spec, opening in (
-            (
-                ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"),
-                r"expert degree 2 is not implemented",
-            ),
-            (
-                ParallelismSpec(dp=2, dense_sharding="zero3"),
-                r"--dense-sharding zero3 is not implemented",
-            ),
-        ):
-            with self.subTest(spec=spec):
-                with self.assertRaisesRegex(ValueError, opening) as raised:
-                    check(spec, engines=self.TUNED)
-                self.assertIn("run --arm", str(raised.exception))
-
-    def test_a_titan_only_roster_passes_this_rule(self):
-        """The state the repair reaches. ``engines`` is the launcher set of
-        the arms the run will really start, so a roster without the tuned
-        driver passes.
-
-        **This says the rule admits it. It does not say the run succeeds.**
-        ``parallelize_piper1b`` now admits an explicit shard degree, so the
-        subprocess no longer refuses such a roster -- but no sharded arm has
-        run on a GPU, so this rule is the only thing under test here.
-        ``ResolveRunTests.test_an_arm_subset_narrows_the_engine_set_spec_rule_16_reads``
-        checks the other half of the claim, that ``--arm`` really narrows
-        the set.
-        """
-        check(ParallelismSpec(dp=2, dense_sharding="zero3"))
-        check(ParallelismSpec(dp=2, ep=2, dense_sharding="zero3"))
-
-    def test_the_tuned_arm_keeps_every_mesh_it_can_reach(self):
-        """The rule may not refuse a mesh the tuned driver already runs.
-        Every recorded megatron cell is replicated with no expert split, so
-        rule 16 has to admit all of them.
-
-        **The last row is planned, not recorded.** Every manifest under
-        ``out/`` that names the ``megatron`` launcher is ``piper1b_megatron``
-        at ``pp2``, ``dp2`` or ``dp2 x pp2``. ``DP2_PP4`` has run on
-        ``megatron_stock``, which is a different launcher and a different
-        scenario. It is swept here because rule 16 must not refuse it, not
-        because the tuned arm has measured it.
-        """
-        for spec, batch, devices in (
-            (TRIVIAL_SPEC, 4, 1),
-            (PP2, 4, 2),
-            (ParallelismSpec(dp=2), 4, 2),
-            (ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"), 4, 4),
-            (DP2_PP4, 8, 8),
-        ):
-            with self.subTest(spec=spec):
-                check(
-                    spec,
-                    batch=batch,
-                    device_count=devices,
-                    engines=self.TUNED,
-                )
-
-
 class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
     """Megatron-FSDP factors the GLOBAL world size into ``dp_cp x ep x tp``
     and has no pipeline term, so it builds a mesh only at ``pp`` 1.
@@ -1842,21 +1638,10 @@ class Rule17MegatronFsdpCannotHoldAPipelineTest(unittest.TestCase):
     TITAN = ("torchtitan",)
 
     def test_the_set_names_the_stock_driver_alone(self):
-        """``megatron`` shards not at all and rule 16 refuses it earlier;
-        ``torchtitan`` shards through ``fully_shard``, which holds a
+        """``torchtitan`` shards through ``fully_shard``, which holds a
         pipeline."""
         self.assertEqual(MEGATRON_FSDP_LAUNCHERS, frozenset({"megatron_stock"}))
-        self.assertNotIn("megatron", MEGATRON_FSDP_LAUNCHERS)
         self.assertNotIn("torchtitan", MEGATRON_FSDP_LAUNCHERS)
-
-    def test_the_two_sets_are_disjoint(self):
-        """A launcher cannot both shard through Megatron-FSDP and implement
-        no sharding at all. Rule 16 would refuse it first, so a launcher in
-        both sets would make rule 17 unreachable for it."""
-        self.assertEqual(
-            MEGATRON_FSDP_LAUNCHERS & REPLICATE_ONLY_LAUNCHERS,
-            frozenset(),
-        )
 
     def test_the_sharded_pipeline_is_refused(self):
         with self.assertRaisesRegex(
@@ -1991,7 +1776,7 @@ class TheEightGpuCellTest(unittest.TestCase):
 
     def test_the_cell_passes_at_eight_devices_for_both_engines(self):
         for shape in (SHAPE_1B, SHAPE_9B):
-            for engines in (("torchtitan",), ("torchtitan", "megatron")):
+            for engines in (("torchtitan",), ("torchtitan", "megatron_stock")):
                 for spec, batch in ((DP2_PP4, 8), (DP2_PP4_MICRO4, 32)):
                     with self.subTest(
                         model_size=shape.name,
@@ -2182,7 +1967,7 @@ class TheSingleGpuRunStaysLegalTest(unittest.TestCase):
 
     def test_every_compile_mode_and_engine_roster_passes(self):
         for mode in COMPILE_MODES:
-            for engines in ((), ("torchtitan",), ("torchtitan", "megatron")):
+            for engines in ((), ("torchtitan",), ("torchtitan", "megatron_stock")):
                 with self.subTest(compile_mode=mode, engines=engines):
                     check(TRIVIAL_SPEC, compile_mode=mode, engines=engines)
 
@@ -2196,8 +1981,8 @@ class ValidatorInterfaceTest(unittest.TestCase):
     def test_the_engine_set_may_be_any_iterable(self):
         """It is built from ``{arm.launcher for arm in arms}`` at the call
         site, and a one-shot iterator must not read differently."""
-        check(PP2, engines=iter(("torchtitan", "megatron")))
-        check(PP2, engines=frozenset({"megatron"}))
+        check(PP2, engines=iter(("torchtitan", "megatron_stock")))
+        check(PP2, engines=frozenset({"megatron_stock"}))
         check(PP2, engines=())
 
     def test_a_valid_spec_returns_none(self):
@@ -2207,7 +1992,7 @@ class ValidatorInterfaceTest(unittest.TestCase):
                 shape=SHAPE_1B,
                 workload=workload(4),
                 compile_mode="default",
-                engines=("torchtitan", "megatron"),
+                engines=("torchtitan", "megatron_stock"),
                 device_count=2,
             )
         )

@@ -19,8 +19,6 @@ from benchmarks.cli.e2e import run_all_command, run_command
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
-    NAN_GUARD_LAUNCHERS,
-    PRECISION_LAUNCHERS,
 )
 from benchmarks.e2e.registry import ENGINES, SCENARIOS
 from benchmarks.e2e.runner import execute_run
@@ -603,7 +601,7 @@ class CliTests(unittest.TestCase):
         holds_stock = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.launcher in NAN_GUARD_LAUNCHERS for arm in scenario.arms)
+            if any(arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms)
         ]
         self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:
@@ -691,7 +689,7 @@ class CliTests(unittest.TestCase):
         holds_stock = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.launcher in PRECISION_LAUNCHERS for arm in scenario.arms)
+            if any(arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms)
         ]
         self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:

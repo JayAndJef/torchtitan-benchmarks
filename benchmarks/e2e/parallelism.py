@@ -65,12 +65,11 @@ supported. Adding one means adding it to ``world_size``, to
 ``execution_model`` and to the throughput divisor at the same time.
 
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` under the
-``replicate`` dense parity, rule 16 refuses every sharded value and every
-expert degree to the tuned megatron driver, rule 17 refuses ``zero3`` under
-a pipeline to the stock megatron driver, and rules 5 and 6 refuse three of
-the five registered schedules for every cross-engine run. **There are
-sixteen rules, and the numbering keeps a gap at 15.** That rule refused a
-sharded value at ``dp`` 1. It now warns instead, because it blocked
+``replicate`` dense parity, rule 17 refuses ``zero3`` under a pipeline to
+the stock megatron driver, and rules 5 and 6 refuse three of the five
+registered schedules for every cross-engine run. **There are fifteen rules,
+and the numbering keeps a gap at 15 and at 16.** Rule 15 refused a sharded
+value at ``dp`` 1. It now warns instead, because it blocked
 ``dp 1 x pp 8``, which is the agreed 30B-A3B matrix, and because no engine
 refuses that mesh. ``dense_sharding_warnings`` carries the warning. The
 numbers of rules 16 and 17 stay where they are: messages, tests and the
@@ -174,9 +173,9 @@ MAX_WORLD_SIZE = 8
 MAX_PP = 8
 
 
-# The ``Arm.launcher`` values that drive Megatron-LM. Rule 5 reads this set,
-# because ``PipelineSchedule.megatron_supported`` is a fact about the library
-# and more than one launcher runs it.
+
+# The ``Arm.launcher`` values that drive Megatron-LM. Rules 5, 12 and the
+# three megatron run axes read this set.
 #
 # **Declared one by one. Not a ``megatron`` prefix, and not "every launcher
 # that is not torchtitan".** A prefix fails OPEN: a launcher that names the
@@ -188,57 +187,11 @@ MAX_PP = 8
 # new launcher is then an edit here rather than a silent classification.
 # ``tests/test_parallelism.py`` refuses a registry launcher this set and
 # ``torchtitan`` do not name between them.
-MEGATRON_LAUNCHERS = frozenset({"megatron", "megatron_stock"})
-
-
-# The ``Arm.launcher`` values whose driver implements neither the sharded
-# dense parity nor an expert degree. Rule 16 reads this set.
 #
-# ``benchmarks/e2e/megatron/train.py`` is the one such driver today. It calls
-# ``initialize_model_parallel(pipeline_model_parallel_size=args.pp)`` with no
-# expert size, it builds a plain replicated ``DistributedDataParallel``, and
-# its command line carries neither an expert flag nor a sharding flag. So a
-# spec that asks for either gets a run that ignores it, and the manifest
-# records a parity and an expert degree the arm did not have.
-#
-# **Declared one by one, for the reason MEGATRON_LAUNCHERS is declared one
-# by one.** This is a fact about one driver's source, not about Megatron-LM:
-# ``megatron_stock`` hands the run to Megatron's own ``pretrain``, which
-# implements both. A prefix or a complement would classify the two the same
-# way and would be wrong about one of them. A new launcher is an edit here
-# rather than a silent classification.
-REPLICATE_ONLY_LAUNCHERS = frozenset({"megatron"})
-
-
-# The ``Arm.launcher`` values whose driver runs stock Megatron's NaN/Inf
-# guard, ``check_for_nan_in_loss_and_grad``. ``--megatron-nan-guard`` reaches
-# these alone, and ``off`` is refused for a run that selects any other
-# megatron launcher.
-#
-# ``megatron_stock`` hands the run to Megatron's own ``pretrain``, whose
-# ``loss_func`` and ``DistributedDataParallel`` both read the field. The
-# tuned driver, ``benchmarks/e2e/megatron/train.py``, never calls
-# ``validate_result`` and builds no such check, so it has no guard under
-# either value: a run that recorded ``off`` for it would name a treatment
-# the arm never had.
-#
-# **Declared one by one, for the reason MEGATRON_LAUNCHERS is.** A new
-# launcher is an edit here rather than a silent classification.
-NAN_GUARD_LAUNCHERS = frozenset({"megatron_stock"})
-
-# The launchers whose driver can hold ``--megatron-precision lean``.
-#
-# The stock driver hands the four precision flags to Megatron's own
-# optimizer builder. The tuned driver
-# (``benchmarks/e2e/megatron/train.py``) builds a plain torch ``AdamW`` and
-# has no precision-aware path at all, so ``lean`` would reach nothing there
-# and the manifest would record a precision the run did not have.
-#
-# Declared beside ``NAN_GUARD_LAUNCHERS`` and for the same reason: the
-# refusal follows the arm roster the run really starts, so ``run --arm``
-# narrows it.
-PRECISION_LAUNCHERS = frozenset({"megatron_stock"})
-
+# One set covers every megatron axis. ``megatron_stock`` hands the run to
+# Megatron's own ``pretrain``, which implements the NaN guard, the
+# precision-aware optimizer, the sharded dense parity and an expert degree.
+MEGATRON_LAUNCHERS = frozenset({"megatron_stock"})
 
 # The ``Arm.launcher`` values whose sharded parity goes through
 # Megatron-FSDP. Rule 17 reads this set.
@@ -268,9 +221,8 @@ PRECISION_LAUNCHERS = frozenset({"megatron_stock"})
 # data_parallel_sharding_strategy='optim_grads_params'`` before it dies. A
 # submodule bump that gives both patterns a pipeline term removes this rule.
 #
-# **Declared one by one, for the reason the two sets above are.** This names
-# the drivers that shard through Megatron-FSDP. ``megatron`` shards not at
-# all and rule 16 refuses it earlier; ``torchtitan`` shards through
+# **Declared one by one, for the reason the set above is.** This names the
+# drivers that shard through Megatron-FSDP. ``torchtitan`` shards through
 # ``fully_shard``, which holds a pipeline.
 #
 # **Only ``zero3`` reaches Megatron-FSDP, so rule 17 refuses ``zero3``
@@ -923,12 +875,10 @@ def validate_parallelism(
     #    launchers rather than the scenario name: a titan-only run may use a
     #    PyTorch-only schedule.
     #
-    #    It reads MEGATRON_LAUNCHERS rather than the one name "megatron".
-    #    A second Megatron-LM launcher, "megatron_stock", walked past this
-    #    rule while the test was an equality against one string, and a
-    #    refusal inside a command builder covered it instead. A command
-    #    builder is not a spec rule: it runs after the manifest records the
-    #    mesh, and it cannot refuse a mesh nobody builds a command for.
+    #    It reads MEGATRON_LAUNCHERS rather than one launcher name. A
+    #    command builder is not a spec rule: it runs after the manifest
+    #    records the mesh, and it cannot refuse a mesh nobody builds a
+    #    command for.
     if (
         schedule is not None
         and engines & MEGATRON_LAUNCHERS
@@ -1116,68 +1066,10 @@ def validate_parallelism(
     #     messages, their tests and the agent guide all name them, so a
     #     renumber would break more than it tidies.
 
-    # 16. A driver that implements neither the sharded parity nor an expert
-    #     degree may not be given one. Its command line carries no such
-    #     flag, so the run would ignore the value and the manifest would
-    #     record it anyway. That is the one failure a recorded fact must not
-    #     have, and both halves became reachable in this pass: rule 14
-    #     refused every expert degree before it, and the parity is new.
-    #
-    #     The expert half is checked first, and it is not redundant. Rule 14
-    #     already ties an expert degree to the sharded parity, so the shard
-    #     half alone would refuse every expert spec that reached here -- but
-    #     under a message about sharding, which is not what the operator
-    #     asked for. The explicit half also keeps the hole shut if rule 14
-    #     ever narrows.
-    #
-    #     **Both messages name a repair, as rule 14's does.** ``engines`` is
-    #     the launcher set of the arms the run will really start.
-    #     ``run --arm NAME`` narrows it. So a subset that selects the
-    #     TorchTitan arms alone takes this axis off the megatron driver and
-    #     passes this rule.
-    #
-    #     **The messages name ``run --arm``, not a bare ``--arm``.**
-    #     ``run-all`` carries PASSTHROUGH_CONTEXT, so it accepts the flag,
-    #     forwards it to the training subprocess as a TorchTitan argument
-    #     and records it in ``extra_torchtitan_args``. The operator would
-    #     read the same refusal a second time with nothing to say the flag
-    #     was ignored.
-    #
-    #     **Neither message promises the selected run then succeeds, and
-    #     the wording stays at "passes this rule" for that reason.** The
-    #     subprocess-side blocker is gone: ``parallelize_piper1b`` refused
-    #     every shard degree above 1 while this rule was written, and it now
-    #     refuses only a DROPPED flag -- it reads the raw configured
-    #     ``data_parallel_shard_degree`` and admits any degree the run asked
-    #     for. So a titan-only sharded roster is no longer refused inside
-    #     the training subprocess.
-    #
-    #     **What is still missing is a run.** No sharded arm and no expert
-    #     arm has executed on a GPU on either engine, so the path is
-    #     declared and not measured. A message that said "measures this
-    #     mesh" would promise the operator a measurement nobody has taken.
-    #     Restore that wording after the first sharded cell passes
-    #     ``validate_arm``, and not before.
-    refused = engines & REPLICATE_ONLY_LAUNCHERS
-    if refused and spec.ep > 1:
-        raise ValueError(
-            f"expert degree {spec.ep} is not implemented by the "
-            f"{', '.join(sorted(refused))} driver, which this run holds. "
-            "That driver passes no expert size to initialize_model_parallel. "
-            "The run would train every expert on every rank. The manifest "
-            "would record a split it did not have. Use run --arm to select "
-            "the TorchTitan arms alone"
-        )
-    if refused and spec.dense_sharding != "replicate":
-        raise ValueError(
-            f"--dense-sharding {spec.dense_sharding} is not implemented by "
-            f"the {', '.join(sorted(refused))} driver, which this run holds. "
-            "That driver builds a plain replicated DistributedDataParallel "
-            "and no MegatronOptimizer. The run would replicate the dense "
-            "parameters and every optimizer state. The manifest would record "
-            "a sharded parity. Use run --arm to select the TorchTitan arms "
-            "alone"
-        )
+    # 16. DELETED with the tuned megatron driver, and the number is kept
+    #     empty on purpose. The rule refused a sharded parity and an expert
+    #     degree to a driver that implemented neither. The stock driver
+    #     implements both.
 
     # 17. A launcher that shards through Megatron-FSDP cannot also hold a
     #     pipeline. ``MEGATRON_FSDP_LAUNCHERS`` carries the arithmetic and
@@ -1189,7 +1081,7 @@ def validate_parallelism(
     #     it as a harness defect and looks in the wrong place. Refusing here
     #     claims no GPU and names the cause.
     #
-    #     **The rule is engine-scoped, exactly as rule 16 is.** TorchTitan
+    #     **The rule is engine-scoped.** TorchTitan
     #     shards under a pipeline through ``fully_shard`` and is unaffected,
     #     so ``run --arm`` selecting the TorchTitan arms alone passes it.
     #

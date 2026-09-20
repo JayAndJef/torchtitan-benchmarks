@@ -25,8 +25,6 @@ from benchmarks.artifacts.run_state import (
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
-    NAN_GUARD_LAUNCHERS,
-    PRECISION_LAUNCHERS,
     ParallelismSpec,
     TRIVIAL_SPEC,
     dense_sharding_warnings,
@@ -618,7 +616,7 @@ def megatron_precision_refusal(
     if megatron_precision == DEFAULT_MEGATRON_PRECISION:
         return None
     arms = tuple(arms)
-    if not any(arm.launcher in PRECISION_LAUNCHERS for arm in arms):
+    if not any(arm.launcher in MEGATRON_LAUNCHERS for arm in arms):
         return (
             f"--megatron-precision {megatron_precision!r} reaches no arm of "
             f"this run: {', '.join(arm.name for arm in arms)} run on "
@@ -654,7 +652,7 @@ def megatron_nan_guard_refusal(
     if megatron_nan_guard == DEFAULT_MEGATRON_NAN_GUARD:
         return None
     arms = tuple(arms)
-    if not any(arm.launcher in NAN_GUARD_LAUNCHERS for arm in arms):
+    if not any(arm.launcher in MEGATRON_LAUNCHERS for arm in arms):
         return (
             f"--megatron-nan-guard {megatron_nan_guard!r} reaches no arm of "
             f"this run: {', '.join(arm.name for arm in arms)} run on "
