@@ -380,7 +380,13 @@ def training_metrics(log_path: Path) -> list[tuple[int, float, int]]:
 def stable_tps(
     rows: list[tuple[int, float, int]], workload: dict[str, Any]
 ) -> list[int]:
-    """Select post-compile steps before each profiler warmup begins."""
+    """Select post-compile steps before each profiler warmup begins.
+
+    The sample rule of a **profiled** run. The profiler costs host and GPU
+    time on every warmup and active step, so the samples are the steps of
+    each cycle that carry none: steps 2 to ``wait`` of every
+    ``profile_freq``. Step 1 of each cycle is dropped as startup noise.
+    """
     profile_freq = int(workload.get("profile_freq", 20))
     wait = profile_freq - int(workload.get("profiler_warmup", 5)) - int(
         workload.get("profiler_active", 5)
@@ -390,6 +396,25 @@ def stable_tps(
         for step, _, tps in rows
         if 2 <= ((step - 1) % profile_freq) + 1 <= wait
     ]
+
+
+def measured_tps(
+    rows: list[tuple[int, float, int]], warmup_steps: int
+) -> list[int]:
+    """Select every step after the warmup.
+
+    The sample rule of an **unprofiled** run, and it is a different figure
+    from ``stable_tps`` rather than a wider reading of the same one. There
+    is no profiler to sample around, so every step after the warmup is a
+    sample: the count grows with ``--steps`` where the profiled rule's does
+    not, and the median is taken over steps the profiled rule discards.
+    Numbers are only comparable within one value of ``--profile``, and
+    within one ``--warmup-steps``.
+
+    The step numbers come from the engine's own log lines, which both
+    engines number from 1.
+    """
+    return [tps for step, _, tps in rows if step > warmup_steps]
 
 
 def _slowest_rank(per_rank: dict[int, float | None]) -> int:
@@ -623,10 +648,21 @@ def evaluate_run(
     raw_training = {
         arm: per_rank_training_metrics(out_dir / f"{arm}.log") for arm in arms
     }
+    # The sample rule follows the axis the run was measured under. A
+    # profiled run samples around its profiler windows; an unprofiled one
+    # takes every step after its warmup. Choosing by the manifest is what
+    # keeps a directory readable by the rule that produced it.
+    if profile:
+        def _samples(rows: list[tuple[int, float, int]]) -> list[int]:
+            return stable_tps(rows, workload)
+    else:
+        warmup_steps = int(manifest["warmup_steps"])
+
+        def _samples(rows: list[tuple[int, float, int]]) -> list[int]:
+            return measured_tps(rows, warmup_steps)
+
     stable_samples = {
-        arm: {
-            rank: stable_tps(rows, workload) for rank, rows in by_rank.items()
-        }
+        arm: {rank: _samples(rows) for rank, rows in by_rank.items()}
         for arm, by_rank in raw_training.items()
     }
     throughput = {

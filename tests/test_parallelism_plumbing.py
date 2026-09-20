@@ -554,6 +554,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
             profile=False,
+            warmup_steps=10,
         )
 
     def test_the_schema_is_seventeen(self) -> None:
@@ -658,6 +659,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "sac",
                 "1b",
                 profile=False,
+                warmup_steps=10,
             )
 
     def test_the_p2p_sync_default_is_recorded_rather_than_left_out(
@@ -702,6 +704,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "1b",
                 parallelism=TRIVIAL_SPEC,
                 profile=False,
+                warmup_steps=10,
             )
 
     def test_the_nan_guard_default_is_recorded_rather_than_left_out(
@@ -769,6 +772,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 parallelism=TRIVIAL_SPEC,
                 megatron_p2p_sync="on",
                 profile=False,
+                warmup_steps=10,
             )
 
     def test_an_omitted_precision_is_a_type_error(self) -> None:
@@ -789,6 +793,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 megatron_p2p_sync="on",
                 megatron_nan_guard="on",
                 profile=False,
+                warmup_steps=10,
             )
 
 
@@ -817,6 +822,7 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
 
     def test_the_trivial_spec_records_the_string_it_always_recorded(self) -> None:
@@ -875,6 +881,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
         manifest["execution_model"] = "something-else-entirely"
         self.assertEqual(
@@ -892,6 +899,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 megatron_nan_guard="on",
                 megatron_precision="stock",
                 profile=False,
+                warmup_steps=10,
             ),
             [],
         )
@@ -911,6 +919,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
         self.assertIn(
             "parallelism",
@@ -928,6 +937,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 megatron_nan_guard="on",
                 megatron_precision="stock",
                 profile=False,
+                warmup_steps=10,
             ),
         )
 
@@ -952,6 +962,7 @@ class ResumeParallelismTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
 
     def _mismatches(self, manifest: dict, parallelism: ParallelismSpec):
@@ -969,6 +980,7 @@ class ResumeParallelismTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
 
     def test_the_same_spec_resumes_and_a_different_one_does_not(self) -> None:
@@ -1049,6 +1061,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
 
     def _mismatches(self, manifest: dict, megatron_p2p_sync: str) -> list[str]:
@@ -1066,6 +1079,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision="stock",
             profile=False,
+            warmup_steps=10,
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -1116,6 +1130,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
             profile=False,
+            warmup_steps=10,
         )
 
     def _mismatches(
@@ -1138,6 +1153,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
             profile=False,
+            warmup_steps=10,
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(
@@ -1188,6 +1204,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision=megatron_precision,
             profile=False,
+            warmup_steps=10,
         )
 
     def _mismatches(
@@ -1210,6 +1227,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             megatron_nan_guard="on",
             megatron_precision=megatron_precision,
             profile=False,
+            warmup_steps=10,
         )
 
     def test_the_same_value_resumes_and_a_different_one_is_refused(

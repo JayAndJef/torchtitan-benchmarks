@@ -60,6 +60,21 @@ DEFAULT_MODEL_SIZE = "1b"
 # would publish two treatments under one label.
 DEFAULT_PROFILE = False
 
+# How many steps an unprofiled run discards before it measures.
+#
+# The engines compile, autotune and fill their caches in the first steps of
+# a run, so a throughput taken over them is not the throughput of the
+# workload. Under ``--profile`` the profiler schedule decides the sample
+# set instead (``benchmarks/e2e/results.py``'s ``stable_tps``), and this
+# axis is refused; without it every step after the warmup is a sample
+# (``measured_tps``).
+#
+# 10 is half of one profiler cycle, which is the span the profiled rule
+# samples: ``stable_tps`` takes steps 2 to 10 of every 20. The two rules
+# therefore discard a comparable prefix, and neither figure is the other's
+# -- results are only comparable within one value of this axis.
+DEFAULT_WARMUP_STEPS = 10
+
 # The Megatron pipeline point-to-point sync treatment, selectable per run.
 # Stock Megatron calls torch.cuda.synchronize() once per batched pipeline
 # message (megatron/core/pipeline_parallel/p2p_communication.py, guarded by

@@ -150,6 +150,11 @@ def manifest_data(
     # would claim a trace layout the run did not write, and every trace rule
     # of benchmarks/e2e/validation.py reads this axis.
     profile: bool,
+    # ``None`` under a profiled run, where the profiler schedule decides
+    # the sample set. No default, for the reason the axes above have none:
+    # the throughput this run publishes is taken over the steps after this
+    # count, and two directories that disagree about it are not comparable.
+    warmup_steps: int | None,
 ) -> dict[str, Any]:
     # Recorded canonically, so a fresh manifest never carries a retired name.
     model_size = canonical_size_name(model_size)
@@ -173,6 +178,7 @@ def manifest_data(
         "megatron_nan_guard": megatron_nan_guard,
         "megatron_precision": megatron_precision,
         "profile": profile,
+        "warmup_steps": warmup_steps,
         "throughput_definition": THROUGHPUT_DEFINITION,
         "execution_model": execution_model(parallelism),
     }
@@ -194,6 +200,7 @@ def write_manifest(
     megatron_nan_guard: str,
     megatron_precision: str,
     profile: bool,
+    warmup_steps: int | None,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -211,6 +218,7 @@ def write_manifest(
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
             profile=profile,
+            warmup_steps=warmup_steps,
         ),
     )
 
@@ -248,6 +256,7 @@ def _resume_mismatches(
     megatron_nan_guard: str,
     megatron_precision: str,
     profile: bool,
+    warmup_steps: int | None,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -260,6 +269,7 @@ def _resume_mismatches(
         "megatron_nan_guard": megatron_nan_guard,
         "megatron_precision": megatron_precision,
         "profile": profile,
+        "warmup_steps": warmup_steps,
         "parallelism": _parallelism_record(scenario, parallelism),
     }
     mismatches = [

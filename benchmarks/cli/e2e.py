@@ -71,6 +71,7 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_PROFILE,
+    DEFAULT_WARMUP_STEPS,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_PRECISION_MODES,
     MEGATRON_P2P_SYNC_MODES,
@@ -144,6 +145,14 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     ``run 0 --steps 12`` on a flag the operator never passed. It defaults
     to ``None`` as the options above do: a resume inherits the recorded
     value, and a fresh run takes ``DEFAULT_PROFILE``.
+
+    ``--warmup-steps`` is the one option of this block that *does* take an
+    environment variable, and the asymmetry costs something: an exported
+    ``WARMUP_STEPS`` refuses every ``--profile`` run, on a flag the
+    operator did not pass. Unset it before a profiled run. It is exported
+    because the matrix supervisor drives a sweep of unprofiled cells and
+    one value serves the whole sweep, which is the case ``AC_MODE`` and
+    ``MODEL_SIZE`` are exported for.
     """
     options = [
         click.option(
@@ -324,6 +333,20 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "time. Results are only comparable within one value."
             ),
         ),
+        click.option(
+            "--warmup-steps",
+            "warmup_steps",
+            type=click.IntRange(min=0),
+            envvar="WARMUP_STEPS",
+            show_envvar=True,
+            help=(
+                "Steps an unprofiled run discards before it measures "
+                f"[default: {DEFAULT_WARMUP_STEPS}]. --steps must be more "
+                "than it. Refused beside --profile, which samples around "
+                "the profiler schedule instead. Results are only comparable "
+                "within one value."
+            ),
+        ),
     ]
     for option in reversed(options):
         command = option(command)
@@ -372,6 +395,23 @@ def _parallelism(options: dict[str, Any]) -> ParallelismSpec | None:
     )
 
 
+def _refuse_warmup_under_profile(options: dict[str, Any]) -> None:
+    """Refuse ``--warmup-steps`` beside ``--profile``.
+
+    The two name two sample rules for one figure. A profiled run samples
+    the steps of each cycle the profiler is idle on
+    (``benchmarks/e2e/results.py``'s ``stable_tps``), so a warmup count
+    would reach no reader and the manifest would record a rule the
+    evaluation did not use. Refused rather than ignored: a silently
+    dropped option publishes a number the operator did not ask for.
+    """
+    if options.get("profile") and options.get("warmup_steps") is not None:
+        raise click.UsageError(
+            "--profile uses the profiler schedule; --warmup-steps applies "
+            "only without it"
+        )
+
+
 def _request(
     gpu: str,
     torchtitan_args: tuple[str, ...],
@@ -383,6 +423,7 @@ def _request(
     # Popped before the ``**options`` expansion below, which must not see it.
     scenario_name = options.pop("scenario")
     parallelism = _parallelism(options)
+    _refuse_warmup_under_profile(options)
     return RunRequest(
         gpu=gpu,
         scenario_name=scenario_name,
