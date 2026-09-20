@@ -25,11 +25,9 @@ from benchmarks.e2e.parallelism import (
     titan_reshard_after_forward,
 )
 from benchmarks.e2e.registry import (
-    DEFAULT_COMPILE_MODE,
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
-    TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
     Workload,
@@ -294,8 +292,6 @@ def command_for_arm(
         # The replay loader materializes exactly this many steps of samples
         # and hard-fails when the run asks for more, so it must track --steps.
         args.extend(("--dataloader.replay-steps", str(workload.steps)))
-    if not uncompiled and compile_mode != "default":
-        args.extend(("--compile.mode", TORCH_COMPILE_MODE[compile_mode]))
     if workload.seed is not None:
         args.extend(("--debug.seed", str(workload.seed)))
     if arm.override_imports:
@@ -417,12 +413,6 @@ def _megatron_stock_command(
             f"{arm.name}: compile mode {compile_mode!r} turns off the "
             f"whole-block torch.compile a titan arm gets, and Megatron never "
             f"has one; it cannot apply to this arm"
-        )
-    if compile_mode != DEFAULT_COMPILE_MODE:
-        raise ValueError(
-            f"{arm.name}: this driver calls megatron.training.pretrain and "
-            f"captures no CUDA graph, so compile mode {compile_mode!r} names "
-            f"a treatment the arm cannot receive"
         )
     # ``flags.py`` refuses this one too, with its own message. Refused here
     # as well, so a caller that never reaches the flag module still gets the

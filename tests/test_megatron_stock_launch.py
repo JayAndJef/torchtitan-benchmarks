@@ -762,11 +762,6 @@ class StockArgvRefusalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot apply to this arm"):
             _command(_stock_arm(), compile_mode="none")
 
-    def test_the_cuda_graph_mode_is_refused(self) -> None:
-        """This driver captures no graph, so the mode names no treatment."""
-        with self.assertRaisesRegex(ValueError, "captures no CUDA graph"):
-            _command(_stock_arm(), compile_mode="cuda-graph")
-
     def test_an_unseeded_workload_is_refused(self) -> None:
         scenario = scenario_by_name(SCENARIO_NAME)
         with self.assertRaisesRegex(ValueError, "seeded workload"):
@@ -1544,14 +1539,6 @@ class StockRunResolutionTests(unittest.TestCase):
     def test_sac_is_refused_for_the_whole_scenario(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
             self._resolve((), "default", "sac")
-
-    def test_the_cuda_graph_mode_is_refused_for_the_whole_scenario(
-        self,
-    ) -> None:
-        with self.assertRaisesRegex(
-            ValueError, "does not support compile mode"
-        ):
-            self._resolve((), "cuda-graph", "none")
 
     def test_the_uncompiled_mode_is_refused_for_the_whole_roster(self) -> None:
         with self.assertRaisesRegex(

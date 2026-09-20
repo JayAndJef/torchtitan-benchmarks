@@ -628,8 +628,8 @@ def _golden_titan_command(size: str) -> list[str]:
 
 
 # The same arm at pp 2, under the modes a real pipeline run would use:
-# --compile-mode default (rule 13 refuses cuda-graph above world size 1) and
-# --ac none (the scenario supports nothing else).
+# --compile-mode default and --ac none (the scenario supports nothing
+# else).
 #
 # **This golden exists to freeze the two ``less-layers 0`` flags.** TorchTitan
 # defaults ``pipeline_parallel_first_stage_less_layers`` and its ``last`` twin
@@ -1691,7 +1691,7 @@ TEST_CENSUS = {
     "test_kernels": 49,
     "test_lm_head_losses": 8,
     # New with the mcore profile registry: 6 that pin the extraction against
-    # a frozen literal (including the cuda-graph branch the parity check
+    # a frozen literal (including the graph-capture branch the parity check
     # never reaches), 8 that pin the validation -- above all that a
     # dual-delivery field set on one side only is refused -- 5 for the
     # driver's declared-state check, and 1 that the builder takes no default
@@ -1793,7 +1793,8 @@ TEST_CENSUS = {
     # ChainedOptimizer, reads a bare optimizer under zero3, refuses a
     # replicated chain under a zero1 label, and follows
     # --megatron-precision on the gradient reduction.
-    "test_megatron_stock_launch": 68,
+    # -2 with the deletion of the graph-capture compile mode.
+    "test_megatron_stock_launch": 66,
     # New with the promotion of the cross-engine weight map out of
     # tools/megatron_parity_check.py: 3 that pin the QKV grouped
     # interleave (including that the guard rejects a plain concatenation)
@@ -1897,7 +1898,8 @@ TEST_CENSUS = {
     # +2 with the schema-16 field: a resume inheriting the recorded
     # precision and refusing another, and a schema-15 directory reading as
     # stock.
-    "test_runner": 75,
+    # -3 with the deletion of the graph-capture compile mode.
+    "test_runner": 72,
     "test_swiglu": 4,
     "test_te_rope": 1,
     # New with the in-process titan build: 3 that pin the override count
@@ -1969,7 +1971,9 @@ TEST_CENSUS = {
     # dense_sharding_warnings, and two for rule 17, which holds a pipeline
     # under zero1 and names it as a repair. Rule 15 is gone and its class
     # now proves the removal, which adds one case to it.
-    "test_parallelism": 158,
+    # -5 with the deletion of the graph-capture compile mode: rule 13 and
+    # its class are gone, and the cell test keeps one mode case.
+    "test_parallelism": 153,
     # The axis threaded through the harness, still on one GPU. The <gpu>
     # positional read as a device set, the six CLI options and the
     # environment variable none of them takes, the child environment, the
@@ -2075,7 +2079,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1835
+TEST_CENSUS_TOTAL = 1825
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

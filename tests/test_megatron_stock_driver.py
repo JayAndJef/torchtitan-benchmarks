@@ -865,7 +865,7 @@ class FlagListTest(unittest.TestCase):
                 "default",
                 "seeded",
             ),
-            "mode": (BATCH_32, TRIVIAL_SPEC, "cuda-graph", "compile mode"),
+            "mode": (BATCH_32, TRIVIAL_SPEC, "none", "compile mode"),
             "expert": (
                 BATCH_32,
                 ParallelismSpec(dp=2, ep=2),
@@ -1803,7 +1803,7 @@ class DriverRefusalTest(unittest.TestCase):
 
     def test_a_mode_other_than_default_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            train.refuse_unsupported_run(stock_args(bench_mode="cuda-graph"))
+            train.refuse_unsupported_run(stock_args(bench_mode="none"))
         self.assertIn("--bench-mode", str(caught.exception))
 
     def test_a_schedule_other_than_1f1b_is_refused(self) -> None:
