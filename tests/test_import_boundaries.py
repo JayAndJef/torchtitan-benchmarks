@@ -41,9 +41,7 @@ TITAN_DIR = REPO_ROOT / "third_party" / "torchtitan"
 # The import roots intra-repo imports are allowed to target. The package
 # restructure folded the two former top-level packages -- the Piper config
 # port and the Megatron baseline -- into ``benchmarks``, so there is now
-# exactly one library root. (Their retired names are spelled out in exactly
-# two places, both deliberate: CLAUDE.md's provenance-boundary paragraph and
-# tests/test_legacy_artifacts.py. This is not one of them.) This tuple
+# exactly one library root. This tuple
 # shrinking to a single entry *is* the assertion that the move happened: a
 # reintroduced top-level package would fail
 # ``test_module_scope_intra_repo_imports_use_canonical_roots`` the moment

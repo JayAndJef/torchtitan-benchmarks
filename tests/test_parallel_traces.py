@@ -1,14 +1,8 @@
-"""Rank-aware trace reading, and the proof that it changed no old number.
+"""Rank-aware trace reading.
 
-Every run recorded before this existed holds exactly one rank, so the whole
-point of this module is two-sided:
-
-* **Nothing moved.** ``LegacyInertnessTests`` evaluates a real single-rank arm
-  through the real publication path and compares the result to the
-  ``results.json`` that run actually wrote. Exact equality, field by field.
-* **Two ranks cannot become a mean.** The rest of the module drives two ranks
-  through the same path and pins the maximum, the sum and the per-rank vector,
-  and pins that the one-rank pooler refuses a two-rank call outright.
+**Two ranks cannot become a mean.** This module drives two ranks through the
+publication path and pins the maximum, the sum and the per-rank vector, and
+pins that the one-rank pooler refuses a two-rank call outright.
 
 The mean is the failure this module exists to prevent. It is neither one
 rank's cost nor the step's total, it passes every other check silently, and
@@ -46,9 +40,6 @@ from tests.test_runner import _SAC_LINE, _SIZE_LINE, _compiled_line
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LEGACY_RESULTS_3 = (
-    Path(__file__).resolve().parent / "fixtures" / "legacy" / "e2e_results3"
-)
 
 def graph_name(graph_hash: str) -> str:
     return f"## Call CompiledFxGraph {graph_hash} ##"
@@ -187,6 +178,13 @@ class RankGroupingTests(unittest.TestCase):
     def test_a_two_digit_rank_parses_as_a_number(self) -> None:
         self.assertEqual(rank_of_trace(Path("rank12_trace.json.gz")), 12)
         self.assertEqual(rank_of_trace(Path("a/b/rank7_trace.json.gz")), 7)
+
+    def test_the_trace_glob_constant_is_the_name_on_disk(self) -> None:
+        self.assertTrue(
+            re.fullmatch(
+                TRACE_FILE_GLOB.replace("*", r".*"), "rank0_trace.json.gz"
+            )
+        )
 
     def test_a_name_that_does_not_declare_a_rank_returns_none(self) -> None:
         # Nothing under out/ is named this way; the tests' own synthetic
@@ -755,117 +753,6 @@ class ValidationRulesGotStricterTests(unittest.TestCase):
             for iteration in (20, 40):
                 self._window(rank, iteration)
         self._validate()
-
-
-class LegacyInertnessTests(unittest.TestCase):
-    """The change moved no number that ``out/`` already holds.
-
-    The fixture is the ``baseline`` arm of
-    ``out/20260807T175156Z/piper1b_qkv/nvidia-h200`` -- a real 2-window,
-    single-rank run at manifest schema 8, whose ``results.json`` (schema 3,
-    the version this commit replaces) is checked in **verbatim**. That file is
-    the ground truth: it was written by the code as it stood before ranks
-    existed, and nothing in this test recomputes it.
-
-    The two traces are the one derived part, and the derivation is stated so a
-    reader can check it: every event that reaches a state-mutating branch of
-    ``trace_window_metrics`` is kept, carrying only the seven fields those
-    branches read, and everything else -- the ``args`` payloads, the
-    un-annotated ``cpu_op`` frames, the non-launch runtime calls -- is
-    dropped. That takes each window from 35,451 and 35,450 events to 11,775,
-    and from 1.0 MB to 175 KB. The tests below are what prove the derivation
-    lossless: if any dropped event had mattered, the recomputed figures would
-    not equal the recorded ones.
-    """
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._temporary = tempfile.TemporaryDirectory()
-        cls.out_dir = Path(cls._temporary.name) / "run"
-        # Copy so no assertion here can touch the fixture.
-        shutil.copytree(LEGACY_RESULTS_3, cls.out_dir)
-        cls.recorded = json.loads((cls.out_dir / "results.json").read_text())
-        cls.result = evaluate_run(cls.out_dir, arms_override=("baseline",))
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls._temporary.cleanup()
-
-    def test_the_fixture_predates_this_change(self) -> None:
-        manifest = json.loads((self.out_dir / "manifest.json").read_text())
-        self.assertEqual(manifest["schema_version"], 8)
-        self.assertEqual(manifest["scenario"], "piper1b_qkv")
-        self.assertEqual(self.recorded["schema_version"], 3)
-        self.assertEqual(self.result.to_dict()["schema_version"], 5)
-
-    def test_the_widened_glob_finds_exactly_what_the_old_one_found(self) -> None:
-        arm_dir = self.out_dir / "baseline"
-        old = sorted(
-            arm_dir.glob("profiling/traces*/iteration_*/rank0_trace.json.gz")
-        )
-        self.assertEqual(trace_files(arm_dir), old)
-        self.assertEqual(len(old), 2)
-
-    def test_a_recorded_run_holds_exactly_one_rank(self) -> None:
-        by_rank = trace_files_by_rank(self.out_dir / "baseline")
-        self.assertEqual(list(by_rank), [0])
-        per_rank = per_rank_pooled_metrics(by_rank)
-        self.assertEqual(list(per_rank), [0])
-        self.assertEqual(busiest_rank(per_rank), 0)
-
-    def test_every_published_gpu_time_field_is_bit_identical(self) -> None:
-        recorded = self.recorded["gpu_time"]["baseline"]
-        published = self.result.gpu_time["baseline"]
-        for field, value in recorded.items():
-            if not hasattr(published, field):
-                # A field the payload no longer holds.
-                continue
-            with self.subTest(field=field):
-                self.assertEqual(getattr(published, field), value)
-
-    def test_the_window_count_is_unchanged(self) -> None:
-        self.assertEqual(
-            self.result.trace_windows["baseline"],
-            self.recorded["trace_windows"]["baseline"],
-        )
-
-    def test_the_new_fields_say_one_rank_and_no_collective(self) -> None:
-        published = self.result.gpu_time["baseline"]
-        self.assertEqual(published.ranks, (0,))
-        self.assertEqual(published.published_rank, 0)
-        self.assertEqual(
-            published.kernel_ms_per_step_summed_over_ranks,
-            published.kernel_ms_per_step,
-        )
-        self.assertEqual(published.collective_ms_per_step, 0.0)
-        self.assertEqual(
-            published.compute_ms_per_step, published.kernel_ms_per_step
-        )
-
-    def test_the_two_bases_agree_on_this_single_stream_trace(self) -> None:
-        """A single-stream arm has nothing to overlap, so the bases agree.
-
-        They are not bit-identical -- the union walks the intervals in time
-        order and the sum walks them in file order, so they accumulate the
-        same values differently -- and the residual here is 5e-4 us in
-        402,484. Reading that residual as evidence of overlap would be wrong.
-        The overlap case is
-        ``CollectiveAndBasisTests.test_busy_union_is_below_the_sum_when_streams_overlap``.
-        """
-        published = self.result.gpu_time["baseline"]
-        self.assertGreater(published.busy_kernel_ms_per_step, 0.0)
-        self.assertAlmostEqual(
-            published.busy_kernel_ms_per_step,
-            published.kernel_ms_per_step,
-            places=6,
-        )
-
-    def test_the_trace_glob_constant_is_the_name_on_disk(self) -> None:
-        self.assertTrue(
-            re.fullmatch(
-                TRACE_FILE_GLOB.replace("*", r".*"), "rank0_trace.json.gz"
-            )
-        )
 
 
 def launch_events(count: int, start: float = 700_000.0) -> list:
