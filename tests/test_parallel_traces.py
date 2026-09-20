@@ -50,14 +50,6 @@ LEGACY_RESULTS_3 = (
     Path(__file__).resolve().parent / "fixtures" / "legacy" / "e2e_results3"
 )
 
-# The manifest key a recorded run still carries. Nothing reads it for a
-# measurement; the loader only parses it.
-MANIFEST_REGIONS = (
-    {"name": "backward_block", "phase": "backward", "invocations_per_window": 4},
-    {"name": "forward_block", "phase": "forward", "invocations_per_window": 4},
-)
-
-
 def graph_name(graph_hash: str) -> str:
     return f"## Call CompiledFxGraph {graph_hash} ##"
 
@@ -110,7 +102,7 @@ def step_event(duration: float) -> dict:
 
 
 def collective_event(duration: float, start: float = 500_000.0) -> dict:
-    """One NCCL kernel, on a stream of its own, outside every region span."""
+    """One NCCL kernel, on a stream of its own."""
     return {"ph": "X", "cat": "kernel",
             "name": "ncclDevKernel_AllReduce_Sum_bf16_RING_LL",
             "pid": 0, "tid": 200, "ts": start, "dur": duration}
@@ -150,7 +142,6 @@ def two_rank_run(out_dir: Path) -> None:
         "scenario": "synthetic_parallel",
         "hardware": "test-gpu",
         "workload": {},
-        "regions": [dict(region) for region in MANIFEST_REGIONS],
         "selected_arms": ["baseline"],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -365,7 +356,6 @@ class SteplessRankTests(unittest.TestCase):
             "scenario": "synthetic_parallel",
             "hardware": "test-gpu",
             "workload": {},
-            "regions": [],
             "selected_arms": ["baseline"],
         }
         (self.out_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -518,8 +508,7 @@ class TheBaselineRatioSaysWhichRanksItDividedTests(unittest.TestCase):
             "scenario": "synthetic_parallel",
             "hardware": "test-gpu",
             "workload": {},
-            "regions": [dict(region) for region in MANIFEST_REGIONS],
-            "selected_arms": list(arms),
+                "selected_arms": list(arms),
         }
         (out_dir / "manifest.json").write_text(json.dumps(manifest))
         return evaluate_run(out_dir)
@@ -725,7 +714,7 @@ class LegacyInertnessTests(unittest.TestCase):
         published = self.result.gpu_time["baseline"]
         for field, value in recorded.items():
             if not hasattr(published, field):
-                # A region-derived field the payload no longer holds.
+                # A field the payload no longer holds.
                 continue
             with self.subTest(field=field):
                 self.assertEqual(getattr(published, field), value)

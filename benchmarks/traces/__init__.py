@@ -1,1 +1,1 @@
-"""Chrome-trace region schema and extraction, shared by validation and evaluation."""
+"""Chrome-trace extraction, shared by validation and evaluation."""

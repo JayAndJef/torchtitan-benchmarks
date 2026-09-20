@@ -1227,7 +1227,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
 
 
 class ResolveRunTests(unittest.TestCase):
-    """``_resolve_run`` resolves the mesh, and derives the regions from it."""
+    """``_resolve_run`` resolves the mesh."""
 
     def _resolve(self, scenario_name: str = "engines", **kwargs):
         kwargs.setdefault("ac_mode", "none")
@@ -1261,38 +1261,6 @@ class ResolveRunTests(unittest.TestCase):
     def test_a_legal_mesh_resolves(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
         self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[10], spec)
-
-    def test_a_pipelined_run_declares_no_regions(self) -> None:
-        """No rank holds every block, so the declared count is unreachable.
-
-        ``piper_block_regions`` asks for ``n_layers * profiler_active``
-        invocations per window, and that count IS the region's identity. A
-        rank of a two-stage pipeline holds half the layers and runs each of
-        them once per microbatch, so it never reaches 80. Deriving a
-        per-rank count instead would be rule 7 rewritten rather than applied.
-        Real pipelined traces exist, but no trace analysis has established a
-        unique per-rank invocation identity that could replace this rule.
-        """
-        scenario = self._resolve(
-            gpu="0,1", parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B")
-        )[1]
-        self.assertEqual(scenario.regions, ())
-
-    def test_the_scenario_that_declares_none_is_unaffected(self) -> None:
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", dict(_METADATA)),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ):
-            scenario = _resolve_run(
-                RunRequest(
-                    gpu="0", scenario_name="engines", ac_mode="none"
-                ),
-                {"PATH": os.environ["PATH"]},
-            )[1]
-        self.assertEqual(scenario.regions, ())
 
     def test_a_malformed_device_list_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "comma-separated GPU indices"):

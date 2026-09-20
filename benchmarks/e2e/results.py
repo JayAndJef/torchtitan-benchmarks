@@ -483,7 +483,7 @@ def evaluate_run(
 ) -> EvaluationResult:
     """Evaluate the end-to-end metrics of the selected arms."""
     out_dir = out_dir.resolve()
-    manifest, arms, declared_regions, warnings = load_run(out_dir, arms_override)
+    manifest, arms, warnings = load_run(out_dir, arms_override)
     baseline = "baseline" if "baseline" in arms else None
     if baseline is None and len(arms) != 1:
         raise ValueError(
@@ -562,7 +562,7 @@ def evaluate_run(
                 "different partitions of the model. Read it as a ratio of "
                 "step costs, never as one component against itself"
             )
-    # Region distributions were the only comparison rows this ever held.
+    # Compiled-region distributions were the only rows this ever held.
     comparisons: dict[str, list[dict[str, float | int | str]]] = {}
     latencies = {
         arm: summary.launch_latency_us

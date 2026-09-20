@@ -1444,7 +1444,6 @@ class EnginesScenarioTests(unittest.TestCase):
         )
         self.assertEqual(scenario.supported_ac_modes, ("none",))
         self.assertEqual(scenario.supported_compile_modes, ("default",))
-        self.assertEqual(scenario.regions, ())
         self.assertEqual(scenario.workload.seed, 42)
         for arm in scenario.arms[:2]:
             self.assertEqual(arm.launcher, "torchtitan")
@@ -1616,7 +1615,6 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["workload"]["local_batch_size"], 4)
         self.assertEqual(manifest["workload"]["seq_len"], 1024)
         self.assertEqual(manifest["selected_arms"], ["titan_eager"])
-        self.assertEqual(manifest["regions"], [])
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
         titan_command = manifest["commands"]["titan_eager"]
         self.assertIn("--debug.seed", titan_command)
@@ -1670,16 +1668,12 @@ class UncompiledRunTests(unittest.TestCase):
             )
         return json.loads((out_dir / "manifest.json").read_text())
 
-    def test_an_uncompiled_run_records_the_mode_and_declares_no_regions(self) -> None:
+    def test_an_uncompiled_run_records_the_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
         self.assertEqual(manifest["schema_version"], 16)
         self.assertEqual(manifest["compile_mode"], "none")
-        # Region pooling reads Inductor's compiled-graph annotations, and an
-        # eager run emits none. The run says so rather than declare a region
-        # rule 7 would then fail to find.
-        self.assertEqual(manifest["regions"], [])
         self.assertNotIn("--compile.enable", manifest["commands"]["titan_compiled"])
 
     def test_a_resume_refuses_to_cross_the_uncompiled_boundary(self) -> None:
@@ -1842,7 +1836,7 @@ class TrainingMetricsTests(unittest.TestCase):
 
 
 def _write_block_traces(arm_dir: Path) -> None:
-    """Write two profiler windows with the region structure the runner expects."""
+    """Write the two profiler windows the runner expects."""
     for iteration in (20, 40):
         trace = (
             arm_dir / f"profiling/traces/iteration_{iteration}/rank0_trace.json.gz"

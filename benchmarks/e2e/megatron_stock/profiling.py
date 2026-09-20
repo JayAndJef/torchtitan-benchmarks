@@ -200,8 +200,7 @@ def assert_windows_written(
     * the shim was not called exactly once, which means Megatron built no
       profiler or built more than one; and
     * this rank wrote fewer windows than ``min_trace_windows``, which is
-      what arm rule 5 needs and what region pooling and the trace metrics
-      rest on.
+      what arm rule 5 needs and what the trace metrics rest on.
 
     Returns the windows this rank wrote.
     """

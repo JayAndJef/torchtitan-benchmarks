@@ -34,22 +34,6 @@ from benchmarks.models.piper_qwen3.shape import PIPER_1B
 EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
 
 
-@dataclass(frozen=True)
-class Region:
-    """One reported compiled region, identified by direction and call count.
-
-    Graph hashes differ between arms, so a region is matched structurally:
-    ``phase`` ("forward" or "backward") comes from whether the graph's CPU
-    annotations nest inside ``CompiledFunctionBackward`` autograd frames, and
-    ``invocations_per_window`` picks the graph among same-phase partitions
-    while pinning the expected sample count.
-    """
-
-    name: str
-    phase: str
-    invocations_per_window: int
-
-
 # Engine-neutral compile modes selectable per run. TORCH_COMPILE_MODE maps a
 # compiled mode to the --compile.mode value the TorchTitan fork applies per
 # block.
@@ -64,11 +48,8 @@ TORCH_COMPILE_MODE = {"default": "default"}
 # Modes that apply no torch.compile at all. Such a run has no torch-level
 # mode name, so TORCH_COMPILE_MODE deliberately holds no entry for one: a
 # caller that asks for the name of a mode the run never used gets a KeyError
-# rather than a name to record. Two consequences follow, and both are
-# inversions rather than relaxations. The run emits no compiled-graph
-# annotations, so it declares no regions (benchmarks.e2e.runner), exactly as
-# a 1-layer shape and the megatron scenario already do. And validation rule 8
-# reads the other way: the compile log line must be absent, because its
+# rather than a name to record. One consequence follows, and it is an
+# inversion rather than a relaxation. And validation rule 8 reads the other way: the compile log line must be absent, because its
 # presence would mean the arm compiled under an uncompiled label
 # (benchmarks.e2e.validation).
 UNCOMPILED_COMPILE_MODES = frozenset({"none"})
@@ -247,7 +228,6 @@ class Scenario:
     description: str
     workload: Workload
     arms: tuple[Arm, ...]
-    regions: tuple[Region, ...] = ()
     supported_ac_modes: tuple[str, ...] = ("sac", "none")
     supported_compile_modes: tuple[str, ...] = COMPILE_MODES
 
@@ -270,45 +250,6 @@ PIPER_1B_WORKLOAD = Workload(
 )
 
 
-def piper_block_regions(
-    *, n_layers: int, profiler_active: int
-) -> tuple[Region, ...]:
-    """Per-block compiled regions for a model of ``n_layers`` layers.
-
-    Each TransformerBlock emits one forward and one backward CompiledFxGraph
-    annotation per step, so a profiler window holds
-    ``n_layers * profiler_active`` invocations of each. That count is also
-    the identity: measured on a real 16-layer trace, the forward graphs run
-    {5, 80, 5} times per window and the backward graphs {5, 80}, so only a
-    multi-layer model produces a count unique to the block graphs. At one
-    layer the block graph would also run 5 times and
-    ``pooled_window_metrics`` could not tell it from the loss- and
-    embedding-side partitions -- which is why ``supports_block_regions`` is
-    derived as ``n_layers > 1`` (False at huge) and such a run declares no
-    regions rather than adding a tiebreak that would weaken validation
-    rule 7.
-    """
-    invocations = n_layers * profiler_active
-    return (
-        Region(
-            name="backward_block",
-            phase="backward",
-            invocations_per_window=invocations,
-        ),
-        Region(
-            name="forward_block",
-            phase="forward",
-            invocations_per_window=invocations,
-        ),
-    )
-
-
-# The normal-size instantiation: 16 layers x 5 active steps = 80.
-PIPER_1B_REGIONS = piper_block_regions(
-    n_layers=PIPER_1B.n_layers, profiler_active=5
-)
-
-
 PIPER_1B_MEGATRON_WORKLOAD = replace(
     PIPER_1B_WORKLOAD,
     config="qwen3_piper_1b_pretokenized",
@@ -320,10 +261,8 @@ PIPER_1B_MEGATRON_WORKLOAD = replace(
 # pre-tokenized c4_test stream. Three arms answer one question -- what does
 # each engine cost per token at this mesh.
 #
-# No per-block regions: region pooling rides on Inductor's compiled-graph
-# annotations, which the Megatron arm honestly does not have. The
-# cross-engine metrics are tokens/s, total GPU kernel time, launch latency
-# and peak memory.
+# The cross-engine metrics are tokens/s, total GPU kernel time, launch
+# latency and peak memory.
 #
 # The ac axis is pinned to "none". Megatron's recompute options are not
 # parity with TorchTitan's per-op SAC, and the Megatron arm does no
@@ -362,7 +301,6 @@ ENGINES = Scenario(
         "arms and not the Megatron one."
     ),
     workload=PIPER_1B_MEGATRON_WORKLOAD,
-    regions=(),
     supported_ac_modes=("none",),
     supported_compile_modes=("default",),
     arms=(

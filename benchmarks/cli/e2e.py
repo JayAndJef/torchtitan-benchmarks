@@ -185,9 +185,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             show_envvar=True,
             help=(
                 "Compile mode applied to every arm in the run [default: "
-                "default]. none runs the TorchTitan arms eager and declares "
-                "no compiled regions. Results are only comparable within one "
-                "mode."
+                "default]. none runs the TorchTitan arms eager. Results are "
+                "only comparable within one mode."
             ),
         ),
         click.option(
@@ -443,7 +442,7 @@ def run_command(
 def evaluate_command(
     out_dir: Path, arms: tuple[str, ...], results_path: Path | None
 ) -> None:
-    """Report throughput, compiled-region timings, and significance tests."""
+    """Report throughput and GPU-time metrics for a finished run."""
     _evaluate(out_dir, arms, results_path)
 
 
