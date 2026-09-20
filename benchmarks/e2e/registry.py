@@ -54,10 +54,9 @@ TORCH_COMPILE_MODE = {"default": "default"}
 # (benchmarks.e2e.validation).
 UNCOMPILED_COMPILE_MODES = frozenset({"none"})
 
-# Activation checkpointing modes selectable per run (schema 8). "sac" is
-# TorchTitan's per-op SelectiveAC (the historical treatment, implied by
-# schema <= 7 manifests); "none" disables checkpointing entirely, delivered
-# to TorchTitan as the tyro subcommand token "activation-checkpoint:none".
+# Activation checkpointing modes selectable per run. "sac" is TorchTitan's
+# per-op SelectiveAC; "none" disables checkpointing entirely, delivered to
+# TorchTitan as the tyro subcommand token "activation-checkpoint:none".
 AC_MODES = ("sac", "none")
 
 # Default values of the three global run axes.

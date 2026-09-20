@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files, trace_files_by_rank
+from benchmarks.artifacts.manifests import MANIFEST_SCHEMA_VERSION
 from benchmarks.artifacts.summaries import summarize
 from benchmarks.e2e.results import (
     busiest_rank,
@@ -128,7 +129,8 @@ def two_rank_arm(arm_dir: Path) -> None:
 
 def two_rank_run(out_dir: Path) -> None:
     manifest = {
-        "schema_version": 9,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "parallelism": {"world_size": 1},
         "scenario": "synthetic_parallel",
         "hardware": "test-gpu",
         "workload": {},
@@ -454,7 +456,8 @@ class SteplessRankTests(unittest.TestCase):
     def _mixed_run(self) -> Path:
         """Rank 1 does ten times rank 0's work and declares no step."""
         manifest = {
-            "schema_version": 9,
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "parallelism": {"world_size": 1},
             "scenario": "synthetic_parallel",
             "hardware": "test-gpu",
             "workload": {},
@@ -606,11 +609,12 @@ class TheBaselineRatioSaysWhichRanksItDividedTests(unittest.TestCase):
 
     def _evaluate(self, out_dir: Path, arms: tuple[str, ...]):
         manifest = {
-            "schema_version": 9,
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "parallelism": {"world_size": 1},
             "scenario": "synthetic_parallel",
             "hardware": "test-gpu",
             "workload": {},
-                "selected_arms": list(arms),
+            "selected_arms": list(arms),
         }
         (out_dir / "manifest.json").write_text(json.dumps(manifest))
         return evaluate_run(out_dir)

@@ -4,71 +4,22 @@ Everything here serializes one run's *identity* -- scenario, arms, the
 command line each arm was launched with, the four global axes
 (``compile_mode`` / ``ac_mode`` / ``model_size`` / ``parallelism``), the
 resolved model shape, the execution model, and the provenance block -- reads
-one back including manifests written by older schemas, and decides whether a
-recorded run is the same run the caller is now asking for.
+one back, and decides whether a recorded run is the same run the caller is
+now asking for.
 
 Those last two are here rather than in modules of their own on purpose. A
-manifest field and its resume rule are two halves of one invariant: adding
-the ``--model-size`` axis (schema 9) added ``model_size`` to
-``manifest_data`` *and* a ``model_size`` comparison to
+manifest field and its resume rule are two halves of one invariant: a new
+axis adds a field to ``manifest_data`` *and* a comparison to
 ``_resume_mismatches`` in a single commit, and a field recorded but not
 gated is a comparability boundary that silently does not hold. Splitting
 reader from writer would divide the same invariant the other way -- a schema
-bump has to move both together, and neither half is meaningful alone. Schema
-10 added ``parallelism`` the same way, in one commit and to both halves.
+bump has to move both together, and neither half is meaningful alone.
 
-Schema 12 is the same move one level down. The ``parallelism`` block gained
-a ``dense_sharding`` key, which says whether the run holds the dense
-parameters replicated or sharded. Nothing here had to gate it, because
-``_resume_mismatches`` compares the whole ``parallelism`` block rather than
-its keys one by one. **The bump is still required.** A schema-11 block
-carries no such key, so a reader that assumed one would read the absence as
-``replicate`` -- true of every run written so far, and an inference rather
-than a record. The version number is what separates "this run replicated the
-dense parameters" from "this file predates the question".
-
-Schema 13 adds ``megatron_p2p_sync`` as a top-level field beside
-``compile_mode``, ``ac_mode`` and ``model_size``, and gates it the same way:
-an omitted value on resume inherits the recorded one, a different value is
-refused, and a schema-12 manifest, which carries no key, reads as ``on``.
-That reading is a record and not an inference, because no run before this
-schema could turn the sync off: the option did not exist, and stock Megatron
-has no flag for the field. It is its own field and not a key of the
-``parallelism`` block, because it is a treatment of the pipeline messages
-rather than a degree, the way ``compile_mode`` is a treatment of the blocks
-and not a field of the workload.
-
-Schema 14 adds ``megatron_nan_guard`` beside it, gated the same way: an
-omitted value on resume inherits the recorded one, a different value is
-refused, and a schema-13 manifest, which carries no key, reads as ``on``.
-That reading is a record too: no run before this schema could turn stock
-Megatron's ``check_for_nan_in_loss_and_grad`` off through the harness. It
-is its own field for the reason the field above is one -- a treatment of
-the stock engine's loss and gradient checks, not a degree -- and it is a
-comparability boundary because the 2026-09-05 A/B measured it at +12% in
-tokens/s on the stock arm.
-
-Schema 15 is a RENAME inside the ``parallelism`` block, and it adds no key.
-``dense_sharding`` took the values ``replicate`` and ``shard``; it now takes
-``replicate``, ``zero1`` and ``zero3``, and ``zero3`` is the new spelling of
-``shard``. **The rename is not a redefinition.** A run recorded as ``shard``
-really did hold the ZeRO-3 parity, so no number on disk changes meaning.
-The bump exists for the READER, who cannot tell the two vocabularies apart
-without it. ``shard`` is a legal string in both. A schema-14 directory
-resumed under schema 15 would compare a retired spelling against a current
-one, and would print a bare ``parallelism`` mismatch. ``_resume_mismatches``
-names the rename instead. Three published cells on disk carry ``shard``, and they
-stay readable exactly as they are.
-
-Schema 16 adds ``megatron_precision`` beside the two fields above, gated the
-same way: an omitted value on resume inherits the recorded one, a different
-value is refused, and a schema <= 15 manifest, which carries no key, reads
-as ``stock``. That reading is a record and not an inference, because no run
-before this schema could ask for the lean optimizer recipe: the option did
-not exist. It is its own field for the reason the two above are: it is a
-treatment of the stock engine's optimizer state rather than a degree. It is
-also a comparability boundary. ``lean`` holds 10 bytes for each parameter,
-and ``stock`` holds 18.
+**The reader takes one schema.** Every field above is a comparability
+boundary, so a manifest another schema wrote cannot be read as this one.
+``load_manifest`` names the version it found and the version it wants, and
+refuses. There are no per-version branches and no defaulted lookups: a run
+recorded under an older schema is read by the code that wrote it.
 
 What *is* split out is everything engine-neutral: output layout and the
 atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
@@ -118,17 +69,10 @@ from typing import TYPE_CHECKING, Any, Mapping
 from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.e2e.parallelism import (
     ParallelismSpec,
-    TRIVIAL_SPEC,
     describe as describe_parallelism,
     execution_model,
 )
-from benchmarks.e2e.registry import (
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
-    DEFAULT_MEGATRON_PRECISION,
-    DEFAULT_MODEL_SIZE,
-    Workload,
-)
+from benchmarks.e2e.registry import Workload
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
     shape_by_name,
@@ -139,12 +83,7 @@ if TYPE_CHECKING:
     from benchmarks.e2e.runner import RunRequest
 
 
-MANIFEST_SCHEMA_VERSION = 16
-
-# The retired spelling of ``zero3`` inside the ``parallelism`` block. Schema
-# 15 renamed it. A manifest that carries it predates the rename, and the
-# resume gate names the rename rather than printing a bare key.
-RETIRED_DENSE_SHARDING = "shard"
+MANIFEST_SCHEMA_VERSION = 17
 
 # What the ``tps`` figure in every step log line, and therefore
 # ``stable_tokens_per_second`` in ``results.json``, counts.
@@ -171,8 +110,7 @@ def _parallelism_record(
     ``describe`` needs the local batch size, because the microbatch count is
     arithmetic over the batch and the microbatch size. Taking it from the
     scenario's own workload keeps the writer and the resume comparison
-    reading one number: the same call produces the recorded block and the
-    default an older manifest is read through.
+    reading one number: one call produces both.
     """
     return describe_parallelism(
         parallelism, local_batch_size=scenario.workload.local_batch_size
@@ -275,13 +213,21 @@ def write_manifest(
 
 
 def load_manifest(out_dir: Path) -> dict[str, Any]:
+    """Read one manifest. Refuse anything another schema wrote."""
     manifest_path = out_dir / "manifest.json"
     if not manifest_path.is_file():
         raise ValueError(f"manifest is missing: {manifest_path}")
     try:
-        return json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read manifest {manifest_path}: {error}") from error
+    found = manifest.get("schema_version")
+    if found != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            f"{manifest_path} records manifest schema {found!r}; this code "
+            f"reads schema {MANIFEST_SCHEMA_VERSION} only"
+        )
+    return manifest
 
 
 def _resume_mismatches(
@@ -308,73 +254,21 @@ def _resume_mismatches(
         "extra_torchtitan_args": list(extra_args),
         "compile_mode": compile_mode,
         "ac_mode": ac_mode,
+        "megatron_p2p_sync": megatron_p2p_sync,
+        "megatron_nan_guard": megatron_nan_guard,
+        "megatron_precision": megatron_precision,
+        "parallelism": _parallelism_record(scenario, parallelism),
     }
     mismatches = [
         key for key, value in expected.items() if manifest.get(key) != value
     ]
-    # Defaulted lookup: a schema <= 12 manifest carries no key, and every
-    # such run kept stock Megatron's own sync, because nothing before this
-    # schema could turn it off. The value is a comparability boundary, so a
-    # different one refuses the resume in either direction.
-    if (
-        manifest.get("megatron_p2p_sync", DEFAULT_MEGATRON_P2P_SYNC)
-        != megatron_p2p_sync
-    ):
-        mismatches.append("megatron_p2p_sync")
-    # The same defaulted lookup: a schema <= 13 manifest carries no key,
-    # and every such run kept stock Megatron's own NaN guard.
-    if (
-        manifest.get("megatron_nan_guard", DEFAULT_MEGATRON_NAN_GUARD)
-        != megatron_nan_guard
-    ):
-        mismatches.append("megatron_nan_guard")
-    # The same defaulted lookup: a schema <= 15 manifest carries no key,
-    # and every such run held stock Megatron's own fp32 optimizer state,
-    # because the lean recipe did not exist.
-    if (
-        manifest.get("megatron_precision", DEFAULT_MEGATRON_PRECISION)
-        != megatron_precision
-    ):
-        mismatches.append("megatron_precision")
-    # Defaulted lookup rather than a generic entry: schema <= 8 output
-    # directories predate the axis and are still resumable as the 1B shape.
-    # Both sides go through canonical_size_name, because 42 e2e manifests on
-    # disk record the retired name "normal" and 88 more record no size at
-    # all, and all of them name the 1B shape. Without that, a resume of a
-    # real run would be refused over a rename.
-    recorded = canonical_size_name(
-        str(manifest.get("model_size", DEFAULT_MODEL_SIZE))
-    )
-    if recorded != canonical_size_name(model_size):
+    # Both sides go through canonical_size_name, because the registry still
+    # resolves the retired alias "normal" to the 1B shape and a caller may
+    # pass it. The recorded value is always canonical.
+    if canonical_size_name(
+        str(manifest.get("model_size"))
+    ) != canonical_size_name(model_size):
         mismatches.append("model_size")
-    # The same shape of defaulted lookup, one axis later: schema <= 9 output
-    # directories predate the parallelism axis and every one of them ran on
-    # one GPU, so they are read through the trivial spec's own record and
-    # still resume. The default is computed rather than written out, so it
-    # cannot drift from what a trivial-spec request produces for this
-    # workload.
-    recorded_parallelism = manifest.get(
-        "parallelism", _parallelism_record(scenario, TRIVIAL_SPEC)
-    )
-    if recorded_parallelism != _parallelism_record(scenario, parallelism):
-        # A schema <= 14 manifest can record the retired spelling "shard",
-        # which schema 15 renamed to "zero3". The run really held that
-        # parity, so the rename takes no number away -- but this gate
-        # compares two vocabularies, and a bare "parallelism" would send
-        # the operator looking for a degree that did not move. The message
-        # names the rename instead.
-        if (
-            isinstance(recorded_parallelism, dict)
-            and str(recorded_parallelism.get("dense_sharding"))
-            == RETIRED_DENSE_SHARDING
-        ):
-            mismatches.append(
-                "parallelism (the recorded dense_sharding 'shard' is the "
-                "retired spelling of 'zero3'; schema 15 renamed it, and "
-                "this directory predates the rename)"
-            )
-        else:
-            mismatches.append("parallelism")
     existing_metadata = manifest.get("hardware_metadata", {})
     for key in (
         "nvidia_smi",
@@ -425,17 +319,8 @@ def _resume_workload(
 
 def load_run(
     out_dir: Path, arms_override: list[str] | tuple[str, ...] | None
-) -> tuple[dict[str, Any], list[str], list[str]]:
-    """Load current and legacy manifests without hiding compatibility warnings."""
-    warnings: list[str] = []
-    manifest_path = out_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-    if not manifest:
-        warnings.append(f"no manifest.json under {out_dir}")
-    arms = list(
-        arms_override
-        or manifest.get("selected_arms")
-        or [arm["name"] for arm in manifest.get("arms", [])]
-        or ["baseline", "helion", "te"]
-    )
-    return manifest, arms, warnings
+) -> tuple[dict[str, Any], list[str]]:
+    """The manifest of one run, and the arms a reader asked for."""
+    manifest = load_manifest(out_dir)
+    arms = list(arms_override or manifest["selected_arms"])
+    return manifest, arms

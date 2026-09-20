@@ -129,7 +129,6 @@ class RunRequest:
     megatron_nan_guard: str | None = None
     # Stock Megatron's optimizer precision. ``None`` means "not requested",
     # as above: a resume inherits the recorded value and a fresh run takes
-    # ``stock``. A schema <= 15 manifest carries no key, and it reads as
     # ``stock``. The value reaches the stock megatron launcher alone, and
     # ``lean`` needs a sharded dense value.
     megatron_precision: str | None = None
@@ -260,52 +259,32 @@ def _resolve_run(
             else request.extra_args
         )
         compile_mode = (
-            str(existing_manifest.get("compile_mode", DEFAULT_COMPILE_MODE))
+            str(existing_manifest["compile_mode"])
             if request.compile_mode is None
             else request.compile_mode
         )
-        # Schema <= 7 manifests imply the historical SAC treatment.
         ac_mode = (
-            str(existing_manifest.get("ac_mode", DEFAULT_AC_MODE))
+            str(existing_manifest["ac_mode"])
             if request.ac_mode is None
             else request.ac_mode
         )
-        # Schema <= 8 manifests predate the model-size axis.
         model_size = (
-            str(existing_manifest.get("model_size", DEFAULT_MODEL_SIZE))
+            str(existing_manifest["model_size"])
             if request.model_size is None
             else request.model_size
         )
-        # Schema <= 12 manifests predate the p2p axis, and every one of
-        # them ran stock Megatron's own sync.
         megatron_p2p_sync = (
-            str(
-                existing_manifest.get(
-                    "megatron_p2p_sync", DEFAULT_MEGATRON_P2P_SYNC
-                )
-            )
+            str(existing_manifest["megatron_p2p_sync"])
             if request.megatron_p2p_sync is None
             else request.megatron_p2p_sync
         )
-        # Schema <= 13 manifests predate the NaN-guard axis, and every one
-        # of them ran stock Megatron's own guard.
         megatron_nan_guard = (
-            str(
-                existing_manifest.get(
-                    "megatron_nan_guard", DEFAULT_MEGATRON_NAN_GUARD
-                )
-            )
+            str(existing_manifest["megatron_nan_guard"])
             if request.megatron_nan_guard is None
             else request.megatron_nan_guard
         )
-        # Schema <= 15 manifests predate the precision axis, and every one
-        # of them held stock Megatron's own fp32 optimizer state.
         megatron_precision = (
-            str(
-                existing_manifest.get(
-                    "megatron_precision", DEFAULT_MEGATRON_PRECISION
-                )
-            )
+            str(existing_manifest["megatron_precision"])
             if request.megatron_precision is None
             else request.megatron_precision
         )
@@ -347,9 +326,8 @@ def _resolve_run(
         )
     if compile_mode not in COMPILE_MODES:
         raise ValueError(
-            f"unknown compile mode {compile_mode!r} (schema <= 7 manifests "
-            f"recorded torch-level names; those runs cannot be resumed here). "
-            f"Available: {', '.join(COMPILE_MODES)}"
+            f"unknown compile mode {compile_mode!r}. Available: "
+            f"{', '.join(COMPILE_MODES)}"
         )
     if ac_mode not in AC_MODES:
         raise ValueError(

@@ -22,7 +22,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts.manifests import (
     _resume_mismatches,
     manifest_data,
-    write_manifest,
 )
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
@@ -1354,7 +1353,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 16)
+        self.assertEqual(manifest["schema_version"], 17)
         self.assertEqual(manifest["model_size"], "huge")
         self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=1024))
         command = manifest["commands"]["titan_compiled"]
@@ -1389,72 +1388,6 @@ class ManifestAndResumeTests(unittest.TestCase):
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
                 ac_mode="none",
-            )
-
-    def test_schema_eight_directories_still_resume_as_the_1b_shape(self) -> None:
-        scenario = scenario_by_name("engines")
-        selected = (scenario.arm("titan_compiled"),)
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary)
-            write_manifest(
-                out_dir,
-                scenario,
-                selected,
-                {"titan_compiled": ["cmd"]},
-                "test-gpu",
-                _METADATA,
-                (),
-                "default",
-                "sac",
-                "normal",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-            )
-            manifest = json.loads((out_dir / "manifest.json").read_text())
-            del manifest["model_size"]
-            del manifest["model_shape"]
-            manifest["schema_version"] = 8
-            (out_dir / "manifest.json").write_text(json.dumps(manifest))
-
-            from benchmarks.artifacts.manifests import _resume_mismatches
-
-            self.assertEqual(
-                _resume_mismatches(
-                    manifest,
-                    scenario,
-                    selected,
-                    "test-gpu",
-                    _METADATA,
-                    (),
-                    "default",
-                    "sac",
-                    "normal",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    megatron_precision="stock",
-                ),
-                [],
-            )
-            self.assertIn(
-                "model_size",
-                _resume_mismatches(
-                    manifest,
-                    scenario,
-                    selected,
-                    "test-gpu",
-                    _METADATA,
-                    (),
-                    "default",
-                    "sac",
-                    "huge",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    megatron_precision="stock",
-                ),
             )
 
 
