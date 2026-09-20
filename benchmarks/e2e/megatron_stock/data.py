@@ -7,7 +7,7 @@ is bit-identical to the TorchTitan replay loader's. The rest of this module
 reshapes that output and adds nothing to it.
 
 ``--dataloader-type external`` passes the iterator below through unchanged
-(``megatron/training/datasets/data_samplers.py``). Megatron's own
+(in Megatron's own data samplers). Megatron's own
 ``MegatronPretrainingSampler`` would shard a global stream by a different
 rule than TorchTitan's ``split_dataset_by_node``, so the two engines would
 put different tokens on the same rank.
@@ -37,9 +37,9 @@ The attention is unchanged by the packing. ``cu_seqlens`` marks every
 document, and every titan row starts at position 0, so a row boundary is a
 document boundary and the mask stays block-diagonal exactly where it was.
 
-The dict keys and dtypes are Megatron's, not ours.
-``megatron/core/utils.py``'s ``_merge_cu_seqlens_across_micro_batch`` reads
-a ``(micro_batch_size, padded_length)`` ``cu_seqlens`` whose rows start at
+The dict keys and dtypes are Megatron's, not ours. Megatron's
+``_merge_cu_seqlens_across_micro_batch`` reads a ``(micro_batch_size,
+padded_length)`` ``cu_seqlens`` whose rows start at
 0, end at ``seq_length``, and are right-padded with more copies of
 ``seq_length``. It strips the padding by finding the **first** entry equal
 to ``seq_length``, so a row must carry no other value that large. The

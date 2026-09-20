@@ -177,9 +177,8 @@ def _megatron_stock_parallelism_markers(
     **The microbatch count comes from ``microbatch_geometry``, and it is
     not ``n_microbatches``.** Stock Megatron derives the count as
     ``global_batch_size // (micro_batch_size * data_parallel_size)``, in
-    ``ConstantNumMicroBatchesCalculator``
-    (``megatron/core/num_microbatches_calculator.py``). That calculator is
-    the one this arm gets: ``rampup_batch_size`` defaults to ``None`` and
+    ``ConstantNumMicroBatchesCalculator``. That calculator is the one this
+    arm gets: ``rampup_batch_size`` defaults to ``None`` and
     the flag list never sets it, so the count is fixed for the whole run.
     ``decrease_batch_size_if_needed`` defaults to ``False``, so Megatron
     asserts the division instead of rounding it.
@@ -217,8 +216,7 @@ def _megatron_stock_parallelism_markers(
     level 0 gets. So the two levels print the same wrapper name, and
     only the optimizer separates them: Megatron builds
     ``DistributedOptimizer`` under that flag and
-    ``Float16OptimizerWithFloat16Params`` without it
-    (``megatron/core/optimizer/__init__.py``). The driver reads the
+    ``Float16OptimizerWithFloat16Params`` without it. The driver reads the
     optimizer ``setup_model_and_optimizer`` returned, so a run that lost
     the flag fails this rule rather than publishing ZeRO-0 memory under a
     ZeRO-1 label. ``DATA_PARALLEL_OPTIMIZERS`` is the table.
@@ -265,8 +263,7 @@ def _megatron_stock_parallelism_markers(
 
     **Arm rule 13 cannot carry this axis alone.** Stock Megatron
     all-reduces the reported loss over the data-parallel group on every
-    last-stage rank, on every step
-    (``megatron/training/training.py``, in ``train_step``). At
+    last-stage rank, on every step, inside its own train step. At
     ``pp`` 1 every rank is a last stage, so every rank emits
     ``ncclDevKernel_AllReduce`` whether or not a gradient moved. Above
     ``pp`` 1 the gradient-norm reduction over the pipeline group already

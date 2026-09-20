@@ -2,7 +2,8 @@
 
 ``hardware_metadata`` produces the manifest's ``hardware_metadata`` block --
 the requested GPU, the ``nvidia-smi`` identity line, the torch version, the
-torchtitan/benchmarks/Megatron revisions and the TransformerEngine version --
+TorchTitan, benchmarks and Megatron revisions, and the TransformerEngine
+version --
 and, as a second job, resolves ``--hardware auto`` into the slugified GPU
 name used as the output-directory label. The two travel together because both
 are read out of the same ``nvidia-smi`` query, and issuing it twice would let
