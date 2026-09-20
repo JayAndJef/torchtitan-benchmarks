@@ -128,9 +128,8 @@ def value_after(emitted, flag):
 # flags.py
 # --------------------------------------------------------------------------
 
-# Section 7 of PIPER_STOCK_MEGATRON_PLAN.md, transcribed. The expert degree
-# and the sharding flag supersede what that section declares, so read this
-# tuple as the replicated roster.
+# The stock Megatron flag roster, transcribed. The expert degree and the
+# sharding flag supersede it, so read this tuple as the replicated roster.
 #
 # **What is checked, and what is not.** Megatron's argparse knows every
 # name here, and knows the sharding flag too. Nothing in this suite calls
@@ -1249,9 +1248,9 @@ class ProfilerShimTest(unittest.TestCase):
 # train.py
 # --------------------------------------------------------------------------
 
-# Section 8.4 of PIPER_STOCK_MEGATRON_PLAN.md, transcribed. The validation
-# profile carries the same strings, and a one-character difference fails a
-# real run at validation time.
+# The stock Megatron log lines, transcribed. The validation profile carries
+# the same strings, and a one-character difference fails a real run at
+# validation time.
 PLAN_MODE_PREFIX = "Megatron-LM stock training loop ("
 PLAN_PARALLELISM_LINE = (
     "Megatron-LM stock parallelism: dp={dp} pp={pp} ep={ep} "
