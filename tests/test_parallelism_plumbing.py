@@ -46,7 +46,13 @@ from benchmarks.e2e.parallelism import (
     describe,
     execution_model,
 )
-from benchmarks.e2e.registry import EXECUTION_MODEL, scenario_by_name
+from benchmarks.e2e.registry import (
+    DEFAULT_AC_MODE,
+    DEFAULT_MEGATRON_NAN_GUARD,
+    DEFAULT_MEGATRON_P2P_SYNC,
+    EXECUTION_MODEL,
+    scenario_by_name,
+)
 from benchmarks.e2e.runner import RunRequest, _resolve_run, execute_run
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
@@ -126,6 +132,43 @@ class ExecutionOptionTests(unittest.TestCase):
             for parameter in run_command.params
             for option in parameter.opts
         }
+
+    def test_the_flipped_axes_take_their_default_from_the_registry(
+        self,
+    ) -> None:
+        """``--ac``, ``--megatron-p2p-sync`` and ``--megatron-nan-guard``
+        each default to "not requested" on the command line, so the
+        registry constant is the one default and the CLI cannot disagree
+        with it."""
+        parameters = self._parameters()
+        for option, constant in (
+            ("--ac", DEFAULT_AC_MODE),
+            ("--megatron-p2p-sync", DEFAULT_MEGATRON_P2P_SYNC),
+            ("--megatron-nan-guard", DEFAULT_MEGATRON_NAN_GUARD),
+        ):
+            with self.subTest(option=option):
+                # Click leaves an unset default unset, so the option
+                # carries no value of its own.
+                self.assertFalse(parameters[option].required)
+                self.assertIn(f"[default: {constant}]", parameters[option].help)
+        self.assertEqual(DEFAULT_AC_MODE, "none")
+        self.assertEqual(DEFAULT_MEGATRON_P2P_SYNC, "off")
+        self.assertEqual(DEFAULT_MEGATRON_NAN_GUARD, "off")
+
+    def test_the_megatron_flag_gates_read_the_literal_value(self) -> None:
+        """The token follows the treatment, never the default of the day.
+
+        A gate spelled ``!= DEFAULT`` would invert the moment a default
+        moved, and the argv would carry the opposite treatment under the
+        same label.
+        """
+        from benchmarks.e2e.megatron_stock.flags import (
+            NO_CHECK_FOR_NAN_FLAG,
+            _nan_guard_flags,
+        )
+
+        self.assertEqual(_nan_guard_flags("on"), [])
+        self.assertEqual(_nan_guard_flags("off"), [NO_CHECK_FOR_NAN_FLAG])
 
     def test_all_six_options_exist_on_both_execution_commands(self) -> None:
         parameters = self._parameters()

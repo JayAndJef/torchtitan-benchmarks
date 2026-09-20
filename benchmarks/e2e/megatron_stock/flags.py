@@ -204,10 +204,11 @@ BENCH_FLAGS: tuple[str, ...] = (
     BENCH_BATCH_P2P_SYNC,
 )
 
-# The two harness flags a default argv omits. The schedule names a split
-# that does not happen at pp 1, and the p2p value restates Megatron's own
-# default at ``on``. A test reads this tuple, so a third such flag is an
-# edit here rather than a silent gap in the roster check.
+# The two harness flags a single-stage argv omits. Both describe the
+# pipeline: the schedule names a split that does not happen at pp 1, and
+# the p2p value names a message that does not exist there. A test reads
+# this tuple, so a third such flag is an edit here rather than a silent gap
+# in the roster check.
 BENCH_FLAGS_OMITTED_BY_DEFAULT: tuple[str, ...] = (
     BENCH_PP_SCHEDULE,
     BENCH_BATCH_P2P_SYNC,
@@ -361,13 +362,14 @@ def refuse_unknown_nan_guard(megatron_nan_guard: str) -> None:
 def _nan_guard_flags(megatron_nan_guard: str) -> list[str]:
     """Megatron's own token under ``off``; nothing under ``on``.
 
-    Empty at the default, which is Megatron's own, so no recorded argv
-    moves. The value is legal at every mesh: the loss check runs on the
-    last stage at ``pp`` 1 and the gradient check runs on every rank at
-    ``dp`` 1, so there is no degree at which the field is inert.
+    The gate reads the literal ``on`` and never the axis default, so the
+    token follows the treatment rather than the default of the day. The
+    value is legal at every mesh: the loss check runs on the last stage at
+    ``pp`` 1 and the gradient check runs on every rank at ``dp`` 1, so
+    there is no degree at which the field is inert.
     """
     refuse_unknown_nan_guard(megatron_nan_guard)
-    if megatron_nan_guard == DEFAULT_MEGATRON_NAN_GUARD:
+    if megatron_nan_guard == "on":
         return []
     return [NO_CHECK_FOR_NAN_FLAG]
 
@@ -873,7 +875,13 @@ def _bench_flags(
     ]
     if spec.pp > 1:
         flags.extend((BENCH_PP_SCHEDULE, str(spec.pp_schedule)))
-    if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+    # The literal, never the axis default: the driver reads ``on`` when
+    # the token is absent, so the token has to follow the treatment.
+    #
+    # Gated on the pipeline too. There is no pipeline message to
+    # synchronize at ``pp`` 1, so the token would name a treatment the run
+    # did not have, and the driver refuses it there.
+    if spec.pp > 1 and megatron_p2p_sync == "off":
         flags.extend((BENCH_BATCH_P2P_SYNC, megatron_p2p_sync))
     return flags
 
@@ -900,14 +908,14 @@ def stock_megatron_flags(
     it with ``str``. This module imports no ``pathlib``, so a caller in a
     torch-free process pays for nothing it does not use.
 
-    ``megatron_p2p_sync`` defaults to ``on``, so a caller that passes
-    nothing builds the argv every published cell ran. ``off`` is refused at
-    ``pp`` 1: the field is inert without a pipeline message, and the argv
-    would carry a treatment the run did not have.
+    ``megatron_p2p_sync`` defaults to ``off``, which adds the harness
+    token. ``on`` is refused at ``pp`` 1: the field is inert without a
+    pipeline message, and the argv would carry a treatment the run did not
+    have.
 
-    ``megatron_nan_guard`` defaults to ``on`` for the same reason. Its
-    ``off`` adds Megatron's own ``--no-check-for-nan-in-loss-and-grad``,
-    ahead of the harness group, and is legal at every mesh.
+    ``megatron_nan_guard`` defaults to ``off``, which adds Megatron's own
+    ``--no-check-for-nan-in-loss-and-grad`` ahead of the harness group. It
+    is legal at every mesh under either value.
 
     ``megatron_precision`` defaults to ``stock``, which sends nothing and
     is 18 bytes of optimizer state per parameter. ``lean`` adds the four
@@ -922,7 +930,7 @@ def stock_megatron_flags(
     refuse_unknown_p2p_sync(megatron_p2p_sync)
     refuse_unknown_nan_guard(megatron_nan_guard)
     refuse_unknown_megatron_precision(megatron_precision)
-    if spec.pp == 1 and megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+    if spec.pp == 1 and megatron_p2p_sync == "on":
         raise ValueError(
             f"megatron p2p sync {megatron_p2p_sync!r} was requested at pp 1, "
             "where there is no pipeline message to synchronize; the argv "

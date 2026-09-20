@@ -401,7 +401,11 @@ def _resolve_run(
     # reaches nothing: TorchTitan sends no pipeline message through
     # Megatron. ``run --arm`` narrows the engine set on purpose, so a
     # megatron-only subset passes.
-    if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC:
+    #
+    # The gate reads the literal ``on`` and never the axis default. ``on``
+    # is the value that asks for a synchronize, so it is the value a mesh
+    # without pipeline messages cannot honor.
+    if megatron_p2p_sync == "on":
         if parallelism.pp == 1:
             raise ValueError(
                 f"--megatron-p2p-sync {megatron_p2p_sync!r} was requested at "
@@ -543,7 +547,7 @@ def megatron_precision_refusal(
 def megatron_nan_guard_refusal(
     arms: Iterable[Arm], megatron_nan_guard: str
 ) -> str | None:
-    """Why ``--megatron-nan-guard off`` cannot reach ``arms``, or ``None``.
+    """Why ``--megatron-nan-guard on`` cannot reach ``arms``, or ``None``.
 
     One refusal, naming its repair. A run with no stock megatron arm
     gives the value nothing to reach, which is the ``--megatron-p2p-sync``
@@ -551,10 +555,13 @@ def megatron_nan_guard_refusal(
     string, and the ``--all-scenarios`` sweep prints it and skips the
     scenario.
 
-    ``on`` is refused nowhere: it is stock Megatron, and every arm's argv
-    is what it was before the option existed.
+    The gate reads the literal ``on`` and never the axis default. ``on``
+    asks stock Megatron to keep its own check, so a run with no stock
+    megatron arm has nothing to ask. ``off`` is refused nowhere: it is the
+    default here, and a TorchTitan arm's argv is untouched under either
+    value.
     """
-    if megatron_nan_guard == DEFAULT_MEGATRON_NAN_GUARD:
+    if megatron_nan_guard != "on":
         return None
     arms = tuple(arms)
     if not any(arm.launcher in MEGATRON_LAUNCHERS for arm in arms):

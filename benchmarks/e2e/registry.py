@@ -44,16 +44,17 @@ AC_MODES = ("sac", "none")
 # ``_resolve_run`` (benchmarks.e2e.runner) and the ``run-all
 # --all-scenarios`` pre-pass (benchmarks.cli.e2e) read these constants.
 # Neither site repeats the literal value now.
-DEFAULT_AC_MODE = "sac"
+DEFAULT_AC_MODE = "none"
 DEFAULT_MODEL_SIZE = "1b"
 
 # The Megatron pipeline point-to-point sync treatment, selectable per run.
 # Stock Megatron calls torch.cuda.synchronize() once per batched pipeline
 # message (megatron/core/pipeline_parallel/p2p_communication.py, guarded by
 # ``config.batch_p2p_comm and config.batch_p2p_sync``). "on" keeps that
-# call, and it is what every published number was measured under. "off"
-# sets the ``batch_p2p_sync`` config field False on both megatron drivers,
-# which removes the call. TorchTitan arms receive nothing.
+# call, and it is what every number published before this default flipped
+# was measured under. "off" sets the ``batch_p2p_sync`` config field False
+# on the megatron driver, which removes the call, and it is the default
+# here. TorchTitan arms receive nothing.
 #
 # It is a run axis and not a ParallelismSpec field. The value is a treatment
 # of the pipeline messages, and execution_model names degrees rather than
@@ -62,7 +63,7 @@ DEFAULT_MODEL_SIZE = "1b"
 # The measured effect and its caveats are in
 # reports/20260901-p2p-sync-ab.md.
 MEGATRON_P2P_SYNC_MODES = ("on", "off")
-DEFAULT_MEGATRON_P2P_SYNC = "on"
+DEFAULT_MEGATRON_P2P_SYNC = "off"
 
 # Stock Megatron's NaN/Inf guard, selectable per run. One Megatron argument,
 # ``check_for_nan_in_loss_and_grad``, gates two host waits at Megatron-LM
@@ -75,16 +76,17 @@ DEFAULT_MEGATRON_P2P_SYNC = "on"
 # removes neither: validate_result still evaluates the rejection function
 # under RerunMode.DISABLED and raises when it is set.
 #
-# "on" is stock Megatron, and it is what every published number was
-# measured under. "off" sends Megatron's own
-# --no-check-for-nan-in-loss-and-grad to the stock launcher, so a stock user
-# can reproduce the argv. TorchTitan arms receive nothing. The
-# measured effect is in reports/20260905-host-sync-ab.md. Evaluation refuses
+# "on" is stock Megatron, and it is what every number published before
+# this default flipped was measured under. "off" sends Megatron's own
+# --no-check-for-nan-in-loss-and-grad to the stock launcher, so a stock
+# user can reproduce the argv, and it is the default here. TorchTitan arms
+# receive nothing. The measured effect is in
+# reports/20260905-host-sync-ab.md. Evaluation refuses
 # a non-finite loss or grad norm on every arm under either value
 # (benchmarks/e2e/results.py's refuse_non_finite_trajectories), which is the
 # guard that has to exist before this one can be turned off.
 MEGATRON_NAN_GUARD_MODES = ("on", "off")
-DEFAULT_MEGATRON_NAN_GUARD = "on"
+DEFAULT_MEGATRON_NAN_GUARD = "off"
 
 # Stock Megatron's optimizer precision, selectable per run.
 #

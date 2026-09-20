@@ -183,7 +183,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             show_envvar=True,
             help=(
                 "Activation checkpointing applied to every arm in the run "
-                "[default: sac]. Results are only comparable within one mode."
+                f"[default: {DEFAULT_AC_MODE}]. Results are only comparable "
+                "within one mode."
             ),
         ),
         click.option(
@@ -263,7 +264,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             help=(
                 "Whether Megatron synchronizes the device after every "
                 f"pipeline message [default: {DEFAULT_MEGATRON_P2P_SYNC}]. "
-                "on is stock Megatron. off needs --pp above 1 and a "
+                "on is stock Megatron, and it needs --pp above 1 and a "
                 "megatron arm; TorchTitan arms receive nothing. Results "
                 "are only comparable within one value."
             ),
@@ -278,8 +279,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 f"NaN and Inf [default: {DEFAULT_MEGATRON_NAN_GUARD}]. on "
                 "is stock Megatron. off sends Megatron's own "
                 "--no-check-for-nan-in-loss-and-grad to the stock megatron "
-                "arm; it is refused beside the tuned megatron arm, which "
-                "has no such guard, and TorchTitan arms receive nothing. "
+                "arm, and it needs one; TorchTitan arms receive nothing. "
                 "Results are only comparable within one value."
             ),
         ),
@@ -507,7 +507,7 @@ def run_all_command(
         # The p2p value reaches megatron arms alone. A scenario with none
         # cannot honor ``off``, and ``_resolve_run`` refuses it; the sweep
         # skips such a scenario for the reason it skips a declined mode.
-        if megatron_p2p_sync != DEFAULT_MEGATRON_P2P_SYNC and not any(
+        if megatron_p2p_sync == "on" and not any(
             arm.launcher in MEGATRON_LAUNCHERS for arm in scenario.arms
         ):
             click.echo(
