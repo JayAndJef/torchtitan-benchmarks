@@ -7,7 +7,6 @@ produce two figures, and the axis is refused beside ``--profile`` rather
 than ignored there.
 """
 
-import gzip
 import json
 import sys
 import tempfile
@@ -45,12 +44,13 @@ _METADATA = {
     "megatron_git_rev": "ghi",
 }
 
-_WORKLOAD = {"profile_freq": 20, "profiler_warmup": 5, "profiler_active": 5}
-
-
-def _write_empty_trace(path: Path) -> None:
-    with gzip.open(path, "wt") as handle:
-        json.dump({"traceEvents": []}, handle)
+_WORKLOAD = {
+    "profile_freq": 20,
+    "profiler_warmup": 5,
+    "profiler_active": 5,
+    "local_batch_size": 4,
+    "seq_len": 1024,
+}
 
 
 def _rows(count: int) -> list[tuple[int, float, int]]:
@@ -236,26 +236,17 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
             root = self._build(
                 Path(temporary), profile=False, warmup_steps=1
             )
-            training = evaluate_run(root).training["titan_eager"]
+            summary = evaluate_run(root).results["titan_eager"]
         # Steps 2..12: eleven samples, where the profiled rule takes nine.
-        self.assertEqual(training.stable_sample_count, 11)
-        self.assertEqual(training.stable_tokens_per_second, 1000)
+        self.assertEqual(summary.stable_sample_count, 11)
+        self.assertEqual(summary.stable_tokens_per_second, 1000)
 
     def test_a_profiled_run_still_reads_the_profiler_rule(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self._build(Path(temporary), profile=True, warmup_steps=None)
-            for window in (20, 40):
-                trace = (
-                    root
-                    / "titan_eager"
-                    / f"profiling/traces/iteration_{window}"
-                    / "rank0_trace.json.gz"
-                )
-                trace.parent.mkdir(parents=True)
-                _write_empty_trace(trace)
-            training = evaluate_run(root).training["titan_eager"]
+            summary = evaluate_run(root).results["titan_eager"]
         # Steps 2..10 of the one cycle this log holds.
-        self.assertEqual(training.stable_sample_count, 9)
+        self.assertEqual(summary.stable_sample_count, 9)
 
 
 if __name__ == "__main__":
