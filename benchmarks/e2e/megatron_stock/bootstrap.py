@@ -1,15 +1,13 @@
 """Make stock Megatron-LM importable in this venv, then put it on the path.
 
-The tuned driver imports ``megatron.core`` alone. The stock driver imports
-``megatron.training``, which reaches ``megatron/training/models/gpt.py``
-and ``megatron/training/models/hybrid.py``. Both read ``override`` from
-``typing``, and ``typing.override`` arrived in Python 3.12. This venv runs
-Python 3.10, so the import fails. ``gpt.py`` is the file this driver's own
-path reaches, through ``model_builder.py``.
+The stock driver imports ``megatron.training``, which reaches two of
+Megatron's own model modules. Both read ``override`` from ``typing``, and
+``typing.override`` arrived in Python 3.12. This venv runs Python 3.10, so
+the import fails.
 
 ``install_typing_override`` adds that one name from ``typing_extensions``,
-which the venv already provides. It changes nothing else, and a submodule
-edit would break the rule that ``third_party/`` is read-only.
+which the venv already provides. It changes nothing else. The Megatron-LM
+checkout is read-only, so a submodule edit is not an option.
 
 Moving the venv to Python 3.12 was the alternative. It rebuilds every wheel,
 rebuilds FlashAttention-3 from source, and makes every published number
@@ -115,9 +113,9 @@ def ensure_dataset_helpers(megatron_dir: Path) -> tuple[Path, ...]:
     """Build megatron's C++ dataset helper before megatron's own make runs.
 
     ``megatron.training.initialize`` calls ``compile_helpers``, which runs
-    ``make`` in ``megatron/core/datasets`` and then calls ``sys.exit(1)``
-    when make fails. There is no flag that skips it. So a failure here
-    stops the arm before it builds a model.
+    ``make`` over Megatron's own dataset helpers and then calls
+    ``sys.exit(1)`` when make fails. There is no flag that skips it. So a
+    failure here stops the arm before it builds a model.
 
     The Makefile reads its include flags from ``python3 -m pybind11
     --includes`` and its output name from ``python3-config
@@ -134,7 +132,7 @@ def ensure_dataset_helpers(megatron_dir: Path) -> tuple[Path, ...]:
     then succeeds without a compiler.
 
     Both names match ``*.so``, which the Megatron-LM checkout gitignores, so
-    this writes no tracked file and edits nothing under ``third_party/``.
+    this writes no tracked file and edits nothing in that checkout.
 
     Returns the files it guaranteed. An empty tuple means make already had a
     current target and this function did nothing.

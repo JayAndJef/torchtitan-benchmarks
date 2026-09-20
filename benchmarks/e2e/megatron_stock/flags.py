@@ -13,8 +13,11 @@ the requested size, which no validation rule can see.
 after a submodule bump, from the repository root::
 
     .venv/bin/python - <<'CHECK'
-    import argparse, sys, typing, typing_extensions
-    sys.path.insert(0, "third_party/Megatron-LM")
+    import argparse, typing, typing_extensions
+    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+        add_megatron_to_path,
+    )
+    add_megatron_to_path()
     if not hasattr(typing, "override"):
         typing.override = typing_extensions.override
     from megatron.training.arguments import add_megatron_arguments
@@ -42,11 +45,10 @@ through Megatron's own ``extra_args_provider`` hook, so Megatron's parser
 owns them and an unknown one fails at parse time.
 
 The list follows Piper's own stock invocation, with three deliberate
-deviations that section 7 of ``PIPER_STOCK_MEGATRON_PLAN.md`` records:
-``--moe-router-dtype fp32`` (TorchTitan routes fp32 too, so an unset dtype
-would make the router a precision difference), no attention-backend flag
-(TransformerEngine then resolves to the same cuDNN kernel the tuned arm
-runs), and no distributed optimizer under ``--zero 0``
+deviations: ``--moe-router-dtype fp32`` (TorchTitan routes fp32 too, so an
+unset dtype would make the router a precision difference), no
+attention-backend flag (TransformerEngine then resolves to the cuDNN kernel
+arm rule 6 pins), and no distributed optimizer under ``--zero 0``
 (both engines then replicate their parameters, so the data-parallel axis
 carries one change).
 
@@ -310,9 +312,8 @@ def data_parallel_optimizer(zero: int) -> str:
     level. This function wraps that class in the chain the line carries.
 
     **The standard path always chains.** ``get_megatron_optimizer`` ends it
-    with an unconditional ``ChainedOptimizer(optimizers)``
-    (``megatron/core/optimizer/__init__.py``), and this suite takes no
-    other path, so both levels print a chain. That chain always holds the
+    with an unconditional ``ChainedOptimizer(optimizers)``, and this suite
+    takes no other path, so both levels print a chain. That chain always holds the
     dense optimizer. It holds a second member where TransformerEngine
     marked a weight for the expert process groups. That mark has three
     conditions: an expert degree above 1, an expert tensor degree that
@@ -495,10 +496,9 @@ def microbatch_geometry(
     """``(rows per sample, microbatches per step, megatron seq_length)``.
 
     **One Megatron sample is one packed sequence, never a batch of rows.**
-    Megatron flattens a ``(m, S)`` microbatch into ``(1, m*S)`` whenever
-    ``cu_seqlens`` is present (``megatron/core/utils.py``'s
-    ``flatten_batch_for_packed_sequences``), so the activation the first
-    stage sends is ``(m*S, 1, H)``. The pipeline allocates its receive
+    Megatron's ``flatten_batch_for_packed_sequences`` flattens a ``(m, S)``
+    microbatch into ``(1, m*S)`` whenever ``cu_seqlens`` is present, so the
+    activation the first stage sends is ``(m*S, 1, H)``. The pipeline allocates its receive
     buffer from ``get_tensor_shapes``, which returns ``(S, m, H)`` and
     validates nothing. The two hold the same number of elements, so the
     transfer succeeds and the next stage reads a **permuted** activation.
@@ -985,9 +985,8 @@ def stock_megatron_flags(
     if profile and workload.steps % workload.profile_freq:
         # **This arm rides Megatron's own loop, and that loop keeps calling
         # prof.step() after it has called prof.stop().** The stop is guarded
-        # on ``iteration == --profile-step-end``
-        # (``megatron/training/training.py``); the step at the top of the
-        # loop body is guarded only on ``--profile``. So every iteration
+        # on ``iteration == --profile-step-end``; the step at the top of
+        # the loop body is guarded only on ``--profile``. So every iteration
         # after the stop transits a dead Kineto session.
         #
         # Ending the profiler on the last whole cycle does not fix that. It

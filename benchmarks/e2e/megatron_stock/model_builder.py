@@ -20,7 +20,7 @@ identity rather than a measured sum. ``tests/test_model_shape.py`` already
 pins the arithmetic that the stage counts sum to ``param_count``.
 
 ``GPTModelConfig.builder`` is a ``ClassVar[str]`` dotted path
-(``megatron/training/models/gpt.py``), and
+(Megatron's own GPT model provider), and
 ``ModelConfig.get_builder_cls`` imports it. ``BenchGPTModelConfig`` changes
 that one string and adds no field, which is the same extension point
 ``megatron.post_training``'s ``ModelOptModelConfig`` uses.

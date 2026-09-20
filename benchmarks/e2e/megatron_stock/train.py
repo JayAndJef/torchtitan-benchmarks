@@ -12,7 +12,7 @@ distributed setup, the forward step, the embedding-rank rule and the
 training loop all stay Megatron's. That is the point of the arm: the
 driver replicates none of the TorchTitan treatment.
 
-**No file under ``third_party/`` is edited.** Three shims run in this
+**No file of the Megatron-LM checkout is edited.** Three shims run in this
 process instead:
 
 * ``bootstrap.install_typing_override`` adds one name Python 3.10 lacks;
@@ -731,9 +731,8 @@ def install_data_parallel_marker(
 
     **The sharding strategy printed is the one the run acts on.**
     ``data_parallel_sharding_strategy`` reaches every ``ddp_config``,
-    because Megatron's argparse defaults it, but
-    ``megatron/core/optimizer/__init__.py`` reads it only under a sharded
-    wrapper. This suite builds none, so the line states ``no_shard``. A
+    because Megatron's argparse defaults it, but Megatron reads it only
+    under a sharded wrapper. This suite builds none, so the line states ``no_shard``. A
     line built from the raw field would say a replicated run sharded.
 
     **The expert degree is read from the group, and a disagreement

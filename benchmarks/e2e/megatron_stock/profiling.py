@@ -1,8 +1,8 @@
 """Give stock Megatron the profiler layout the harness reads.
 
 Stock Megatron writes **one** window per rank, to
-``{args.tensorboard_dir}/../torch_profile/rank-<rank>.json.gz``
-(``megatron/training/training.py``). Its schedule carries ``repeat=1``.
+``{args.tensorboard_dir}/../torch_profile/rank-<rank>.json.gz``. Its
+schedule carries ``repeat=1``.
 
 The harness reads
 ``<arm_dir>/profiling/traces/iteration_*/rank<n>_trace.json.gz`` and arm
@@ -105,11 +105,10 @@ def install_profiler_shim(
 
     **``skip_first=1`` aligns the two engines, and without it the published
     throughput is biased.** The two engines call ``prof.step()`` at opposite
-    ends of the loop body. Megatron calls it **first**
-    (``megatron/training/training.py``, at the top of ``train``'s ``while``),
-    so training step ``k`` runs under ``schedule(k)``. TorchTitan calls it
-    **last** (``torchtitan/trainer.py``, after ``train_step``), so its step
-    ``k`` runs under ``schedule(k-1)``. One step of offset.
+    ends of the loop body. Megatron calls it **first**, at the top of its
+    training loop, so training step ``k`` runs under ``schedule(k)``.
+    TorchTitan calls it **last**, after its train step, so its step ``k``
+    runs under ``schedule(k-1)``. One step of offset.
 
     That offset is not cosmetic. ``results.py``'s ``stable_tps`` samples
     steps 2 to 10 of every 20-step cycle, and at the default schedule the
