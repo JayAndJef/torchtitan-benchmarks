@@ -907,6 +907,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
             megatron_precision="stock",
+            profile=False,
         )
         self.assertEqual(recorded["model_size"], "1b")
         self.assertEqual(recorded["model_shape"]["name"], "1b")
@@ -942,6 +943,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                     megatron_p2p_sync="on",
                     megatron_nan_guard="on",
                     megatron_precision="stock",
+                    profile=False,
                 )
                 # Written by hand, because manifest_data canonicalises: an
                 # on-disk manifest from before the rename says "normal".
@@ -960,6 +962,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                         megatron_p2p_sync="on",
                         megatron_nan_guard="on",
                         megatron_precision="stock",
+                        profile=False,
                     ),
                     [],
                 )
@@ -977,6 +980,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
             megatron_precision="stock",
+            profile=False,
         )
         self.assertEqual(
             _resume_mismatches(
@@ -992,6 +996,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                 megatron_p2p_sync="on",
                 megatron_nan_guard="on",
                 megatron_precision="stock",
+                profile=False,
             ),
             ["model_size"],
         )

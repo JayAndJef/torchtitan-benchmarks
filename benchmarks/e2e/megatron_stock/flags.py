@@ -179,6 +179,11 @@ INIT_METHOD_STD = "0.01"
 BENCH_ARM_DIR = "--bench-arm-dir"
 BENCH_MODEL_SIZE = "--bench-model-size"
 BENCH_LOCAL_BATCH_SIZE = "--bench-local-batch-size"
+# The profiler switch, and the one token that states it. The four schedule
+# flags below travel with it and with nothing else: the driver refuses a
+# schedule flag without this token, so an argv cannot ask for a window it
+# also declines to collect.
+BENCH_PROFILE = "--bench-profile"
 BENCH_PROFILE_FREQ = "--bench-profile-freq"
 BENCH_PROFILER_WARMUP = "--bench-profiler-warmup"
 BENCH_PROFILER_ACTIVE = "--bench-profiler-active"
@@ -194,6 +199,7 @@ BENCH_FLAGS: tuple[str, ...] = (
     BENCH_ARM_DIR,
     BENCH_MODEL_SIZE,
     BENCH_LOCAL_BATCH_SIZE,
+    BENCH_PROFILE,
     BENCH_PROFILE_FREQ,
     BENCH_PROFILER_WARMUP,
     BENCH_PROFILER_ACTIVE,
@@ -212,6 +218,17 @@ BENCH_FLAGS: tuple[str, ...] = (
 BENCH_FLAGS_OMITTED_BY_DEFAULT: tuple[str, ...] = (
     BENCH_PP_SCHEDULE,
     BENCH_BATCH_P2P_SYNC,
+)
+
+# The harness flags that describe a profiler window. ``_bench_flags`` emits
+# the whole group under ``--profile`` and none of it otherwise, and
+# ``train.py`` refuses any member of it without ``BENCH_PROFILE``. One
+# tuple, so the writer and the refusal cannot disagree about the group.
+BENCH_PROFILE_SCHEDULE_FLAGS: tuple[str, ...] = (
+    BENCH_PROFILE_FREQ,
+    BENCH_PROFILER_WARMUP,
+    BENCH_PROFILER_ACTIVE,
+    BENCH_MIN_TRACE_WINDOWS,
 )
 
 # Flags this suite declines under EVERY ZeRO level, each for a
@@ -761,7 +778,10 @@ def _sharding_flags(zero: int) -> list[str]:
 
 
 def _data_flags(
-    shape: PiperShape, workload: Workload, *, profile_step_end: int
+    shape: PiperShape,
+    workload: Workload,
+    *,
+    profile_step_end: int | None,
 ) -> list[str]:
     """The data source, the logging and the profiler.
 
@@ -788,7 +808,23 @@ def _data_flags(
     an active window writes a third, short trace that arm rule 5 and the
     per-step metrics would then count. Ending on a cycle boundary puts the
     stop on a step the schedule is idle on, where it is a no-op.
+
+    ``profile_step_end`` is ``None`` when the run collects no traces, and
+    the four profiler tokens then leave the argv. Megatron's own default
+    for ``--profile`` is off, so the run builds no profiler at all.
     """
+    profiler = (
+        [
+            "--profile",
+            "--use-pytorch-profiler",
+            "--profile-step-start",
+            "1",
+            "--profile-step-end",
+            str(profile_step_end),
+        ]
+        if profile_step_end is not None
+        else []
+    )
     return [
         "--tokenizer-type",
         "NullTokenizer",
@@ -813,12 +849,7 @@ def _data_flags(
         "--log-interval",
         "1",
         "--log-throughput",
-        "--profile",
-        "--use-pytorch-profiler",
-        "--profile-step-start",
-        "1",
-        "--profile-step-end",
-        str(profile_step_end),
+        *profiler,
     ]
 
 
@@ -830,6 +861,7 @@ def _bench_flags(
     model_size: str,
     rows_per_sample: int,
     megatron_p2p_sync: str,
+    profile: bool,
 ) -> list[str]:
     """The harness group, which ``train.py`` adds to Megatron's own parser.
 
@@ -852,7 +884,27 @@ def _bench_flags(
     default for the field. The default argv therefore does not move, and a
     reader of a recorded command line sees the flag exactly where the run
     turned the sync off.
+
+    ``--bench-profile`` and the four schedule flags are one group: every
+    member of it appears under ``profile`` and none of it otherwise. The
+    driver refuses a schedule flag without the token, so a partial group
+    cannot install a profiler the run does not declare.
     """
+    schedule = (
+        [
+            BENCH_PROFILE,
+            BENCH_PROFILE_FREQ,
+            str(workload.profile_freq),
+            BENCH_PROFILER_WARMUP,
+            str(workload.profiler_warmup),
+            BENCH_PROFILER_ACTIVE,
+            str(workload.profiler_active),
+            BENCH_MIN_TRACE_WINDOWS,
+            str(workload.min_trace_windows),
+        ]
+        if profile
+        else []
+    )
     flags = [
         BENCH_ARM_DIR,
         str(arm_dir),
@@ -860,18 +912,11 @@ def _bench_flags(
         model_size,
         BENCH_LOCAL_BATCH_SIZE,
         str(workload.local_batch_size),
-        BENCH_PROFILE_FREQ,
-        str(workload.profile_freq),
-        BENCH_PROFILER_WARMUP,
-        str(workload.profiler_warmup),
-        BENCH_PROFILER_ACTIVE,
-        str(workload.profiler_active),
+        *schedule,
         BENCH_SEQ_LEN,
         str(workload.seq_len),
         BENCH_ROWS_PER_SAMPLE,
         str(rows_per_sample),
-        BENCH_MIN_TRACE_WINDOWS,
-        str(workload.min_trace_windows),
     ]
     if spec.pp > 1:
         flags.extend((BENCH_PP_SCHEDULE, str(spec.pp_schedule)))
@@ -896,6 +941,7 @@ def stock_megatron_flags(
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
+    profile: bool = True,
 ) -> list[str]:
     """The whole argument list for one stock Megatron-LM arm.
 
@@ -922,6 +968,12 @@ def stock_megatron_flags(
     flags of ``LEAN_PRECISION_FLAGS`` and reaches 10 bytes. It is refused
     under ``--zero 0``, because Megatron asserts
     ``use_distributed_optimizer`` under the precision-aware optimizer.
+
+    ``profile`` defaults to ``True``, which is the argv this arm has always
+    built. Under ``False`` Megatron's own profiler flags and the harness
+    schedule group both leave, the run writes no trace, and the whole-cycle
+    refusal below does not apply: it exists to keep a profiler window
+    whole, and there is no window.
 
     Raises ``ValueError`` on a request this arm cannot honour. Each refusal
     names the reason, because a caller may build a command line without a
@@ -954,7 +1006,7 @@ def stock_megatron_flags(
             f"pipeline schedule {spec.pp_schedule!r} is not implemented by "
             f"the stock driver; it runs {SUPPORTED_PP_SCHEDULE!r} alone"
         )
-    if workload.steps % workload.profile_freq:
+    if profile and workload.steps % workload.profile_freq:
         # **This arm rides Megatron's own loop, and that loop keeps calling
         # prof.step() after it has called prof.stop().** The stop is guarded
         # on ``iteration == --profile-step-end``
@@ -989,9 +1041,12 @@ def stock_megatron_flags(
     )
     # A whole number of cycles, refused above, so this is workload.steps.
     # See _data_flags, and the refusal above for why it may not be less.
+    # ``None`` under no profile, which drops the profiler tokens.
     profile_step_end = (
-        workload.steps // workload.profile_freq
-    ) * workload.profile_freq
+        (workload.steps // workload.profile_freq) * workload.profile_freq
+        if profile
+        else None
+    )
     return [
         *_geometry_flags(shape, megatron_seq_length=megatron_seq_length),
         *_engine_flags(),
@@ -1013,5 +1068,6 @@ def stock_megatron_flags(
             model_size=model_size,
             rows_per_sample=rows_per_sample,
             megatron_p2p_sync=megatron_p2p_sync,
+            profile=profile,
         ),
     ]

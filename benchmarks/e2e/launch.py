@@ -202,6 +202,7 @@ def command_for_arm(
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
+    profile: bool = True,
 ) -> list[str]:
     """Build the training command for one arm, dispatching on its launcher.
 
@@ -233,6 +234,13 @@ def command_for_arm(
     ``megatron_precision`` defaults to ``stock``, which is again the
     identity: it adds no token to any argv. It reaches the stock megatron
     command alone, and a TorchTitan argv is untouched under either value.
+
+    ``profile`` defaults to ``True``, which is the identity again, by a
+    different route: every command line this repository recorded before the
+    axis existed carried the profiler flags. The run axis itself defaults
+    to off (``DEFAULT_PROFILE``), and ``_resolve_run`` passes the run's own
+    value. Under ``False`` both engines lose every profiler token and the
+    run writes no trace.
     """
     if arm.launcher == "megatron_stock":
         return _megatron_stock_command(
@@ -246,6 +254,7 @@ def command_for_arm(
             megatron_p2p_sync,
             megatron_nan_guard,
             megatron_precision,
+            profile,
         )
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
@@ -255,6 +264,24 @@ def command_for_arm(
     # list, so a compiled arm builds the command line it built before
     # compile became an arm property.
     compile_flags = ("--compile.enable",) if arm.compile == "torch" else ()
+    # TorchTitan's profiler is off unless these tokens ask for it
+    # (``CompileConfig``'s sibling ``ProfilingConfig``), so an unprofiled
+    # run drops the block and passes no negation. The flags keep their
+    # position, so a profiled arm builds the command line it built before
+    # the axis existed.
+    profiler_flags = (
+        (
+            "--profiler.enable_profiling",
+            "--profiler.profile_freq",
+            str(workload.profile_freq),
+            "--profiler.profiler_active",
+            str(workload.profiler_active),
+            "--profiler.profiler_warmup",
+            str(workload.profiler_warmup),
+        )
+        if profile
+        else ()
+    )
     args = [
         "./run_train.sh",
         "--module",
@@ -273,13 +300,7 @@ def command_for_arm(
         "--training.local-batch-size",
         str(workload.local_batch_size),
         *compile_flags,
-        "--profiler.enable_profiling",
-        "--profiler.profile_freq",
-        str(workload.profile_freq),
-        "--profiler.profiler_active",
-        str(workload.profiler_active),
-        "--profiler.profiler_warmup",
-        str(workload.profiler_warmup),
+        *profiler_flags,
         # Empty at the trivial spec, so the argv below it is unchanged.
         *_titan_parallelism_flags(parallelism),
     ]
@@ -365,6 +386,7 @@ def _megatron_stock_command(
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
+    profile: bool = True,
 ) -> list[str]:
     """Launch command for the stock Megatron-LM driver.
 
@@ -450,5 +472,9 @@ def _megatron_stock_command(
             # an unknown value, and lean under a replicated dense value,
             # each with its own message; _resolve_run refuses both first.
             megatron_precision=megatron_precision,
+            # Megatron's own profiler flags and the harness schedule group
+            # under True, and the --bench-profile token with them; nothing
+            # at all under False.
+            profile=profile,
         ),
     ]

@@ -489,6 +489,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard="on",
             megatron_precision="stock",
+            profile=False,
         )
 
     def _resume(self, out_dir: Path, megatron_p2p_sync: str | None):
@@ -804,6 +805,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             megatron_p2p_sync="off",
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision="stock",
+            profile=False,
         )
 
     def _resume(self, out_dir: Path, megatron_nan_guard: str | None):
@@ -991,6 +993,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             megatron_p2p_sync="off",
             megatron_nan_guard="off",
             megatron_precision=megatron_precision,
+            profile=False,
         )
 
     def _resume(
@@ -1554,6 +1557,7 @@ class ManifestTests(unittest.TestCase):
                 megatron_p2p_sync="on",
                 megatron_nan_guard="on",
                 megatron_precision="stock",
+                profile=False,
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 

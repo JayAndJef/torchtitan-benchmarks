@@ -828,6 +828,7 @@ def validate_arm(
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
+    profile: bool = True,
 ) -> None:
     """Reject partial or wrongly configured runs before analysis.
 
@@ -857,16 +858,31 @@ def validate_arm(
     scenario was measured under. The stock profile asks every rank, at
     every mesh, for the four precision fields its driver prints from the
     arguments Megatron resolved, under both values.
+
+    ``profile`` says whether the run collected traces. Under ``False`` the
+    arm writes none, so arm rules 5, 6 and 13 and the per-rank trace count
+    have nothing to read and are skipped; every log rule still runs on
+    every rank. It defaults to ``True``, which is the reading every run
+    before the axis existed got, and it is the strict direction: a caller
+    that forgets the argument fails an unprofiled arm rather than passing a
+    profiled one unchecked.
+
+    **Rule 13 leaves with the traces, and arm rule 12 then carries the
+    data-parallel axis alone.** Rule 12 reads each engine's own
+    data-parallel log line, which the engine prints after it has built the
+    reduction path, so a ``dp`` run that reduced nothing still fails. What
+    is lost is the second witness -- the all-reduce kernel -- so cite a
+    ``dp`` number from an unprofiled run as resting on the log line.
     """
-    profile = VALIDATION_PROFILES[arm.validation]
+    engine_profile = VALIDATION_PROFILES[arm.validation]
     shape = shape_by_name(model_size)
     # At every world size, unlike the mesh markers below: the guard runs
     # at pp 1 and at dp 1. Resolved before any log is read, so an unknown
     # value lands first.
-    nan_guard_markers = profile.nan_guard_markers(megatron_nan_guard)
+    nan_guard_markers = engine_profile.nan_guard_markers(megatron_nan_guard)
     # The optimizer state has a precision at every mesh too, and both
     # values are a claim the log must carry.
-    precision_markers = profile.precision_markers(megatron_precision)
+    precision_markers = engine_profile.precision_markers(megatron_precision)
     if not log_path.is_file():
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     logs = logs_by_rank(log_path.read_text(errors="replace"))
@@ -878,7 +894,7 @@ def validate_arm(
     # execution.
     parallelism_markers: tuple[str, ...] = ()
     if parallelism.world_size > 1:
-        parallelism_markers = profile.parallelism_markers(
+        parallelism_markers = engine_profile.parallelism_markers(
             parallelism, workload, megatron_precision
         )
         if not parallelism_markers:
@@ -890,7 +906,7 @@ def validate_arm(
             )
         # The p2p half joins after the refusal above, because an empty
         # tuple here is honest: a TorchTitan arm never receives the value.
-        parallelism_markers += profile.p2p_markers(
+        parallelism_markers += engine_profile.p2p_markers(
             parallelism, megatron_p2p_sync
         )
     if parallelism.world_size > 1 and set(logs) != expected_ranks:
@@ -906,7 +922,7 @@ def validate_arm(
             f" on rank {rank}; see {log_path}"
             if parallelism.world_size > 1
             else f"; see {log_path}",
-            profile=profile,
+            profile=engine_profile,
             shape=shape,
             ac_mode=ac_mode,
             model_size=model_size,
@@ -916,6 +932,13 @@ def validate_arm(
             nan_guard_markers=nan_guard_markers,
             precision_markers=precision_markers,
         )
+
+    # Every rule below reads a trace file. A run without --profile writes
+    # none, so the block is skipped whole rather than rule by rule: a rule
+    # that read an empty set would pass every arm and report a check it did
+    # not make.
+    if not profile:
+        return
 
     # Arm rules 5 and 7 are per rank. Every rank runs the same number of
     # profiler windows, so a rank short of them is as broken as a run short of

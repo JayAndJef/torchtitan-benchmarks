@@ -47,6 +47,19 @@ AC_MODES = ("sac", "none")
 DEFAULT_AC_MODE = "none"
 DEFAULT_MODEL_SIZE = "1b"
 
+# Whether a run collects profiler traces.
+#
+# Off is the default, and it is the treatment a published throughput number
+# wants: the profiler costs GPU and host time on every window, and the whole
+# 40-step floor exists to hold two of them. Under ``--profile`` the run
+# collects the trace layout an external analysis tool reads, and the floor
+# and every trace rule of ``benchmarks/e2e/validation.py`` apply again.
+#
+# It is a run axis and not an arm property: both engines either write the
+# layout or write nothing, and a run that profiled one arm and not another
+# would publish two treatments under one label.
+DEFAULT_PROFILE = False
+
 # The Megatron pipeline point-to-point sync treatment, selectable per run.
 # Stock Megatron calls torch.cuda.synchronize() once per batched pipeline
 # message (megatron/core/pipeline_parallel/p2p_communication.py, guarded by

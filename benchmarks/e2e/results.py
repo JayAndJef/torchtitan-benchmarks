@@ -492,11 +492,17 @@ def evaluate_run(
             "publish absolute metrics without it"
         )
 
+    # The run axis, read back from the manifest. Without ``--profile`` the
+    # arms wrote no trace, so every trace-derived block below is absent
+    # rather than empty: an absent figure cannot be quoted by mistake, and a
+    # zero or a null in a kernel-time row reads as a measurement.
+    profile = bool(manifest["profile"])
+
     per_rank: dict[str, dict[int, PooledMetrics]] = {}
     published_rank: dict[str, int] = {}
     pooled: dict[str, PooledMetrics] = {}
     trace_windows: dict[str, int] = {}
-    for arm in arms:
+    for arm in arms if profile else ():
         by_rank = trace_files_by_rank(out_dir / arm)
         if not by_rank:
             raise ValueError(f"no profiler traces under {out_dir / arm}")
@@ -512,10 +518,12 @@ def evaluate_run(
         trace_windows[arm] = pooled[arm].windows
 
     baseline_kernel_ms = (
-        pooled[baseline].kernel_ms_per_step if baseline is not None else None
+        pooled[baseline].kernel_ms_per_step
+        if baseline is not None and profile
+        else None
     )
     gpu_time = {}
-    for arm in arms:
+    for arm in arms if profile else ():
         kernel_ms = pooled[arm].kernel_ms_per_step
         gpu_time[arm] = GpuTimeSummary(
             kernel_ms_per_step=kernel_ms,
@@ -551,7 +559,7 @@ def evaluate_run(
     # ranks nobody chose for being busy, which is a different and weaker
     # figure, and it would move the ratio a single-GPU run has always
     # published the moment a run has two ranks.
-    for arm in arms:
+    for arm in arms if profile else ():
         if baseline is None or arm == baseline:
             continue
         if gpu_time[arm].published_rank != gpu_time[baseline].published_rank:
@@ -872,26 +880,31 @@ def render_evaluation(result: EvaluationResult) -> str:
             f"{_value(training.peak_memory_gib, 9, 2)}"
         )
 
-    lines.extend(
-        [
-            "",
-            "gpu kernel time (host-speed-immune; compare kernels with this):",
-            "  "
-            + f"{'arm':22s} {'kernel ms/step':>14s} {'vs base':>8s} "
-            + f"{'launch us':>10s}",
-        ]
-    )
-    for arm in result.arms:
-        gpu = result.gpu_time[arm]
-        lines.append(
-            f"  {arm:22s} "
-            f"{_value(gpu.kernel_ms_per_step, 14, 2)} "
-            f"{_value(gpu.baseline_kernel_ratio, 8, 4)} "
-            f"{_value(gpu.launch_latency_us, 10, 2)}"
+    # Absent without --profile: the run wrote no trace, so there is no
+    # kernel time to print and an empty table would read as a zero.
+    if result.gpu_time:
+        lines.extend(
+            [
+                "",
+                "gpu kernel time (host-speed-immune; compare kernels with "
+                "this):",
+                "  "
+                + f"{'arm':22s} {'kernel ms/step':>14s} {'vs base':>8s} "
+                + f"{'launch us':>10s}",
+            ]
         )
+        for arm in result.arms:
+            gpu = result.gpu_time[arm]
+            lines.append(
+                f"  {arm:22s} "
+                f"{_value(gpu.kernel_ms_per_step, 14, 2)} "
+                f"{_value(gpu.baseline_kernel_ratio, 8, 4)} "
+                f"{_value(gpu.launch_latency_us, 10, 2)}"
+            )
 
     lines.extend(_render_rank_throughput(result))
-    lines.extend(_render_rank_split(result))
+    if result.gpu_time:
+        lines.extend(_render_rank_split(result))
 
     lines.extend(["", "loss trajectories (sanity check, not a measurement):"])
     for arm in result.arms:
