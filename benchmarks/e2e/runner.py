@@ -568,10 +568,9 @@ def megatron_precision_refusal(
     if zero == 0:
         return (
             f"--megatron-precision {megatron_precision!r} needs "
-            "--zero 1 or --zero 3: Megatron asserts "
-            "use_distributed_optimizer under "
-            "--use-precision-aware-optimizer, and the zero level is the one "
-            "owner of that flag"
+            "--zero 1: Megatron asserts use_distributed_optimizer under "
+            "--use-precision-aware-optimizer, and the zero level is the "
+            "one owner of that flag"
         )
     return None
 

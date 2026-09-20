@@ -74,7 +74,7 @@ SHARDED_MESH = ParallelismSpec(
     ep=2,
     pp_schedule="1F1B",
     pp_microbatch_size=4,
-    zero=3,
+    zero=1,
 )
 
 # Every mesh the argv checks below sweep, with the batch each needs.
@@ -155,27 +155,21 @@ STOCK_LOG_FRAGMENTS = (
     "Megatron-LM stock nan guard: check_for_nan_in_loss_and_grad=",
 )
 
-# The wrapper class name is the half of the data-parallel line that moves
-# with --zero, so it cannot sit in the roster above. Megatron
-# picks the class from --use-megatron-fsdp alone, and the two classes are
-# siblings rather than one a subclass of the other, so the name is what
-# says which memory strategy ran.
+# The wrapper class name, per ZeRO level. Megatron builds one class at
+# both levels here, because this suite sends no wrapper flag. The name is
+# still read off the wrapper rather than hardcoded, so a run that reached
+# another class fails arm rule 12.
 STOCK_WRAPPER_FRAGMENTS = {
     0: "Megatron-LM stock data parallel: DistributedDataParallel ",
-    3: (
-        "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
-    ),
+    1: "Megatron-LM stock data parallel: DistributedDataParallel ",
 }
 
-# The other half of the line that moves with the value. Megatron-FSDP
-# turns the gradient overlap on inside its own constructor, on the config
-# object it was handed, so a sharded run reports True where the argv says
-# nothing. The whole field is pinned here, commas included, because a
-# roster entry that stopped at the "=" would no longer say which token
-# follows it.
+# The overlap half of the same line. The whole field is pinned here,
+# commas included, because a roster entry that stopped at the "=" would no
+# longer say which token follows it.
 STOCK_OVERLAP_FRAGMENTS = {
     0: "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
-    3: "(overlap_grad_reduce=True, grad_reduce_in_fp32=True,",
+    1: "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
 }
 
 # The rest of the mode line. ``ValidationProfile.mode_line`` stops at the
@@ -846,13 +840,11 @@ class StockValidationProfileTests(unittest.TestCase):
             "optimizer=ChainedOptimizer[Float16OptimizerWithFloat16Params])",
         )
 
-    def test_the_sharded_markers_name_the_other_wrapper(self) -> None:
-        """``--zero 3`` moves three fields of two lines.
+    def test_the_sharded_markers_name_the_sharded_optimizer(self) -> None:
+        """``--zero 1`` moves the optimizer field of the second line.
 
-        Megatron picks ``FullyShardedDataParallelV1`` from
-        ``--use-megatron-fsdp`` alone, and the strategy it then acts on is
-        ``optim_grads_params``. A run that lost the sharding flags prints
-        the replicated line and fails arm rule 12, which is the point.
+        A run that lost ``--use-distributed-optimizer`` prints the
+        replicated line and fails arm rule 12, which is the point.
         """
         markers = _megatron_stock_parallelism_markers(
             SHARDED_MESH, self.workload, "stock"
@@ -864,11 +856,11 @@ class StockValidationProfileTests(unittest.TestCase):
         )
         self.assertEqual(
             markers[1],
-            "Megatron-LM stock data parallel: FullyShardedDataParallelV1 "
-            "over 2 ranks (overlap_grad_reduce=True, "
+            "Megatron-LM stock data parallel: DistributedDataParallel "
+            "over 2 ranks (overlap_grad_reduce=False, "
             "grad_reduce_in_fp32=True, "
-            "sharding_strategy=optim_grads_params, expert_parallel=2, "
-            "optimizer=DistributedOptimizer)",
+            "sharding_strategy=no_shard, expert_parallel=2, "
+            "optimizer=ChainedOptimizer[DistributedOptimizer])",
         )
 
     def test_the_two_values_share_no_data_parallel_marker(self) -> None:
@@ -904,23 +896,10 @@ class StockValidationProfileTests(unittest.TestCase):
             "optimizer=ChainedOptimizer[DistributedOptimizer])", line
         )
 
-    def test_the_sharded_marker_names_a_bare_optimizer(self) -> None:
-        """``zero 3`` takes the Megatron-FSDP branch, which does not chain.
-
-        That branch collapses its optimizer list at a single model chunk,
-        which is what this harness builds. A marker that expected a chain
-        here would fail an honest sharded run.
-        """
-        line = _megatron_stock_parallelism_markers(
-            SHARDED_MESH, self.workload, "stock"
-        )[1]
-        self.assertIn("optimizer=DistributedOptimizer)", line)
-        self.assertNotIn("ChainedOptimizer", line)
-
     def test_a_replicated_chain_cannot_satisfy_a_zero1_marker(self) -> None:
         """The hazard: ZeRO-0 must not publish under a ZeRO-1 label.
 
-        Megatron keeps ``DistributedDataParallel`` under both values, so
+        Megatron keeps ``DistributedDataParallel`` at both levels, so
         the wrapper separates neither, and both chains carry the same
         outer class. A chain of ``Float16OptimizerWithFloat16Params`` is
         what a run that lost ``--use-distributed-optimizer`` builds.
@@ -1103,27 +1082,23 @@ class StockValidationProfileTests(unittest.TestCase):
                     self.profile.data_parallel_pattern.search(line)
                 )
 
-    def test_each_value_names_its_own_wrapper_class(self) -> None:
+    def test_each_level_names_the_wrapper_class(self) -> None:
         """Asserted by name, from the table beside the flags that build it.
 
-        The class name is the only field of this line that Megatron picks
-        from ``--use-megatron-fsdp`` alone, so it is the field that proves
-        the zero value.
+        The class name says which mechanism ran, and the driver reads it
+        off the wrapper rather than from the argv. Both levels build one
+        class here, so the optimizer field is what separates them; the
+        test above pins that.
         """
         for spec in (MESH, SHARDED_MESH):
             with self.subTest(zero=spec.zero):
                 line = self.profile.parallelism_markers(
                     spec, self.workload, "stock"
                 )[1]
-                other = (
-                    3 if spec.zero == 0
-                    else 0
-                )
                 for roster in (
                     STOCK_WRAPPER_FRAGMENTS, STOCK_OVERLAP_FRAGMENTS
                 ):
                     self.assertIn(roster[spec.zero], line)
-                    self.assertNotIn(roster[other], line)
 
 
 # --------------------------------------------------------------------------
@@ -1164,11 +1139,9 @@ STOCK_MESH_CASES = (
     # The zero control cell of the matrix, and the expert split
     # it makes legal. Both lines carry a field that moves between the two
     # values, so a diff over the replicated cells alone proves half of it.
-    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", zero=3), 32),
+    (ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", zero=1), 32),
     (
-        ParallelismSpec(
-            dp=2, pp=4, ep=2, pp_schedule="1F1B", zero=3
-        ),
+        ParallelismSpec(dp=2, pp=4, ep=2, pp_schedule="1F1B", zero=1),
         32,
     ),
     # The deepest pipeline eight GPUs hold. pp 8 forces dp 1, so it prints
@@ -1242,7 +1215,7 @@ def _driver_lines() -> list[str]:
         ),
         *train.parallelism_lines(_StockArgs(spec), microbatches=8),
         _driver_data_parallel_line(0, dp=2, ep=1),
-        _driver_data_parallel_line(3, dp=2, ep=2),
+        _driver_data_parallel_line(1, dp=2, ep=2),
         train.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
         train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
         train.P2P_LINE.format(comm=True, sync=True),

@@ -50,17 +50,11 @@ runs), and no distributed optimizer under ``--zero 0``
 (both engines then replicate their parameters, so the data-parallel axis
 carries one change).
 
-**``--zero 3`` moves that third deviation and nothing else.**
-Both engines then shard the dense parameters, so the axis still carries one
-change, and Megatron needs its own distributed optimizer to do it. See
-``ZERO3_FLAGS``.
-
 **``--zero 1`` sends ONE flag**,
 ``--use-distributed-optimizer``. Megatron then keeps a plain
 ``DistributedDataParallel`` and builds a ``DistributedOptimizer``, which
-shards the optimizer states over the data-parallel group. No Megatron-FSDP
-wrapper exists under this value, so nothing factors the world size and the
-value holds a pipeline. See ``ZERO1_FLAGS``.
+shards the optimizer states over the data-parallel group. It builds no
+device mesh, so the level holds a pipeline. See ``ZERO1_FLAGS``.
 
 **``--megatron-p2p-sync off`` adds one harness flag and nothing else.**
 Megatron has no CLI flag for ``batch_p2p_sync``, so ``--bench-batch-p2p-sync
@@ -103,128 +97,71 @@ SUPPORTED_MODE = "default"
 # forward_backward_pipelining_without_interleaving is 1F1B and nothing else.
 SUPPORTED_PP_SCHEDULE = "1F1B"
 
-# **Megatron-FSDP runs at version 1, and version 2 is impossible here.**
-# FullyShardedDataParallelV2._validate_config raises on a pipeline degree, an
-# expert degree, a tensor degree, a context degree, and on any config whose
-# num_moe_experts is set (mcore_fsdp_adapter.py). Every shape in
-# PIPER_SHAPES is a mixture of experts, so v2 refuses this suite even at
-# pp 1 and ep 1. Megatron already defaults this value to 1. The flag list
-# states the fact rather than inherits it. A submodule bump that moves the
-# default then changes a recorded argv rather than a silent run.
-MEGATRON_FSDP_VERSION = "1"
-
-# What Megatron-FSDP shards. It pairs with what TorchTitan shards under
-# --zero 3: the parameters, the gradients and the optimizer
-# state. Megatron already defaults this value too. The flag list states it
-# for the reason above.
-MEGATRON_SHARDING_STRATEGY = "optim_grads_params"
-
-# arguments.py asserts ckpt_format == "fsdp_dtensor" under
-# --use-megatron-fsdp. The arm saves no checkpoint, so the flag is inert
-# except for that assert.
-MEGATRON_CHECKPOINT_FORMAT = "fsdp_dtensor"
-
-# The wrapper class Megatron builds for each value, and the sharding
+# The wrapper class Megatron builds for each level, and the sharding
 # strategy that wrapper then acts on. train.py prints both off the wrapper
 # it really got; benchmarks/e2e/validation.py reads this table to say what
-# each value must print. **The class name follows the version constant**,
-# because training.py picks FullyShardedDataParallel and that factory picks
-# the class from ddp_config.megatron_fsdp_version.
+# each level must print.
 #
-# **The strategy is "no_shard" at level 0, and Megatron's own argparse
+# **Both levels build the SAME wrapper.** Megatron picks its sharded
+# wrapper on one flag that this suite sends at no level. So this table
+# cannot separate the two levels, and DATA_PARALLEL_OPTIMIZERS below is
+# what does.
+#
+# **The strategy is "no_shard" at both levels, and Megatron's own argparse
 # default is not.** args.data_parallel_sharding_strategy defaults to
 # "optim_grads_params" and reaches the DDP config whatever the wrapper is,
-# but megatron/core/optimizer/__init__.py reads it only under
-# use_megatron_fsdp. So the value the run acts on is "no_shard" here, and
-# the raw field is inert. A marker built from the raw field would say a
-# replicated run sharded.
-#
-# **Levels 0 and 1 build the SAME wrapper**, because
-# training.py picks FullyShardedDataParallel on --use-megatron-fsdp alone
-# and level 1 does not send it. So this table cannot separate those two
-# values, and DATA_PARALLEL_OPTIMIZERS below is what does.
-#
-# **Level 1 reads "no_shard" too, for the reason level 0 does.**
-# megatron/core/optimizer/__init__.py reads
-# data_parallel_sharding_strategy only under use_megatron_fsdp, so the
-# strategy a level 1 run acts on is no_shard whatever the raw field says.
-# Level 1 shards the optimizer states through the DistributedOptimizer, which
-# is not this field.
+# but megatron/core/optimizer/__init__.py reads it only under the sharded
+# wrapper. So the value the run acts on is "no_shard" here, and the raw
+# field is inert. A marker built from the raw field would say
+# a replicated run sharded. Level 1 shards the optimizer states through
+# the DistributedOptimizer, which is not this field.
 DATA_PARALLEL_WRAPPERS: dict[int, str] = {
     0: "DistributedDataParallel",
     1: "DistributedDataParallel",
-    3: f"FullyShardedDataParallelV{MEGATRON_FSDP_VERSION}",
 }
+NO_SHARD_STRATEGY = "no_shard"
+"""The strategy every level of this suite acts on. ``train.py`` prints it."""
+
 SHARDING_STRATEGIES: dict[int, str] = {
-    0: "no_shard",
-    1: "no_shard",
-    3: MEGATRON_SHARDING_STRATEGY,
+    0: NO_SHARD_STRATEGY,
+    1: NO_SHARD_STRATEGY,
 }
 
-# The strategies under which Megatron-FSDP turns the gradient overlap on
-# by itself. ``MegatronFSDP.__init__`` reads this exact list
-# (``megatron_fsdp.py``), and it mutates the very object
-# ``get_megatron_ddp_config`` built, because it keeps the reference rather
-# than a copy (see ``mcore_fsdp_adapter.py``'s own
-# ``self.ddp_config = ddp_config``). So a sharded run reports
-# ``overlap_grad_reduce=True`` even though the argv omits the flag.
-MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES: tuple[str, ...] = (
-    "optim_grads_params",
-    "optim_grads",
-)
-
-# What ``overlap_grad_reduce`` reads on the wrapper, per value.
+# What ``overlap_grad_reduce`` reads on the wrapper, per level.
 #
-# **It is DERIVED from the strategy, and it may not restate it.** Megatron
-# keys the mutation on ``data_parallel_sharding_strategy``, not on this
-# repo's ZeRO level. ``MEGATRON_SHARDING_STRATEGY`` is a
-# documented reversal target, so a hand-written table here would keep
-# saying True after somebody moved that constant to a strategy the list
-# above does not hold -- and arm rule 12 would then fail the first run
-# after the flip. One statement of the fact, in one place.
-#
-# **``zero 0`` reads False for two independent reasons.** Its strategy
-# is ``no_shard``, which the list above does not hold; and no
-# Megatron-FSDP wrapper exists at all under that value, so the mutation
-# never runs. Do not read that row as a coincidence of the derivation.
+# False at both levels, and for two independent reasons. The argv omits
+# ``--overlap-grad-reduce`` at every level (see ``ALWAYS_OMITTED_FLAGS``),
+# so ``args`` carries False. And Megatron mutates that field only inside
+# its own sharded wrapper, which this suite never builds.
 DATA_PARALLEL_OVERLAP: dict[int, bool] = {
-    value: strategy in MEGATRON_FSDP_GRAD_OVERLAP_STRATEGIES
-    for value, strategy in SHARDING_STRATEGIES.items()
+    level: False for level in SHARDING_STRATEGIES
 }
 
-# The optimizer class Megatron builds for each value.
+# The optimizer class Megatron builds for each level.
 #
-# **This table is necessary, because the wrapper table above no longer
-# separates every value.** ``zero 0`` and ``zero 1`` both build a plain
-# ``DistributedDataParallel``, so the wrapper class alone cannot say which
-# of the two ran. The optimizer can:
+# **This table is necessary, because the wrapper table above separates
+# neither level.** Both build a plain ``DistributedDataParallel``, so the
+# wrapper class alone cannot say which level ran. The optimizer can:
 # ``megatron/core/optimizer/__init__.py:656`` builds ``DistributedOptimizer``
 # under ``use_distributed_optimizer``, and ``:679`` builds
 # ``Float16OptimizerWithFloat16Params`` otherwise.
 #
-# So the two tables together pin all three values and neither does it
-# alone: ``zero 0`` is DDP plus the fp16 optimizer, ``zero 1`` is DDP plus
-# the distributed optimizer, and ``zero 3`` is the Megatron-FSDP wrapper.
-#
-# ``zero 3`` reads ``DistributedOptimizer`` too, because ``arguments.py``
-# sets ``use_distributed_optimizer = True`` inside the Megatron-FSDP block
-# whatever the argv said.
+# So the two tables together pin both levels and neither does it alone:
+# level 0 is DDP plus the fp16 optimizer, and level 1 is DDP plus the
+# distributed optimizer.
 DATA_PARALLEL_OPTIMIZERS: dict[int, str] = {
     0: "Float16OptimizerWithFloat16Params",
     1: "DistributedOptimizer",
-    3: "DistributedOptimizer",
 }
 
 # The outer class Megatron returns for a chain of optimizers
 # (``megatron/core/optimizer/optimizer.py``).
 #
-# **The table above names a class, and two of the three values print it
-# inside a chain.** ``get_megatron_optimizer`` ends its standard path with
-# an unconditional ``ChainedOptimizer(optimizers)``. ``zero 3`` alone takes
-# the Megatron-FSDP branch, which returns its one optimizer bare at a
-# single model chunk.
-# ``data_parallel_optimizer`` below is what a marker must read; the raw
-# table cannot state the line.
+# **The table above names a class, and every level prints it inside a
+# chain.** ``get_megatron_optimizer`` ends its standard path with an
+# unconditional ``ChainedOptimizer(optimizers)``, and this suite takes no
+# other path. ``data_parallel_optimizer`` below is what a marker must
+# read; the raw table cannot state the line.
 CHAINED_OPTIMIZER = "ChainedOptimizer"
 
 # TorchTitan's own optimizer values, replicated flag for flag.
@@ -286,15 +223,9 @@ BENCH_FLAGS_OMITTED_BY_DEFAULT: tuple[str, ...] = (
 # so a test can assert their absence by name rather than by a hand-written
 # list that can drift from the reason.
 #
-# **--overlap-grad-reduce and --overlap-param-gather stay here under both
-# values, and the reason is not the reason --use-distributed-optimizer
-# leaves.** Megatron-FSDP turns all three on itself, so the "an argv that
-# omits it would deny a fact the run has" argument appears to reach all
-# three. It does not.
-#
-# ``arguments.py`` sets ``args.use_distributed_optimizer = True`` inside
-# the Megatron-FSDP block whatever the argv said. Sending that flag
-# therefore changes nothing the run does, and the argv gains a fact.
+# **--overlap-grad-reduce and --overlap-param-gather stay here at both
+# levels, and the reason is not the reason --use-distributed-optimizer
+# leaves.**
 #
 # The two overlap flags travel together: ``arguments.py`` asserts
 # ``--overlap-param-gather`` needs ``--overlap-grad-reduce``, so neither
@@ -305,16 +236,6 @@ BENCH_FLAGS_OMITTED_BY_DEFAULT: tuple[str, ...] = (
 # the argv says, and this arm runs stock Megatron at its own defaults.
 #
 # The marker reads the resolved value instead. See DATA_PARALLEL_OVERLAP.
-#
-# **The consequence under ``zero 3`` is a caption obligation, not a defect.**
-# ``resolve_ddp_bucket_size`` runs before the wrapper exists and reads the
-# argument, which is False, so a sharded run enters Megatron-FSDP with
-# ``bucket_size = None``. The wrapper then flips ``overlap_grad_reduce`` to
-# True on the config it holds. So the sharded arm overlaps its gradient
-# reduction with NO bucket size set, and **whether that costs anything is
-# unmeasured**. Say so beside any sharded number.
-# Sending the pair to bucket it would change the run rather than the record,
-# which is what the paragraph above refuses.
 ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--overlap-grad-reduce",
     "--overlap-param-gather",
@@ -344,37 +265,15 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
 # **Level 1 is one flag.** --use-distributed-optimizer alone gives Megatron a
 # DistributedOptimizer beside a plain DistributedDataParallel, which shards
 # the optimizer states over the data-parallel group and nothing else. It
-# builds no device mesh, which is why spec rule 17 lets this value hold a
-# pipeline where level 3 cannot.
+# builds no device mesh, so the level holds a pipeline.
 ZERO1_FLAGS: tuple[str, ...] = ("--use-distributed-optimizer",)
 
-# The flag that takes Megatron into its Megatron-FSDP branch. That branch
-# collapses its optimizer list at a single model chunk, so it returns a
-# bare optimizer here. This flag therefore also decides the optimizer
-# field of the data-parallel line. ``data_parallel_optimizer`` reads it
-# there, and it states the condition.
-MEGATRON_FSDP_FLAG = "--use-megatron-fsdp"
-
-# **Level 3 is five flags, and --use-distributed-optimizer is one of them.**
-# Megatron-FSDP v1 turns that one on itself and warns (arguments.py), so an
-# argv that omitted it would deny a fact the run has. Two of the other four
-# restate a Megatron default on purpose, so a submodule bump that moves
-# either default changes a recorded argv rather than a silent run.
-ZERO3_FLAGS: tuple[str, ...] = (
-    MEGATRON_FSDP_FLAG,
-    "--megatron-fsdp-version",
-    "--data-parallel-sharding-strategy",
-    "--use-distributed-optimizer",
-    "--ckpt-format",
-)
-
-# What each value sends, as one table. ``_sharding_flags`` builds the tokens
-# with their values and ``omitted_flags`` subtracts this from ``ZERO3_FLAGS``,
-# so presence and absence stay one fact and cannot drift apart.
+# What each level sends, as one table. ``_sharding_flags`` builds the tokens
+# and ``omitted_flags`` subtracts this from ``ZERO1_FLAGS``, so presence and
+# absence stay one fact and cannot drift apart.
 SHARDING_FLAGS_BY_VALUE: dict[int, tuple[str, ...]] = {
     0: (),
     1: ZERO1_FLAGS,
-    3: ZERO3_FLAGS,
 }
 
 # The flag NAMES --megatron-precision lean sends. The whole recipe, its
@@ -419,43 +318,27 @@ def data_parallel_optimizer(zero: int) -> str:
     """The optimizer name the data-parallel line must carry.
 
     ``DATA_PARALLEL_OPTIMIZERS`` names the class Megatron builds for this
-    value. This function says whether the line names that class bare or
-    inside a chain, and the ZeRO level is what decides it.
+    level. This function wraps that class in the chain the line carries.
 
     **The standard path always chains.** ``get_megatron_optimizer`` ends it
     with an unconditional ``ChainedOptimizer(optimizers)``
-    (``megatron/core/optimizer/__init__.py``), so ``zero 0`` and
-    ``zero 1`` both print a chain. That chain always holds the dense
-    optimizer. It holds a second member where TransformerEngine marked a
-    weight for the expert process groups. That mark has three conditions:
-    an expert degree above 1, an expert tensor degree that differs from
-    the dense one, or an expert GTP remat size that differs. This argv
-    reaches the first alone, because Megatron defaults the other two to
-    the dense values. Both members carry one class, because
+    (``megatron/core/optimizer/__init__.py``), and this suite takes no
+    other path, so both levels print a chain. That chain always holds the
+    dense optimizer. It holds a second member where TransformerEngine
+    marked a weight for the expert process groups. That mark has three
+    conditions: an expert degree above 1, an expert tensor degree that
+    differs from the dense one, or an expert GTP remat size that differs.
+    This argv reaches the first alone, because Megatron defaults the other
+    two to the dense values. Both members carry one class, because
     ``use_distributed_optimizer`` is one value for the whole run, so the
     printed string does not move with the expert degree.
 
-    **``zero 3`` is the exception.** ``--use-megatron-fsdp`` takes Megatron
-    into a branch that collapses its optimizer list when the list holds one
-    member. The list takes one entry for each group of dense model chunks,
-    and Megatron splits that group only under
-    ``--overlap-param-gather-with-optimizer-step``, which this harness
-    never sends. So the list holds one member here, and the line names the
-    class bare.
-
-    **No run has printed the bare form.** Every ``zero 3`` cell under
-    ``out/`` predates this field, so read that value from the Megatron
-    source rather than as a measurement.
-
     **The model shape decides none of this.** An earlier version of this
-    function branched on ``shape.num_experts``, which made ``zero 3`` expect
-    a chain Megatron never builds.
+    function branched on ``shape.num_experts``, which expected a chain
+    Megatron never builds.
     """
     refuse_unknown_zero(zero)
-    inner = DATA_PARALLEL_OPTIMIZERS[zero]
-    if MEGATRON_FSDP_FLAG in SHARDING_FLAGS_BY_VALUE[zero]:
-        return inner
-    return f"{CHAINED_OPTIMIZER}[{inner}]"
+    return f"{CHAINED_OPTIMIZER}[{DATA_PARALLEL_OPTIMIZERS[zero]}]"
 
 
 # Megatron's own switch for ``check_for_nan_in_loss_and_grad``
@@ -550,10 +433,9 @@ def _precision_flags(
     if zero == 0:
         raise ValueError(
             f"megatron precision {megatron_precision!r} needs "
-            "--zero 1 or --zero 3: Megatron "
-            "asserts use_distributed_optimizer under "
-            "--use-precision-aware-optimizer, and the ZeRO level "
-            "is the one owner of that flag"
+            "--zero 1: Megatron asserts use_distributed_optimizer under "
+            "--use-precision-aware-optimizer, and the ZeRO level is the "
+            "one owner of that flag"
         )
     return [
         "--use-precision-aware-optimizer",
@@ -606,16 +488,15 @@ def omitted_flags(zero: int) -> tuple[str, ...]:
     from declined to required as the value changes. A test reads this rather
     than a hand-written list, so every absence is asserted by name.
 
-    **It is SUBTRACTED from what the value sends, never written twice.**
-    ``zero 0`` declines all five, ``zero 1`` declines the four it does not
-    send, and ``zero 3`` declines none. ``--use-distributed-optimizer`` is
-    the flag that moves between the two sharded values, so a hand-written
-    list here could say a level 1 run declines a flag its own argv carries.
+    **It is SUBTRACTED from what the level sends, never written twice.**
+    Level 0 declines ``--use-distributed-optimizer`` and level 1 sends it,
+    so a hand-written list here could say a level 1 run declines a flag its
+    own argv carries.
     """
     refuse_unknown_zero(zero)
     sent = SHARDING_FLAGS_BY_VALUE[zero]
     return ALWAYS_OMITTED_FLAGS + tuple(
-        flag for flag in ZERO3_FLAGS if flag not in sent
+        flag for flag in ZERO1_FLAGS if flag not in sent
     )
 
 
@@ -870,46 +751,16 @@ def _sharding_flags(zero: int) -> list[str]:
     Under ``zero 1`` it is the one flag of ``ZERO1_FLAGS``. Megatron then
     keeps a plain ``DistributedDataParallel`` and builds a
     ``DistributedOptimizer``, which shards the optimizer states over the
-    data-parallel group. It builds no device mesh, so this value holds a
-    pipeline where ``zero 3`` cannot.
+    data-parallel group. It builds no device mesh, so the level holds a
+    pipeline.
 
-    Under ``zero 3`` it is the five flags of ``ZERO3_FLAGS``. Two of them
-    restate a Megatron default on purpose, so a submodule bump that moves
-    either default changes a recorded argv rather than a silent run.
-
-    **Megatron-FSDP v1 accepts a pipeline degree and an expert degree.**
-    Its distributed index reads ``expt_dp_group`` and ``ep_group``
-    (``mcore_fsdp_adapter.py``), and no assert in ``arguments.py`` forbids
-    the combination for v1. Version 2 refuses every shape here; see
-    ``MEGATRON_FSDP_VERSION``.
-
-    **One precondition lives outside this module, and it is enforced.**
-    ``arguments.py`` asserts ``CUDA_DEVICE_MAX_CONNECTIONS != "1"`` under
-    ``--use-megatron-fsdp``. Nothing under ``benchmarks/`` sets that
-    variable, but the child inherits the operator's own shell, so an
-    ambient ``"1"`` would kill every rank at argument parsing.
-    ``benchmarks/execution/environment.py``'s
-    ``refuse_megatron_fsdp_connection_limit`` refuses such a host, and
-    ``_resolve_run`` calls it after it builds the argv -- reading the flag
-    off this list rather than re-deriving the condition, so the two cannot
-    drift apart. This module reads no environment variable, which is what
-    keeps a test able to build the whole command line without a shell.
+    This module reads no environment variable, which is what keeps a test
+    able to build the whole command line without a shell.
     """
     refuse_unknown_zero(zero)
     if zero == 0:
         return []
-    if zero == 1:
-        return list(ZERO1_FLAGS)
-    return [
-        "--use-megatron-fsdp",
-        "--megatron-fsdp-version",
-        MEGATRON_FSDP_VERSION,
-        "--data-parallel-sharding-strategy",
-        MEGATRON_SHARDING_STRATEGY,
-        "--use-distributed-optimizer",
-        "--ckpt-format",
-        MEGATRON_CHECKPOINT_FORMAT,
-    ]
+    return list(ZERO1_FLAGS)
 
 
 def _data_flags(
@@ -1097,8 +948,7 @@ def stock_megatron_flags(
     refuse_unknown_zero(spec.zero)
     if spec.ep > 1 and spec.zero == 0:
         raise ValueError(
-            f"expert-parallel degree {spec.ep} needs "
-            "--zero 1 or --zero 3: TorchTitan "
+            f"expert-parallel degree {spec.ep} needs --zero 1: TorchTitan "
             "cannot split the experts while it replicates the dense "
             "parameters, so a replicated expert row would compare two "
             "different memory strategies"

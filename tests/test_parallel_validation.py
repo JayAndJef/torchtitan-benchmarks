@@ -514,7 +514,8 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
         )
 
     def test_a_shard_degree_is_data_parallelism_too(self) -> None:
-        """ZeRO-3 is what an omitted shard-degree flag produces.
+        """Full parameter sharding is what an omitted shard-degree flag
+        produces.
 
         ``parallelize_piper1b`` refuses it in the training process. This
         pattern is what stops such a log being published as single-GPU if
