@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ./run_bench.sh run-all <gpu-index> --scenario <name>
+# Usage: ./run_bench.sh run <gpu-index> [--scenario <name>]
 
 set -euo pipefail
 

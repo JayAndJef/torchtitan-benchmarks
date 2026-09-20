@@ -46,7 +46,7 @@ loop is not paranoia: an arm that dies during launch fails inside the same
 second as its predecessor.
 
 ``run_timestamp`` is public because ``benchmarks.cli.e2e`` generates one
-stamp and hands it to every scenario of a ``run-all --all-scenarios`` sweep,
+stamp and hands it to every scenario of a multi-scenario ``run``,
 which is what groups them under a single ``out/<timestamp>/``.
 ``_default_output_dir`` takes a ``Scenario`` only to read its ``.name``, so
 the annotation lives under ``TYPE_CHECKING`` and this module keeps no

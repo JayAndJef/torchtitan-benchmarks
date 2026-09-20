@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -15,7 +16,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.cli.e2e import run_all_command, run_command
+from benchmarks.cli.e2e import run_command
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import (
     MEGATRON_ENGINES,
@@ -35,11 +36,29 @@ from benchmarks.models.piper_qwen3.shape import HUGE
 class CliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
+        # ``run`` always evaluates, and every test here patches the runner,
+        # so no output directory holds a manifest. A test that asserts on
+        # the evaluation patches the name again itself.
+        evaluate = mock.patch("benchmarks.cli.e2e._evaluate")
+        self.addCleanup(evaluate.stop)
+        evaluate.start()
+
+    def _two_scenarios(self) -> dict:
+        """The registry with a second scenario, for the multi-scenario rules.
+
+        One scenario is declared today, so the rules that need two are
+        exercised against a copy of it under another name.
+        """
+        engines = SCENARIOS["engines"]
+        return {
+            "engines": engines,
+            "engines_copy": replace(engines, name="engines_copy"),
+        }
 
     def test_importing_main_alone_registers_every_command(self) -> None:
         """The group is fully populated by importing ``cli.main`` and nothing else.
 
-        ``run``, ``run-all`` and ``evaluate`` are defined in
+        ``run`` and ``evaluate`` are defined in
         ``benchmarks/cli/e2e.py`` and ``kernel-bench`` in
         ``benchmarks/cli/kernel.py``, with plain ``@click.command``;
         ``main.py`` attaches them with ``cli.add_command``. Binding them with
@@ -47,7 +66,7 @@ class CliTests(unittest.TestCase):
         and ``from benchmarks.cli.main import cli`` -- what ``__main__.py``
         and this file do -- would then yield a group holding only whichever
         commands some earlier import had loaded. Nothing else would notice: a
-        CLI missing ``run-all`` starts fine and prints a usage message.
+        CLI missing ``evaluate`` starts fine and prints a usage message.
 
         A subprocess, because the rest of the suite imports the command
         modules for its patch targets; in this process the group would be
@@ -68,20 +87,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
             completed.stdout.split(),
-            ["evaluate", "kernel-bench", "run", "run-all", "scenarios"],
+            ["evaluate", "kernel-bench", "run", "scenarios"],
         )
 
     def test_root_help_and_scenario_listing(self) -> None:
         help_result = self.runner.invoke(cli, ["--help"])
         self.assertEqual(help_result.exit_code, 0)
-        self.assertIn("run-all", help_result.output)
+        self.assertIn("run", help_result.output)
         result = self.runner.invoke(cli, ["scenarios"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("engines", result.output)
         self.assertIn("titan_compiled", result.output)
 
     def test_execution_help_shows_environment_variables(self) -> None:
-        result = self.runner.invoke(cli, ["run-all", "--help"])
+        result = self.runner.invoke(cli, ["run", "--help"])
         self.assertEqual(result.exit_code, 0)
         for envvar in (
             "OUT",
@@ -126,15 +145,7 @@ class CliTests(unittest.TestCase):
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
                     cli,
-                    [
-                        "run-all",
-                        "0",
-                        "--all-scenarios",
-                        "--ac",
-                        "none",
-                        "--model-size",
-                        "huge",
-                    ],
+                    ["run", "0", "--ac", "none", "--model-size", "huge"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         ac_modes = {call.args[0].axes.ac_mode for call in execute.call_args_list}
@@ -253,7 +264,7 @@ class CliTests(unittest.TestCase):
                     "--scenario",
                     "engines",
                     "--arm",
-                    "baseline",
+                    "titan_compiled",
                     "--",
                     "--debug.seed",
                     "42",
@@ -263,12 +274,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
         self.assertEqual(request.gpu, "2")
-        self.assertEqual(request.arm_names, ("baseline",))
+        self.assertEqual(request.arm_names, ("titan_compiled",))
         self.assertEqual(
             request.extra_args,
             ("--debug.seed", "42", "--debug.deterministic"),
         )
-        self.assertIn("Evaluate with:", result.output)
 
     def test_run_collects_repeated_arms_in_command_line_order(self) -> None:
         completed = SimpleNamespace(
@@ -299,7 +309,7 @@ class CliTests(unittest.TestCase):
             execute.call_args.args[0].arm_names, ("titan_eager", "titan_compiled")
         )
 
-    def test_run_all_executes_then_evaluates_same_output(self) -> None:
+    def test_run_executes_then_evaluates_same_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             completed = SimpleNamespace(out_dir=out_dir)
@@ -308,7 +318,7 @@ class CliTests(unittest.TestCase):
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
                 result = self.runner.invoke(
                     cli,
-                    ["run-all", "6", "--scenario", "engines", "--ac", "none"],
+                    ["run", "6", "--scenario", "engines", "--ac", "none"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
@@ -324,15 +334,13 @@ class CliTests(unittest.TestCase):
                 "benchmarks.cli.e2e.execute_run", return_value=completed
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
-                    cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
+                    cli, ["run", "0", "--ac", "none"]
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         requests = [call.args[0] for call in execute.call_args_list]
         self.assertEqual(
             [request.scenario_name for request in requests], list(SCENARIOS)
         )
-        self.assertEqual(len({request.timestamp for request in requests}), 1)
-        self.assertIsNotNone(requests[0].timestamp)
 
     def test_all_scenarios_skips_a_scenario_that_declines_the_ac_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -341,7 +349,7 @@ class CliTests(unittest.TestCase):
                 "benchmarks.cli.e2e.execute_run", return_value=completed
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
-                    cli, ["run-all", "0", "--all-scenarios", "--ac", "sac"]
+                    cli, ["run", "0", "--ac", "sac"]
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         execute.assert_not_called()
@@ -355,7 +363,7 @@ class CliTests(unittest.TestCase):
             with mock.patch(
                 "benchmarks.cli.e2e.execute_run", return_value=completed
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
-                result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
+                result = self.runner.invoke(cli, ["run", "0"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(DEFAULT_AC_MODE, "none")
         self.assertEqual(
@@ -370,7 +378,7 @@ class CliTests(unittest.TestCase):
                 "benchmarks.cli.e2e.execute_run", return_value=completed
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
-                    cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
+                    cli, ["run", "0", "--ac", "none"]
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         names = [call.args[0].scenario_name for call in execute.call_args_list]
@@ -381,57 +389,136 @@ class CliTests(unittest.TestCase):
             "benchmarks.cli.e2e.execute_run", side_effect=RuntimeError("arm failed")
         ) as execute, mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
             result = self.runner.invoke(
-                cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
+                cli, ["run", "0", "--ac", "none"]
             )
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(execute.call_count, 1)
         evaluate.assert_not_called()
 
-    def test_an_omitted_scenario_fails_on_both_execution_commands(self) -> None:
-        """``--scenario`` is required, and an omitted one runs nothing.
+    def test_an_omitted_scenario_runs_every_scenario(self) -> None:
+        """There is no default scenario of one name, and no refusal either.
 
-        One scenario was the default until this change. A default could
-        only be reached by an omission, and would then measure that scenario
-        under whatever label the operator assumed. ``benchmarks/e2e/runner.py``
-        holds the rule in one place, so both commands that take the flag
-        inherit it and the CLI adds no default of its own.
-
-        Click cannot state the rule as ``required=True``: the option block is
-        shared with ``run-all``, whose ``--all-scenarios`` and ``--resume``
-        each supply the scenario themselves. Two tests above cover that half.
-
-        The patch on ``hardware_metadata`` proves the refusal lands before the
-        runner probes the host, so no scenario runs.
+        An omitted ``--scenario`` selects the whole roster, so the run
+        measures every scenario rather than one under whatever label the
+        operator assumed. ``benchmarks/e2e/runner.py`` keeps the refusal
+        for a programmatic request that names none, and this command
+        passes a name for every run but a resume.
         """
-        for command in (["run", "2"], ["run-all", "0"]):
-            with self.subTest(command=command[0]):
-                with mock.patch(
-                    "benchmarks.e2e.runner.hardware_metadata",
-                    side_effect=AssertionError("the host was probed"),
-                ):
-                    result = self.runner.invoke(cli, command)
-                self.assertNotEqual(result.exit_code, 0)
-                self.assertIn("no scenario requested", result.output)
-                self.assertIn("--scenario", result.output)
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute:
+                result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            [call.args[0].scenario_name for call in execute.call_args_list],
+            list(SCENARIOS),
+        )
 
-    def test_all_scenarios_rejects_conflicting_options(self) -> None:
-        for conflicting in (
-            ["--scenario", "engines"],
-            ["--out", "/tmp/output"],
-            ["--results", "/tmp/results.json"],
-        ):
-            with self.subTest(option=conflicting[0]):
+    def test_a_single_directory_option_needs_exactly_one_scenario(self) -> None:
+        """``--out``, ``--resume`` and ``--results`` each name one path.
+
+        Two scenarios sharing one would overwrite each other's manifest and
+        results, so each option needs the selection narrowed to one.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            for conflicting in (
+                ["--out", f"{temporary}/output"],
+                ["--resume", temporary],
+                ["--results", f"{temporary}/results.json"],
+            ):
+                with self.subTest(option=conflicting[0]):
+                    with mock.patch.dict(
+                        "benchmarks.cli.e2e.SCENARIOS",
+                        self._two_scenarios(),
+                        clear=True,
+                    ):
+                        result = self.runner.invoke(
+                            cli, ["run", "0", *conflicting]
+                        )
+                    self.assertNotEqual(result.exit_code, 0)
+                    self.assertIn("names one directory", result.output)
+                    self.assertIn("2 scenarios", result.output)
+
+    def test_one_scenario_accepts_the_single_directory_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute:
                 result = self.runner.invoke(
-                    cli, ["run-all", "0", "--all-scenarios", *conflicting]
+                    cli,
+                    [
+                        "run",
+                        "0",
+                        "--scenario",
+                        "engines",
+                        "--ac",
+                        "none",
+                        "--out",
+                        f"{temporary}/output",
+                    ],
                 )
-                self.assertNotEqual(result.exit_code, 0)
-                self.assertIn("--all-scenarios cannot be combined", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(execute.call_count, 1)
 
-    def test_run_all_does_not_evaluate_a_failed_execution(self) -> None:
+    def test_an_unknown_scenario_is_refused_and_named(self) -> None:
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run",
+            side_effect=AssertionError("a run started"),
+        ):
+            result = self.runner.invoke(
+                cli, ["run", "0", "--scenario", "kernels"]
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("no such scenario: 'kernels'", result.output)
+
+    def test_an_arm_absent_from_a_selected_scenario_is_refused(self) -> None:
+        """``--arm`` applies to every selected scenario.
+
+        A name one of them does not declare would run a smaller matrix
+        than the operator asked for, so it is refused before a GPU is
+        claimed.
+        """
+        with mock.patch(
+            "benchmarks.cli.e2e.execute_run",
+            side_effect=AssertionError("a run started"),
+        ):
+            result = self.runner.invoke(
+                cli, ["run", "0", "--arm", "no_such_arm"]
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("has no arm(s) 'no_such_arm'", result.output)
+
+    def test_several_scenarios_share_one_timestamp(self) -> None:
+        """One stamp groups the whole sweep under one out/<stamp>/ root."""
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch.dict(
+                "benchmarks.cli.e2e.SCENARIOS",
+                self._two_scenarios(),
+                clear=True,
+            ), mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute:
+                result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            [request.scenario_name for request in requests],
+            ["engines", "engines_copy"],
+        )
+        stamps = {request.timestamp for request in requests}
+        self.assertEqual(len(stamps), 1)
+        self.assertIsNotNone(requests[0].timestamp)
+        self.assertIn("===== scenario: engines_copy =====", result.output)
+
+    def test_run_does_not_evaluate_a_failed_execution(self) -> None:
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", side_effect=RuntimeError("arm failed")
         ), mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
-            result = self.runner.invoke(cli, ["run-all", "0"])
+            result = self.runner.invoke(cli, ["run", "0"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("arm failed", result.output)
         evaluate.assert_not_called()
@@ -476,7 +563,7 @@ class CliTests(unittest.TestCase):
         An exported value would make a plain ``run 0 --scenario X`` fail a
         refusal naming a flag the operator never passed.
         """
-        for command in (run_command, run_all_command):
+        for command in (run_command,):
             parameters = {
                 option: parameter
                 for parameter in command.params
@@ -509,9 +596,8 @@ class CliTests(unittest.TestCase):
                 result = self.runner.invoke(
                     cli,
                     [
-                        "run-all",
+                        "run",
                         "0,1",
-                        "--all-scenarios",
                         "--ac",
                         "none",
                         "--pp",
@@ -571,7 +657,7 @@ class CliTests(unittest.TestCase):
         An exported value would make a plain titan run fail a refusal
         naming a flag the operator never passed.
         """
-        for command in (run_command, run_all_command):
+        for command in (run_command,):
             parameters = {
                 option: parameter
                 for parameter in command.params
@@ -604,9 +690,8 @@ class CliTests(unittest.TestCase):
                 result = self.runner.invoke(
                     cli,
                     [
-                        "run-all",
+                        "run",
                         "0",
-                        "--all-scenarios",
                         "--ac",
                         "none",
                         "--megatron-nan-guard",
@@ -631,7 +716,19 @@ class CliTests(unittest.TestCase):
             "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
-                cli, ["run", "2", "--megatron-precision", "lean"]
+                cli,
+                [
+                    "run",
+                    "2",
+                    # Named, so the sweep's own lean-needs-zero-1 skip does
+                    # not apply and the value reaches the request.
+                    "--scenario",
+                    "engines",
+                    "--zero",
+                    "1",
+                    "--megatron-precision",
+                    "lean",
+                ],
             )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(execute.call_args.args[0].axes.megatron_precision, "lean")
@@ -661,7 +758,7 @@ class CliTests(unittest.TestCase):
         ``--zero``. An exported value would fail every replicated
         run on a flag the operator never passed.
         """
-        for command in (run_command, run_all_command):
+        for command in (run_command,):
             parameters = {
                 option: parameter
                 for parameter in command.params
@@ -692,9 +789,8 @@ class CliTests(unittest.TestCase):
                 result = self.runner.invoke(
                     cli,
                     [
-                        "run-all",
+                        "run",
                         "0",
-                        "--all-scenarios",
                         "--ac",
                         "none",
                         "--zero",
@@ -726,15 +822,7 @@ class CliTests(unittest.TestCase):
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
                     cli,
-                    [
-                        "run-all",
-                        "0",
-                        "--all-scenarios",
-                        "--ac",
-                        "none",
-                        "--megatron-precision",
-                        "lean",
-                    ],
+                    ["run", "0", "--ac", "none", "--megatron-precision", "lean"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(execute.call_args_list, [])
@@ -743,7 +831,7 @@ class CliTests(unittest.TestCase):
             result.output,
         )
 
-    def test_run_all_records_evaluation_failure_for_resume(self) -> None:
+    def test_run_records_evaluation_failure_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             (out_dir / "run_state.json").write_text(
@@ -756,7 +844,7 @@ class CliTests(unittest.TestCase):
                 "benchmarks.cli.e2e._evaluate",
                 side_effect=click.ClickException("bad trace"),
             ):
-                result = self.runner.invoke(cli, ["run-all", "0"])
+                result = self.runner.invoke(cli, ["run", "0"])
             state = json.loads((out_dir / "run_state.json").read_text())
 
         self.assertNotEqual(result.exit_code, 0)
