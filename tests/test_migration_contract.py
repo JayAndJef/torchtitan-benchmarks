@@ -1829,7 +1829,8 @@ TEST_CENSUS = {
     # counts against the tensor list, and its split at pp 4, pp 8 and
     # every expert degree eight GPUs hold.
     # -2 with the deletion of the region declarations.
-    "test_model_shape": 55,
+    # -1 with the deletion of supports_block_regions.
+    "test_model_shape": 54,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -2090,7 +2091,7 @@ TEST_CENSUS = {
     # both JSON and a report.
     "test_throughput": 42,
 }
-TEST_CENSUS_TOTAL = 1801
+TEST_CENSUS_TOTAL = 1800
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

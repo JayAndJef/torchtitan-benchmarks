@@ -71,9 +71,7 @@ shape and not a free choice.
     does --
     29% embedding tables, 71% layer stack. At one layer the ratio above is
     1.65, so a 1-layer model at dim 4096 would be 62% embedding table and the
-    benchmark would measure the lm_head and the cross entropy. Four layers
-    also keep ``supports_block_regions`` True, so ``large`` is the only shape
-    above ``1b`` that validation rule 7 still guards.
+    benchmark would measure the lm_head and the cross entropy.
 
 ``huge`` (synthetic)
     One transformer layer at a much larger width, sized to fill an H200 (see
@@ -118,10 +116,8 @@ shape and not a free choice.
 
 Everything that varies per shape is a field or a derived property of
 ``PiperShape``, so registering a new shape is one ``PIPER_SHAPES`` entry and
-never an edit somewhere else. That includes the two knobs that used to be
-hardcoded per size elsewhere: ``supports_block_regions`` (derived from
-``n_layers``) and ``parity_gate`` (a field, read by
-``tools/megatron_parity_check.py``).
+never an edit somewhere else. That includes ``parity_gate``, a field that
+used to be hardcoded per size elsewhere.
 
 Registering one also means writing its numbers into
 ``tests/test_model_shape.py``'s ``PINNED_SHAPES``, which a test requires.
@@ -300,19 +296,6 @@ class PiperShape:
         )
 
     # --- derived geometry -------------------------------------------------
-
-    @property
-    def supports_block_regions(self) -> bool:
-        """False at one layer, where the block graph cannot be identified.
-
-        ``benchmarks/traces/extraction.py`` identifies a compiled block
-        graph by its invocation count, ``n_layers * profiler_active``. At
-        ``n_layers == 1`` that equals ``profiler_active``, which the loss- and
-        embedding-side partitions also produce, so the match is ambiguous and
-        the run declares no regions at all -- exactly as the megatron scenario
-        does, and for the same reason.
-        """
-        return self.n_layers > 1
 
     @property
     def heads_per_group(self) -> int:
@@ -505,7 +488,6 @@ class PiperShape:
             "vocab_size": self.vocab_size,
             "rope_theta": self.rope_theta,
             "max_seq_len": self.max_seq_len,
-            "supports_block_regions": self.supports_block_regions,
             "parity_gate": self.parity_gate,
             "param_count": self.param_count,
             "nparams_dense": self.nparams_dense,
@@ -555,7 +537,6 @@ HUGE = PiperShape(
 # layer count is what buys that. At dim 4096 the 6753/D ratio is 1.65, so a
 # 1-layer model here would be 62% embedding table, and the benchmark would
 # measure the lm_head and the cross entropy rather than a transformer block.
-# Four layers also keep supports_block_regions True.
 #
 # No scenario has run at this shape, in either system.
 LARGE = PiperShape(
@@ -618,12 +599,6 @@ GIANT = PiperShape(
 # 32 query heads over 8 kv heads is 4:1 grouped-query attention, where 1B and
 # every synthetic shape run 2:1, so the fused qkv is 1.5x dim wide here rather
 # than 2x. It is also the first with 8 experts.
-#
-# VALIDATION RULE 7 IS UNTESTED AT 24 LAYERS. The rule identifies a compiled
-# block graph by its invocations per window, n_layers * profiler_active, which
-# is 120 here against the 80 every published regioned run has. Nobody has
-# matched 120 against a real trace. supports_block_regions is True, so a
-# regioned scenario will declare the regions and rule 7 will judge them.
 PIPER_9B = PiperShape(
     name="9b",
     dim=2048,

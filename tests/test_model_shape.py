@@ -105,7 +105,6 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(PIPER_1B.moe_hidden_dim, 3584)
         self.assertEqual(PIPER_1B.qkv_out_features, 2048)
         self.assertEqual(PIPER_1B.heads_per_group, 2)
-        self.assertTrue(PIPER_1B.supports_block_regions)
 
     def test_the_tensor_by_tensor_count_reproduces_a_real_run(self) -> None:
         # The helper earns its authority here, against the same logged
@@ -153,9 +152,6 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(LARGE.qkv_out_features, 2 * LARGE.dim)
         self.assertEqual(LARGE.head_dim, PIPER_1B.head_dim)
         self.assertEqual(LARGE.vocab_size, PIPER_1B.vocab_size)
-        # Four layers, so this is the only shape above normal whose block
-        # graphs stay identifiable and whose runs validation rule 7 guards.
-        self.assertTrue(LARGE.supports_block_regions)
 
     def test_giant_geometry_follows_the_piper_1b_family_rules(self) -> None:
         """Recorded values now, and this is what they must record.
@@ -172,8 +168,6 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(GIANT.qkv_out_features, 2 * GIANT.dim)
         self.assertEqual(GIANT.head_dim, PIPER_1B.head_dim)
         self.assertEqual(GIANT.vocab_size, PIPER_1B.vocab_size)
-        # One layer, so the same region argument the huge shape makes.
-        self.assertFalse(GIANT.supports_block_regions)
         # 6753/dim is 0.41 here, further below 1.0 than huge's 0.55.
         self.assertLess(
             2 * GIANT.vocab_size / (45 * GIANT.dim),
@@ -243,7 +237,6 @@ class ShapeArithmeticTests(unittest.TestCase):
         # The reason the huge shape exists: at one layer the embedding tables
         # must not dominate. embedding+lm_head / one layer = 6753/dim.
         self.assertLess(2 * HUGE.vocab_size / (45 * HUGE.dim), 1.0)
-        self.assertFalse(HUGE.supports_block_regions)
 
     def test_the_geometry_guards_refuse_an_impossible_shape(self) -> None:
         with self.assertRaisesRegex(ValueError, "multiple of head_dim"):
@@ -398,7 +391,6 @@ class ShapeArithmeticTests(unittest.TestCase):
         self.assertEqual(shape.qkv_out_features, 5120)
         # Not piper's 262144: the harness ceiling and the RoPE cache size.
         self.assertEqual(shape.max_seq_len, 4096)
-        self.assertTrue(shape.supports_block_regions)
         self.assertEqual(
             _counts_from_the_tensor_list(shape),
             (1_528_510_464, 29_003_612_160, 3_353_032_704),
@@ -410,18 +402,6 @@ class ShapeArithmeticTests(unittest.TestCase):
             described = shape.describe(seq_len=1024)
             self.assertEqual(json.loads(json.dumps(described)), described)
             self.assertEqual(described["name"], shape.name)
-
-    def test_block_region_support_is_derived_from_the_layer_count(self) -> None:
-        # Not a per-shape flag anyone can set wrong: a 1-layer block graph is
-        # not structurally identifiable, at any dim.
-        self.assertTrue(PIPER_1B.supports_block_regions)
-        self.assertFalse(HUGE.supports_block_regions)
-        self.assertFalse(
-            PiperShape.derived(name="probe", dim=1024, n_layers=1).supports_block_regions
-        )
-        self.assertTrue(
-            PiperShape.derived(name="probe", dim=1024, n_layers=2).supports_block_regions
-        )
 
     def test_parity_gate_is_shape_data(self) -> None:
         # tools/megatron_parity_check.py reads these; the huge gate is wider
@@ -482,7 +462,6 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
         "max_seq_len": 4096,
-        "supports_block_regions": True,
         "parity_gate": 2e-2,
         "param_count": 1_066_241_024,
         "nparams_dense": 361_532_416,
@@ -502,7 +481,6 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
         "max_seq_len": 4096,
-        "supports_block_regions": True,
         "parity_gate": 3e-2,
         "param_count": 4_264_661_504,
         "nparams_dense": 1_446_023_680,
@@ -523,7 +501,6 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
         "max_seq_len": 4096,
-        "supports_block_regions": True,
         "parity_gate": 2e-2,
         "param_count": 9_330_201_600,
         "nparams_dense": 874_091_520,
@@ -543,7 +520,6 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
         "max_seq_len": 4096,
-        "supports_block_regions": False,
         "parity_gate": 5e-2,
         "param_count": 10_528_837_760,
         "nparams_dense": 4_187_000_960,
@@ -563,7 +539,6 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
         "max_seq_len": 4096,
-        "supports_block_regions": False,
         "parity_gate": 6e-2,
         "param_count": 17_058_349_184,
         "nparams_dense": 5_783_994_496,
@@ -586,7 +561,6 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
         "max_seq_len": 4096,
-        "supports_block_regions": True,
         "parity_gate": 2e-2,
         "param_count": 30_532_122_624,
         "nparams_dense": 1_528_510_464,
@@ -607,7 +581,6 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "vocab_size": 151_936,
         "rope_theta": 1_000_000.0,
         "max_seq_len": 4096,
-        "supports_block_regions": True,
         "parity_gate": 3e-2,
         "param_count": 47_685_316_608,
         "nparams_dense": 2_587_111_424,
