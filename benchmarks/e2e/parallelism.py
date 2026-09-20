@@ -148,9 +148,9 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 # ``_get_metrics_rank`` special-cases ``ZBVZeroBubble`` and returns 0; it
 # does not special-case ``DualPipeV``, and this repo special-cases neither.
 # Rule 5 refuses a V-shaped schedule only beside a megatron arm, so a
-# titan-only run may still ask for one. Rule 6 narrows the exposure and does
-# not close it: both V-shaped schedules set ``requires_uncompiled``, so such
-# a run holds eager arms alone.
+# titan-only run may still ask for one. The resolve-time refusal narrows
+# the exposure and does not close it: both V-shaped schedules set
+# ``requires_uncompiled``, so such a run holds eager arms alone.
 #
 # The gap already existed at ``dp 1`` and ``dp 2`` with ``pp 2``. The lift to
 # world size 8 and pp 4 added six ``(dp, pp)`` pairs: (1, 3), (1, 4), (2, 3),
@@ -693,7 +693,6 @@ def validate_parallelism(
     *,
     shape: PiperShape,
     workload: Workload,
-    compiled: bool,
     engines: Iterable[str],
     device_count: int,
 ) -> None:
@@ -701,9 +700,7 @@ def validate_parallelism(
 
     ``engines`` is the set of ``Arm.launcher`` values the run will start, so
     the megatron restriction follows the arm roster rather than a scenario
-    name. ``compiled`` says whether any selected arm asks for whole-block
-    ``torch.compile``; rule 6 reads it. ``device_count`` is how many
-    devices the operator asked for.
+    name. ``device_count`` is how many devices the operator asked for.
 
     Rules 8 and 9 were dead behind rule 14 while it refused every
     ``ep > 1``. Rule 14 now refuses an expert degree only under the
@@ -821,14 +818,10 @@ def validate_parallelism(
             "no cross-engine comparison"
         )
 
-    # 6. PyTorch's zero-bubble and DualPipeV classes call
-    #    _check_torch_compile_compatibility, which raises on a compiled stage
-    #    module. Refusing here beats failing inside the training subprocess.
-    if schedule is not None and schedule.requires_uncompiled and compiled:
-        raise ValueError(
-            f"pipeline schedule {schedule.name!r} raises on a compiled stage "
-            "module, so every arm of the run must run eager"
-        )
+    # 6. DELETED. It refused a schedule that raises on a compiled stage
+    #    module. Compile is an arm property, so a spec alone cannot answer
+    #    it; ``_resolve_run`` (benchmarks.e2e.runner) reads the selected
+    #    arms and names the one that compiles.
 
     # 7. Every stage holds the same number of transformer layers. An uneven
     #    split is a different model per rank, and TorchTitan produces one

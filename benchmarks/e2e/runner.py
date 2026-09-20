@@ -25,6 +25,7 @@ from benchmarks.artifacts.run_state import (
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
+    PP_SCHEDULES,
     ParallelismSpec,
     TRIVIAL_SPEC,
     zero_warnings,
@@ -345,10 +346,30 @@ def _resolve_run(
         parallelism,
         shape=shape,
         workload=workload,
-        compiled=any(arm.compile == "torch" for arm in arms),
         engines={arm.launcher for arm in arms},
         device_count=len(devices),
     )
+    # PyTorch's zero-bubble and DualPipeV classes call
+    # ``_check_torch_compile_compatibility``, which raises on a compiled
+    # stage module. Compile is a property of each arm, so the spec alone
+    # cannot answer this and ``validate_parallelism`` no longer asks it.
+    # The refusal names the arm, because the repair is to drop that arm or
+    # to choose another schedule. Refusing here beats failing inside the
+    # training subprocess.
+    schedule = (
+        PP_SCHEDULES.get(parallelism.pp_schedule)
+        if parallelism.pp_schedule is not None
+        else None
+    )
+    if schedule is not None and schedule.requires_uncompiled:
+        compiled_arms = [arm.name for arm in arms if arm.compile == "torch"]
+        if compiled_arms:
+            raise ValueError(
+                f"pipeline schedule {schedule.name!r} raises on a compiled "
+                f"stage module, and {', '.join(compiled_arms)} asks for "
+                "torch.compile; select the eager arms alone, or choose "
+                "another --pp-schedule"
+            )
     # Both engines start a second rank now, so the blanket refusal that stood
     # here is gone. What refuses an unimplemented mesh is the sixteen rules
     # above plus the engines themselves: ``parallelize_piper1b`` refuses a

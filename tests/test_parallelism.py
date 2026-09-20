@@ -83,7 +83,6 @@ def check(
     *,
     shape: PiperShape = SHAPE_1B,
     batch: int = 4,
-    compiled: bool = True,
     engines: tuple[str, ...] = ("torchtitan",),
     device_count: int | None = None,
 ) -> None:
@@ -96,7 +95,6 @@ def check(
         spec,
         shape=shape,
         workload=workload(batch),
-        compiled=compiled,
         engines=engines,
         device_count=spec.world_size if device_count is None else device_count,
     )
@@ -1009,7 +1007,6 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
         check(
             ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
             batch=8,
-            compiled=False,
             engines=("torchtitan",),
         )
 
@@ -1039,7 +1036,6 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
                     check(
                         ParallelismSpec(pp=2, pp_schedule=name),
                         batch=8,
-                        compiled=False,
                         engines=("torchtitan", "megatron_stock"),
                     )
 
@@ -1101,7 +1097,6 @@ class MegatronLauncherSetTest(unittest.TestCase):
                     check(
                         ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
                         batch=8,
-                        compiled=False,
                         engines=("torchtitan", launcher),
                     )
 
@@ -1114,37 +1109,14 @@ class MegatronLauncherSetTest(unittest.TestCase):
         check(
             ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
             batch=8,
-            compiled=False,
             engines=("torchtitan", "some-other-engine"),
         )
 
 
-class Rule06UncompiledScheduleTest(unittest.TestCase):
-    def test_an_eager_run_carries_a_zero_bubble_schedule(self):
-        check(
-            ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
-            batch=8,
-            compiled=False,
-        )
-
-    def test_a_compiled_arm_is_refused_for_a_zero_bubble_schedule(self):
-        with self.assertRaisesRegex(ValueError, "must run eager"):
-            check(
-                ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
-                batch=8,
-                compiled=True,
-            )
-
-    def test_the_two_targeted_schedules_run_compiled(self):
-        """1F1B and Interleaved1F1B never call
-        ``_check_torch_compile_compatibility``, so the milestone is a fully
-        compiled run."""
-        check(PP2, compiled=True)
-        check(
-            ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
-            batch=8,
-            compiled=True,
-        )
+# Rule 6 is DELETED from this module. It refused a schedule that raises on
+# a compiled stage module, and compile is a property of each arm rather
+# than of a spec. ``_resolve_run`` holds the refusal now, and
+# ``tests/test_runner.py`` tests it there.
 
 
 class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
@@ -1618,11 +1590,6 @@ class TheEightGpuCellTest(unittest.TestCase):
                 ):
                     check(DP2_PP4, batch=8, device_count=device_count)
 
-    def test_the_cell_keeps_both_compile_treatments(self):
-        for compiled in (True, False):
-            with self.subTest(compiled=compiled):
-                check(DP2_PP4, batch=8, device_count=8, compiled=compiled)
-
     def test_the_cell_records_eight_ranks_and_eight_microbatches(self):
         self.assertEqual(DP2_PP4.world_size, 8)
         self.assertEqual(
@@ -1746,8 +1713,8 @@ class TheSingleGpuRunStaysLegalTest(unittest.TestCase):
     """Nothing this repo can run today may become unrunnable.
 
     The trivial spec is what every published number was measured under, so
-    it has to survive every other axis: each registered shape, each compile
-    treatment, each engine roster, and any batch size.
+    it has to survive every other axis: each registered shape, each engine
+    roster, and any batch size.
     """
 
     def test_every_registered_shape_passes_at_the_trivial_spec(self):
@@ -1755,11 +1722,10 @@ class TheSingleGpuRunStaysLegalTest(unittest.TestCase):
             with self.subTest(model_size=name):
                 check(TRIVIAL_SPEC, shape=PIPER_SHAPES[name])
 
-    def test_every_compile_treatment_and_engine_roster_passes(self):
-        for compiled in (True, False):
-            for engines in ((), ("torchtitan",), ("torchtitan", "megatron_stock")):
-                with self.subTest(compiled=compiled, engines=engines):
-                    check(TRIVIAL_SPEC, compiled=compiled, engines=engines)
+    def test_every_engine_roster_passes(self):
+        for engines in ((), ("torchtitan",), ("torchtitan", "megatron_stock")):
+            with self.subTest(engines=engines):
+                check(TRIVIAL_SPEC, engines=engines)
 
     def test_any_batch_size_passes(self):
         for batch in (1, 2, 3, 4, 8, 48):
@@ -1781,7 +1747,6 @@ class ValidatorInterfaceTest(unittest.TestCase):
                 PP2,
                 shape=SHAPE_1B,
                 workload=workload(4),
-                compiled=True,
                 engines=("torchtitan", "megatron_stock"),
                 device_count=2,
             )

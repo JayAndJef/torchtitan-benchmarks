@@ -129,6 +129,62 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(PIPER_1B_MEGATRON_WORKLOAD.steps, 40)
 
 
+class UncompiledScheduleRefusalTests(unittest.TestCase):
+    """The refusal parallelism rule 6 used to hold.
+
+    PyTorch's zero-bubble and DualPipeV classes call
+    ``_check_torch_compile_compatibility``, which raises on a compiled
+    stage module. Compile is a property of each arm, so a spec alone
+    cannot answer this: ``_resolve_run`` reads the selected arms and names
+    the one that compiles.
+    """
+
+    ZBV = ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble")
+
+    def setUp(self) -> None:
+        self.metadata = {
+            "requested_gpu": "0",
+            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+            "torch_version": "test",
+            "torchtitan_git_rev": "titan-rev",
+            "benchmarks_git_rev": "bench-rev",
+            "megatron_git_rev": "megatron-rev",
+        }
+
+    def _resolve(self, names: tuple[str, ...]):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ):
+            return _resolve_run(
+                RunRequest(
+                    gpu="0,1",
+                    scenario_name="engines",
+                    arm_names=names,
+                    out_dir=Path(temporary) / "run",
+                    ac_mode="none",
+                    batch=8,
+                    parallelism=self.ZBV,
+                ),
+                {"PATH": os.environ["PATH"]},
+            )
+
+    def test_a_compiled_arm_is_refused_and_named(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, r"ZBVZeroBubble.*titan_compiled"
+        ):
+            self._resolve(("titan_compiled", "titan_eager"))
+
+    def test_the_eager_arm_alone_resolves(self) -> None:
+        """Rule 5 refuses the stock megatron arm at this schedule, so the
+        eager titan arm is the whole legal selection here."""
+        resolved = self._resolve(("titan_eager",))
+        self.assertEqual([arm.name for arm in resolved[2]], ["titan_eager"])
+
+
 class SelectedArmTests(unittest.TestCase):
     """Repeated ``--arm`` is an ordered subset, never a second scenario."""
 
