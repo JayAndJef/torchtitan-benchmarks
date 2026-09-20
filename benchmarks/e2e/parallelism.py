@@ -19,8 +19,10 @@ and the TorchTitan training subprocess never needs it either, because
 command line.
 
 ``ParallelismSpec`` and ``PipelineSchedule`` are declared in
-``benchmarks.e2e.schema``. This module holds the schedule table, the
-derived values and the rules.
+``benchmarks.e2e.schema``, with ``Workload``. This module holds the
+schedule table, the derived values and the rules, and it imports no
+scenario declaration: ``benchmarks/e2e/registry.py`` reads this module and
+not the other way round.
 
 Terms, used here with these meanings only:
 
@@ -81,8 +83,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from benchmarks.e2e.registry import Workload
-from benchmarks.e2e.schema import ParallelismSpec, PipelineSchedule
+from benchmarks.e2e.schema import ParallelismSpec, PipelineSchedule, Workload
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 

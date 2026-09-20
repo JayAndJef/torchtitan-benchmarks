@@ -36,8 +36,9 @@ stdlib-only module at runtime and need no ``TYPE_CHECKING`` block. The
 ``e2e/runner.py``, which imports this module, and only the
 ``TYPE_CHECKING`` guard kept that pair out of a module-level cycle.
 
-One name still crosses to ``benchmarks.e2e.registry``: ``Workload``, which
-``_resume_workload`` reconstructs and revalidates from recorded JSON.
+No name crosses to ``benchmarks.e2e.registry`` any more. ``Workload``,
+which ``_resume_workload`` reconstructs and revalidates from recorded JSON,
+comes from ``schema`` as well.
 
 At *package* granularity ``artifacts/`` and ``e2e/`` remain mutually
 dependent, because ``e2e/runner.py`` and ``e2e/results.py`` import from this
@@ -60,12 +61,12 @@ from benchmarks.e2e.parallelism import (
     describe as describe_parallelism,
     execution_model,
 )
-from benchmarks.e2e.registry import Workload
 from benchmarks.e2e.schema import (
     Arm,
     ParallelismSpec,
     RunRequest,
     Scenario,
+    Workload,
 )
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
