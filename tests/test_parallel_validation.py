@@ -827,33 +827,6 @@ class ArmRuleTwelveTests(unittest.TestCase):
                         parallelism=DP2,
                     )
 
-    def test_a_profile_that_can_prove_nothing_refuses_the_run(self) -> None:
-        """An empty marker tuple is a refusal, never a pass.
-
-        No profile returns one today. The day one does -- a data-parallel
-        titan run has no schedule line, for instance -- the run must fail
-        rather than publish a mesh nothing checked.
-        """
-        silent = replace(
-            TORCHTITAN_PROFILE,
-            parallelism_markers=lambda spec, workload, precision: (),
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = _ArmFixture(Path(temporary))
-            fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
-            with mock.patch.dict(
-                "benchmarks.e2e.validation._PROFILE_BY_ENGINE",
-                {"torchtitan": silent},
-            ):
-                with self.assertRaisesRegex(RuntimeError, "logs nothing"):
-                    validate_arm(
-                        ENGINES.arm("titan_compiled"),
-                        fixture.root,
-                        fixture.log,
-                        ENGINES.workload,
-                        parallelism=PP2,
-                    )
-
 
 class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     """The ``--megatron-p2p-sync`` half of arm rule 12.
@@ -876,16 +849,15 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
                             (),
                         )
 
-    def test_the_titan_profile_asks_for_no_line_and_still_checks_the_value(
-        self,
-    ) -> None:
+    def test_the_titan_profile_asks_for_no_line(self) -> None:
+        """The option reaches the megatron command alone.
+
+        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
+        tuple, so an unknown value never reaches a profile.
+        """
         titan = TORCHTITAN_PROFILE
         for value in ("on", "off"):
             self.assertEqual(titan.p2p_markers(PP2, value), ())
-        for name in ("megatron_stock", "torchtitan"):
-            with self.subTest(profile=name):
-                with self.assertRaisesRegex(ValueError, "unknown megatron p2p"):
-                    profile_for_engine(name).p2p_markers(PP2, "sometimes")
 
 
 def _stock_log(
@@ -943,16 +915,15 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(profile.nan_guard_markers(value), (line,))
 
-    def test_the_titan_profile_asks_for_no_line_and_still_checks_the_value(
-        self,
-    ) -> None:
+    def test_the_titan_profile_asks_for_no_line(self) -> None:
+        """The option reaches the stock megatron command alone.
+
+        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
+        tuple, so an unknown value never reaches a profile.
+        """
         titan = TORCHTITAN_PROFILE
         for value in ("on", "off"):
             self.assertEqual(titan.nan_guard_markers(value), ())
-        for name in ("megatron_stock", "torchtitan"):
-            with self.subTest(profile=name):
-                with self.assertRaisesRegex(ValueError, "unknown megatron nan"):
-                    profile_for_engine(name).nan_guard_markers("sometimes")
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,
@@ -1071,18 +1042,15 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
             ),
         )
 
-    def test_the_titan_profile_asks_for_no_field_and_checks_the_value(
-        self,
-    ) -> None:
+    def test_the_titan_profile_asks_for_no_field(self) -> None:
+        """The option reaches the stock megatron command alone.
+
+        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
+        tuple, so an unknown value never reaches a profile.
+        """
         titan = TORCHTITAN_PROFILE
         for value in ("stock", "lean"):
             self.assertEqual(titan.precision_markers(value), ())
-        for name in ("megatron_stock", "torchtitan"):
-            with self.subTest(profile=name):
-                with self.assertRaisesRegex(
-                    ValueError, "unknown megatron precision"
-                ):
-                    profile_for_engine(name).precision_markers("bf16")
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,

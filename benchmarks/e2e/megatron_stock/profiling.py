@@ -24,8 +24,8 @@ guards fire.
 
 ``record_shapes`` stays whatever Megatron asked for, which is
 ``--pytorch-profiler-collect-shapes`` and therefore False. No metric in
-``benchmarks/traces/`` reads a shape; ``tools/analyze.py`` does, so add that
-flag before you run that diagnostic on this arm.
+``benchmarks/traces/`` reads a shape. A diagnostic that needs one must ask
+Megatron for that flag itself.
 """
 
 from __future__ import annotations

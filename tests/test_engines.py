@@ -13,6 +13,10 @@ read the records back:
 Each of those is pinned equal to the records here. Without these tests a
 new engine could take one module's edit and not the other's, and the run
 would be validated or refused under the wrong engine's terms.
+
+This module also holds the two arm-to-profile agreements ``validate_arm``
+used to refuse at run time. Both are pure functions of the registry, so a
+test settles them once instead of every run asking again.
 """
 
 import sys
@@ -25,11 +29,21 @@ from benchmarks.e2e.engines import ENGINES, command_for_arm, engine_for_arm
 from benchmarks.e2e.launch import megatron_stock_command, titan_command
 from benchmarks.e2e.parallelism import MEGATRON_ENGINES
 from benchmarks.e2e.registry import SCENARIOS
-from benchmarks.e2e.schema import Arm
+from benchmarks.e2e.schema import Arm, ParallelismSpec
 from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
     TORCHTITAN_PROFILE,
     profile_for_engine,
+)
+
+
+# The meshes arm rule 12 is asked about: every shape above one rank the
+# harness can express, plus one that carries a schedule.
+_MESHES = (
+    ParallelismSpec(dp=2),
+    ParallelismSpec(pp=2, pp_schedule="1F1B"),
+    ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
+    ParallelismSpec(dp=2, ep=2, zero=1),
 )
 
 
@@ -91,6 +105,52 @@ class ArmDeclarationTests(unittest.TestCase):
             "an arm names an engine that holds no record:\n  "
             + "\n  ".join(offenders),
         )
+
+    def test_every_compiled_arm_names_an_engine_that_can_prove_it(self):
+        """Rule 8 reads a log line, so the engine must print one.
+
+        ``validate_arm`` used to refuse this pairing on every run. The
+        pairing is a property of the registry alone, so it is settled
+        here: an arm that declares ``compile="torch"`` names an engine
+        whose profile carries a ``compile_marker``.
+        """
+        offenders = []
+        for scenario in SCENARIOS.values():
+            for arm in scenario.arms:
+                profile = ENGINES[arm.engine].validation
+                if arm.compile == "torch" and profile.compile_marker is None:
+                    offenders.append(
+                        f"{scenario.name}/{arm.name}: engine {arm.engine}"
+                    )
+        self.assertEqual(
+            offenders,
+            [],
+            "an arm asks for torch.compile and its engine proves nothing:\n  "
+            + "\n  ".join(offenders),
+        )
+
+    def test_every_engine_proves_every_mesh_above_one_rank(self):
+        """Arm rule 12 needs a marker, so every profile must name one.
+
+        ``validate_arm`` used to refuse an empty tuple on every run. Which
+        lines a profile names is a property of the registry, so it is
+        settled here instead. The p2p half is deliberately left out: an
+        empty tuple there is honest, because a TorchTitan arm never
+        receives that value.
+        """
+        workload = SCENARIOS["engines"].workload
+        for name, engine in ENGINES.items():
+            for spec in _MESHES:
+                for precision in ("stock", "lean"):
+                    with self.subTest(
+                        engine=name, spec=spec, precision=precision
+                    ):
+                        markers = engine.validation.parallelism_markers(
+                            spec, workload, precision
+                        )
+                        self.assertTrue(markers)
+                        for marker in markers:
+                            self.assertTrue(marker.strip())
 
     def test_the_dispatcher_calls_the_arm_s_own_builder(self):
         """One call goes through the record, and nothing branches."""

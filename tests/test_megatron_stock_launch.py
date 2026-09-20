@@ -56,7 +56,6 @@ from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
     TORCHTITAN_PROFILE,
     _megatron_stock_parallelism_markers,
-    validate_arm,
 )
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import shape_by_name
@@ -793,27 +792,16 @@ class StockValidationProfileTests(unittest.TestCase):
     def test_the_profile_does_not_check_the_ac_line(self) -> None:
         self.assertFalse(self.profile.check_ac_line)
 
-    def test_the_profile_cannot_prove_a_compiled_arm(self) -> None:
-        """``compile_marker`` is None, so a stock arm asking for
-        torch.compile is refused.
+    def test_the_profile_proves_no_compile_treatment(self) -> None:
+        """``compile_marker`` is None, so rule 8 asks this engine nothing.
 
         megatron-core compiles no whole layer, so no log line proves the
-        treatment either way. The absence of a marker must refuse such an
-        arm rather than skip the check.
+        treatment either way. No arm of this engine may therefore declare
+        ``compile="torch"``, and ``tests/test_engines.py`` pins that over
+        every registered arm.
         """
         self.assertIsNone(self.profile.compile_marker)
-        with tempfile.TemporaryDirectory() as temporary:
-            log = Path(temporary) / "baseline.log"
-            log.write_text("Training completed\n")
-            with self.assertRaisesRegex(RuntimeError, "cannot prove"):
-                validate_arm(
-                    replace(_stock_arm(), compile="torch"),
-                    Path(temporary),
-                    log,
-                    self.workload,
-                    ac_mode="none",
-                    model_size="1b",
-                )
+        self.assertEqual(_stock_arm().compile, "none")
 
     # -- arm rule 12 ----------------------------------------------------
 
@@ -935,10 +923,11 @@ class StockValidationProfileTests(unittest.TestCase):
         self.assertNotEqual(stock, lean)
 
     def test_the_markers_are_non_empty_above_world_size_one(self) -> None:
-        """An empty tuple would make ``validate_arm`` refuse the run.
+        """Each marker names the mesh, and the first one names the degrees.
 
-        Every mesh this scenario can run must produce at least the
-        parallelism line, or the arm cannot be published at all.
+        ``tests/test_engines.py`` pins the non-empty part over every
+        engine. This test adds what that one cannot: the content of this
+        driver's own line at four meshes.
         """
         for spec in (
             ParallelismSpec(pp=2, pp_schedule="1F1B"),
