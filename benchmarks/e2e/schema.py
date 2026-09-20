@@ -71,6 +71,15 @@ class Arm:
     ``engine`` names the record that runs the arm. One string carries both
     the command builder and the validation profile, so an arm cannot take
     one engine's argv and another engine's log rules.
+
+    Attributes:
+        overrides_per_block: The ``[Override]`` log lines expected per
+            transformer block. ``validate_arm`` multiplies this by the
+            shape's layer count, so one arm stays correct at every
+            ``--model-size``.
+        engine: The name of a record in ``benchmarks.e2e.engines``'
+            ``ENGINES``. A plain string keeps ``asdict(arm)``
+            JSON-serializable for the manifest.
     """
 
     name: str
@@ -78,16 +87,9 @@ class Arm:
     compile: Literal["torch", "none"]
     config: str | None = None
     override_imports: tuple[str, ...] = ()
-    # [Override] log lines expected per transformer block. validate_arm
-    # multiplies by the shape's layer count, so an arm stays correct at any
-    # --model-size (16 lines at normal, 1 at huge).
     overrides_per_block: int = 0
     trace_kernel_markers: tuple[str, ...] = ()
     requires_gcc_toolset: bool = False
-    # Which engine runs this arm. It names a record in
-    # benchmarks.e2e.engines' ENGINES, which owns both the command builder
-    # and the validation profile. A plain string, so asdict(arm) stays
-    # JSON-serializable for the manifest.
     engine: str = "torchtitan"
 
 
@@ -486,22 +488,26 @@ class RunRequest:
     arms differently and the gate would not see it. Omitting the flags on a
     resume therefore asks for the trivial spec, which matches a single-GPU
     directory and is refused against any other.
+
+    Attributes:
+        gpu: The ``<gpu>`` positional, kept exactly as the operator typed
+            it. It names a device set, which ``parse_devices`` splits, but
+            the string itself is never rewritten: manifests record it as
+            ``hardware_metadata.requested_gpu`` and ``CUDA_VISIBLE_DEVICES``
+            takes the same value.
+        scenario_name: The requested scenario. There is no default.
+            ``None`` means "not requested", which only a resume may leave
+            unanswered, because the recorded manifest names the scenario
+            there. ``_resolve_run`` refuses ``None`` in every other case.
+        arm_names: An ordered subset of the scenario arms, matching the
+            repeated ``run --arm NAME`` options exactly. Empty means every
+            arm.
+        axes: The eight global run axes, each one answered or left
+            unrequested.
     """
 
-    # The ``<gpu>`` positional, kept exactly as the operator typed it. It
-    # names a device *set* -- ``parse_devices`` splits it -- but the string
-    # itself is never rewritten: roughly one hundred manifests under ``out/``
-    # record it as ``hardware_metadata.requested_gpu``, and
-    # ``CUDA_VISIBLE_DEVICES`` is set from the same value.
     gpu: str
-    # No default scenario. ``None`` means "not requested", which only a resume
-    # may leave unanswered: the recorded manifest names the scenario there. A
-    # default could only be reached by an omission, and would then measure one
-    # scenario under whatever label the operator assumed, which is a wrong
-    # result rather than a missing one. ``_resolve_run`` refuses it otherwise.
     scenario_name: str | None = None
-    # Empty means every scenario arm. A non-empty tuple is an ordered subset,
-    # matching repeated ``run --arm NAME`` options exactly.
     arm_names: tuple[str, ...] = ()
     hardware: str = "auto"
     out_dir: Path | None = None
@@ -513,7 +519,6 @@ class RunRequest:
     timestamp: str | None = None
     cache_root: Path | None = None
     compiler_env: Path | None = None
-    # The eight global run axes, each one answered or left unrequested.
     axes: RequestedAxes = RequestedAxes()
 
 
