@@ -189,7 +189,7 @@ class RequestTests(unittest.TestCase):
         return seen[0]
 
     def test_an_untouched_command_line_requests_no_parallelism(self) -> None:
-        request = self._request("0", "--scenario", "piper1b_rope")
+        request = self._request("0", "--scenario", "piper1b_megatron")
         self.assertIsNone(request.parallelism)
 
     def test_the_gpu_string_is_kept_exactly_as_typed(self) -> None:
@@ -197,7 +197,7 @@ class RequestTests(unittest.TestCase):
         # CUDA_VISIBLE_DEVICES is set from the same value.
         for value in ("0", "0,1", "3,2"):
             with self.subTest(value=value):
-                request = self._request(value, "--scenario", "piper1b_rope")
+                request = self._request(value, "--scenario", "piper1b_megatron")
                 self.assertEqual(request.gpu, value)
                 self.assertIsInstance(request.gpu, str)
 
@@ -205,7 +205,7 @@ class RequestTests(unittest.TestCase):
         request = self._request(
             "0,1",
             "--scenario",
-            "piper1b_rope",
+            "piper1b_megatron",
             "--dp",
             "2",
             "--dense-sharding",
@@ -240,7 +240,7 @@ class RequestTests(unittest.TestCase):
                 "run",
                 "0,1",
                 "--scenario",
-                "piper1b_rope",
+                "piper1b_megatron",
                 "--dp",
                 "2",
                 "--dense-sharding",
@@ -254,7 +254,7 @@ class RequestTests(unittest.TestCase):
         request = self._request(
             "0,1",
             "--scenario",
-            "piper1b_rope",
+            "piper1b_megatron",
             "--pp",
             "2",
             "--pp-schedule",
@@ -268,12 +268,12 @@ class RequestTests(unittest.TestCase):
         )
 
     def test_an_option_left_out_takes_the_spec_default(self) -> None:
-        request = self._request("0,1", "--scenario", "piper1b_rope", "--dp", "2")
+        request = self._request("0,1", "--scenario", "piper1b_megatron", "--dp", "2")
         self.assertEqual(request.parallelism, ParallelismSpec(dp=2))
 
     def test_a_degree_below_one_is_refused_by_the_option(self) -> None:
         result = CliRunner().invoke(
-            cli, ["run", "0", "--scenario", "piper1b_rope", "--pp", "0"]
+            cli, ["run", "0", "--scenario", "piper1b_megatron", "--pp", "0"]
         )
         self.assertNotEqual(result.exit_code, 0)
 
@@ -298,7 +298,16 @@ class RequestTests(unittest.TestCase):
             "benchmarks.cli.e2e.record_evaluation_status"
         ):
             result = CliRunner().invoke(
-                cli, ["run-all", "0,1", "--all-scenarios", "--dp", "2"]
+                cli,
+                [
+                    "run-all",
+                    "0,1",
+                    "--all-scenarios",
+                    "--ac",
+                    "none",
+                    "--dp",
+                    "2",
+                ],
             )
         self.assertEqual(result.exit_code, 0, result.output)
         # Several scenarios, and every one of them carries the same spec.
@@ -486,7 +495,7 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
         megatron_nan_guard: str = "on",
         megatron_precision: str = "stock",
     ) -> dict:
-        scenario = scenario_by_name("piper1b_rope")
+        scenario = scenario_by_name("piper1b_megatron")
         return manifest_data(
             scenario,
             (scenario.arm("baseline"),),
@@ -550,7 +559,7 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
 
     def test_an_omitted_parallelism_is_a_type_error(self) -> None:
         """A defaulted value would record dp 1 x pp 1 for any mesh."""
-        scenario = scenario_by_name("piper1b_rope")
+        scenario = scenario_by_name("piper1b_megatron")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
@@ -593,7 +602,7 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
     def test_an_omitted_p2p_sync_is_a_type_error(self) -> None:
         """A writer that defaulted it would record ``on`` for a run that
         turned the sync off, and the two are a comparability boundary."""
-        scenario = scenario_by_name("piper1b_rope")
+        scenario = scenario_by_name("piper1b_megatron")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
@@ -659,7 +668,7 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
     def test_an_omitted_nan_guard_is_a_type_error(self) -> None:
         """A writer that defaulted it would record ``on`` for a run that
         turned the guard off, and the two are a comparability boundary."""
-        scenario = scenario_by_name("piper1b_rope")
+        scenario = scenario_by_name("piper1b_megatron")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
@@ -678,7 +687,7 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
     def test_an_omitted_precision_is_a_type_error(self) -> None:
         """A writer that defaulted it would record ``stock`` for a run that
         held 10 bytes for each parameter rather than 18."""
-        scenario = scenario_by_name("piper1b_rope")
+        scenario = scenario_by_name("piper1b_megatron")
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
@@ -706,7 +715,7 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
     """
 
     def _manifest(self, parallelism: ParallelismSpec) -> dict:
-        scenario = scenario_by_name("piper1b_rope")
+        scenario = scenario_by_name("piper1b_megatron")
         return manifest_data(
             scenario,
             (scenario.arm("baseline"),),
@@ -759,7 +768,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper1b_rope")
+        self.scenario = scenario_by_name("piper1b_megatron")
         self.arms = (self.scenario.arm("baseline"),)
 
     def test_a_manifest_whose_only_difference_is_the_derived_field_resumes(
@@ -838,7 +847,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
 
 class ResumeParallelismTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper1b_rope")
+        self.scenario = scenario_by_name("piper1b_megatron")
         self.arms = (self.scenario.arm("baseline"),)
 
     def _manifest(self, parallelism: ParallelismSpec) -> dict:
@@ -1220,7 +1229,8 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
 class ResolveRunTests(unittest.TestCase):
     """``_resolve_run`` resolves the mesh, and derives the regions from it."""
 
-    def _resolve(self, scenario_name: str = "piper1b_rope", **kwargs):
+    def _resolve(self, scenario_name: str = "piper1b_megatron", **kwargs):
+        kwargs.setdefault("ac_mode", "none")
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
             return_value=("test-gpu", dict(_METADATA)),
@@ -1299,17 +1309,6 @@ class ResolveRunTests(unittest.TestCase):
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
         self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[10], spec)
 
-    def test_a_single_gpu_run_still_declares_its_block_regions(self) -> None:
-        scenario = self._resolve(gpu="0")[1]
-        self.assertEqual(
-            sorted(region.name for region in scenario.regions),
-            ["backward_block", "forward_block"],
-        )
-        self.assertEqual(
-            [region.invocations_per_window for region in scenario.regions],
-            [80, 80],
-        )
-
     def test_a_pipelined_run_declares_no_regions(self) -> None:
         """No rank holds every block, so the declared count is unreachable.
 
@@ -1357,7 +1356,7 @@ class ResolveRunTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 _resolve_run(
-                    RunRequest(gpu="0,1", scenario_name="piper1b_rope"),
+                    RunRequest(gpu="0,1", scenario_name="piper1b_megatron"),
                     {"PATH": os.environ["PATH"]},
                 )
 
@@ -1484,8 +1483,8 @@ class RunBannerTests(unittest.TestCase):
         ):
             request = RunRequest(
                 gpu=gpu,
-                scenario_name="piper1b_rope",
-                arm_names=("baseline",),
+                scenario_name="piper1b_megatron",
+                arm_names=("titan_stock",),
                 out_dir=Path(temporary) / "run",
                 ac_mode="none",
                 parallelism=spec,

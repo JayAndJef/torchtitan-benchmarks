@@ -921,12 +921,12 @@ class ModelSizeAliasTests(unittest.TestCase):
         self.assertEqual(canonical_size_name("enormous"), "enormous")
 
     def test_a_fresh_manifest_records_the_canonical_name(self) -> None:
-        scenario = scenario_by_name("piper1b_rope")
-        selected = (scenario.arm("baseline"),)
+        scenario = scenario_by_name("piper1b_megatron")
+        selected = (scenario.arm("titan_stock"),)
         recorded = manifest_data(
             scenario,
             selected,
-            {"baseline": ["cmd"]},
+            {"titan_stock": ["cmd"]},
             "test-gpu",
             _METADATA,
             (),
@@ -950,8 +950,8 @@ class ModelSizeAliasTests(unittest.TestCase):
         requested one. Both sides must normalise, or a run recorded before the
         rename would be refused for naming its own shape.
         """
-        scenario = scenario_by_name("piper1b_rope")
-        selected = (scenario.arm("baseline"),)
+        scenario = scenario_by_name("piper1b_megatron")
+        selected = (scenario.arm("titan_stock"),)
         for recorded_name, requested in (
             ("normal", "1b"),
             ("1b", "normal"),
@@ -962,7 +962,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                 manifest = manifest_data(
                     scenario,
                     selected,
-                    {"baseline": ["cmd"]},
+                    {"titan_stock": ["cmd"]},
                     "test-gpu",
                     _METADATA,
                     (),
@@ -999,7 +999,7 @@ class ModelSizeAliasTests(unittest.TestCase):
         manifest = manifest_data(
             scenario,
             selected,
-            {"baseline": ["cmd"]},
+            {"titan_stock": ["cmd"]},
             "test-gpu",
             _METADATA,
             (),
@@ -1211,21 +1211,24 @@ class CommandTests(unittest.TestCase):
         )
 
     def test_the_default_size_is_delivered_explicitly_too(self) -> None:
-        scenario = scenario_by_name("piper1b_rope")
+        scenario = scenario_by_name("piper1b_megatron")
         command = command_for_arm(
-            scenario.workload, scenario.arm("baseline"), Path("/tmp/arm"), ()
+            scenario.workload, scenario.arm("titan_stock"), Path("/tmp/arm"), ()
         )
         self.assertEqual(
-            command[command.index("--config") + 1], "qwen3_piper_1b"
+            command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
         )
         self.assertEqual(
             command[command.index("--config-arg") + 1], "size=1b"
         )
 
-    def test_non_replay_scenarios_do_not_get_the_replay_flag(self) -> None:
-        scenario = scenario_by_name("piper1b_rope")
+    def test_a_non_replay_workload_does_not_get_the_replay_flag(self) -> None:
+        from dataclasses import replace as replace_field
+
+        scenario = scenario_by_name("piper1b_megatron")
+        workload = replace_field(scenario.workload, replay_dataloader=False)
         command = command_for_arm(
-            scenario.workload, scenario.arm("baseline"), Path("/tmp/arm"), ()
+            workload, scenario.arm("titan_stock"), Path("/tmp/arm"), ()
         )
         self.assertNotIn("--dataloader.replay-steps", command)
 
@@ -1303,8 +1306,8 @@ class ValidationRuleElevenTests(unittest.TestCase):
         return root / "baseline.log"
 
     def test_a_log_without_the_size_marker_fails(self) -> None:
-        scenario = scenario_by_name("piper1b_rope")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("piper1b_megatron")
+        arm = scenario.arm("titan_stock")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._fixture(root)
@@ -1327,8 +1330,8 @@ class ValidationRuleElevenTests(unittest.TestCase):
             validate_arm(arm, root, log, scenario.workload, model_size="huge")
 
     def test_override_count_scales_with_the_layer_count(self) -> None:
-        scenario = scenario_by_name("piper1b_swiglu")
-        arm = scenario.arm("piper_optimized_triton")
+        scenario = scenario_by_name("piper1b_megatron")
+        arm = scenario.arm("titan_swiglu")
         applied = (
             f"[Override] {arm.override_imports[0]}: "
             "model_spec.model.layers.0.moe ...\n"
@@ -1414,8 +1417,8 @@ class ManifestAndResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary) / "run"
             self._run(
-                scenario_name="piper1b_attention",
-                arm_names=("baseline",),
+                scenario_name="piper1b_megatron",
+                arm_names=("titan_stock",),
                 out_dir=out_dir,
                 ac_mode="none",
                 model_size="huge",
@@ -1428,45 +1431,18 @@ class ManifestAndResumeTests(unittest.TestCase):
         # Rule 7's structural matcher cannot identify a 1-layer block graph,
         # so the run says so instead of claiming a region it cannot verify.
         self.assertEqual(manifest["regions"], [])
-        command = manifest["commands"]["baseline"]
-        self.assertEqual(command[command.index("--config") + 1], "qwen3_piper_1b")
-        self.assertEqual(command[command.index("--config-arg") + 1], "size=huge")
-
-    def test_normal_run_still_declares_the_eighty_invocation_regions(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary) / "run"
-            with mock.patch(
-                "benchmarks.e2e.runner.hardware_metadata",
-                return_value=("test-gpu", _METADATA),
-            ), mock.patch(
-                "benchmarks.e2e.runner.resolve_cpu_pinning",
-                return_value=CpuPinning((), "none: test"),
-            ), mock.patch("benchmarks.e2e.runner.validate_arm"):
-                execute_run(
-                    RunRequest(
-                        gpu="0",
-                        scenario_name="piper1b_rope",
-                        arm_names=("baseline",),
-                        out_dir=out_dir,
-                    ),
-                    process_runner=_fake_process(_size_line(PIPER_1B)),
-                    environment={"PATH": os.environ["PATH"]},
-                )
-            manifest = json.loads((out_dir / "manifest.json").read_text())
+        command = manifest["commands"]["titan_stock"]
         self.assertEqual(
-            [
-                (region["name"], region["invocations_per_window"])
-                for region in manifest["regions"]
-            ],
-            [("backward_block", 80), ("forward_block", 80)],
+            command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
         )
+        self.assertEqual(command[command.index("--config-arg") + 1], "size=huge")
 
     def test_resume_refuses_a_different_size_and_inherits_an_absent_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary) / "run"
             self._run(
-                scenario_name="piper1b_attention",
-                arm_names=("baseline",),
+                scenario_name="piper1b_megatron",
+                arm_names=("titan_stock",),
                 out_dir=out_dir,
                 ac_mode="none",
                 model_size="huge",
@@ -1475,7 +1451,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "model_size"):
                 self._run(
                     scenario_name=None,
-                    arm_names=("baseline",),
+                    arm_names=("titan_stock",),
                     resume_dir=out_dir,
                     ac_mode="none",
                     model_size="normal",
@@ -1484,21 +1460,21 @@ class ManifestAndResumeTests(unittest.TestCase):
             # Omitting --model-size on a resume inherits the recorded value.
             self._run(
                 scenario_name=None,
-                arm_names=("baseline",),
+                arm_names=("titan_stock",),
                 resume_dir=out_dir,
                 ac_mode="none",
             )
 
     def test_schema_eight_directories_still_resume_as_the_1b_shape(self) -> None:
-        scenario = scenario_by_name("piper1b_rope")
-        selected = (scenario.arm("baseline"),)
+        scenario = scenario_by_name("piper1b_megatron")
+        selected = (scenario.arm("titan_stock"),)
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             write_manifest(
                 out_dir,
                 scenario,
                 selected,
-                {"baseline": ["cmd"]},
+                {"titan_stock": ["cmd"]},
                 "test-gpu",
                 _METADATA,
                 (),

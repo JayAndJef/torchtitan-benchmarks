@@ -100,20 +100,6 @@ FOREIGN_ROOTS = ("torchtitan",)
 # number. They must survive the move byte for byte. Ordering is deterministic
 # (SCENARIOS is built from a tuple, arms are tuples), so it is pinned too.
 E2E_INVENTORY = {
-    "piper1b_rope": ("baseline", "helion", "te"),
-    "piper1b_swiglu": (
-        "baseline",
-        "piper_optimized_triton",
-        "piper_optimized_inductor",
-    ),
-    "piper1b_qkv": ("baseline", "fused_qkv"),
-    "piper1b_lm_head": (
-        "baseline",
-        "fused_linear_ce",
-        "te_fused_ce",
-        "piper_optimized_te_ce",
-    ),
-    "piper1b_attention": ("baseline", "flash_attention_3", "flex_flash"),
     "piper1b_megatron": (
         "baseline",
         "titan_stock",
@@ -315,9 +301,7 @@ KERNEL_BASELINE_ARMS = {
 # on one side alone is exactly what this table catches, and a table of one
 # catches it as well as a table of four. Delete the table and the guard goes
 # with it, for a saving of two lines.
-KERNEL_TO_E2E_SCENARIO = {
-    "lm_head": "piper1b_lm_head",
-}
+KERNEL_TO_E2E_SCENARIO: dict[str, str] = {}
 # A bandwidth floor has no end-to-end counterpart, so it is excluded from the
 # pairing above. No scenario the map still holds declares one today -- rope
 # was the last, and it left with copy_floor -- so the subtraction is empty
@@ -579,8 +563,8 @@ class RegistryDispatchTests(unittest.TestCase):
                     self.assertTrue(all(isinstance(a, str) for a in command))
 
     def test_an_unknown_launcher_is_rejected_rather_than_ignored(self) -> None:
-        scenario = scenario_by_name("piper1b_rope")
-        arm = replace(scenario.arm("baseline"), launcher="not-an-engine")
+        scenario = scenario_by_name("piper1b_megatron")
+        arm = replace(scenario.arm("titan_stock"), launcher="not-an-engine")
         with self.assertRaisesRegex(ValueError, "unknown launcher"):
             command_for_arm(scenario.workload, arm, Path("/tmp/arm-dir"), ())
 
@@ -770,15 +754,15 @@ def _golden_titan_pp4_command(size: str) -> list[str]:
     ]
 
 
-# The plain path, and the only golden that carries an override: no seed, no
-# replay loader, no --compile.mode, no trailing ac token.
-GOLDEN_OVERRIDE_ARM = ("piper1b_swiglu", "piper_optimized_inductor")
+# The only golden that carries an override: no --compile.mode, and the
+# trailing ac token the engine comparison always sends.
+GOLDEN_OVERRIDE_ARM = ("piper1b_megatron", "titan_swiglu")
 GOLDEN_OVERRIDE_COMMAND = [
     "./run_train.sh",
     "--module",
     TITAN_CONFIG_MODULE,
     "--config",
-    "qwen3_piper_1b",
+    "qwen3_piper_1b_pretokenized",
     "--config-arg",
     "size=normal",
     "--training.seq-len",
@@ -795,10 +779,15 @@ GOLDEN_OVERRIDE_COMMAND = [
     "5",
     "--profiler.profiler_warmup",
     "5",
+    "--dataloader.replay-steps",
+    "40",
+    "--debug.seed",
+    "42",
     "--override.imports",
     SWIGLU_INDUCTOR_OVERRIDE,
     "--dump-folder",
     "/tmp/arm-dir",
+    "activation-checkpoint:none",
 ]
 
 # sys.executable leads the megatron argv and is machine-specific, so it is
@@ -953,7 +942,7 @@ class GoldenCommandTests(unittest.TestCase):
 
     def test_titan_override_argv_on_the_plain_path(self) -> None:
         self.assertEqual(
-            self._command(GOLDEN_OVERRIDE_ARM, "normal", "default", "sac"),
+            self._command(GOLDEN_OVERRIDE_ARM, "normal", "default", "none"),
             GOLDEN_OVERRIDE_COMMAND,
         )
 
@@ -1670,7 +1659,7 @@ TEST_CENSUS = {
     # variable, and the two sweeps -- lean under a sharded dense value
     # runs the stock scenario alone, and lean under replicate reaches no
     # scenario at all.
-    "test_cli": 36,
+    "test_cli": 37,
     # The knowledge base under database/: one test runs its checker and one
     # builds its document. Both skip, per method, where the gitignored
     # directory is absent, so the count holds on every checkout.
@@ -2110,7 +2099,7 @@ TEST_CENSUS = {
     # +2 with the 30b-a3b shape: its geometry against piper's case and its
     # counts against the tensor list, and its split at pp 4, pp 8 and
     # every expert degree eight GPUs hold.
-    "test_model_shape": 59,
+    "test_model_shape": 58,
     # New when trace reading became rank-aware. A run may now hold more than
     # one rank, and the arithmetic that turns several ranks into one published
     # figure is the highest-risk part of it: pooling two ranks' windows gives
@@ -2182,8 +2171,7 @@ TEST_CENSUS = {
     # +2 with the schema-16 field: a resume inheriting the recorded
     # precision and refusing another, and a schema-15 directory reading as
     # stock.
-    "test_runner": 93,
-    "test_run_validation": 1,
+    "test_runner": 85,
     "test_swiglu": 4,
     "test_te_rope": 1,
     # New with the in-process titan build: 3 that pin the override count
@@ -2306,7 +2294,7 @@ TEST_CENSUS = {
     # 'shard' record names it, and a current 'zero3' record resumes.
     # +1 with the review repair: a zero1 stock run passes the connection
     # limit precondition, because its argv sends no --use-megatron-fsdp.
-    "test_parallelism_plumbing": 88,
+    "test_parallelism_plumbing": 87,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2368,7 +2356,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1926
+TEST_CENSUS_TOTAL = 1916
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own
