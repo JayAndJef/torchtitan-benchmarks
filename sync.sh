@@ -55,3 +55,13 @@ export MAX_JOBS="${MAX_JOBS:-64}"
 export NVCC_THREADS="${NVCC_THREADS:-2}"
 
 uv sync "$@"
+
+# Install the pre-push hook. Worktrees share one hook set, so the common dir
+# is the correct target; --git-dir would name the per-worktree directory and
+# the hook would apply to this worktree alone. The link is absolute and the
+# command is idempotent.
+repo_root="$PWD"
+hooks_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd)/hooks"
+mkdir -p "$hooks_dir"
+ln -sfn "$repo_root/tools/pre-push.sh" "$hooks_dir/pre-push"
+echo "sync.sh: linked $hooks_dir/pre-push to $repo_root/tools/pre-push.sh"
