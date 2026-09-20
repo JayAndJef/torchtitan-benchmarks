@@ -57,12 +57,15 @@ import click
 from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
-from benchmarks.e2e.parallelism import (
+from benchmarks.e2e.schema import (
     DEFAULT_ZERO,
+    ParallelismSpec,
+    RunRequest,
     ZERO_MODES,
+)
+from benchmarks.e2e.parallelism import (
     MEGATRON_LAUNCHERS,
     PP_SCHEDULE_CHOICES,
-    ParallelismSpec,
 )
 from benchmarks.e2e.registry import (
     AC_MODES,
@@ -79,7 +82,6 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
 from benchmarks.e2e.runner import (
-    RunRequest,
     RunResult,
     execute_run,
     megatron_nan_guard_refusal,

@@ -69,6 +69,9 @@ PARENT_SIDE_MODULES = (
     "benchmarks.cli.kernel",
     "benchmarks.cli.rendering",
     "benchmarks.e2e.registry",
+    # The e2e type declarations. Parent-side, and the cheapest module in the
+    # tree: it imports the standard library alone.
+    "benchmarks.e2e.schema",
     # The parallelism run axis. Parent-side for the same reason the shape
     # registry is: it declares degrees, schedules and the rules that refuse
     # an illegal set, and it resolves none of them against a device.

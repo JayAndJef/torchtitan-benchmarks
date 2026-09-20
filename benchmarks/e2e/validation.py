@@ -4,7 +4,8 @@
 published. Engine differences live in the ``VALIDATION_PROFILES`` registry,
 selected by ``Arm.validation``; the structural rules -- trace-window count,
 kernel markers, override counting, and the parameter-count line -- are
-shared.
+shared. ``ValidationProfile`` itself is declared in
+``benchmarks.e2e.schema``; this module holds the profiles.
 
 **The log rules run once per rank.** One ``<arm>.log`` holds every rank's
 output, so a rule read against the whole file asks "did some rank do this".
@@ -37,9 +38,7 @@ from __future__ import annotations
 
 import gzip
 import re
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.megatron_stock.flags import (
@@ -51,9 +50,9 @@ from benchmarks.e2e.megatron_stock.flags import (
     microbatch_geometry,
     refuse_unknown_zero,
 )
+from benchmarks.e2e.schema import ParallelismSpec
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
-    ParallelismSpec,
     TRIVIAL_SPEC,
     n_microbatches,
     titan_mesh,
@@ -65,9 +64,8 @@ from benchmarks.e2e.registry import (
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
-    Arm,
-    Workload,
 )
+from benchmarks.e2e.schema import Arm, ValidationProfile, Workload
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 
@@ -113,111 +111,6 @@ _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
 # looking at the arm's own trace. Widening this to a bare ``nccl`` is not the
 # repair: see the paragraph above.
 ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
-
-
-@dataclass(frozen=True)
-class ValidationProfile:
-    """Engine-specific pieces of validate_arm, selected by Arm.validation.
-
-    The engine-neutral rules (trace-window count, kernel markers, override
-    counting when declared) are shared; these fields carry what differs:
-    the completion marker, the log line that proves the arm's compile
-    treatment, the phrases that mean a silent fallback, and whether the
-    SelectiveAC line is expected at all.
-
-    ``compile_marker`` is rule 8, and it is read both ways: the line must
-    be *present* when the arm declares ``compile="torch"``, and *absent*
-    when it declares ``compile="none"``. A profile leaves it ``None`` when
-    the engine compiles no whole block and exposes no switch for one. Rule
-    8 then checks nothing for that engine, and an arm of it that declares
-    ``"torch"`` is refused rather than published under a treatment nothing
-    checked.
-
-    ``parallelism_markers`` is arm rule 12: the log lines that prove this
-    engine really ran the requested mesh. It is a callable rather than a
-    string because every value in those lines comes from the spec, the
-    workload and the precision. An empty tuple means this engine logs
-    nothing that proves this spec, and ``validate_arm`` then refuses the
-    run rather than publishing a mesh nothing checked -- the same shape as
-    ``compile_marker`` above.
-
-    **It takes the precision because one field of the stock data-parallel
-    line moves with it, and a real run proved it.**
-    ``--megatron-precision lean`` sends ``--main-grads-dtype bf16``, so
-    Megatron reduces the gradients in bf16 and the wrapper reports it. The
-    value reaches every profile, because one call site serves all three.
-    The other two profiles read it and state nothing for it.
-
-    ``pipelined_pattern`` is the other half of arm rule 12, and it reads the
-    other way. ``parallelism_markers`` proves the engine built the mesh that
-    was asked for. It says nothing when nothing was asked for, so a log from
-    a real pipeline passed validation against the trivial spec: the run would
-    have been published as single-GPU. This pattern matches only a log that
-    built a pipeline, and at ``pp`` 1 its presence fails the arm.
-
-    This is the inversion an eager arm already uses on ``compile_marker``:
-    a run that silently compiled cannot be published as eager, and a run
-    that silently pipelined cannot be published as one GPU.
-    Measured before it was added: of 296 arm logs under ``out/``, exactly one
-    matches, and it is a deliberate ``--pp 2`` run.
-
-    ``data_parallel_pattern`` is the same inversion on the other axis, and
-    it guards a worse mistake. A pipeline rank and a single-GPU rank publish
-    the same per-device throughput, so a pipeline published as one GPU
-    misstates the mesh and not the rate. A **data-parallel** rank reads a
-    batch of its own, so a ``dp 2`` run published under the trivial spec
-    reads as roughly twice the true rate, and every other rule passes. Each
-    engine's pattern names two witnesses: the mesh line the engine logs
-    whatever this repo's code does, and the wrapper line this repo prints.
-    Neither matches a ``pp 2, dp 1`` log, which was checked against a real
-    one.
-
-    Measured before it was added, the way ``pipelined_pattern`` was: of the
-    532 arm logs under ``out/`` -- every run this repo has ever done, all of
-    them single-GPU or pipeline-only -- **none** matches either pattern. So
-    the rule refuses nothing that has already happened.
-
-    ``p2p_markers`` is the ``--megatron-p2p-sync`` half of arm rule 12. It
-    takes the spec and the requested value, and returns the line the engine
-    prints from its BUILT config, above ``pp`` 1 alone: below a pipeline
-    there is no message to synchronize, and the option is refused there
-    before a GPU is claimed. It is a second callable rather than a third
-    argument of ``parallelism_markers``, because the value is not part of
-    the mesh and a TorchTitan arm never receives it. An empty tuple here is
-    therefore not a refusal: the titan profile returns one at every mesh,
-    and ``validate_arm`` reads only the mesh markers for that.
-
-    ``nan_guard_markers`` is the ``--megatron-nan-guard`` half of the same
-    rule. It takes the requested value alone, because the guard runs at
-    every mesh: the loss check runs on the last stage at ``pp`` 1 and the
-    gradient check runs on every rank at ``dp`` 1, so there is no spec
-    below which the line is not asked. The stock profile returns the line
-    its driver prints from the value Megatron parsed. The titan profile
-    returns nothing, because the option never reaches it.
-
-    ``precision_markers`` is the ``--megatron-precision`` half of the same
-    rule, and it takes the requested value alone for the reason
-    ``nan_guard_markers`` does: the optimizer state has a precision at
-    every mesh. The stock profile asks for the four fields its driver
-    prints from the arguments Megatron resolved, under BOTH values. A
-    ``stock`` label is a claim about the precision exactly as a ``lean``
-    label is, so a run that gained the lean flags must fail a stock label
-    as surely as a run that lost them fails a lean one. The titan profile
-    returns nothing, because the option never reaches it.
-    """
-
-    completion_marker: str
-    compile_marker: str | None
-    failure_markers: tuple[str, ...]
-    check_ac_line: bool
-    parallelism_markers: Callable[
-        [ParallelismSpec, Workload, str], tuple[str, ...]
-    ]
-    pipelined_pattern: re.Pattern[str]
-    data_parallel_pattern: re.Pattern[str]
-    p2p_markers: Callable[[ParallelismSpec, str], tuple[str, ...]]
-    nan_guard_markers: Callable[[str], tuple[str, ...]]
-    precision_markers: Callable[[str], tuple[str, ...]]
 
 
 def _titan_parallelism_markers(

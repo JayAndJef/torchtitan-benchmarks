@@ -70,10 +70,8 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     refuse_unknown_p2p_sync,
     stock_megatron_flags,
 )
-from benchmarks.e2e.parallelism import (  # noqa: E402
-    TRIVIAL_SPEC,
-    ParallelismSpec,
-)
+from benchmarks.e2e.schema import ParallelismSpec
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import PIPER_1B_MEGATRON_WORKLOAD  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     GRAD_NORM_METRIC,

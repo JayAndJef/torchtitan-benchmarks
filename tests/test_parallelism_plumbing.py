@@ -40,8 +40,8 @@ from benchmarks.cli.e2e import (
     run_command,
 )
 from benchmarks.cli.main import cli
+from benchmarks.e2e.schema import ParallelismSpec, RunRequest
 from benchmarks.e2e.parallelism import (
-    ParallelismSpec,
     TRIVIAL_SPEC,
     describe,
     execution_model,
@@ -53,7 +53,10 @@ from benchmarks.e2e.registry import (
     EXECUTION_MODEL,
     scenario_by_name,
 )
-from benchmarks.e2e.runner import RunRequest, _resolve_run, execute_run
+from benchmarks.e2e.runner import (
+    _resolve_run,
+    execute_run,
+)
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices

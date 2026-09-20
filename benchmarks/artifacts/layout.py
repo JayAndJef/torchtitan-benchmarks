@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from benchmarks.execution.paths import BENCH_DIR
 
 if TYPE_CHECKING:
-    from benchmarks.e2e.registry import Scenario
+    from benchmarks.e2e.schema import Scenario
 
 
 # The prefix torchrun puts on every tee'd line. Two spellings reach a log

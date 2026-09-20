@@ -37,11 +37,8 @@ from benchmarks.artifacts.layout import (
 )
 from benchmarks.artifacts.manifests import load_run
 from benchmarks.artifacts.summaries import _value
-from benchmarks.e2e.parallelism import (
-    DEFAULT_ZERO,
-    ParallelismSpec,
-    zero_warnings,
-)
+from benchmarks.e2e.schema import DEFAULT_ZERO, ParallelismSpec
+from benchmarks.e2e.parallelism import zero_warnings
 from benchmarks.traces.extraction import PooledMetrics, per_rank_pooled_metrics
 
 

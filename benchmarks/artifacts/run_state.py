@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 from benchmarks.artifacts.layout import atomic_write_json
 
 if TYPE_CHECKING:
-    from benchmarks.e2e.registry import Arm
+    from benchmarks.e2e.schema import Arm
 
 
 STATE_SCHEMA_VERSION = 1

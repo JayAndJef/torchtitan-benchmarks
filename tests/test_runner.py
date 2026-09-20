@@ -15,16 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts.layout import trace_files
 from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.launch import command_for_arm
-from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
+from benchmarks.e2e.schema import Arm, ParallelismSpec, RunRequest
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
-    Arm,
     SCENARIOS,
     ENGINES,
     PIPER_1B_MEGATRON_WORKLOAD,
     scenario_by_name,
 )
 from benchmarks.e2e.results import stable_tps, training_metrics
-from benchmarks.e2e.runner import RunRequest, _resolve_run, execute_run, select_arms
+from benchmarks.e2e.runner import (
+    _resolve_run,
+    execute_run,
+    select_arms,
+)
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from dataclasses import replace
