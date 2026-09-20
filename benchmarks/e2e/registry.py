@@ -17,7 +17,6 @@ command construction (``benchmarks.e2e.launch``), validation
 from dataclasses import dataclass, replace
 
 from benchmarks.models.piper_qwen3.shape import PIPER_1B
-from benchmarks.traces.schema import Region
 
 
 # How a SINGLE-GPU training process executes the model: plain bf16 params on
@@ -33,6 +32,23 @@ from benchmarks.traces.schema import Region
 # constant cannot describe two of them. Earlier schemas ran under FSDP2
 # mixed precision.
 EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
+
+
+@dataclass(frozen=True)
+class Region:
+    """One reported compiled region, identified by direction and call count.
+
+    Graph hashes differ between arms, so a region is matched structurally:
+    ``phase`` ("forward" or "backward") comes from whether the graph's CPU
+    annotations nest inside ``CompiledFunctionBackward`` autograd frames, and
+    ``invocations_per_window`` picks the graph among same-phase partitions
+    while pinning the expected sample count.
+    """
+
+    name: str
+    phase: str
+    invocations_per_window: int
+
 
 # Engine-neutral compile modes selectable per run. TORCH_COMPILE_MODE maps a
 # compiled mode to the --compile.mode value the TorchTitan fork applies per

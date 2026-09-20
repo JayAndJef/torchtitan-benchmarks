@@ -1,18 +1,8 @@
 """Extract GPU-time measurements from profiler traces.
 
-Two kinds of measurement come out of each trace window:
-
-- **Region spans**: the GPU span of whole compiled regions (``## Call
-  CompiledFxGraph`` GPU annotations), first kernel to last. A span includes
-  the idle gaps where the GPU waited on the host, so it moves with host
-  dispatch speed.
-- **Kernel time**: the summed durations of the GPU kernel/memcpy/memset
-  events inside each region span, plus the per-window total across all
-  kernels. Kernel time depends only on the GPU and is the comparable
-  measurement when host speed varies between runs.
-
-Whole compiled regions are used rather than individual generated kernels:
-Inductor kernel names are unstable across torch versions and arms.
+**Kernel time** is the summed duration of the GPU kernel/memcpy/memset
+events in a window. It depends only on the GPU and is the comparable
+measurement when host speed varies between runs.
 
 Three further per-window totals exist because the summed kernel time alone
 stops answering the question once a run holds more than one rank:
@@ -44,31 +34,19 @@ Pooling happens **per rank** and never across ranks. ``pooled_window_metrics``
 pools one rank's windows; two ranks of input would give an arithmetic mean,
 which is neither one rank's cost nor the step's, so it refuses such a call
 outright. ``per_rank_pooled_metrics`` is the entry point a measurement uses.
-
-Regions are matched structurally, not by name or size. Each compiled graph's
-direction is read from the CPU side of the trace — backward graph calls nest
-inside ``CompiledFunctionBackward`` autograd frames — and the scenario's
-declared per-window invocation count then picks the transformer-block graph
-among same-phase partitions. The count doubles as a guard: if the compiler
-partitions the model differently, no graph matches and extraction fails
-instead of silently mislabeling a region.
 """
 
 from __future__ import annotations
 
 import gzip
 import json
-from bisect import bisect_left
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from benchmarks.traces.schema import Region, rank_of_trace
+from benchmarks.artifacts.layout import rank_of_trace
 
 
-COMPILED_GRAPH_TAG = "## Call CompiledFxGraph"
-BACKWARD_FRAME = "CompiledFunctionBackward"
 PROFILER_STEP_TAG = "ProfilerStep#"
 LAUNCH_CATEGORIES = frozenset({"cuda_runtime", "cuda_driver"})
 LAUNCH_PREFIXES = ("cudaLaunchKernel", "cuLaunchKernel")
@@ -88,14 +66,11 @@ KERNEL_CATEGORIES = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
 # ``ncclDevKernel_Broadcast_RING_LL`` and
 # ``ncclDevKernel_AllReduce_Sum_bf16_RING_LL``.
 #
-# **This tuple gates more than the two new columns.** A name that matches
-# leaves ``raw_kernels``, so it also leaves ``region_kernel`` and therefore
-# ``region_kernel_ms_per_step``, which every run under ``out/`` already
-# publishes. A false positive would silently shrink a long-published number
-# rather than only mis-split a new one. The evidence that it does not, today:
-# a scan of 367 arm directories under ``out/`` found no device kernel whose
-# name begins with ``nccl`` on either engine. Re-run that scan before you
-# widen this tuple.
+# **A false positive would silently shrink a published number** rather than
+# only mis-split a new one. The evidence that it does not, today: a scan of
+# 367 arm directories under ``out/`` found no device kernel whose name
+# begins with ``nccl`` on either engine. Re-run that scan before you widen
+# this tuple.
 COLLECTIVE_KERNEL_PREFIXES = ("nccl", "ncclDevKernel")
 
 
@@ -129,8 +104,6 @@ def busy_union(intervals: Iterable[tuple[float, float]]) -> float:
 class WindowMetrics:
     """GPU-time measurements extracted from one profiler window."""
 
-    region_spans: dict[str, list[float]]
-    region_kernel: dict[str, list[float]]
     kernel_total_us: float
     profiled_steps: int
     launch_total_us: float
@@ -149,8 +122,6 @@ class PooledMetrics:
     here is ever a quantity averaged over ranks; see the module docstring.
     """
 
-    region_spans: dict[str, list[float]]
-    region_kernel: dict[str, list[float]]
     windows: int
     kernel_total_us: float
     profiled_steps: int
@@ -166,13 +137,6 @@ class PooledMetrics:
         if not self.profiled_steps:
             return None
         return self.kernel_total_us / self.profiled_steps / 1000.0
-
-    @property
-    def region_kernel_ms_per_step(self) -> float | None:
-        if not self.profiled_steps:
-            return None
-        total = sum(sum(values) for values in self.region_kernel.values())
-        return total / self.profiled_steps / 1000.0
 
     @property
     def collective_ms_per_step(self) -> float | None:
@@ -229,12 +193,6 @@ class PooledMetrics:
         return self.launch_total_us / self.launch_count
 
 
-def _short_hash(graph: str) -> str:
-    """Abbreviate '## Call CompiledFxGraph <hash> ##' for error messages."""
-    parts = graph.split()
-    return (parts[3] if len(parts) > 3 else graph)[:16]
-
-
 def _load_events(trace_path: Path) -> list[dict]:
     try:
         with gzip.open(trace_path, "rt") as trace_file:
@@ -243,78 +201,10 @@ def _load_events(trace_path: Path) -> list[dict]:
         raise ValueError(f"{trace_path}: unreadable profiler trace: {error}") from error
 
 
-def _graph_phases(
-    trace_path: Path,
-    backward_frames: dict[int, list[tuple[float, float]]],
-    cpu_calls: dict[str, list[tuple[int, float, float]]],
-    gpu_graphs: dict[str, list],
-) -> dict[str, str]:
-    """Classify each compiled graph as forward or backward via autograd frames."""
-    phases: dict[str, str] = {}
-    for graph, calls in cpu_calls.items():
-        inside = {
-            any(
-                start <= call_start and call_end <= end
-                for start, end in backward_frames.get(tid, ())
-            )
-            for tid, call_start, call_end in calls
-        }
-        if len(inside) != 1:
-            raise ValueError(
-                f"{trace_path}: graph {_short_hash(graph)}... appears both "
-                f"inside and outside {BACKWARD_FRAME} frames; cannot classify"
-            )
-        phases[graph] = "backward" if inside.pop() else "forward"
-    for graph in gpu_graphs:
-        if graph not in phases:
-            raise ValueError(
-                f"{trace_path}: graph {_short_hash(graph)}... has GPU spans "
-                f"but no CPU-side annotations; the trace lacks the CPU-side "
-                f"autograd context needed to classify forward vs backward"
-            )
-    return phases
-
-
-def _kernel_time_within(
-    spans: list[tuple[int, int, float, float]],
-    stream_kernels: dict[tuple[int, int], tuple[list[float], list[float]]],
-) -> list[float]:
-    """Sum compute-kernel durations inside each span, per invocation.
-
-    The collectives are excluded here as they are from
-    ``compute_ms_per_step``, and for the same reason: a blocking collective's
-    duration is partly peer wait, so counting it inside a region would make
-    the region's cost depend on another rank. ``stream_kernels`` is already
-    filtered, so a collective that happens to share the region's stream lands
-    in the window total and in ``collective_us``, and in neither region.
-    Without this, ``region_kernel_ms_per_step`` could exceed
-    ``compute_ms_per_step`` and ``other`` could read zero while part of the
-    total was waiting.
-    """
-    busy = []
-    for pid, tid, start, end in spans:
-        starts, ends = stream_kernels.get((pid, tid), ((), ()))
-        total = 0.0
-        index = bisect_left(starts, start)
-        while index < len(starts) and starts[index] < end:
-            if ends[index] <= end:
-                total += ends[index] - starts[index]
-            index += 1
-        busy.append(total)
-    return busy
-
-
-def trace_window_metrics(
-    trace_path: Path,
-    regions: Iterable[Region],
-) -> WindowMetrics:
-    """Extract one window's measurements or fail on partition changes."""
+def trace_window_metrics(trace_path: Path) -> WindowMetrics:
+    """Extract one window's measurements."""
     events = _load_events(trace_path)
 
-    backward_frames: dict[int, list[tuple[float, float]]] = defaultdict(list)
-    cpu_calls: dict[str, list[tuple[int, float, float]]] = defaultdict(list)
-    gpu_spans: dict[str, list[tuple[int, int, float, float]]] = defaultdict(list)
-    raw_kernels: dict[tuple[int, int], list[tuple[float, float]]] = defaultdict(list)
     # ``step_names`` decides ``profiled_steps`` and counts a step name in any
     # category, which is what it has always done.
     #
@@ -340,17 +230,11 @@ def trace_window_metrics(
         category = event.get("cat")
         start = event.get("ts", 0.0)
         end = start + event.get("dur", 0.0)
-        if category == "cpu_op" and name == BACKWARD_FRAME:
-            backward_frames[event.get("tid")].append((start, end))
-        elif category in KERNEL_CATEGORIES:
+        if category in KERNEL_CATEGORIES:
             kernel_total += end - start
             device_intervals.append((start, end))
             if name.startswith(COLLECTIVE_KERNEL_PREFIXES):
                 collective_total += end - start
-            else:
-                raw_kernels[(event.get("pid"), event.get("tid"))].append(
-                    (start, end)
-                )
         elif category in LAUNCH_CATEGORIES and name.startswith(LAUNCH_PREFIXES):
             launch_total += end - start
             launch_count += 1
@@ -358,48 +242,6 @@ def trace_window_metrics(
             step_names.add(name)
             if category == "user_annotation":
                 step_walls[name] = max(step_walls.get(name, 0.0), end - start)
-        elif name.startswith(COMPILED_GRAPH_TAG):
-            if category == "user_annotation":
-                cpu_calls[name].append((event.get("tid"), start, end))
-            elif category == "gpu_user_annotation":
-                gpu_spans[name].append(
-                    (event.get("pid"), event.get("tid"), start, end)
-                )
-
-    stream_kernels = {}
-    for stream, intervals in raw_kernels.items():
-        intervals.sort()
-        stream_kernels[stream] = (
-            [interval[0] for interval in intervals],
-            [interval[1] for interval in intervals],
-        )
-
-    phases = _graph_phases(trace_path, backward_frames, cpu_calls, gpu_spans)
-
-    region_spans: dict[str, list[float]] = {}
-    region_kernel: dict[str, list[float]] = {}
-    for region in regions:
-        candidates = [
-            graph
-            for graph, spans in gpu_spans.items()
-            if phases[graph] == region.phase
-            and len(spans) == region.invocations_per_window
-        ]
-        if len(candidates) != 1:
-            inventory = ", ".join(
-                f"{_short_hash(graph)}...({phases[graph]}, n={len(spans)})"
-                for graph, spans in sorted(gpu_spans.items())
-            ) or "none"
-            raise ValueError(
-                f"{trace_path}: expected exactly one {region.phase} compiled "
-                f"graph with {region.invocations_per_window} invocations for "
-                f"region {region.name!r}, found {len(candidates)}; the compiled "
-                f"partitioning changed and the graph-to-region mapping is no "
-                f"longer valid. Graphs in trace: {inventory}"
-            )
-        spans = gpu_spans[candidates[0]]
-        region_spans[region.name] = [end - start for _, _, start, end in spans]
-        region_kernel[region.name] = _kernel_time_within(spans, stream_kernels)
 
     if 0 < len(step_walls) < len(step_names):
         raise ValueError(
@@ -409,8 +251,6 @@ def trace_window_metrics(
         )
 
     return WindowMetrics(
-        region_spans=region_spans,
-        region_kernel=region_kernel,
         kernel_total_us=kernel_total,
         profiled_steps=len(step_names),
         launch_total_us=launch_total,
@@ -446,21 +286,15 @@ def _refuse_mixed_ranks(trace_paths: tuple[Path, ...]) -> None:
         )
 
 
-def pooled_window_metrics(
-    trace_paths: Iterable[Path],
-    regions: Iterable[Region],
-) -> PooledMetrics:
+def pooled_window_metrics(trace_paths: Iterable[Path]) -> PooledMetrics:
     """Pool one rank's profiler windows, validating each window.
 
     Windows only. Every field of the result is a total over the windows of a
     single rank, and a call carrying two ranks' files is refused rather than
     averaged.
     """
-    regions = tuple(regions)
     trace_paths = tuple(trace_paths)
     _refuse_mixed_ranks(trace_paths)
-    spans: dict[str, list[float]] = {region.name: [] for region in regions}
-    kernel: dict[str, list[float]] = {region.name: [] for region in regions}
     windows = 0
     kernel_total = 0.0
     collective_total = 0.0
@@ -471,11 +305,8 @@ def pooled_window_metrics(
     launch_total = 0.0
     launch_count = 0
     for trace_path in trace_paths:
-        window = trace_window_metrics(trace_path, regions)
+        window = trace_window_metrics(trace_path)
         windows += 1
-        for name in spans:
-            spans[name].extend(window.region_spans[name])
-            kernel[name].extend(window.region_kernel[name])
         kernel_total += window.kernel_total_us
         collective_total += window.collective_us
         busy_total += window.busy_kernel_us
@@ -498,8 +329,6 @@ def pooled_window_metrics(
             "step count than the kernel totals"
         )
     return PooledMetrics(
-        region_spans=spans,
-        region_kernel=kernel,
         windows=windows,
         kernel_total_us=kernel_total,
         profiled_steps=sum(step_counts),
@@ -514,7 +343,6 @@ def pooled_window_metrics(
 
 def per_rank_pooled_metrics(
     files_by_rank: Mapping[int, Iterable[Path]],
-    regions: Iterable[Region],
 ) -> dict[int, PooledMetrics]:
     """Pool each rank's windows separately, in rank order.
 
@@ -524,13 +352,12 @@ def per_rank_pooled_metrics(
     single-GPU run gives one entry and its value is exactly what
     ``pooled_window_metrics`` returned before ranks existed.
     """
-    regions = tuple(regions)
     if not files_by_rank:
         raise ValueError("no profiler trace windows supplied")
     pooled: dict[int, PooledMetrics] = {}
     for rank in sorted(files_by_rank):
         try:
-            pooled[rank] = pooled_window_metrics(files_by_rank[rank], regions)
+            pooled[rank] = pooled_window_metrics(files_by_rank[rank])
         except ValueError as error:
             raise ValueError(f"rank {rank}: {error}") from error
     return pooled

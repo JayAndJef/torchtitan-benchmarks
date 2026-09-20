@@ -41,7 +41,7 @@ from benchmarks.traces.extraction import (
     pooled_window_metrics,
     trace_window_metrics,
 )
-from benchmarks.traces.schema import TRACE_FILE_GLOB, Region, rank_of_trace
+from benchmarks.artifacts.layout import TRACE_FILE_GLOB, rank_of_trace
 from tests.test_runner import _SAC_LINE, _SIZE_LINE, _compiled_line
 
 
@@ -50,9 +50,11 @@ LEGACY_RESULTS_3 = (
     Path(__file__).resolve().parent / "fixtures" / "legacy" / "e2e_results3"
 )
 
-REGIONS = (
-    Region(name="backward_block", phase="backward", invocations_per_window=4),
-    Region(name="forward_block", phase="forward", invocations_per_window=4),
+# The manifest key a recorded run still carries. Nothing reads it for a
+# measurement; the loader only parses it.
+MANIFEST_REGIONS = (
+    {"name": "backward_block", "phase": "backward", "invocations_per_window": 4},
+    {"name": "forward_block", "phase": "forward", "invocations_per_window": 4},
 )
 
 
@@ -148,11 +150,7 @@ def two_rank_run(out_dir: Path) -> None:
         "scenario": "synthetic_parallel",
         "hardware": "test-gpu",
         "workload": {},
-        "regions": [
-            {"name": region.name, "phase": region.phase,
-             "invocations_per_window": region.invocations_per_window}
-            for region in REGIONS
-        ],
+        "regions": [dict(region) for region in MANIFEST_REGIONS],
         "selected_arms": ["baseline"],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -228,7 +226,7 @@ class PoolingStaysPerRankTests(unittest.TestCase):
         two_rank_arm(self.root)
         paths = trace_files(self.root)
         with self.assertRaisesRegex(ValueError, "average across ranks"):
-            pooled_window_metrics(paths, REGIONS)
+            pooled_window_metrics(paths)
 
     def test_one_rank_many_windows_is_not_refused(self) -> None:
         for iteration in (20, 40):
@@ -239,15 +237,13 @@ class PoolingStaysPerRankTests(unittest.TestCase):
                  "fwd": ("forward", [10.0] * 4)},
                 [step_event(1000.0)],
             )
-        pooled = pooled_window_metrics(trace_files(self.root), REGIONS)
+        pooled = pooled_window_metrics(trace_files(self.root))
         self.assertEqual(pooled.windows, 2)
         self.assertEqual(pooled.profiled_steps, 2)
 
     def test_per_rank_pooling_keeps_each_rank_whole(self) -> None:
         two_rank_arm(self.root)
-        per_rank = per_rank_pooled_metrics(
-            trace_files_by_rank(self.root), REGIONS
-        )
+        per_rank = per_rank_pooled_metrics(trace_files_by_rank(self.root))
         self.assertEqual(sorted(per_rank), [0, 1])
         self.assertAlmostEqual(per_rank[0].kernel_ms_per_step, 0.220)
         self.assertAlmostEqual(per_rank[1].kernel_ms_per_step, 0.500)
@@ -259,14 +255,7 @@ class PoolingStaysPerRankTests(unittest.TestCase):
 
     def test_no_ranks_at_all_is_an_error_not_an_empty_answer(self) -> None:
         with self.assertRaisesRegex(ValueError, "no profiler trace windows"):
-            per_rank_pooled_metrics({}, REGIONS)
-
-    def test_a_failure_inside_one_rank_names_that_rank(self) -> None:
-        two_rank_arm(self.root)
-        wrong = (Region(name="forward_block", phase="forward",
-                        invocations_per_window=99),)
-        with self.assertRaisesRegex(ValueError, "rank 0:"):
-            per_rank_pooled_metrics(trace_files_by_rank(self.root), wrong)
+            per_rank_pooled_metrics({})
 
     def test_only_the_extraction_module_calls_the_single_rank_pooler(
         self,
@@ -299,9 +288,7 @@ class CollectiveAndBasisTests(unittest.TestCase):
 
     def test_a_collective_leaves_the_total_and_leaves_compute(self) -> None:
         two_rank_arm(self.root)
-        per_rank = per_rank_pooled_metrics(
-            trace_files_by_rank(self.root), REGIONS
-        )
+        per_rank = per_rank_pooled_metrics(trace_files_by_rank(self.root))
         busy = per_rank[1]
         self.assertAlmostEqual(busy.collective_ms_per_step, 0.060)
         self.assertAlmostEqual(busy.compute_ms_per_step, 0.440)
@@ -317,9 +304,7 @@ class CollectiveAndBasisTests(unittest.TestCase):
 
     def test_the_step_wall_comes_from_the_profiler_annotation(self) -> None:
         two_rank_arm(self.root)
-        per_rank = per_rank_pooled_metrics(
-            trace_files_by_rank(self.root), REGIONS
-        )
+        per_rank = per_rank_pooled_metrics(trace_files_by_rank(self.root))
         self.assertAlmostEqual(per_rank[0].wall_ms_per_step, 1.0)
         self.assertAlmostEqual(per_rank[1].wall_ms_per_step, 1.5)
         # The reason it is recorded: bubble = wall - busy, per rank. No
@@ -348,9 +333,7 @@ class CollectiveAndBasisTests(unittest.TestCase):
             {},
             overlapping,
         )
-        pooled = per_rank_pooled_metrics(
-            trace_files_by_rank(self.root), ()
-        )[0]
+        pooled = per_rank_pooled_metrics(trace_files_by_rank(self.root))[0]
         self.assertAlmostEqual(pooled.kernel_total_us, 200.0)
         self.assertAlmostEqual(pooled.busy_kernel_us, 150.0)
 
@@ -404,7 +387,7 @@ class SteplessRankTests(unittest.TestCase):
 
     def test_a_mixture_of_stepped_and_stepless_ranks_is_refused(self) -> None:
         arm = self._mixed_run()
-        per_rank = per_rank_pooled_metrics(trace_files_by_rank(arm), ())
+        per_rank = per_rank_pooled_metrics(trace_files_by_rank(arm))
         self.assertEqual(per_rank[0].kernel_ms_per_step, 0.220)
         self.assertIsNone(per_rank[1].kernel_ms_per_step)
         with self.assertRaisesRegex(ValueError, r"ranks \[1\] carry no"):
@@ -425,45 +408,8 @@ class SteplessRankTests(unittest.TestCase):
                 [{"ph": "X", "cat": "kernel", "name": "a",
                   "pid": 0, "tid": 100, "ts": 0.0, "dur": 220.0}],
             )
-        per_rank = per_rank_pooled_metrics(trace_files_by_rank(arm), ())
+        per_rank = per_rank_pooled_metrics(trace_files_by_rank(arm))
         self.assertEqual(busiest_rank(per_rank), 0)
-
-
-class CollectivesAreNotRegionComputeTests(unittest.TestCase):
-    """A collective that shares a region's stream is not that region's work."""
-
-    def setUp(self) -> None:
-        self._temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self._temporary.cleanup)
-        self.root = Path(self._temporary.name)
-
-    def test_a_collective_inside_a_region_span_is_not_region_kernel(
-        self,
-    ) -> None:
-        write_trace(
-            self.root / "profiling/traces/iteration_20/rank0_trace.json.gz",
-            {"bwd": ("backward", [100.0] * 4),
-             "fwd": ("forward", [10.0] * 4)},
-            [step_event(1000.0),
-             # Same stream as the region's own annotation (tid 100), sitting
-             # inside the first backward span.
-             {"ph": "X", "cat": "kernel",
-              "name": "ncclDevKernel_AllReduce_Sum_bf16_RING_LL",
-              "tid": 100, "ts": 30.0, "dur": 40.0}],
-        )
-        pooled = per_rank_pooled_metrics(
-            trace_files_by_rank(self.root), REGIONS
-        )[0]
-        self.assertAlmostEqual(pooled.kernel_total_us, 260.0)
-        self.assertAlmostEqual(pooled.collective_us, 40.0)
-        # Every backward invocation reads its own 50 us of compute. The one
-        # that hosted the collective does not read 90.
-        self.assertEqual(pooled.region_kernel["backward_block"], [50.0] * 4)
-        self.assertAlmostEqual(pooled.region_kernel_ms_per_step, 0.220)
-        self.assertAlmostEqual(pooled.compute_ms_per_step, 0.220)
-        self.assertLessEqual(
-            pooled.region_kernel_ms_per_step, pooled.compute_ms_per_step
-        )
 
 
 class StepWallReadsTheHostAnnotationTests(unittest.TestCase):
@@ -480,7 +426,7 @@ class StepWallReadsTheHostAnnotationTests(unittest.TestCase):
             {},
             extra,
         )
-        return per_rank_pooled_metrics(trace_files_by_rank(self.root), ())[0]
+        return per_rank_pooled_metrics(trace_files_by_rank(self.root))[0]
 
     def test_a_device_annotation_cannot_set_the_wall(self) -> None:
         pooled = self._window([
@@ -533,27 +479,9 @@ class PublishedNumberIsTheMaximumTests(unittest.TestCase):
         self.assertAlmostEqual(self.gpu.compute_ms_per_step, 0.440)
         self.assertAlmostEqual(self.gpu.wall_ms_per_step, 1.5)
 
-    def test_every_published_scalar_belongs_to_one_rank(self) -> None:
-        """Coherence, not a per-field maximum.
-
-        ``other = kernel - regions``. Taking the two sides from different
-        ranks can make it negative, which is why the reduction picks a rank
-        and then reads that rank's whole row.
-        """
-        published = next(
-            row for row in self.gpu.per_rank
-            if row.rank == self.gpu.published_rank
-        )
-        self.assertEqual(
-            self.gpu.region_kernel_ms_per_step,
-            published.region_kernel_ms_per_step,
-        )
-        self.assertEqual(self.gpu.launch_latency_us, published.launch_latency_us)
-        self.assertGreaterEqual(self.gpu.other_kernel_ms_per_step, 0.0)
-
     def test_the_busiest_rank_helper_breaks_ties_toward_the_lowest(self) -> None:
         per_rank = per_rank_pooled_metrics(
-            trace_files_by_rank(self.out_dir / "baseline"), REGIONS
+            trace_files_by_rank(self.out_dir / "baseline")
         )
         self.assertEqual(busiest_rank(per_rank), 1)
         self.assertEqual(busiest_rank({3: per_rank[0], 7: per_rank[0]}), 3)
@@ -590,14 +518,7 @@ class TheBaselineRatioSaysWhichRanksItDividedTests(unittest.TestCase):
             "scenario": "synthetic_parallel",
             "hardware": "test-gpu",
             "workload": {},
-            "regions": [
-                {
-                    "name": region.name,
-                    "phase": region.phase,
-                    "invocations_per_window": region.invocations_per_window,
-                }
-                for region in REGIONS
-            ],
+            "regions": [dict(region) for region in MANIFEST_REGIONS],
             "selected_arms": list(arms),
         }
         (out_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -674,23 +595,14 @@ class TheBaselineRatioSaysWhichRanksItDividedTests(unittest.TestCase):
 
 
 class ValidationRulesGotStricterTests(unittest.TestCase):
-    """Rules 5 and 7 now run per rank, and neither reading is weaker.
+    """Rule 5 now runs per rank, and that reading is not weaker.
 
-    Rule 5 asked for a window count over the whole arm and now asks it of
-    every rank, which is the same question at one rank and a stronger one
-    above it.
+    It asked for a window count over the whole arm and now asks it of every
+    rank, which is the same question at one rank and a stronger one above it.
 
-    Rule 7 changed less than an earlier draft of this docstring claimed. Its
-    structural predicate already ran per window, because
-    ``trace_window_metrics`` reads one file, so a rank whose graphs did not
-    match failed under the old code as well. What changed is the attribution
-    -- the error now names the rank -- and the fact that the per-window
-    step-consistency check no longer spans two ranks. The test below
-    discriminates on the message for that reason, and claims nothing more.
-
-    Rules 6 and 9 read every rank's traces as one set, which is what they did
-    when one rank was all there was. They are deliberately not per rank; the
-    comment at their call site records why.
+    Rule 6 reads every rank's traces as one set, which is what it did when
+    one rank was all there was. It is deliberately not per rank; the comment
+    at its call site records why.
     """
 
     def setUp(self) -> None:
@@ -716,13 +628,12 @@ class ValidationRulesGotStricterTests(unittest.TestCase):
             [step_event(1000.0)],
         )
 
-    def _validate(self, regions=()) -> None:
+    def _validate(self) -> None:
         validate_arm(
             self.arm,
             self.arm_dir,
             self.log_path,
             self.workload,
-            regions=regions,
         )
 
     def test_rule_five_fires_on_the_rank_that_is_short(self) -> None:
@@ -746,29 +657,11 @@ class ValidationRulesGotStricterTests(unittest.TestCase):
         ):
             self._validate()
 
-    def test_rule_seven_asks_each_rank_its_own_structural_question(
-        self,
-    ) -> None:
-        """Rank 1's graphs are repartitioned; rank 0's are fine."""
-        regions = (
-            Region(name="forward_block", phase="forward",
-                   invocations_per_window=80),
-        )
-        for iteration in (20, 40):
-            self._window(0, iteration)
-            self._window(1, iteration, invocations=40)
-        with self.assertRaisesRegex(RuntimeError, "rank 1:"):
-            self._validate(regions=regions)
-
-    def test_a_well_formed_two_rank_arm_passes_both_rules(self) -> None:
-        regions = (
-            Region(name="forward_block", phase="forward",
-                   invocations_per_window=80),
-        )
+    def test_a_well_formed_two_rank_arm_passes_every_rule(self) -> None:
         for rank in (0, 1):
             for iteration in (20, 40):
                 self._window(rank, iteration)
-        self._validate(regions=regions)
+        self._validate()
 
 
 class LegacyInertnessTests(unittest.TestCase):
@@ -823,32 +716,19 @@ class LegacyInertnessTests(unittest.TestCase):
     def test_a_recorded_run_holds_exactly_one_rank(self) -> None:
         by_rank = trace_files_by_rank(self.out_dir / "baseline")
         self.assertEqual(list(by_rank), [0])
-        per_rank = per_rank_pooled_metrics(by_rank, self._regions())
+        per_rank = per_rank_pooled_metrics(by_rank)
         self.assertEqual(list(per_rank), [0])
         self.assertEqual(busiest_rank(per_rank), 0)
-
-    def _regions(self) -> tuple[Region, ...]:
-        manifest = json.loads((self.out_dir / "manifest.json").read_text())
-        return tuple(Region(**region) for region in manifest["regions"])
 
     def test_every_published_gpu_time_field_is_bit_identical(self) -> None:
         recorded = self.recorded["gpu_time"]["baseline"]
         published = self.result.gpu_time["baseline"]
         for field, value in recorded.items():
+            if not hasattr(published, field):
+                # A region-derived field the payload no longer holds.
+                continue
             with self.subTest(field=field):
                 self.assertEqual(getattr(published, field), value)
-
-    def test_every_published_region_summary_is_bit_identical(self) -> None:
-        recorded = self.recorded["regions"]["baseline"]
-        published = self.result.regions["baseline"]
-        self.assertEqual(set(recorded), set(published))
-        for name, summaries in recorded.items():
-            for measure in ("span", "kernel"):
-                with self.subTest(region=name, measure=measure):
-                    self.assertEqual(
-                        vars(getattr(published[name], measure)),
-                        summaries[measure],
-                    )
 
     def test_the_window_count_is_unchanged(self) -> None:
         self.assertEqual(
@@ -886,28 +766,6 @@ class LegacyInertnessTests(unittest.TestCase):
             published.kernel_ms_per_step,
             places=6,
         )
-
-    def test_the_fixture_traces_reproduce_the_summaries_they_are_derived_from(
-        self,
-    ) -> None:
-        """The proof is the fixture's, not the harness's.
-
-        Recompute the region summaries straight from the traces and compare
-        them to the recorded file. A fixture that had lost a needed event
-        would fail here rather than quietly agreeing with itself.
-        """
-        pooled = per_rank_pooled_metrics(
-            trace_files_by_rank(self.out_dir / "baseline"), self._regions()
-        )[0]
-        recorded = self.recorded["regions"]["baseline"]
-        for name, summaries in recorded.items():
-            self.assertEqual(
-                vars(summarize(pooled.region_spans[name])), summaries["span"]
-            )
-            self.assertEqual(
-                vars(summarize(pooled.region_kernel[name])),
-                summaries["kernel"],
-            )
 
     def test_the_trace_glob_constant_is_the_name_on_disk(self) -> None:
         self.assertTrue(
@@ -978,7 +836,7 @@ class LaunchCountsSkipSteplessRanksTests(unittest.TestCase):
     def test_the_stepless_rank_would_win_if_it_were_divided_by_one(self) -> None:
         """The defect this pins, stated as arithmetic rather than as a claim."""
         by_rank = trace_files_by_rank(self.tmp / "baseline")
-        pooled = per_rank_pooled_metrics(by_rank, ())
+        pooled = per_rank_pooled_metrics(by_rank)
         self.assertEqual(pooled[0].profiled_steps, 0)
         self.assertEqual(pooled[0].launch_count, 500)
         self.assertEqual(pooled[1].profiled_steps, 5)
@@ -1013,7 +871,7 @@ class PartialStepAnnotationIsRefusedTests(unittest.TestCase):
              device_step("ProfilerStep#21", 1000.0, start=2000.0)],
         )
         with self.assertRaises(ValueError) as raised:
-            trace_window_metrics(path, ())
+            trace_window_metrics(path)
         self.assertIn("host annotation", str(raised.exception))
 
     def test_an_all_host_window_pooled_with_an_all_device_window_is_refused(
@@ -1030,10 +888,10 @@ class PartialStepAnnotationIsRefusedTests(unittest.TestCase):
             {"fwd": ("forward", [10.0])},
             [device_step("ProfilerStep#40", 1000.0)],
         )
-        trace_window_metrics(host_only, ())
-        trace_window_metrics(device_only, ())
+        trace_window_metrics(host_only)
+        trace_window_metrics(device_only)
         with self.assertRaises(ValueError) as raised:
-            pooled_window_metrics((host_only, device_only), ())
+            pooled_window_metrics((host_only, device_only))
         self.assertIn("on the device", str(raised.exception))
 
     def test_every_step_on_the_device_still_reports_no_wall(self) -> None:
@@ -1043,7 +901,7 @@ class PartialStepAnnotationIsRefusedTests(unittest.TestCase):
             {"fwd": ("forward", [10.0])},
             [device_step("ProfilerStep#20", 1000.0)],
         )
-        pooled = pooled_window_metrics((path,), ())
+        pooled = pooled_window_metrics((path,))
         self.assertEqual(pooled.profiled_steps, 1)
         self.assertIsNone(pooled.wall_ms_per_step)
 
@@ -1053,7 +911,7 @@ class PartialStepAnnotationIsRefusedTests(unittest.TestCase):
             {"fwd": ("forward", [10.0])},
             [host_step("ProfilerStep#20", 1000.0)],
         )
-        pooled = pooled_window_metrics((path,), ())
+        pooled = pooled_window_metrics((path,))
         self.assertEqual(pooled.profiled_steps, 1)
         self.assertAlmostEqual(pooled.wall_ms_per_step, 1.0)
 

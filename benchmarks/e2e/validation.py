@@ -70,11 +70,10 @@ from benchmarks.e2e.registry import (
     TORCH_COMPILE_MODE,
     UNCOMPILED_COMPILE_MODES,
     Arm,
+    Region,
     Workload,
 )
 from benchmarks.models.piper_qwen3.shape import shape_by_name
-from benchmarks.traces.extraction import per_rank_pooled_metrics
-from benchmarks.traces.schema import Region
 
 
 _SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
@@ -1013,10 +1012,6 @@ def validate_arm(
                     f"{ALL_REDUCE_MARKER!r}; a rank that reduced no gradient "
                     "reports roughly twice the true throughput"
                 )
-    if regions and profile.check_regions:
-        try:
-            per_rank_pooled_metrics(traces_by_rank, regions)
-        except ValueError as error:
-            raise RuntimeError(
-                f"{arm.name}: profiler traces failed structural validation: {error}"
-            ) from error
+    # Arm rule 7 is DELETED. It matched each declared compiled region
+    # against one same-phase graph in the traces, and the traces no longer
+    # carry region measurements.

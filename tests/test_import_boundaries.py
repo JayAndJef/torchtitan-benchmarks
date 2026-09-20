@@ -83,7 +83,6 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.runner",
     "benchmarks.e2e.results",
     "benchmarks.e2e.validation",
-    "benchmarks.traces.schema",
     "benchmarks.traces.extraction",
     "benchmarks.artifacts.layout",
     "benchmarks.artifacts.manifests",
