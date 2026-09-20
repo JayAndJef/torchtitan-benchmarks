@@ -22,7 +22,7 @@ from benchmarks.e2e.parallelism import (
     NAN_GUARD_LAUNCHERS,
     PRECISION_LAUNCHERS,
 )
-from benchmarks.e2e.registry import PIPER_1B_ROPE, SCENARIOS
+from benchmarks.e2e.registry import PIPER_1B_MEGATRON, SCENARIOS
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import HUGE
@@ -73,8 +73,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("run-all", help_result.output)
         result = self.runner.invoke(cli, ["scenarios"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("piper1b_lm_head", result.output)
-        self.assertIn("piper_optimized_te_ce", result.output)
+        self.assertIn("piper1b_megatron", result.output)
+        self.assertIn("titan_stock", result.output)
 
     def test_execution_help_shows_environment_variables(self) -> None:
         result = self.runner.invoke(cli, ["run-all", "--help"])
@@ -93,7 +93,7 @@ class CliTests(unittest.TestCase):
     def test_compile_mode_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -108,7 +108,7 @@ class CliTests(unittest.TestCase):
     def test_compile_mode_defaults_to_unrequested(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -150,7 +150,7 @@ class CliTests(unittest.TestCase):
     def test_model_size_defaults_to_unrequested_and_rejects_unknowns(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -214,9 +214,9 @@ class CliTests(unittest.TestCase):
                     "run",
                     "0",
                     "--scenario",
-                    "piper1b_attention",
+                    "piper1b_megatron",
                     "--arm",
-                    "baseline",
+                    "titan_stock",
                     "--ac",
                     "none",
                     "--model-size",
@@ -229,8 +229,10 @@ class CliTests(unittest.TestCase):
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
         self.assertEqual(manifest["model_size"], "huge")
-        command = manifest["commands"]["baseline"]
-        self.assertEqual(command[command.index("--config") + 1], "qwen3_piper_1b")
+        command = manifest["commands"]["titan_stock"]
+        self.assertEqual(
+            command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
+        )
         self.assertEqual(command[command.index("--config-arg") + 1], "size=huge")
         self.assertFalse([token for token in command if token.endswith("_huge")])
 
@@ -242,7 +244,7 @@ class CliTests(unittest.TestCase):
     def test_run_preserves_torchtitan_passthrough_arguments(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -253,7 +255,7 @@ class CliTests(unittest.TestCase):
                     "run",
                     "2",
                     "--scenario",
-                    "piper1b_rope",
+                    "piper1b_megatron",
                     "--arm",
                     "baseline",
                     "--",
@@ -276,8 +278,8 @@ class CliTests(unittest.TestCase):
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
             selected_arms=(
-                PIPER_1B_ROPE.arm("helion"),
-                PIPER_1B_ROPE.arm("baseline"),
+                PIPER_1B_MEGATRON.arm("titan_swiglu"),
+                PIPER_1B_MEGATRON.arm("titan_stock"),
             ),
         )
         with mock.patch(
@@ -289,16 +291,16 @@ class CliTests(unittest.TestCase):
                     "run",
                     "2",
                     "--scenario",
-                    "piper1b_rope",
+                    "piper1b_megatron",
                     "--arm",
-                    "helion",
+                    "titan_swiglu",
                     "--arm",
-                    "baseline",
+                    "titan_stock",
                 ],
             )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(
-            execute.call_args.args[0].arm_names, ("helion", "baseline")
+            execute.call_args.args[0].arm_names, ("titan_swiglu", "titan_stock")
         )
 
     def test_run_all_executes_then_evaluates_same_output(self) -> None:
@@ -310,7 +312,7 @@ class CliTests(unittest.TestCase):
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
                 result = self.runner.invoke(
                     cli,
-                    ["run-all", "6", "--scenario", "piper1b_rope"],
+                    ["run-all", "6", "--scenario", "piper1b_megatron", "--ac", "none"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
@@ -318,13 +320,25 @@ class CliTests(unittest.TestCase):
         evaluate.assert_called_once_with(out_dir, (), None)
 
     def test_all_scenarios_runs_each_scenario_under_one_timestamp(self) -> None:
-        # At the default ac mode (sac), scenarios that only support ac=none
-        # (piper1b_megatron) are skipped with a message rather than run.
-        supported_at_sac = [
-            name
-            for name, scenario in SCENARIOS.items()
-            if "sac" in scenario.supported_ac_modes
-        ]
+        # Every scenario declines the default ac mode (sac), so the sweep at
+        # ac none is the one that runs them all, under one timestamp.
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
+                result = self.runner.invoke(
+                    cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            [request.scenario_name for request in requests], list(SCENARIOS)
+        )
+        self.assertEqual(len({request.timestamp for request in requests}), 1)
+        self.assertIsNotNone(requests[0].timestamp)
+
+    def test_all_scenarios_skips_a_scenario_that_declines_the_ac_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
@@ -332,14 +346,8 @@ class CliTests(unittest.TestCase):
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
         self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
-        self.assertEqual(
-            [request.scenario_name for request in requests], supported_at_sac
-        )
-        self.assertNotIn("piper1b_megatron", supported_at_sac)
+        execute.assert_not_called()
         self.assertIn("skipped: does not support ac mode 'sac'", result.output)
-        self.assertEqual(len({request.timestamp for request in requests}), 1)
-        self.assertIsNotNone(requests[0].timestamp)
 
     def test_all_scenarios_at_compile_none_skips_the_megatron_scenario(self) -> None:
         # The uncompiled mode names a titan treatment Megatron never has, so
@@ -382,7 +390,9 @@ class CliTests(unittest.TestCase):
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", side_effect=RuntimeError("arm failed")
         ) as execute, mock.patch("benchmarks.cli.e2e._evaluate") as evaluate:
-            result = self.runner.invoke(cli, ["run-all", "0", "--all-scenarios"])
+            result = self.runner.invoke(
+                cli, ["run-all", "0", "--all-scenarios", "--ac", "none"]
+            )
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(execute.call_count, 1)
         evaluate.assert_not_called()
@@ -390,7 +400,7 @@ class CliTests(unittest.TestCase):
     def test_an_omitted_scenario_fails_on_both_execution_commands(self) -> None:
         """``--scenario`` is required, and an omitted one runs nothing.
 
-        ``piper1b_rope`` was the default until this change. A default could
+        One scenario was the default until this change. A default could
         only be reached by an omission, and would then measure that scenario
         under whatever label the operator assumed. ``benchmarks/e2e/runner.py``
         holds the rule in one place, so both commands that take the flag
@@ -416,7 +426,7 @@ class CliTests(unittest.TestCase):
 
     def test_all_scenarios_rejects_conflicting_options(self) -> None:
         for conflicting in (
-            ["--scenario", "piper1b_rope"],
+            ["--scenario", "piper1b_megatron"],
             ["--out", "/tmp/output"],
             ["--results", "/tmp/results.json"],
         ):
@@ -439,7 +449,7 @@ class CliTests(unittest.TestCase):
     def test_megatron_p2p_sync_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -454,7 +464,7 @@ class CliTests(unittest.TestCase):
         """``None`` is what lets a resume inherit the recorded value."""
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -530,14 +540,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             {request.megatron_p2p_sync for request in requests}, {"off"}
         )
-        self.assertIn(
-            "skipped: --megatron-p2p-sync 'off' reaches no arm", result.output
-        )
 
     def test_megatron_nan_guard_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -552,7 +559,7 @@ class CliTests(unittest.TestCase):
         """``None`` is what lets a resume inherit the recorded value."""
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -624,10 +631,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             {request.megatron_nan_guard for request in requests}, {"off"}
         )
-        # Both refusals appear, each on the scenario it names.
-        self.assertIn(
-            "skipped: --megatron-nan-guard 'off' reaches no arm", result.output
-        )
         self.assertIn(
             "skipped: --megatron-nan-guard 'off' was requested with baseline, "
             "whose driver benchmarks/e2e/megatron/train.py has no NaN guard",
@@ -637,7 +640,7 @@ class CliTests(unittest.TestCase):
     def test_megatron_precision_reaches_the_request(self) -> None:
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -652,7 +655,7 @@ class CliTests(unittest.TestCase):
         """``None`` is what lets a later resume inherit the recorded value."""
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(PIPER_1B_ROPE.arm("baseline"),),
+            selected_arms=(PIPER_1B_MEGATRON.arm("titan_stock"),),
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
@@ -722,11 +725,6 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(
             {request.megatron_precision for request in requests}, {"lean"}
-        )
-        # Both arm-side refusals appear, each on the scenario it names.
-        self.assertIn(
-            "skipped: --megatron-precision 'lean' reaches no arm",
-            result.output,
         )
         self.assertIn(
             "skipped: --megatron-precision 'lean' was requested with "

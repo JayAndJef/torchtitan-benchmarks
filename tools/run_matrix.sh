@@ -134,21 +134,16 @@ say "hf cache:    $HF_DATASETS_CACHE"
 CELL_LIST=()
 if [ "$CELLS" = all ] || [ "$CELLS" = huge ]; then
     for mode in default cuda-graph; do
-        for scenario in piper1b_megatron piper1b_attention; do
-            CELL_LIST+=("huge|none|$mode|$scenario")
-        done
+        CELL_LIST+=("huge|none|$mode|piper1b_megatron")
     done
 fi
 if [ "$CELLS" = all ] || [ "$CELLS" = 1b ]; then
     for ac in sac none; do
         for mode in default cuda-graph; do
-            for scenario in piper1b_rope piper1b_swiglu piper1b_qkv \
-                            piper1b_lm_head piper1b_attention piper1b_megatron; do
-                # megatron declares supported_ac_modes=("none",); the CLI
-                # errors rather than skipping on a direct --scenario request.
-                [ "$scenario" = piper1b_megatron ] && [ "$ac" != none ] && continue
-                CELL_LIST+=("1b|$ac|$mode|$scenario")
-            done
+            # Both scenarios declare supported_ac_modes=("none",); the CLI
+            # errors rather than skipping on a direct --scenario request.
+            [ "$ac" != none ] && continue
+            CELL_LIST+=("1b|$ac|$mode|piper1b_megatron")
         done
     done
 fi

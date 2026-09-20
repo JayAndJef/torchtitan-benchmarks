@@ -703,8 +703,8 @@ class ValidationRulesGotStricterTests(unittest.TestCase):
             _compiled_line("default") + _SAC_LINE + _SIZE_LINE
             + "Training completed\n"
         )
-        scenario = scenario_by_name("piper1b_rope")
-        self.arm = next(arm for arm in scenario.arms if arm.name == "baseline")
+        scenario = scenario_by_name("piper1b_megatron")
+        self.arm = next(arm for arm in scenario.arms if arm.name == "titan_stock")
         self.workload = scenario.workload
 
     def _window(self, rank: int, iteration: int, invocations: int = 80) -> None:

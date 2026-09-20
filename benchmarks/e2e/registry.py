@@ -264,17 +264,6 @@ PIPER_1B_WORKLOAD = Workload(
     local_batch_size=4,
 )
 
-PIPER_1B_UNFUSED_QKV_WORKLOAD = replace(
-    PIPER_1B_WORKLOAD,
-    config="qwen3_piper_1b_unfused_qkv",
-    seed=42,
-)
-
-PIPER_1B_LM_HEAD_WORKLOAD = replace(
-    PIPER_1B_WORKLOAD,
-    config="qwen3_piper_1b_full_logits",
-    seed=42,
-)
 
 def piper_block_regions(
     *, n_layers: int, profiler_active: int
@@ -315,130 +304,6 @@ PIPER_1B_REGIONS = piper_block_regions(
 )
 
 
-PIPER_1B_ROPE = Scenario(
-    name="piper1b_rope",
-    description="TorchTitan RoPE, Helion RoPE, and TransformerEngine RoPE on piper-1B.",
-    workload=PIPER_1B_WORKLOAD,
-    regions=PIPER_1B_REGIONS,
-    arms=(
-        Arm(
-            name="baseline",
-            description="TorchTitan CosSinRoPE; rotate-half math fused by Inductor into block kernels",
-        ),
-        Arm(
-            name="helion",
-            description="TorchTitan HelionCosSinRoPE kernel, swapped in via config override",
-            override_imports=(
-                "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
-            ),
-            overrides_per_block=1,
-            trace_kernel_markers=("_helion__rope_cos_sin_fwd",),
-        ),
-        Arm(
-            name="te",
-            description="TransformerEngine CUDA RoPE (JIT-built, needs gcc-13), via config override",
-            override_imports=(
-                "benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope",
-            ),
-            overrides_per_block=1,
-            trace_kernel_markers=("fused_rope_forward_positions_kernel",),
-            requires_gcc_toolset=True,
-        ),
-    ),
-)
-
-
-PIPER_1B_SWIGLU = Scenario(
-    name="piper1b_swiglu",
-    description="TorchTitan MoE SwiGLU versus the two Piper grouped-expert variants on piper-1B.",
-    workload=PIPER_1B_WORKLOAD,
-    regions=PIPER_1B_REGIONS,
-    arms=(
-        Arm(
-            name="baseline",
-            description="TorchTitan modern GroupedExperts: separate w1/w3 grouped GEMMs, plain-ops activation",
-        ),
-        Arm(
-            name="piper_optimized_triton",
-            description="fused w13 grouped GEMM + combined [R,2F] custom Triton activation op, via config override",
-            override_imports=(
-                "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu.piper_optimized_triton_fused_grouped_experts",
-            ),
-            overrides_per_block=1,
-            trace_kernel_markers=(
-                "_combined_silu_and_mul_forward_kernel",
-                "_combined_silu_and_mul_backward_kernel",
-            ),
-        ),
-        Arm(
-            name="piper_optimized_inductor",
-            description="fused w13 grouped GEMM, plain-ops SwiGLU left to Inductor, via config override",
-            override_imports=(
-                "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu.piper_optimized_inductor_fused_grouped_experts",
-            ),
-            overrides_per_block=1,
-            # No trace_kernel_markers: the activation is deliberately plain
-            # ops with no distinctive kernel name; Inductor fuses it into
-            # neighboring generated kernels. The [Override] count is the
-            # application check.
-        ),
-    ),
-)
-
-
-PIPER_1B_QKV = Scenario(
-    name="piper1b_qkv",
-    description="Separate Q/K/V projections versus fused QKV on piper-1B.",
-    workload=PIPER_1B_UNFUSED_QKV_WORKLOAD,
-    regions=PIPER_1B_REGIONS,
-    arms=(
-        Arm(
-            name="baseline",
-            description="TorchTitan QKVLinear: separate Q and KV GEMMs (qwen3_piper_1b_unfused_qkv config)",
-        ),
-        Arm(
-            name="fused_qkv",
-            description="TorchTitan FusedQKVLinear: one wqkv GEMM plus split (qwen3_piper_1b config)",
-            config="qwen3_piper_1b",
-        ),
-    ),
-)
-
-
-PIPER_1B_LM_HEAD = Scenario(
-    name="piper1b_lm_head",
-    description=(
-        "Piper full logits versus full-token PyTorch fused linear-CE and "
-        "reference and Piper-optimized TransformerEngine fused CE."
-    ),
-    workload=PIPER_1B_LM_HEAD_WORKLOAD,
-    regions=PIPER_1B_REGIONS,
-    arms=(
-        Arm(
-            name="baseline",
-            description="full-logits F.linear then TorchTitan CrossEntropyLoss, compiled",
-        ),
-        Arm(
-            name="fused_linear_ce",
-            description="torch.nn.functional.linear_cross_entropy: CE without materializing full logits",
-            config="qwen3_piper_1b_fused_linear_ce",
-        ),
-        Arm(
-            name="te_fused_ce",
-            description="full logits then the vendored TransformerEngine Triton cross entropy",
-            config="qwen3_piper_1b_te_fused_ce",
-            trace_kernel_markers=("online_softmax_kernel", "cross_entropy_kernel"),
-        ),
-        Arm(
-            name="piper_optimized_te_ce",
-            description="TE CE reworked into one Triton kernel writing the pre-scaled bf16 grad in forward (TE: 2 fwd kernels + a bwd scaling pass)",
-            config="qwen3_piper_1b_piper_optimized_te_ce",
-            trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
-        ),
-    ),
-)
-
-
 PIPER_1B_MEGATRON_WORKLOAD = replace(
     PIPER_1B_WORKLOAD,
     config="qwen3_piper_1b_pretokenized",
@@ -456,8 +321,7 @@ _PIPER_OPTIMIZED_SWIGLU_INDUCTOR = (
 # a bit-identical pre-tokenized data stream. No per-block regions: region
 # pooling rides on Inductor's compiled-graph annotations, which an eager
 # Megatron arm honestly does not have — total GPU kernel time, tokens/s,
-# launch latency, and peak memory are the cross-engine metrics (per-block
-# detail for the titan arms lives in the four scenarios above). ac mode is
+# launch latency, and peak memory are the cross-engine metrics. ac mode is
 # pinned to "none": Megatron-at-its-best does no recompute and its recompute
 # options are not parity with titan's per-op SAC.
 #
@@ -659,59 +523,9 @@ PIPER_MEGATRON_STOCK = Scenario(
 )
 
 
-# Captured by profiling, never guessed: FA4's kernels are emitted by the CuTe
-# DSL at compile time and their names appear nowhere in the torch source. The
-# full symbols are long CUTLASS manglings; these two substrings are the stable
-# parts, and Postprocess/Preprocess deliberately do not match the bwd marker.
-_FA4_TRACE_MARKERS = ("FlashAttentionForwardSm90", "FlashAttentionBackwardSm90")
-
-
-PIPER_1B_ATTENTION = Scenario(
-    name="piper1b_attention",
-    description=(
-        "Inner-attention backends on piper-1B: FlexAttention versus "
-        "FlashAttention-3 varlen versus FlexAttention lowered to "
-        "FlashAttention-4. TE cannot be an arm here -- see CLAUDE.md."
-    ),
-    workload=PIPER_1B_WORKLOAD,
-    regions=PIPER_1B_REGIONS,
-    arms=(
-        Arm(
-            name="baseline",
-            description="TorchTitan FlexAttention: an Inductor Triton template over a block-diagonal causal BlockMask (qwen3_piper_1b config)",
-        ),
-        Arm(
-            name="flash_attention_3",
-            description="FlashAttention-3 varlen over packed documents (qwen3_piper_1b_varlen config); needs the flash3 dependency group",
-            config="qwen3_piper_1b_varlen",
-            # FA3 degrades to FA2 rather than failing when it declines to
-            # register, so pin its own kernel name: seeing pytorch_flash::
-            # instead would mean the arm measured FA2 under an FA3 label.
-            trace_kernel_markers=("FlashAttnFwdSm90", "FlashAttnBwdSm90"),
-        ),
-        Arm(
-            name="flex_flash",
-            description=(
-                "FlexAttention lowered to FlashAttention-4 CuTe DSL kernels "
-                "(qwen3_piper_1b_flex_flash config); same BlockMask as "
-                "baseline, so this pair isolates the kernel family. Needs the "
-                "fa4 group"
-            ),
-            config="qwen3_piper_1b_flex_flash",
-            trace_kernel_markers=_FA4_TRACE_MARKERS,
-        ),
-    ),
-)
-
-
 SCENARIOS = {
     scenario.name: scenario
     for scenario in (
-        PIPER_1B_ROPE,
-        PIPER_1B_SWIGLU,
-        PIPER_1B_QKV,
-        PIPER_1B_LM_HEAD,
-        PIPER_1B_ATTENTION,
         PIPER_1B_MEGATRON,
         PIPER_MEGATRON_STOCK,
     )
