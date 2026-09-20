@@ -1328,10 +1328,10 @@ class ResolveRunTests(unittest.TestCase):
 
     def test_a_single_gpu_run_resolves_to_the_trivial_spec(self) -> None:
         resolved = self._resolve(gpu="0")
-        self.assertEqual(resolved[7].parallelism, TRIVIAL_SPEC)
+        self.assertEqual(resolved.axes.parallelism, TRIVIAL_SPEC)
 
     def test_a_named_trivial_spec_resolves_the_same_way(self) -> None:
-        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC)[7].parallelism, TRIVIAL_SPEC)
+        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC).axes.parallelism, TRIVIAL_SPEC)
 
     def test_a_mesh_that_does_not_fill_the_device_list_is_refused(self) -> None:
         # Rule 1: not "at most". An under-filled request would leave a GPU
@@ -1343,7 +1343,7 @@ class ResolveRunTests(unittest.TestCase):
 
     def test_a_legal_mesh_resolves(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
-        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec)[7].parallelism, spec)
+        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec).axes.parallelism, spec)
 
     def test_a_malformed_device_list_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "comma-separated GPU indices"):

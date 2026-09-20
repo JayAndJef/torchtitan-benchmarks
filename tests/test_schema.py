@@ -76,6 +76,7 @@ DECLARED_TYPES = (
     "ValidationProfile",
     "Engine",
     "RequestedAxes",
+    "ResolvedRun",
     "RunAxes",
     "RunRequest",
 )

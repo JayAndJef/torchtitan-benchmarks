@@ -209,7 +209,7 @@ class UncompiledScheduleRefusalTests(unittest.TestCase):
         """Rule 5 refuses the stock megatron arm at this schedule, so the
         eager titan arm is the whole legal selection here."""
         resolved = self._resolve(("titan_eager",))
-        self.assertEqual([arm.name for arm in resolved[2]], ["titan_eager"])
+        self.assertEqual([arm.name for arm in resolved.arms], ["titan_eager"])
 
 
 class SelectedArmTests(unittest.TestCase):
@@ -285,7 +285,7 @@ class SelectedArmTests(unittest.TestCase):
                         arm.name for arm in self.scenario.arms
                     ]
                     self.assertEqual(
-                        [arm.name for arm in resolved[2]], expected
+                        [arm.name for arm in resolved.arms], expected
                     )
                     hardware.assert_called_once()
 
@@ -466,16 +466,16 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         legal: the megatron arm gets the flag and the titan arm gets
         nothing."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[7].megatron_p2p_sync, "off")
-        commands = resolved[6]
+        self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
+        commands = resolved.commands
         megatron = commands["megatron_stock"]
         self.assertEqual(megatron[-2:], ["--bench-batch-p2p-sync", "off"])
         self.assertEqual(_p2p_flags(commands["titan_compiled"]), [])
 
     def test_a_megatron_only_subset_passes(self) -> None:
         resolved = self._resolve(("megatron_stock",))
-        self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
-        self.assertEqual(resolved[7].megatron_p2p_sync, "off")
+        self.assertEqual([arm.name for arm in resolved.arms], ["megatron_stock"])
+        self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
 
     def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
         for requested in (None, "off"):
@@ -483,8 +483,8 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_p2p_sync=requested
                 )
-                self.assertEqual(resolved[7].megatron_p2p_sync, "off")
-                commands = resolved[6]
+                self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
+                commands = resolved.commands
                 self.assertEqual(
                     _p2p_flags(commands["megatron_stock"]),
                     ["--bench-batch-p2p-sync"],
@@ -495,15 +495,15 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         resolved = self._resolve(
             ("megatron_stock", "titan_compiled"), megatron_p2p_sync="on"
         )
-        self.assertEqual(resolved[7].megatron_p2p_sync, "on")
-        for name, command in resolved[6].items():
+        self.assertEqual(resolved.axes.megatron_p2p_sync, "on")
+        for name, command in resolved.commands.items():
             self.assertEqual(_p2p_flags(command), [], name)
 
     def test_the_stock_scenario_takes_the_value_too(self) -> None:
         resolved = self._resolve(
             ("megatron_stock",), scenario_name="engines"
         )
-        command = resolved[6]["megatron_stock"]
+        command = resolved.commands["megatron_stock"]
         self.assertEqual(command[-2:], ["--bench-batch-p2p-sync", "off"])
 
     def _write_manifest(self, out_dir: Path, megatron_p2p_sync: str) -> None:
@@ -561,10 +561,10 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             out_dir.mkdir()
             self._write_manifest(out_dir, "off")
             resolved = self._resume(out_dir, megatron_p2p_sync=None)
-            self.assertEqual(resolved[7].megatron_p2p_sync, "off")
-            self.assertTrue(resolved[8])
+            self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
+            self.assertTrue(resolved.resumed)
             self.assertEqual(
-                resolved[6]["megatron_stock"][-2:],
+                resolved.commands["megatron_stock"][-2:],
                 ["--bench-batch-p2p-sync", "off"],
             )
             with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
@@ -738,8 +738,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         token, once, ahead of the harness group, and the titan arm gets
         nothing."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[7].megatron_nan_guard, "off")
-        commands = resolved[6]
+        self.assertEqual(resolved.axes.megatron_nan_guard, "off")
+        commands = resolved.commands
         stock = commands["megatron_stock"]
         self.assertEqual(stock.count(NO_NAN_CHECK), 1)
         self.assertLess(stock.index(NO_NAN_CHECK), stock.index("--bench-arm-dir"))
@@ -747,8 +747,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
 
     def test_a_stock_only_subset_passes(self) -> None:
         resolved = self._resolve(("megatron_stock",))
-        self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
-        self.assertEqual(resolved[7].megatron_nan_guard, "off")
+        self.assertEqual([arm.name for arm in resolved.arms], ["megatron_stock"])
+        self.assertEqual(resolved.axes.megatron_nan_guard, "off")
 
     def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
         for requested in (None, "off"):
@@ -756,8 +756,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_nan_guard=requested
                 )
-                self.assertEqual(resolved[7].megatron_nan_guard, "off")
-                commands = resolved[6]
+                self.assertEqual(resolved.axes.megatron_nan_guard, "off")
+                commands = resolved.commands
                 self.assertIn(NO_NAN_CHECK, commands["megatron_stock"])
                 self.assertNotIn(NO_NAN_CHECK, commands["titan_compiled"])
 
@@ -765,8 +765,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         resolved = self._resolve(
             ("megatron_stock", "titan_compiled"), megatron_nan_guard="on"
         )
-        self.assertEqual(resolved[7].megatron_nan_guard, "on")
-        for name, command in resolved[6].items():
+        self.assertEqual(resolved.axes.megatron_nan_guard, "on")
+        for name, command in resolved.commands.items():
             self.assertNotIn(NO_NAN_CHECK, command, name)
 
     def test_the_banner_names_the_value(self) -> None:
@@ -891,9 +891,9 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             out_dir.mkdir()
             self._write_manifest(out_dir, "off")
             resolved = self._resume(out_dir, megatron_nan_guard=None)
-            self.assertEqual(resolved[7].megatron_nan_guard, "off")
-            self.assertTrue(resolved[8])
-            self.assertIn(NO_NAN_CHECK, resolved[6]["megatron_stock"])
+            self.assertEqual(resolved.axes.megatron_nan_guard, "off")
+            self.assertTrue(resolved.resumed)
+            self.assertIn(NO_NAN_CHECK, resolved.commands["megatron_stock"])
             with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
                 self._resume(out_dir, megatron_nan_guard="on")
 
@@ -1007,8 +1007,8 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         """A mixed selection is legal: the stock arm gets the four flags
         and the titan arm gets none of them."""
         resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved[7].megatron_precision, "lean")
-        commands = resolved[6]
+        self.assertEqual(resolved.axes.megatron_precision, "lean")
+        commands = resolved.commands
         stock = commands["megatron_stock"]
         for flag in self.LEAN_FLAGS:
             with self.subTest(flag=flag):
@@ -1021,8 +1021,8 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 resolved = self._resolve(
                     ("megatron_stock", "titan_compiled"), megatron_precision=requested
                 )
-                self.assertEqual(resolved[7].megatron_precision, "stock")
-                for name, command in resolved[6].items():
+                self.assertEqual(resolved.axes.megatron_precision, "stock")
+                for name, command in resolved.commands.items():
                     for flag in self.LEAN_FLAGS:
                         self.assertNotIn(flag, command, name)
 
@@ -1098,9 +1098,9 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 out_dir, megatron_precision="lean", parallelism=spec
             )
             resolved = self._resume(out_dir, parallelism=spec)
-            self.assertEqual(resolved[7].megatron_precision, "lean")
+            self.assertEqual(resolved.axes.megatron_precision, "lean")
             self.assertIn(
-                "--use-precision-aware-optimizer", resolved[6]["megatron_stock"]
+                "--use-precision-aware-optimizer", resolved.commands["megatron_stock"]
             )
             with self.assertRaisesRegex(ValueError, "megatron_precision"):
                 self._resume(
