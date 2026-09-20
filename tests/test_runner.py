@@ -985,14 +985,11 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
     def test_lean_without_a_stock_arm_is_refused_before_any_probe(self) -> None:
         """TorchTitan holds its own bf16 optimizer states, so a titan-only
         run gives the value nothing to reach."""
-        for scenario_name, names in (
-            ("engines", ("titan_compiled",)),
-            ("engines", ("titan_compiled",)),
-        ):
-            with self.subTest(scenario=scenario_name):
+        for names in (("titan_compiled",), ("titan_compiled", "titan_eager")):
+            with self.subTest(arms=names):
                 self._refused_before_any_probe(
                     "reaches no arm",
-                    scenario_name,
+                    "engines",
                     arm_names=names,
                     megatron_precision="lean",
                 )
