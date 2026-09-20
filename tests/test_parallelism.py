@@ -1812,7 +1812,6 @@ class ImportBudgetTest(unittest.TestCase):
         self.assertEqual(
             {name for name in imported if name.startswith("benchmarks")},
             {
-                "benchmarks.e2e.registry",
                 "benchmarks.e2e.schema",
                 "benchmarks.models.piper_qwen3.shape",
             },
