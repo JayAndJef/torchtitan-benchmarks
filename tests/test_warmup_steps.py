@@ -209,7 +209,7 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
             "hardware": "test-gpu",
             "workload": _WORKLOAD,
             "selected_arms": ["titan_eager"],
-            "arms": [{"name": "titan_eager", "launcher": "torchtitan"}],
+            "arms": [{"name": "titan_eager", "engine": "torchtitan"}],
             "parallelism": {"world_size": 1, "dp": 1, "pp": 1, "ep": 1},
         }
         (root / "manifest.json").write_text(json.dumps(manifest))

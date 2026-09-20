@@ -23,7 +23,7 @@ from benchmarks.artifacts.manifests import (
     _resume_mismatches,
     manifest_data,
 )
-from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.megatron_stock import profiling
 from benchmarks.e2e.megatron_stock.flags import (
     BENCH_PROFILE,
@@ -308,7 +308,7 @@ class TracelessEvaluationTests(unittest.TestCase):
                 "profiler_active": 5,
             },
             "selected_arms": ["titan_eager"],
-            "arms": [{"name": "titan_eager", "launcher": "torchtitan"}],
+            "arms": [{"name": "titan_eager", "engine": "torchtitan"}],
             "parallelism": {"world_size": 1, "dp": 1, "pp": 1, "ep": 1},
         }
         (root / "manifest.json").write_text(json.dumps(manifest))

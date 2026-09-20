@@ -1,11 +1,12 @@
 """Reject partial or wrongly configured end-to-end runs before analysis.
 
 ``validate_arm`` is the gate every arm passes before its numbers are
-published. Engine differences live in the ``VALIDATION_PROFILES`` registry,
-selected by ``Arm.validation``; the structural rules -- trace-window count,
-kernel markers, override counting, and the parameter-count line -- are
-shared. ``ValidationProfile`` itself is declared in
-``benchmarks.e2e.schema``; this module holds the profiles.
+published. Engine differences live in two named profiles,
+``TORCHTITAN_PROFILE`` and ``MEGATRON_STOCK_PROFILE``, chosen by the arm's
+engine; the structural rules -- trace-window count, kernel markers, override
+counting, and the parameter-count line -- are shared. ``ValidationProfile``
+itself is declared in ``benchmarks.e2e.schema``; this module holds the
+profiles, and ``benchmarks.e2e.engines`` puts each on its engine record.
 
 **The log rules run once per rank.** One ``<arm>.log`` holds every rank's
 output, so a rule read against the whole file asks "did some rank do this".
@@ -341,7 +342,7 @@ def _no_p2p_markers(
 ) -> tuple[str, ...]:
     """TorchTitan has no p2p sync to prove.
 
-    ``--megatron-p2p-sync`` reaches the two megatron launchers alone, and a
+    ``--megatron-p2p-sync`` reaches the megatron command alone, and a
     TorchTitan argv is the same under either value. So no line is asked of
     a titan rank, and its absence is not a failure. The value is still
     checked, so an unknown one does not pass through a titan arm unseen.
@@ -391,7 +392,7 @@ def _nan_guard_token(megatron_nan_guard: str) -> str:
 def _no_nan_guard_markers(megatron_nan_guard: str) -> tuple[str, ...]:
     """TorchTitan has no Megatron NaN guard to prove.
 
-    The value reaches the stock megatron launcher alone, and a TorchTitan
+    The value reaches the stock megatron command alone, and a TorchTitan
     argv is the same under either value. The value is still checked, so
     an unknown one does not pass through a titan arm unseen.
     """
@@ -439,7 +440,7 @@ def _precision_tokens(megatron_precision: str) -> tuple[str, str]:
 def _no_precision_markers(megatron_precision: str) -> tuple[str, ...]:
     """TorchTitan has no Megatron optimizer precision to prove.
 
-    The value reaches the stock megatron launcher alone, and a TorchTitan
+    The value reaches the stock megatron command alone, and a TorchTitan
     argv is the same under either value. The value is still checked, so an
     unknown one does not pass through a titan arm unseen.
     """
@@ -479,72 +480,97 @@ def _megatron_stock_precision_markers(
     )
 
 
-VALIDATION_PROFILES = {
-    "torchtitan": ValidationProfile(
-        completion_marker="Training completed",
-        # Carried by both of TorchTitan's compile log lines -- the per-block
-        # line and the loss function's -- so one check covers every
-        # component --compile.enable switches on, in both directions.
-        compile_marker="with torch.compile",
-        failure_markers=("falling back to the PyTorch",),
-        check_ac_line=True,
-        parallelism_markers=_titan_parallelism_markers,
-        # TorchTitan logs this from _build_pipeline_schedule, which
-        # runs only when the pipeline degree is above 1.
-        pipelined_pattern=re.compile(r"Using pipeline schedule"),
-        # Two independent witnesses of a data-parallel degree, because one
-        # of them is not ours. ``ParallelDims.build_mesh`` logs the resolved
-        # mesh on every rank whatever this repo's code does, so a degree
-        # above 1 shows there even in a run that never reached
-        # ``parallelize_piper1b``; the second alternative is our own line.
-        # A ``pp 2, dp 1`` run logs ``dp_replicate=1, dp_shard=1`` and
-        # matches neither, which was checked against a real one.
-        data_parallel_pattern=re.compile(
-            r"dp_replicate=(?!1\b)\d+"
-            r"|dp_shard=(?!1\b)\d+"
-            r"|piper1b data parallel:"
-        ),
-        # The option never reaches a TorchTitan arm.
-        p2p_markers=_no_p2p_markers,
-        # Nor does this one.
-        nan_guard_markers=_no_nan_guard_markers,
-        precision_markers=_no_precision_markers,
+# The TorchTitan profile. ``benchmarks/e2e/engines.py`` puts it on the
+# ``torchtitan`` engine record; nothing else reads it.
+TORCHTITAN_PROFILE = ValidationProfile(
+    completion_marker="Training completed",
+    # Carried by both of TorchTitan's compile log lines -- the per-block
+    # line and the loss function's -- so one check covers every
+    # component --compile.enable switches on, in both directions.
+    compile_marker="with torch.compile",
+    failure_markers=("falling back to the PyTorch",),
+    check_ac_line=True,
+    parallelism_markers=_titan_parallelism_markers,
+    # TorchTitan logs this from _build_pipeline_schedule, which
+    # runs only when the pipeline degree is above 1.
+    pipelined_pattern=re.compile(r"Using pipeline schedule"),
+    # Two independent witnesses of a data-parallel degree, because one
+    # of them is not ours. ``ParallelDims.build_mesh`` logs the resolved
+    # mesh on every rank whatever this repo's code does, so a degree
+    # above 1 shows there even in a run that never reached
+    # ``parallelize_piper1b``; the second alternative is our own line.
+    # A ``pp 2, dp 1`` run logs ``dp_replicate=1, dp_shard=1`` and
+    # matches neither, which was checked against a real one.
+    data_parallel_pattern=re.compile(
+        r"dp_replicate=(?!1\b)\d+"
+        r"|dp_shard=(?!1\b)\d+"
+        r"|piper1b data parallel:"
     ),
-    # The megatron arm of the engines scenario. It runs
-    # megatron.training's own pretrain() through pretrain_gpt's providers.
-    # Every marker below carries the word "stock", and the driver prints
-    # the same strings.
-    "megatron_stock": ValidationProfile(
-        completion_marker="Training completed",
-        # None on purpose: megatron-core binds jit_fuser = torch.compile at
-        # import and compiles no whole layer, so no log line proves a
-        # whole-block treatment either way. Rule 8 therefore checks nothing
-        # here, and it refuses a stock arm that declares compile="torch".
-        # The driver's own line is still matched, by the first precision
-        # marker below.
-        compile_marker=None,
-        failure_markers=(),
-        check_ac_line=False,
-        parallelism_markers=_megatron_stock_parallelism_markers,
-        # The driver prints its own resolved degrees. Any pipeline degree
-        # other than 1 is what this must not see at the trivial spec.
-        pipelined_pattern=re.compile(
-            r"Megatron-LM stock parallelism: dp=\d+ pp=(?!1\b)\d+"
-        ),
-        # The same line's other degree, plus the wrapper's own line. The
-        # negative lookahead is what keeps dp=1 out: it refuses a 1 that ends
-        # the number and admits 10 or 12.
-        data_parallel_pattern=re.compile(
-            r"Megatron-LM stock parallelism: dp=(?!1\b)\d+"
-            r"|Megatron-LM stock data parallel:"
-        ),
-        # The stock driver's own p2p line, and it carries the word "stock".
-        p2p_markers=_megatron_stock_p2p_markers,
-        # The stock driver's nan guard line, from the value Megatron parsed.
-        nan_guard_markers=_megatron_stock_nan_guard_markers,
-        precision_markers=_megatron_stock_precision_markers,
+    # The option never reaches a TorchTitan arm.
+    p2p_markers=_no_p2p_markers,
+    # Nor does this one.
+    nan_guard_markers=_no_nan_guard_markers,
+    precision_markers=_no_precision_markers,
+)
+
+# The megatron arm of the engines scenario. It runs
+# megatron.training's own pretrain() through pretrain_gpt's providers.
+# Every marker below carries the word "stock", and the driver prints
+# the same strings.
+MEGATRON_STOCK_PROFILE = ValidationProfile(
+    completion_marker="Training completed",
+    # None on purpose: megatron-core binds jit_fuser = torch.compile at
+    # import and compiles no whole layer, so no log line proves a
+    # whole-block treatment either way. Rule 8 therefore checks nothing
+    # here, and it refuses a stock arm that declares compile="torch".
+    # The driver's own line is still matched, by the first precision
+    # marker below.
+    compile_marker=None,
+    failure_markers=(),
+    check_ac_line=False,
+    parallelism_markers=_megatron_stock_parallelism_markers,
+    # The driver prints its own resolved degrees. Any pipeline degree
+    # other than 1 is what this must not see at the trivial spec.
+    pipelined_pattern=re.compile(
+        r"Megatron-LM stock parallelism: dp=\d+ pp=(?!1\b)\d+"
     ),
+    # The same line's other degree, plus the wrapper's own line. The
+    # negative lookahead is what keeps dp=1 out: it refuses a 1 that ends
+    # the number and admits 10 or 12.
+    data_parallel_pattern=re.compile(
+        r"Megatron-LM stock parallelism: dp=(?!1\b)\d+"
+        r"|Megatron-LM stock data parallel:"
+    ),
+    # The stock driver's own p2p line, and it carries the word "stock".
+    p2p_markers=_megatron_stock_p2p_markers,
+    # The stock driver's nan guard line, from the value Megatron parsed.
+    nan_guard_markers=_megatron_stock_nan_guard_markers,
+    precision_markers=_megatron_stock_precision_markers,
+)
+
+
+# Which profile validates an arm of which engine.
+#
+# ``benchmarks/e2e/engines.py`` builds the same pairing on its own records,
+# from the same two constants, and ``tests/test_engines.py`` pins the two
+# against each other. The duplication is the price of the import direction:
+# this module sits BELOW ``engines.py``, because an engine record carries a
+# profile, so it cannot read the records back.
+_PROFILE_BY_ENGINE = {
+    "torchtitan": TORCHTITAN_PROFILE,
+    "megatron_stock": MEGATRON_STOCK_PROFILE,
 }
+
+
+def profile_for_engine(engine: str) -> ValidationProfile:
+    """The validation profile for one engine name."""
+    try:
+        return _PROFILE_BY_ENGINE[engine]
+    except KeyError as error:
+        raise ValueError(
+            f"Unknown engine {engine!r}. Available: "
+            + ", ".join(sorted(_PROFILE_BY_ENGINE))
+        ) from error
 
 
 def _trace_contains(trace_path: Path, marker: str) -> bool:
@@ -600,7 +626,7 @@ def _validate_log(
     if profile.compile_marker is None:
         if arm.compile == "torch":
             raise RuntimeError(
-                f"{arm.name}: validation profile {arm.validation!r} cannot "
+                f"{arm.name}: engine {arm.engine!r} cannot "
                 "prove a whole-block torch.compile; that engine compiles no "
                 "whole layer and exposes no switch for one"
             )
@@ -767,7 +793,7 @@ def validate_arm(
     is lost is the second witness -- the all-reduce kernel -- so cite a
     ``dp`` number from an unprofiled run as resting on the log line.
     """
-    engine_profile = VALIDATION_PROFILES[arm.validation]
+    engine_profile = profile_for_engine(arm.engine)
     shape = shape_by_name(model_size)
     # At every world size, unlike the mesh markers below: the guard runs
     # at pp 1 and at dp 1. Resolved before any log is read, so an unknown
@@ -792,7 +818,7 @@ def validate_arm(
         )
         if not parallelism_markers:
             raise RuntimeError(
-                f"{arm.name}: validation profile {arm.validation!r} logs "
+                f"{arm.name}: engine {arm.engine!r} logs "
                 f"nothing that proves dp {parallelism.dp} x pp "
                 f"{parallelism.pp}; the run cannot be published under a mesh "
                 "no rule checked"

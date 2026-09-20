@@ -22,9 +22,9 @@ from benchmarks.artifacts.run_state import (
     load_run_state,
     update_run_state,
 )
-from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.parallelism import (
-    MEGATRON_LAUNCHERS,
+    MEGATRON_ENGINES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
     zero_warnings,
@@ -326,7 +326,7 @@ def _resolve_run(
         )
 
     # The fourth global axis, resolved and checked before any host probe.
-    # ``engines`` is the launcher set of the arms this run will really start,
+    # ``engines`` is the engine set of the arms this run will really start,
     # so the Megatron restrictions follow the arms rather than a scenario
     # name. ``run --arm NAME`` narrows that set on purpose: a run of one
     # titan arm has no megatron opponent to match, and refusing it for the
@@ -337,7 +337,7 @@ def _resolve_run(
         parallelism,
         shape=shape,
         workload=workload,
-        engines={arm.launcher for arm in arms},
+        engines={arm.engine for arm in arms},
         device_count=len(devices),
     )
     # PyTorch's zero-bubble and DualPipeV classes call
@@ -381,7 +381,7 @@ def _resolve_run(
     # ``results.json``. A second copy of the text here could drift from the
     # copy the artifact carries.
     for warning in zero_warnings(
-        parallelism, engines=[arm.launcher for arm in arms]
+        parallelism, engines=[arm.engine for arm in arms]
     ):
         _emit(event_handler, "summary", f"WARNING: {warning}")
 
@@ -403,7 +403,7 @@ def _resolve_run(
                 "pp 1, where there is no pipeline message to synchronize; "
                 "the manifest would record a treatment the run did not have"
             )
-        if not any(arm.launcher in MEGATRON_LAUNCHERS for arm in arms):
+        if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
             raise ValueError(
                 f"--megatron-p2p-sync {megatron_p2p_sync!r} reaches no arm "
                 f"of this run: {', '.join(arm.name for arm in arms)} run on "
@@ -415,7 +415,7 @@ def _resolve_run(
     # The NaN-guard treatment, refused parent-side through the helper the
     # --all-scenarios sweep reads too, so a skipped scenario and a refused
     # run state one reason. Legal at every mesh; what decides it is which
-    # launchers the selection holds.
+    # engines the selection holds.
     refusal = megatron_nan_guard_refusal(arms, megatron_nan_guard)
     if refusal is not None:
         raise ValueError(refusal)
@@ -522,7 +522,7 @@ def megatron_precision_refusal(
     if megatron_precision == DEFAULT_MEGATRON_PRECISION:
         return None
     arms = tuple(arms)
-    if not any(arm.launcher in MEGATRON_LAUNCHERS for arm in arms):
+    if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
         return (
             f"--megatron-precision {megatron_precision!r} reaches no arm of "
             f"this run: {', '.join(arm.name for arm in arms)} run on "
@@ -547,7 +547,7 @@ def megatron_nan_guard_refusal(
 
     One refusal, naming its repair. A run with no stock megatron arm
     gives the value nothing to reach, which is the ``--megatron-p2p-sync``
-    refusal with a smaller launcher set. ``_resolve_run`` raises the
+    refusal with a smaller engine set. ``_resolve_run`` raises the
     string, and the ``--all-scenarios`` sweep prints it and skips the
     scenario.
 
@@ -560,7 +560,7 @@ def megatron_nan_guard_refusal(
     if megatron_nan_guard != "on":
         return None
     arms = tuple(arms)
-    if not any(arm.launcher in MEGATRON_LAUNCHERS for arm in arms):
+    if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
         return (
             f"--megatron-nan-guard {megatron_nan_guard!r} reaches no arm of "
             f"this run: {', '.join(arm.name for arm in arms)} run on "

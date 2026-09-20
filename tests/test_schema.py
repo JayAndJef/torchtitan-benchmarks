@@ -54,6 +54,7 @@ LAYER_ORDER = (
     "benchmarks.e2e.megatron_stock.model_builder",
     "benchmarks.e2e.launch",
     "benchmarks.e2e.validation",
+    "benchmarks.e2e.engines",
     "benchmarks.artifacts.manifests",
     "benchmarks.e2e.runner",
     "benchmarks.e2e.results",
@@ -73,6 +74,7 @@ DECLARED_TYPES = (
     "PipelineSchedule",
     "ParallelismSpec",
     "ValidationProfile",
+    "Engine",
     "RunRequest",
 )
 

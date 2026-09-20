@@ -23,7 +23,7 @@ from benchmarks.artifacts.manifests import (
     _resume_mismatches,
     manifest_data,
 )
-from benchmarks.e2e.launch import command_for_arm
+from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
@@ -1023,7 +1023,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
 
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
-                if arm.launcher != "torchtitan":
+                if arm.engine != "torchtitan":
                     continue
                 name = arm.config or scenario.workload.config
                 with self.subTest(scenario=scenario.name, arm=arm.name):

@@ -4,7 +4,7 @@ The declarations themselves live in ``benchmarks.e2e.schema``. This module
 holds the instances, the tables and the run-axis constants built from them.
 
 Scenarios describe what differs between arms, and nothing else: command
-construction (``benchmarks.e2e.launch``), provenance collection
+construction (``benchmarks.e2e.engines``), provenance collection
 (``benchmarks.execution.provenance``), and validation
 (``benchmarks.e2e.validation``) each live in their own module and read these
 declarations. That is what lets a new ablation be a registry entry rather
@@ -108,7 +108,7 @@ DEFAULT_MEGATRON_P2P_SYNC = "off"
 #
 # "on" is stock Megatron, and it is what every number published before
 # this default flipped was measured under. "off" sends Megatron's own
-# --no-check-for-nan-in-loss-and-grad to the stock launcher, so a stock
+# --no-check-for-nan-in-loss-and-grad to the stock command, so a stock
 # user can reproduce the argv, and it is the default here. TorchTitan arms
 # receive nothing. The measured effect is in
 # reports/20260905-host-sync-ab.md. Evaluation refuses
@@ -155,7 +155,7 @@ DEFAULT_MEGATRON_NAN_GUARD = "off"
 # "lean" needs a sharded dense value. optimizer_config.py asserts
 # use_distributed_optimizer under --use-precision-aware-optimizer, and the
 # zero axis is the one owner of that flag. The value reaches the
-# stock megatron launcher alone.
+# stock megatron command alone.
 #
 # **"lean" changes the numerics.** bf16 Adam moments and bf16 gradient
 # accumulation are a real change, and at pp 8 the accumulation is 16-way in
@@ -259,8 +259,7 @@ ENGINES = Scenario(
             ),
             # The stock driver compiles no whole transformer layer.
             compile="none",
-            launcher="megatron_stock",
-            validation="megatron_stock",
+            engine="megatron_stock",
             # Both markers are MEASURED, on every rank. The dp 2 x pp 4
             # cell at out/20260826T172258Z carries them in all eight ranks
             # of both profiler windows, at 320 and 640 per window per rank.

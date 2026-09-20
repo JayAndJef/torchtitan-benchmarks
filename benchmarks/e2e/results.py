@@ -626,7 +626,7 @@ def evaluate_run(
     #
     # It also reads the engines the evaluated arms run on, because one
     # warning is about TorchTitan's FSDP2 alone. The manifest arm records
-    # carry the launcher, so the file states the same facts the console did.
+    # carry the engine, so the file states the same facts the console did.
     warnings.extend(
         zero_warnings(
             ParallelismSpec(
@@ -636,7 +636,7 @@ def evaluate_run(
                 zero=int(recorded_parallelism.get("zero", DEFAULT_ZERO)),
             ),
             engines=[
-                str(record.get("launcher", ""))
+                str(record.get("engine", ""))
                 for record in manifest.get("arms", ())
                 if record.get("name") in set(arms)
             ],

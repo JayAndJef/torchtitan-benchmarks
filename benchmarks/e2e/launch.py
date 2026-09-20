@@ -1,9 +1,11 @@
 """Build the training launch command for one end-to-end benchmark arm.
 
 Command construction is the seam between a declarative arm and the engine
-that actually trains it: ``command_for_arm`` dispatches on ``arm.launcher``
-and each branch delivers the scenario workload, the global run axes, and the
-arm's own overrides in that engine's own spelling.
+that actually trains it. This module holds one builder per engine, and each
+delivers the scenario workload, the global run axes, and the arm's own
+overrides in that engine's own spelling. Every builder takes the same
+parameters; ``benchmarks.e2e.engines`` holds the records that pair a builder
+with a validation profile, and it owns the dispatch.
 
 **At the trivial parallelism spec the argv is the argv this repo has always
 built.** ``_titan_parallelism_flags`` returns an empty tuple there, so no
@@ -188,13 +190,12 @@ def _refuse_parallelism_passthrough(
         )
 
 
-def command_for_arm(
+def titan_command(
     workload: Workload,
     arm: Arm,
     arm_dir: Path,
     extra_args: list[str] | tuple[str, ...],
-    ac_mode: str = "sac",
-    *,
+    ac_mode: str,
     model_size: str = "1b",
     parallelism: ParallelismSpec = TRIVIAL_SPEC,
     megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
@@ -202,60 +203,23 @@ def command_for_arm(
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
     profile: bool = True,
 ) -> list[str]:
-    """Build the training command for one arm, dispatching on its launcher.
+    """Launch command for one TorchTitan arm.
 
-    ``model_size``, ``parallelism``, ``megatron_p2p_sync``,
-    ``megatron_nan_guard`` and ``megatron_precision`` are keyword-only: the
-    five positional parameters are the historical signature and callers
-    pass them positionally.
+    ``parallelism`` defaults to ``TRIVIAL_SPEC``, which is the identity:
+    ``_titan_parallelism_flags`` returns an empty tuple there, so the argv
+    below it is the argv this repo has always built.
 
-    ``parallelism`` defaults to ``TRIVIAL_SPEC`` rather than being required,
-    and the asymmetry with ``manifest_data`` -- which takes its parallelism
-    with no default at all -- is deliberate. A manifest states what a run
-    **was**, so a defaulted value there could publish a parallel run under a
-    single-GPU claim. A command line is **built**, and this default builds
-    the single-GPU command line, which is the identity: it cannot introduce
-    a ``--parallelism.*`` token. ``_resolve_run`` passes the run's own spec
-    explicitly either way.
+    The three megatron values are accepted and ignored. Every engine builder
+    takes the same parameters, so ``benchmarks.e2e.engines`` dispatches one
+    call and no caller branches on the engine. A TorchTitan arm sends no
+    pipeline message through Megatron and holds no Megatron optimizer, so
+    none of the three can change this argv; ``_resolve_run``
+    (``benchmarks.e2e.runner``) is what refuses a non-default value for a
+    run that holds no megatron arm.
 
-    ``megatron_p2p_sync`` defaults to ``on`` for the same reason: the
-    default is the identity, and it adds no token to any argv. The value
-    reaches the two megatron commands alone. A TorchTitan arm sends no
-    pipeline message through Megatron, so its argv is untouched under
-    either value; ``_resolve_run`` is what refuses ``off`` for a run that
-    holds no megatron arm.
-
-    ``megatron_nan_guard`` defaults to ``on`` for the same reason, and it
-    reaches the stock megatron command alone, and a TorchTitan argv is
-    untouched under either value.
-
-    ``megatron_precision`` defaults to ``stock``, which is again the
-    identity: it adds no token to any argv. It reaches the stock megatron
-    command alone, and a TorchTitan argv is untouched under either value.
-
-    ``profile`` defaults to ``True``, which is the identity again, by a
-    different route: every command line this repository recorded before the
-    axis existed carried the profiler flags. The run axis itself defaults
-    to off (``DEFAULT_PROFILE``), and ``_resolve_run`` passes the run's own
-    value. Under ``False`` both engines lose every profiler token and the
-    run writes no trace.
+    ``profile`` decides the profiler block alone. Under ``False`` the arm
+    passes no profiler token and writes no trace.
     """
-    if arm.launcher == "megatron_stock":
-        return _megatron_stock_command(
-            workload,
-            arm,
-            arm_dir,
-            extra_args,
-            ac_mode,
-            model_size,
-            parallelism,
-            megatron_p2p_sync,
-            megatron_nan_guard,
-            megatron_precision,
-            profile,
-        )
-    if arm.launcher != "torchtitan":
-        raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
     _refuse_parallelism_passthrough(arm, extra_args)
     # CompileConfig.enable is False in the fork, so an eager arm omits the
     # flag: there is no negation to pass. The flag keeps its position in the
@@ -373,7 +337,7 @@ def _megatron_launcher(spec: ParallelismSpec) -> list[str]:
     ]
 
 
-def _megatron_stock_command(
+def megatron_stock_command(
     workload: Workload,
     arm: Arm,
     arm_dir: Path,

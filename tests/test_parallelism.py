@@ -40,7 +40,7 @@ from benchmarks.e2e.parallelism import (
     titan_reshard_after_forward,
     MAX_PP,
     MAX_WORLD_SIZE,
-    MEGATRON_LAUNCHERS,
+    MEGATRON_ENGINES,
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
@@ -1004,7 +1004,7 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
         check(PP2, engines=("torchtitan", "megatron_stock"))
 
     def test_a_pytorch_only_schedule_reaches_a_titan_only_run(self):
-        """Rule 5 reads the launchers, not the scenario name, so a run with
+        """Rule 5 reads the engines, not the scenario name, so a run with
         no megatron arm keeps the schedule."""
         check(
             ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
@@ -1045,64 +1045,64 @@ class Rule05MegatronSupportsTheScheduleTest(unittest.TestCase):
 class MegatronLauncherSetTest(unittest.TestCase):
     """Rule 5 asks "does this run drive Megatron-LM", and this set answers it.
 
-    The rule tested one launcher name by equality until a second Megatron-LM
-    launcher arrived. The second one then walked past the rule, and a refusal
+    The rule tested one engine name by equality until a second Megatron-LM
+    engine arrived. The second one then walked past the rule, and a refusal
     inside a command builder covered the hole instead. These tests make the
     classification a declaration rather than a spelling.
     """
 
-    def test_every_registry_launcher_is_classified(self):
+    def test_every_registry_engine_is_classified(self):
         """The guard the declared set needs.
 
-        A launcher that is neither ``torchtitan`` nor a member of
-        ``MEGATRON_LAUNCHERS`` has never been classified, so nobody has
+        An engine that is neither ``torchtitan`` nor a member of
+        ``MEGATRON_ENGINES`` has never been classified, so nobody has
         decided whether rule 5 applies to it. Fail here, where the decision
         is one edit, rather than inside a training subprocess.
         """
-        launchers = {
-            arm.launcher
+        engines_declared = {
+            arm.engine
             for scenario in SCENARIOS.values()
             for arm in scenario.arms
         }
-        unclassified = launchers - MEGATRON_LAUNCHERS - {"torchtitan"}
+        unclassified = engines_declared - MEGATRON_ENGINES - {"torchtitan"}
         self.assertEqual(
             unclassified,
             set(),
-            "add each launcher to MEGATRON_LAUNCHERS, or to the titan side, "
+            "add each engine to MEGATRON_ENGINES, or to the titan side, "
             "before rule 5 has to read it",
         )
 
-    def test_the_set_holds_only_launchers_the_registry_declares(self):
+    def test_the_set_holds_only_engines_the_registry_declares(self):
         """The other direction. A name nobody uses is a name that went
         stale, and rule 5 would then read a set that describes no arm."""
-        launchers = {
-            arm.launcher
+        engines_declared = {
+            arm.engine
             for scenario in SCENARIOS.values()
             for arm in scenario.arms
         }
-        self.assertEqual(MEGATRON_LAUNCHERS - launchers, set())
+        self.assertEqual(MEGATRON_ENGINES - engines_declared, set())
 
-    def test_the_set_does_not_hold_the_titan_launcher(self):
-        self.assertNotIn("torchtitan", MEGATRON_LAUNCHERS)
+    def test_the_set_does_not_hold_the_titan_engine(self):
+        self.assertNotIn("torchtitan", MEGATRON_ENGINES)
 
     def test_rule_five_reads_every_member_of_the_set(self):
-        """Each Megatron-LM launcher alone must trip rule 5.
+        """Each Megatron-LM engine alone must trip rule 5.
 
         A membership test that read only the first name would pass with any
-        one launcher present, so ask each of them on its own.
+        one engine present, so ask each of them on its own.
         """
-        for launcher in sorted(MEGATRON_LAUNCHERS):
-            with self.subTest(launcher=launcher):
+        for engine in sorted(MEGATRON_ENGINES):
+            with self.subTest(engine=engine):
                 with self.assertRaisesRegex(
                     ValueError, r"not implemented by Megatron-LM"
                 ):
                     check(
                         ParallelismSpec(pp=2, pp_schedule="ZBVZeroBubble"),
                         batch=8,
-                        engines=("torchtitan", launcher),
+                        engines=("torchtitan", engine),
                     )
 
-    def test_a_launcher_outside_the_set_keeps_a_pytorch_only_schedule(self):
+    def test_an_engine_outside_the_set_keeps_a_pytorch_only_schedule(self):
         """The rule must not become "anything that is not torchtitan".
 
         A third engine would then inherit Megatron's restriction and lose a
@@ -1737,7 +1737,7 @@ class TheSingleGpuRunStaysLegalTest(unittest.TestCase):
 
 class ValidatorInterfaceTest(unittest.TestCase):
     def test_the_engine_set_may_be_any_iterable(self):
-        """It is built from ``{arm.launcher for arm in arms}`` at the call
+        """It is built from ``{arm.engine for arm in arms}`` at the call
         site, and a one-shot iterator must not read differently."""
         check(PP2, engines=iter(("torchtitan", "megatron_stock")))
         check(PP2, engines=frozenset({"megatron_stock"}))

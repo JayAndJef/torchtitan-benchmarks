@@ -1587,9 +1587,9 @@ class MarkerStringTest(unittest.TestCase):
 
         A one-character difference fails a real run at arm rule 12.
         """
-        from benchmarks.e2e.validation import VALIDATION_PROFILES
+        from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
 
-        profile = VALIDATION_PROFILES["megatron_stock"]
+        profile = MEGATRON_STOCK_PROFILE
         cases = {
             "stock": stock_args(),
             "lean": stock_args(
@@ -1956,7 +1956,7 @@ class RendezvousDefaultsTest(unittest.TestCase):
         self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
         self.assertTrue(1024 <= int(env["MASTER_PORT"]) <= 65535)
 
-    def test_the_launcher_values_are_kept(self) -> None:
+    def test_the_torchrun_values_are_kept(self) -> None:
         env = {"MASTER_ADDR": "10.0.0.7", "MASTER_PORT": "29500"}
         train.install_rendezvous_defaults(env)
         self.assertEqual(
@@ -2553,9 +2553,9 @@ class DataParallelMarkerTest(unittest.TestCase):
             DATA_PARALLEL_OPTIMIZERS,
             grad_reduce_in_fp32,
         )
-        from benchmarks.e2e.validation import VALIDATION_PROFILES
+        from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
 
-        profile = VALIDATION_PROFILES["megatron_stock"]
+        profile = MEGATRON_STOCK_PROFILE
         ddp_cls, _ = self.wrapper_classes()
         for spec, cls in (
             (PP4_SPEC, ddp_cls),

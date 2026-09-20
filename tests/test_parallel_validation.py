@@ -38,7 +38,9 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.validation import (
     ALL_REDUCE_MARKER,
-    VALIDATION_PROFILES,
+    MEGATRON_STOCK_PROFILE,
+    TORCHTITAN_PROFILE,
+    profile_for_engine,
     validate_arm,
 )
 from benchmarks.execution.environment import LOG_RANK_TEMPLATE
@@ -210,7 +212,7 @@ def _titan_log(spec: ParallelismSpec = PP2) -> str:
     wrong still fails, not the wording of these two.
     """
     markers = "\n".join(
-        VALIDATION_PROFILES["torchtitan"].parallelism_markers(
+        TORCHTITAN_PROFILE.parallelism_markers(
             spec, ENGINES.workload, "stock"
         )
     )
@@ -423,7 +425,7 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
 
     def test_the_megatron_pattern_reads_the_degree_not_the_line(self) -> None:
         """``pp=1`` is not a pipeline. Any other degree is."""
-        pattern = VALIDATION_PROFILES["megatron_stock"].pipelined_pattern
+        pattern = MEGATRON_STOCK_PROFILE.pipelined_pattern
         trivial = "Megatron-LM stock parallelism: dp=1 pp=1 schedule=None"
         pipelined = "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B"
         deeper = "Megatron-LM stock parallelism: dp=1 pp=4 schedule=1F1B"
@@ -432,7 +434,7 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
         self.assertIsNotNone(pattern.search(deeper))
 
     def test_the_titan_pattern_does_not_match_a_one_gpu_mesh_line(self) -> None:
-        pattern = VALIDATION_PROFILES["torchtitan"].pipelined_pattern
+        pattern = TORCHTITAN_PROFILE.pipelined_pattern
         self.assertIsNone(pattern.search(_titan_log(TRIVIAL_SPEC)))
         self.assertIsNotNone(pattern.search(_titan_log(PP2)))
 
@@ -484,7 +486,7 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
         above 1 shows there even in a run that never reached the wrapper.
         Either alone must fail the arm.
         """
-        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        titan = TORCHTITAN_PROFILE.data_parallel_pattern
         self.assertIsNotNone(
             titan.search(
                 "Building device mesh with parallelism: pp=1, "
@@ -497,7 +499,7 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
                 "(dp_replicate=2, dp_shard=1); 17 FSDP units"
             )
         )
-        megatron = VALIDATION_PROFILES["megatron_stock"].data_parallel_pattern
+        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
         self.assertIsNotNone(
             megatron.search(
                 "Megatron-LM stock parallelism: dp=2 pp=1 schedule=None "
@@ -520,7 +522,7 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
         pattern is what stops such a log being published as single-GPU if
         the refusal is ever lifted.
         """
-        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        titan = TORCHTITAN_PROFILE.data_parallel_pattern
         self.assertIsNotNone(
             titan.search(
                 "Building device mesh with parallelism: pp=1, "
@@ -535,7 +537,7 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
         matched the line rather than the degree would fail every honest
         pipeline run.
         """
-        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        titan = TORCHTITAN_PROFILE.data_parallel_pattern
         self.assertIsNone(
             titan.search(
                 "Building device mesh with parallelism: pp=2, "
@@ -543,7 +545,7 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
             )
         )
         self.assertIsNone(titan.search(_titan_log(PP2)))
-        megatron = VALIDATION_PROFILES["megatron_stock"].data_parallel_pattern
+        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
         self.assertIsNone(
             megatron.search(
                 "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B "
@@ -553,13 +555,13 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
 
     def test_a_double_digit_degree_is_not_read_as_one(self) -> None:
         """``dp=1`` must not match ``dp=12``, and the reverse."""
-        megatron = VALIDATION_PROFILES["megatron_stock"].data_parallel_pattern
+        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
         self.assertIsNotNone(
             megatron.search(
                 "Megatron-LM stock parallelism: dp=12 pp=1 schedule=None"
             )
         )
-        titan = VALIDATION_PROFILES["torchtitan"].data_parallel_pattern
+        titan = TORCHTITAN_PROFILE.data_parallel_pattern
         self.assertIsNotNone(titan.search("dp_replicate=10, dp_shard=1,"))
         self.assertIsNone(titan.search("dp_replicate=1, dp_shard=1,"))
 
@@ -644,7 +646,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
                 )
 
     def test_the_titan_markers_name_the_degrees_and_the_schedule(self) -> None:
-        markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
+        markers = TORCHTITAN_PROFILE.parallelism_markers(
             PP2, ENGINES.workload, "stock"
         )
         self.assertEqual(
@@ -671,7 +673,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
             DATA_PARALLEL_LINE,
         )
 
-        markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
+        markers = TORCHTITAN_PROFILE.parallelism_markers(
             DP2, ENGINES.workload, "stock"
         )
         self.assertIn(
@@ -686,9 +688,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         """
         for spec in (TRIVIAL_SPEC, PP2):
             with self.subTest(spec=spec):
-                markers = VALIDATION_PROFILES[
-                    "torchtitan"
-                ].parallelism_markers(
+                markers = TORCHTITAN_PROFILE.parallelism_markers(
                     spec, ENGINES.workload, "stock"
                 )
                 self.assertEqual(
@@ -835,14 +835,14 @@ class ArmRuleTwelveTests(unittest.TestCase):
         rather than publish a mesh nothing checked.
         """
         silent = replace(
-            VALIDATION_PROFILES["torchtitan"],
+            TORCHTITAN_PROFILE,
             parallelism_markers=lambda spec, workload, precision: (),
         )
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary))
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
             with mock.patch.dict(
-                "benchmarks.e2e.validation.VALIDATION_PROFILES",
+                "benchmarks.e2e.validation._PROFILE_BY_ENGINE",
                 {"torchtitan": silent},
             ):
                 with self.assertRaisesRegex(RuntimeError, "logs nothing"):
@@ -872,20 +872,20 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
                 for value in ("on", "off"):
                     with self.subTest(profile=name, spec=spec, value=value):
                         self.assertEqual(
-                            VALIDATION_PROFILES[name].p2p_markers(spec, value),
+                            profile_for_engine(name).p2p_markers(spec, value),
                             (),
                         )
 
     def test_the_titan_profile_asks_for_no_line_and_still_checks_the_value(
         self,
     ) -> None:
-        titan = VALIDATION_PROFILES["torchtitan"]
+        titan = TORCHTITAN_PROFILE
         for value in ("on", "off"):
             self.assertEqual(titan.p2p_markers(PP2, value), ())
         for name in ("megatron_stock", "torchtitan"):
             with self.subTest(profile=name):
                 with self.assertRaisesRegex(ValueError, "unknown megatron p2p"):
-                    VALIDATION_PROFILES[name].p2p_markers(PP2, "sometimes")
+                    profile_for_engine(name).p2p_markers(PP2, "sometimes")
 
 
 def _stock_log(
@@ -904,7 +904,7 @@ def _stock_log(
     profile asks for them under BOTH values, so a fixture that omitted
     them would fail every stock arm.
     """
-    profile = VALIDATION_PROFILES["megatron_stock"]
+    profile = MEGATRON_STOCK_PROFILE
     workload = scenario_by_name("engines").workload
     lines = [
         # The first marker is the driver's own line, and the four fields
@@ -938,7 +938,7 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     def test_the_stock_line_is_pinned_to_the_driver_constant(self) -> None:
         """The validator and the driver state one line in two places, and
         the line is asked at every mesh."""
-        profile = VALIDATION_PROFILES["megatron_stock"]
+        profile = MEGATRON_STOCK_PROFILE
         for value, line in (("on", self.ON_LINE), ("off", self.OFF_LINE)):
             with self.subTest(value=value):
                 self.assertEqual(profile.nan_guard_markers(value), (line,))
@@ -946,13 +946,13 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     def test_the_titan_profile_asks_for_no_line_and_still_checks_the_value(
         self,
     ) -> None:
-        titan = VALIDATION_PROFILES["torchtitan"]
+        titan = TORCHTITAN_PROFILE
         for value in ("on", "off"):
             self.assertEqual(titan.nan_guard_markers(value), ())
         for name in ("megatron_stock", "torchtitan"):
             with self.subTest(profile=name):
                 with self.assertRaisesRegex(ValueError, "unknown megatron nan"):
-                    VALIDATION_PROFILES[name].nan_guard_markers("sometimes")
+                    profile_for_engine(name).nan_guard_markers("sometimes")
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,
@@ -1049,7 +1049,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         """Megatron maps each dtype to a ``torch.dtype``, so the markers
         carry the torch spelling rather than the flag's. The first marker
         is the driver's own line, which rule 8 no longer holds."""
-        profile = VALIDATION_PROFILES["megatron_stock"]
+        profile = MEGATRON_STOCK_PROFILE
         self.assertEqual(
             profile.precision_markers("stock"),
             (
@@ -1074,7 +1074,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
     def test_the_titan_profile_asks_for_no_field_and_checks_the_value(
         self,
     ) -> None:
-        titan = VALIDATION_PROFILES["torchtitan"]
+        titan = TORCHTITAN_PROFILE
         for value in ("stock", "lean"):
             self.assertEqual(titan.precision_markers(value), ())
         for name in ("megatron_stock", "torchtitan"):
@@ -1082,7 +1082,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ValueError, "unknown megatron precision"
                 ):
-                    VALIDATION_PROFILES[name].precision_markers("bf16")
+                    profile_for_engine(name).precision_markers("bf16")
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,
