@@ -1985,7 +1985,10 @@ TEST_CENSUS = {
     # four that pin one static cu_seqlens length -- per rank, across two
     # ranks when the maximum is global, that the padding adds no document,
     # and that a maximum below a pack is refused.
-    "test_megatron_data": 11,
+    # -4 with the move of the c4 materializer into the stock driver: the
+    # four stream-parity tests moved to test_megatron_stock_data, which is
+    # a new module and therefore carries no pinned count.
+    "test_megatron_data": 7,
     # The megatron driver's pipeline handling, which needs two GPUs to run
     # and none to check: how a batch splits into microbatches, which
     # pipeline requests the driver refuses (an interleaved schedule by
@@ -2376,7 +2379,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1912
+TEST_CENSUS_TOTAL = 1908
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

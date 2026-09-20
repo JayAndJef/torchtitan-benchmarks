@@ -1,11 +1,10 @@
 """The c4_test stream, shaped for stock Megatron's external dataloader.
 
 Both engines read one stream, rank for rank.
-``benchmarks/e2e/megatron/data.py``'s ``materialize_titan_samples`` drains
-TorchTitan's own dataset class with TorchTitan's own tokenizer, and
-``tests/test_megatron_data.py`` asserts that its output is bit-identical to
-the TorchTitan replay loader's. This module reshapes that output and adds
-nothing to it.
+``materialize_titan_samples`` below drains TorchTitan's own dataset class
+with TorchTitan's own tokenizer, and the test suite asserts that its output
+is bit-identical to the TorchTitan replay loader's. The rest of this module
+reshapes that output and adds nothing to it.
 
 ``--dataloader-type external`` passes the iterator below through unchanged
 (``megatron/training/datasets/data_samplers.py``). Megatron's own
@@ -53,7 +52,54 @@ from __future__ import annotations
 
 import torch
 
-from benchmarks.e2e.megatron.data import materialize_titan_samples
+from benchmarks.execution.paths import TITAN_DIR
+
+C4_TEST_PATH = TITAN_DIR / "tests" / "assets" / "c4_test"
+TOKENIZER_PATH = TITAN_DIR / "tests" / "assets" / "tokenizer"
+
+
+def materialize_titan_samples(
+    *,
+    seq_len: int,
+    num_samples: int,
+    dp_rank: int = 0,
+    dp_world_size: int = 1,
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Drain the first num_samples (input, positions, label) triples from
+    torchtitan's c4_test dataset, exactly as the titan arms consume them.
+
+    ``dp_rank`` and ``dp_world_size`` are the data-parallel slice, and they
+    default to the whole stream. They are forwarded to the stock dataset
+    class unchanged: it calls ``split_dataset_by_node(ds, dp_rank,
+    dp_world_size)`` on the raw documents, which is the split torchtitan's
+    own loader gives its ranks. So this function reproduces the titan stream
+    rank for rank rather than reimplementing a split, which is what the
+    parity between the two engines rests on.
+
+    ``num_samples`` is PER RANK. A data-parallel rank reads a batch of its
+    own each step, so every rank drains the same count from a different
+    shard.
+    """
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+    from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
+
+    tokenizer = HuggingFaceTokenizer(tokenizer_path=str(TOKENIZER_PATH))
+    dataset = HuggingFaceTextDataset(
+        dataset_name="c4_test",
+        dataset_path=str(C4_TEST_PATH),
+        tokenizer=tokenizer,
+        seq_len=seq_len,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=True,
+    )
+    iterator = iter(dataset)
+    samples = []
+    for _ in range(num_samples):
+        inputs, label = next(iterator)
+        samples.append((inputs["input"], inputs["positions"], label))
+    return samples
+
 
 # The keys one microbatch carries. ``pretrain_gpt.py``'s ``BATCH_KEYS``
 # names ten; a key this dict omits reaches ``get_batch`` as None, which is
