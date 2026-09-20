@@ -108,8 +108,8 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
         self.assertEqual(THROUGHPUT_DEFINITION, "tokens_per_second_per_device")
 
     def test_the_schema_moved_with_the_new_key(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 16)
-        self.assertEqual(self._manifest()["schema_version"], 16)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 17)
+        self.assertEqual(self._manifest()["schema_version"], 17)
 
 
 class PerRankLogParsingTests(unittest.TestCase):
@@ -184,8 +184,11 @@ class _RunFixture:
             "workload": WORKLOAD,
             "selected_arms": sorted(logs),
         }
-        if parallelism is not None:
-            manifest["parallelism"] = parallelism
+        manifest["parallelism"] = (
+            {"world_size": 1, "dp": 1, "pp": 1, "ep": 1}
+            if parallelism is None
+            else parallelism
+        )
         (out_dir / "manifest.json").write_text(json.dumps(manifest))
         for arm, text in logs.items():
             (out_dir / f"{arm}.log").write_text(text)
@@ -218,10 +221,8 @@ class SingleRankIsUnchangedTests(unittest.TestCase):
             result = evaluate_run(out_dir)
             return result, render_evaluation(result)
 
-    def test_a_schema_nine_directory_carries_no_parallelism_and_still_reads(
-        self,
-    ) -> None:
-        result, _ = self._evaluate(None)
+    def test_one_rank_publishes_the_median_it_always_published(self) -> None:
+        result, _ = self._evaluate({"world_size": 1, "pp": 1})
         training = result.training["baseline"]
         self.assertEqual(training.stable_tokens_per_second, 1000)
         self.assertEqual(training.tokens_per_second_global, 1000)
@@ -274,24 +275,6 @@ class DenseShardingWarningsReachTheArtifactTests(unittest.TestCase):
                     "pp": 1,
                     "ep": 1,
                     "dense_sharding": "replicate",
-                }
-            ),
-            [],
-        )
-
-    def test_a_directory_written_before_the_rename_still_evaluates(self) -> None:
-        """Three published cells record ``shard``, which this axis no longer
-        declares. They predate the question these warnings ask, so they earn
-        none -- and evaluating them must not fail.
-        """
-        self.assertEqual(
-            self._warnings(
-                {
-                    "world_size": 1,
-                    "dp": 1,
-                    "pp": 1,
-                    "ep": 1,
-                    "dense_sharding": "shard",
                 }
             ),
             [],
@@ -622,6 +605,7 @@ class WholeEvaluationTests(unittest.TestCase):
                 "scenario": "synthetic",
                 "hardware": "test-gpu",
                 "workload": {},
+                "parallelism": {"world_size": 1},
                 "selected_arms": ["baseline", "optimized"],
             }
             (out_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -664,6 +648,7 @@ class WholeEvaluationTests(unittest.TestCase):
                 "scenario": "synthetic",
                 "hardware": "test-gpu",
                 "workload": WORKLOAD,
+                "parallelism": {"world_size": 1},
                 "selected_arms": ["baseline", "optimized"],
             }
             (out_dir / "manifest.json").write_text(json.dumps(manifest))

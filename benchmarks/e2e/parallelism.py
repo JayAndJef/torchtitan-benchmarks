@@ -374,9 +374,9 @@ PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
 # **``zero3`` is the RENAME of the old ``shard``, never a redefinition.**
 # Three cells on disk record ``dense_sharding: "shard"`` and carry published
 # numbers. A redefinition would let a reader pool a ZeRO-3 cell against a
-# ZeRO-1 cell as if the two were repeats of one measurement. The manifest
-# schema bump is what separates the two spellings; see
-# ``benchmarks/artifacts/manifests.py``.
+# ZeRO-1 cell as if the two were repeats of one measurement. A manifest
+# schema bump separated the two spellings, and this code reads one schema,
+# so a recorded ``shard`` never reaches this axis.
 #
 # **What ``zero1`` asks each engine for.** Megatron gets
 # ``--use-distributed-optimizer`` alone, which is a plain
@@ -664,12 +664,10 @@ def execution_model(spec: ParallelismSpec) -> str:
     keeps every replicated string this repo has already recorded exactly
     where it was.
 
-    **The sharded suffix MOVED, and the manifest schema bump is the
-    boundary.** Three recorded cells carry ``dp8-shard``. This function now
-    writes ``dp8-zero3`` for the same mesh, so an old string and a new
-    string of one mesh do not match as text. That is the rename, and
-    ``benchmarks/artifacts/manifests.py`` carries the bump that separates
-    the two spellings.
+    **The sharded suffix MOVED.** Three recorded cells carry
+    ``dp8-shard``. This function now writes ``dp8-zero3`` for the same mesh,
+    so an old string and a new string of one mesh do not match as text.
+    That is the rename.
     """
     devices = "single-gpu" if spec.world_size == 1 else f"{spec.world_size}-gpu"
     if skip_dp(spec):

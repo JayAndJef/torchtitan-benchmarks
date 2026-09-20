@@ -30,6 +30,8 @@ from click.testing import CliRunner
 from benchmarks.artifacts.manifests import (
     MANIFEST_SCHEMA_VERSION,
     _resume_mismatches,
+    load_manifest,
+    load_run,
     manifest_data,
 )
 from benchmarks.cli.e2e import (
@@ -487,7 +489,7 @@ class AffinityDeviceTests(unittest.TestCase):
         )
 
 
-class ManifestSchemaSixteenTests(unittest.TestCase):
+class ManifestSchemaSeventeenTests(unittest.TestCase):
     def _manifest(
         self,
         parallelism: ParallelismSpec,
@@ -512,9 +514,52 @@ class ManifestSchemaSixteenTests(unittest.TestCase):
             megatron_precision=megatron_precision,
         )
 
-    def test_the_schema_is_sixteen(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 16)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 16)
+    def test_the_schema_is_seventeen(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 17)
+        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 17)
+
+    def test_a_foreign_schema_is_refused_and_both_versions_are_named(
+        self,
+    ) -> None:
+        """One refusal, and no per-version branch behind it.
+
+        Every field of a manifest is a comparability boundary, so a file
+        another schema wrote is read by the code that wrote it. The message
+        names the version found and the version wanted, because those two
+        numbers are what a reader acts on.
+        """
+        for recorded in (8, 16, 18, None):
+            with self.subTest(schema_version=recorded):
+                with tempfile.TemporaryDirectory() as temporary:
+                    out_dir = Path(temporary)
+                    manifest = self._manifest(TRIVIAL_SPEC)
+                    if recorded is None:
+                        del manifest["schema_version"]
+                    else:
+                        manifest["schema_version"] = recorded
+                    (out_dir / "manifest.json").write_text(
+                        json.dumps(manifest)
+                    )
+                    for read in (
+                        lambda path: load_manifest(path),
+                        lambda path: load_run(path, None),
+                    ):
+                        with self.assertRaises(ValueError) as caught:
+                            read(out_dir)
+                        message = str(caught.exception)
+                        self.assertIn(repr(recorded), message)
+                        self.assertIn(str(MANIFEST_SCHEMA_VERSION), message)
+
+    def test_a_current_schema_manifest_reads_and_names_its_arms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            manifest = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
+            (out_dir / "manifest.json").write_text(json.dumps(manifest))
+            self.assertEqual(load_manifest(out_dir), manifest)
+            self.assertEqual(
+                load_run(out_dir, None), (manifest, manifest["selected_arms"])
+            )
+            self.assertEqual(load_run(out_dir, ["other"])[1], ["other"])
 
     def test_the_trivial_spec_round_trips_through_json(self) -> None:
         recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
@@ -884,24 +929,6 @@ class ResumeParallelismTests(unittest.TestCase):
             megatron_precision="stock",
         )
 
-    def test_a_schema_nine_directory_still_resumes_as_single_gpu(self) -> None:
-        """Every directory under out/ predates the axis and carries no key."""
-        manifest = self._manifest(TRIVIAL_SPEC)
-        del manifest["parallelism"]
-        manifest["schema_version"] = 9
-        self.assertEqual(self._mismatches(manifest, TRIVIAL_SPEC), [])
-
-    def test_a_schema_nine_directory_refuses_a_parallel_request(self) -> None:
-        manifest = self._manifest(TRIVIAL_SPEC)
-        del manifest["parallelism"]
-        manifest["schema_version"] = 9
-        self.assertIn(
-            "parallelism",
-            self._mismatches(
-                manifest, ParallelismSpec(pp=2, pp_schedule="1F1B")
-            ),
-        )
-
     def test_the_same_spec_resumes_and_a_different_one_does_not(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
         manifest = self._manifest(spec)
@@ -941,19 +968,12 @@ class ResumeParallelismTests(unittest.TestCase):
     def test_a_block_without_the_key_cannot_claim_the_default_parity(
         self,
     ) -> None:
-        """A schema-11 ``parallelism`` block predates the key.
+        """A block without ``dense_sharding`` cannot claim a parity.
 
-        Reading its absence as ``replicate`` would be an inference. Every
-        such run really was replicated, but the block cannot say so, and the
-        safe direction is to refuse the resume rather than to record a parity
-        the file never carried.
-
-        **The comparison reads no ``schema_version``.** ``_resume_mismatches``
-        compares the whole ``parallelism`` block, so the missing key alone is
-        what refuses this. Setting a version here would suggest a gate that
-        does not exist. (A resume across this commit is refused by
-        ``benchmarks_git_rev`` anyway; this pins which way the record itself
-        reads.)
+        Reading its absence as ``replicate`` would be an inference. The safe
+        direction is to refuse the resume rather than to record a parity the
+        file never carried. ``_resume_mismatches`` compares the whole
+        ``parallelism`` block, so the missing key alone is what refuses this.
         """
         manifest = self._manifest(TRIVIAL_SPEC)
         del manifest["parallelism"]["dense_sharding"]
@@ -1027,22 +1047,11 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
         self.assertEqual(refused, ["megatron_p2p_sync"])
         self.assertNotIn("parallelism", refused)
 
-    def test_a_schema_twelve_directory_reads_as_on(self) -> None:
-        """No run before schema 13 could turn the sync off, so the absent
-        key is a record of ``on`` and not an inference: the run kept stock
-        Megatron's own synchronize. A request for ``off`` against such a
-        directory is refused rather than silently changing the treatment."""
-        manifest = self._manifest("on")
-        del manifest["megatron_p2p_sync"]
-        manifest["schema_version"] = 12
-        self.assertEqual(self._mismatches(manifest, "on"), [])
-        self.assertIn("megatron_p2p_sync", self._mismatches(manifest, "off"))
-
 
 class ResumeMegatronNanGuardTests(unittest.TestCase):
     """``--resume`` gates ``megatron_nan_guard`` the way it gates the p2p
-    value: the same value resumes, a different one is refused in either
-    direction, and a directory that predates the field reads as ``on``.
+    value: the same value resumes, and a different one is refused in either
+    direction.
     """
 
     def setUp(self) -> None:
@@ -1108,27 +1117,11 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
         refused = self._mismatches(manifest, "on")
         self.assertEqual(refused, ["megatron_nan_guard"])
 
-    def test_a_schema_thirteen_directory_reads_as_on(self) -> None:
-        """No run before schema 14 could turn the guard off through the
-        harness, so the absent key is a record of ``on``. A request for
-        ``off`` against such a directory is refused rather than silently
-        changing the treatment under the recorded label."""
-        manifest = self._manifest("on")
-        del manifest["megatron_nan_guard"]
-        manifest["schema_version"] = 13
-        self.assertEqual(self._mismatches(manifest, "on"), [])
-        self.assertIn("megatron_nan_guard", self._mismatches(manifest, "off"))
-
 
 class ResumeMegatronPrecisionTests(unittest.TestCase):
     """``--resume`` gates ``megatron_precision`` the way it gates the two
-    values above: the same value resumes, a different one is refused in
-    either direction, and a directory that predates the field reads as
-    ``stock``.
-
-    It also carries the schema-15 rename. A manifest that records the
-    retired ``shard`` spelling is refused with a message that names the
-    rename, rather than a bare ``parallelism`` key.
+    values above: the same value resumes, and a different one is refused in
+    either direction.
     """
 
     def setUp(self) -> None:
@@ -1190,35 +1183,8 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
                     self._mismatches(manifest, requested),
                 )
 
-    def test_a_schema_fifteen_directory_reads_as_stock(self) -> None:
-        """No run before schema 16 could ask for the lean recipe, so the
-        absent key is a record of ``stock`` and not an inference."""
-        manifest = self._manifest("stock")
-        del manifest["megatron_precision"]
-        manifest["schema_version"] = 15
-        self.assertEqual(self._mismatches(manifest, "stock"), [])
-        self.assertIn(
-            "megatron_precision", self._mismatches(manifest, "lean")
-        )
-
-    def test_a_retired_shard_record_names_the_rename(self) -> None:
-        """The run really held the ZeRO-3 parity, so the rename takes no
-        number away. This gate compares two vocabularies, and a bare
-        ``parallelism`` would send the operator looking for a degree that
-        did not move."""
-        from benchmarks.artifacts.manifests import RETIRED_DENSE_SHARDING
-
-        spec = ParallelismSpec(dp=2, dense_sharding="zero3")
-        manifest = self._manifest("stock", parallelism=spec)
-        manifest["parallelism"]["dense_sharding"] = RETIRED_DENSE_SHARDING
-        manifest["schema_version"] = 14
-        refused = self._mismatches(manifest, "stock", parallelism=spec)
-        self.assertEqual(len(refused), 1)
-        self.assertTrue(refused[0].startswith("parallelism"))
-        self.assertIn("retired spelling of 'zero3'", refused[0])
-
-    def test_a_current_zero3_record_resumes(self) -> None:
-        """The rename message is for the retired spelling alone."""
+    def test_a_zero3_record_resumes(self) -> None:
+        """The ZeRO-3 parity is a value of the axis like any other."""
         spec = ParallelismSpec(dp=2, dense_sharding="zero3")
         manifest = self._manifest("stock", parallelism=spec)
         self.assertEqual(

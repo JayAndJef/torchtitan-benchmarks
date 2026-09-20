@@ -472,26 +472,6 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
                 self._resume(out_dir, megatron_p2p_sync="on")
 
-    def test_a_resume_of_a_schema_twelve_directory_reads_as_on(self) -> None:
-        """A directory written before the field exists carries no key, and
-        no such run could have turned the sync off. So it resumes as ``on``
-        with the argv it always had, and a request for ``off`` is refused
-        rather than changing the treatment under the recorded label."""
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary) / "run"
-            out_dir.mkdir()
-            self._write_manifest(out_dir, "on")
-            manifest_path = out_dir / "manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            del manifest["megatron_p2p_sync"]
-            manifest["schema_version"] = 12
-            manifest_path.write_text(json.dumps(manifest))
-            resolved = self._resume(out_dir, megatron_p2p_sync=None)
-            self.assertEqual(resolved[12], "on")
-            self.assertEqual(_p2p_flags(resolved[6]["megatron_stock"]), [])
-            with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
-                self._resume(out_dir, megatron_p2p_sync="off")
-
     def test_execute_run_hands_the_value_to_validate_arm(self) -> None:
         """The value the run resolved is the value the gate reads."""
 
@@ -800,27 +780,6 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
                 self._resume(out_dir, megatron_nan_guard="on")
 
-    def test_a_resume_of_a_schema_thirteen_directory_reads_as_on(self) -> None:
-        """A directory written before the field exists carries no key, and
-        no such run could have turned the guard off. So it resumes as
-        ``on`` with the argv it always had, and a request for ``off`` is
-        refused rather than changing the treatment under the recorded
-        label."""
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary) / "run"
-            out_dir.mkdir()
-            self._write_manifest(out_dir, "on")
-            manifest_path = out_dir / "manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            del manifest["megatron_nan_guard"]
-            manifest["schema_version"] = 13
-            manifest_path.write_text(json.dumps(manifest))
-            resolved = self._resume(out_dir, megatron_nan_guard=None)
-            self.assertEqual(resolved[13], "on")
-            self.assertNotIn(NO_NAN_CHECK, resolved[6]["megatron_stock"])
-            with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
-                self._resume(out_dir, megatron_nan_guard="off")
-
 
 class MegatronPrecisionResolutionTests(unittest.TestCase):
     """What ``_resolve_run`` does with ``--megatron-precision``.
@@ -1023,28 +982,6 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 self._resume(
                     out_dir, megatron_precision="stock", parallelism=spec
                 )
-
-    def test_a_resume_of_a_schema_fifteen_directory_reads_as_stock(
-        self,
-    ) -> None:
-        """A directory written before the field exists carries no key, and
-        no such run could ask for the lean recipe. So it resumes as
-        ``stock`` with the argv it always had."""
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary) / "run"
-            out_dir.mkdir()
-            self._write_manifest(out_dir, megatron_precision="stock")
-            manifest_path = out_dir / "manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            del manifest["megatron_precision"]
-            manifest["schema_version"] = 15
-            manifest_path.write_text(json.dumps(manifest))
-            resolved = self._resume(out_dir)
-            self.assertEqual(resolved[14], "stock")
-            self.assertNotIn(
-                "--use-precision-aware-optimizer", resolved[6]["megatron_stock"]
-            )
-
 
 class ParallelizeTests(unittest.TestCase):
     def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
@@ -1599,7 +1536,7 @@ class ManifestTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 16)
+        self.assertEqual(manifest["schema_version"], 17)
         self.assertEqual(manifest["compile_mode"], "none")
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
@@ -1672,7 +1609,7 @@ class UncompiledRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 16)
+        self.assertEqual(manifest["schema_version"], 17)
         self.assertEqual(manifest["compile_mode"], "none")
         self.assertNotIn("--compile.enable", manifest["commands"]["titan_compiled"])
 
