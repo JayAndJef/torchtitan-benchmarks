@@ -908,9 +908,9 @@ def _stock_log(
     profile = VALIDATION_PROFILES["megatron_stock"]
     workload = scenario_by_name("engines").workload
     lines = [
-        profile.mode_line("default"),
-        # The driver prints these on its own mode line, off the arguments
-        # Megatron resolved.
+        # The first marker is the driver's own line, and the four fields
+        # after it are printed on that line, off the arguments Megatron
+        # resolved.
         ", ".join(profile.precision_markers(megatron_precision)),
         _SIZE_LINE.rstrip("\n"),
         *profile.parallelism_markers(
@@ -984,7 +984,6 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
                     )
                     fixture.write({0: _stock_log(TRIVIAL_SPEC, nan_guard_line)})
                     keywords = dict(
-                        compile_mode="default",
                         ac_mode="none",
                         megatron_nan_guard=value,
                     )
@@ -1025,7 +1024,6 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
                     fixture.root,
                     fixture.log,
                     scenario.workload,
-                    compile_mode="default",
                     ac_mode="none",
                     parallelism=PP2,
                     megatron_nan_guard="off",
@@ -1045,13 +1043,17 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
 
     NAN_GUARD_ON = stock_train.NAN_GUARD_LINE.format(value=True)
 
-    def test_the_stock_markers_are_the_four_resolved_fields(self) -> None:
+    def test_the_stock_markers_are_the_driver_line_and_four_fields(
+        self,
+    ) -> None:
         """Megatron maps each dtype to a ``torch.dtype``, so the markers
-        carry the torch spelling rather than the flag's."""
+        carry the torch spelling rather than the flag's. The first marker
+        is the driver's own line, which rule 8 no longer holds."""
         profile = VALIDATION_PROFILES["megatron_stock"]
         self.assertEqual(
             profile.precision_markers("stock"),
             (
+                "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=False",
                 "main_grads_dtype=torch.float32",
                 "exp_avg_dtype=torch.float32",
@@ -1061,6 +1063,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         self.assertEqual(
             profile.precision_markers("lean"),
             (
+                "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=True",
                 "main_grads_dtype=torch.bfloat16",
                 "exp_avg_dtype=torch.bfloat16",
@@ -1109,7 +1112,6 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
                         )
                     })
                     keywords = dict(
-                        compile_mode="default",
                         ac_mode="none",
                         megatron_precision=requested,
                     )
@@ -1154,7 +1156,6 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
                     fixture.root,
                     fixture.log,
                     scenario.workload,
-                    compile_mode="default",
                     ac_mode="none",
                     parallelism=PP2,
                     megatron_precision="lean",

@@ -28,7 +28,6 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
-    UNCOMPILED_COMPILE_MODES,
     Arm,
     Workload,
 )
@@ -253,12 +252,11 @@ def command_for_arm(
     if arm.launcher != "torchtitan":
         raise ValueError(f"{arm.name}: unknown launcher {arm.launcher!r}")
     _refuse_parallelism_passthrough(arm, extra_args)
-    uncompiled = compile_mode in UNCOMPILED_COMPILE_MODES
-    # CompileConfig.enable is False in the fork, so an uncompiled run omits
-    # the flag: there is no negation to pass. The flag keeps its position in
-    # the list, so every compiled mode builds the command line it built
-    # before this mode existed.
-    compile_flags = () if uncompiled else ("--compile.enable",)
+    # CompileConfig.enable is False in the fork, so an eager arm omits the
+    # flag: there is no negation to pass. The flag keeps its position in the
+    # list, so a compiled arm builds the command line it built before
+    # compile became an arm property.
+    compile_flags = ("--compile.enable",) if arm.compile == "torch" else ()
     args = [
         "./run_train.sh",
         "--module",
@@ -385,7 +383,7 @@ def _megatron_stock_command(
     **At the trivial spec the launcher is the plain interpreter.**
     ``_megatron_launcher`` starts torchrun only above one rank.
 
-    The five refusals below restate what a run already refuses, and
+    The four refusals below restate what a run already refuses, and
     ``flags.py`` restates two of them again for a caller that reaches it
     directly. A caller may build a command line without a run, and a bare
     Megatron failure minutes into a subprocess names neither the flag nor
@@ -406,12 +404,6 @@ def _megatron_stock_command(
         raise ValueError(
             f"{arm.name}: the stock megatron arm runs without recompute; "
             f"ac mode {ac_mode!r} has no Megatron parity (use --ac none)"
-        )
-    if compile_mode in UNCOMPILED_COMPILE_MODES:
-        raise ValueError(
-            f"{arm.name}: compile mode {compile_mode!r} turns off the "
-            f"whole-block torch.compile a titan arm gets, and Megatron never "
-            f"has one; it cannot apply to this arm"
         )
     # ``flags.py`` refuses this one too, with its own message. Refused here
     # as well, so a caller that never reaches the flag module still gets the
@@ -450,7 +442,6 @@ def _megatron_stock_command(
             parallelism,
             arm_dir=str(arm_dir),
             model_size=model_size,
-            compile_mode=compile_mode,
             # flags.py refuses off at pp 1 and an unknown value, with its
             # own messages; a run never reaches either, because
             # _resolve_run refuses both first.
