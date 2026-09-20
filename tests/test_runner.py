@@ -65,14 +65,17 @@ PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
     "piper_optimized_inductor_fused_grouped_experts"
 )
 
-# No registered arm carries an override today. The plumbing stays, so the
-# rules that guard it are exercised against a synthetic arm.
+# No registered arm carries an override or needs the host compiler today.
+# The plumbing stays, so the rules that guard it are exercised against a
+# synthetic arm: the override argv, arm rules 2 and 3, and the
+# compiler-environment branch of the runner.
 OVERRIDE_ARM = Arm(
     name="override_arm",
     description="a synthetic arm that swaps one config node per block",
     compile="torch",
     override_imports=(PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
     overrides_per_block=1,
+    requires_gcc_toolset=True,
 )
 
 # The eight names ``RequestedAxes`` owns. The refusal helpers below take one
@@ -1535,6 +1538,85 @@ class EnginesScenarioTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
+
+
+class CompilerEnvironmentTests(unittest.TestCase):
+    """The ``requires_gcc_toolset`` branch, against the synthetic arm.
+
+    No registered arm sets the field, so the branch has no live caller.
+    It stays because an override arm can need a C++ host compiler that the
+    stock one is not, and a branch nothing exercises is a branch that
+    breaks unseen.
+    """
+
+    metadata = {
+        "requested_gpu": "0",
+        "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+        "cpu_pinning": "none: test",
+        "torch_version": "test",
+        "torchtitan_git_rev": "titan-rev",
+        "benchmarks_git_rev": "bench-rev",
+        "megatron_git_rev": "megatron-rev",
+    }
+
+    def _run(self, arm: Arm, compiler_env: Path) -> dict[str, str]:
+        """Execute one arm and return the environment it was launched with."""
+        captured: dict[str, str] = {}
+
+        def fake_process(command, **keywords):
+            captured.update(keywords["env"])
+            return SimpleNamespace(returncode=0)
+
+        scenario = replace(scenario_by_name("engines"), arms=(arm,))
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("test-gpu", self.metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning((), "none: test"),
+        ), mock.patch(
+            "benchmarks.e2e.runner.scenario_by_name", return_value=scenario
+        ), mock.patch("benchmarks.e2e.runner.validate_arm"):
+            execute_run(
+                RunRequest(
+                    axes=RequestedAxes(ac_mode="none"),
+                    gpu="0",
+                    scenario_name="engines",
+                    out_dir=Path(temporary) / "run",
+                    compiler_env=compiler_env,
+                ),
+                process_runner=fake_process,
+                environment={"PATH": os.environ["PATH"]},
+            )
+        return captured
+
+    def test_the_arm_that_asks_for_the_compiler_gets_the_sourced_script(
+        self,
+    ) -> None:
+        """The script's own exports reach the training subprocess."""
+        with tempfile.TemporaryDirectory() as temporary:
+            script = Path(temporary) / "enable"
+            script.write_text("export BENCH_TEST_TOOLSET=13\n")
+            environment = self._run(OVERRIDE_ARM, script)
+        self.assertEqual(environment.get("BENCH_TEST_TOOLSET"), "13")
+
+    def test_an_arm_that_does_not_ask_for_it_runs_without_it(self) -> None:
+        """The branch is per arm, so one arm cannot enable it for another."""
+        with tempfile.TemporaryDirectory() as temporary:
+            script = Path(temporary) / "enable"
+            script.write_text("export BENCH_TEST_TOOLSET=13\n")
+            environment = self._run(
+                replace(OVERRIDE_ARM, requires_gcc_toolset=False), script
+            )
+        self.assertNotIn("BENCH_TEST_TOOLSET", environment)
+
+    def test_a_missing_script_fails_the_arm_by_name(self) -> None:
+        """A silently skipped script would build the extension with the
+        stock compiler and fail deep inside the training subprocess."""
+        with tempfile.TemporaryDirectory() as temporary:
+            absent = Path(temporary) / "no-such-enable"
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                self._run(OVERRIDE_ARM, absent)
 
 
 class CpuPinningTests(unittest.TestCase):
