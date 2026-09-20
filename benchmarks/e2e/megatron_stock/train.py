@@ -67,7 +67,6 @@ from benchmarks.e2e.megatron_stock.flags import (
     BENCH_BATCH_P2P_SYNC,
     BENCH_LOCAL_BATCH_SIZE,
     BENCH_MIN_TRACE_WINDOWS,
-    BENCH_MODE,
     BENCH_MODEL_SIZE,
     BENCH_PP_SCHEDULE,
     BENCH_PROFILE_FREQ,
@@ -75,7 +74,6 @@ from benchmarks.e2e.megatron_stock.flags import (
     BENCH_PROFILER_WARMUP,
     BENCH_ROWS_PER_SAMPLE,
     BENCH_SEQ_LEN,
-    SUPPORTED_MODE,
     SUPPORTED_PP_SCHEDULE,
 )
 from benchmarks.e2e.registry import (
@@ -90,7 +88,7 @@ from benchmarks.e2e.registry import (
 # compares these constants against the profile's own strings.
 # --------------------------------------------------------------------------
 
-# Arm rule 8. The profile matches the prefix up to the first comma.
+# Arm rule 8. The profile matches the prefix up to the first field.
 #
 # **The four precision fields are the --megatron-precision half of arm rule
 # 12.** Megatron resolves every one of them before it builds the optimizer,
@@ -105,7 +103,7 @@ from benchmarks.e2e.registry import (
 # and fp16, and store_param_remainders already holds the master copy at 2
 # bytes for each parameter.
 MODE_LINE = (
-    "Megatron-LM stock training loop (mode={mode}, "
+    "Megatron-LM stock training loop ("
     "main_params_dtype={main_params_dtype}, "
     "main_grads_dtype={main_grads_dtype}, "
     "use_precision_aware_optimizer={precision_aware}, "
@@ -287,7 +285,6 @@ def add_bench_args(parser: Any) -> Any:
     group.add_argument(BENCH_PROFILE_FREQ, type=int, required=True)
     group.add_argument(BENCH_PROFILER_WARMUP, type=int, required=True)
     group.add_argument(BENCH_PROFILER_ACTIVE, type=int, required=True)
-    group.add_argument(BENCH_MODE, type=str, required=True)
     group.add_argument(BENCH_PP_SCHEDULE, type=str, default=None)
     group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
     group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
@@ -350,13 +347,6 @@ def refuse_unsupported_run(args: Any) -> None:
     of these would train something the manifest does not name, which is a
     wrong number rather than a crash.
     """
-    if args.bench_mode != SUPPORTED_MODE:
-        raise ValueError(
-            f"{BENCH_MODE} {args.bench_mode!r} is not implemented by the "
-            f"stock driver; it runs {SUPPORTED_MODE!r} alone, because "
-            "Megatron compiles no whole transformer layer and there is no "
-            "treatment to turn off"
-        )
     pipeline_degree = args.pipeline_model_parallel_size
     if pipeline_degree > 1:
         if args.bench_pp_schedule != SUPPORTED_PP_SCHEDULE:
@@ -410,14 +400,13 @@ def refuse_unsupported_run(args: Any) -> None:
 def mode_line(args: Any) -> str:
     """The line arm rule 8 matches, plus the precision this arm really runs.
 
-    The eight fields after the mode are what makes the arm a configured
-    engine rather than a plain-bf16 one. They are read from the resolved
+    The eight fields make the arm a configured engine rather than a
+    plain-bf16 one. They are read from the resolved
     arguments, so the log records what Megatron built. Four of them carry
     the --megatron-precision treatment, and the validation profile asks
     for those four under both values.
     """
     return MODE_LINE.format(
-        mode=args.bench_mode,
         main_params_dtype=args.main_params_dtype,
         main_grads_dtype=args.main_grads_dtype,
         precision_aware=args.use_precision_aware_optimizer,

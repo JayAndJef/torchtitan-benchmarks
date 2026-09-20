@@ -1769,7 +1769,8 @@ TEST_CENSUS = {
     # its own name.
     # +1 that a chain of one member and a chain of two read alike, so the
     # expert degree does not move the expected string.
-    "test_megatron_stock_driver": 149,
+    # -1 with the deletion of the --bench-mode field.
+    "test_megatron_stock_driver": 148,
     # The wiring of the same scenario: the whole stock argv frozen at the
     # trivial spec and at dp 2 x pp 4, the absence of any --parallelism.
     # token on it, the two less-layers flags on its titan arm, the mode and
@@ -2079,7 +2080,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1825
+TEST_CENSUS_TOTAL = 1824
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

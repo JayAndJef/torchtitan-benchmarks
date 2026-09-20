@@ -113,7 +113,6 @@ BENCH_FLAG_NAMES = (
     "--bench-profile-freq",
     "--bench-profiler-warmup",
     "--bench-profiler-active",
-    "--bench-mode",
 )
 
 # The log fragments the driver and this profile must agree on, character for
@@ -125,7 +124,7 @@ BENCH_FLAG_NAMES = (
 # appears in the driver package's source.
 STOCK_LOG_FRAGMENTS = (
     "Training completed",
-    "Megatron-LM stock training loop (mode=",
+    "Megatron-LM stock training loop (",
     "Megatron-LM stock parallelism: dp=",
     # ``pipelined_pattern`` needs ``dp=<n> pp=`` with one space between, so
     # the pipeline token is part of the contract and not decoration. A
@@ -806,10 +805,10 @@ class StockValidationProfileTests(unittest.TestCase):
             VALIDATION_PROFILES[_stock_arm().validation], self.profile
         )
 
-    def test_the_mode_line_names_the_requested_mode(self) -> None:
+    def test_the_mode_line_is_the_stock_driver_prefix(self) -> None:
         self.assertEqual(
             self.profile.mode_line("default"),
-            "Megatron-LM stock training loop (mode=default,",
+            "Megatron-LM stock training loop (",
         )
 
     def test_the_profile_checks_neither_the_ac_line_nor_the_regions(
