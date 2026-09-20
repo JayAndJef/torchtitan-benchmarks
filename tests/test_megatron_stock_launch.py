@@ -54,7 +54,7 @@ from benchmarks.e2e.validation import (
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 
-SCENARIO_NAME = "piper_megatron_stock"
+SCENARIO_NAME = "engines"
 STOCK_PACKAGE = "benchmarks.e2e.megatron_stock"
 STOCK_FLAGS_MODULE = f"{STOCK_PACKAGE}.flags"
 # The driver itself, which prints the marker strings. It is a separate
@@ -233,11 +233,11 @@ def _skip_without_stock_package(module: str):
 
 
 def _stock_arm() -> Arm:
-    return scenario_by_name(SCENARIO_NAME).arm("baseline")
+    return scenario_by_name(SCENARIO_NAME).arm("megatron_stock")
 
 
 def _titan_arm() -> Arm:
-    return scenario_by_name(SCENARIO_NAME).arm("titan_stock")
+    return scenario_by_name(SCENARIO_NAME).arm("titan_compiled")
 
 
 def _command(
@@ -281,10 +281,10 @@ def _flag_names(command: list[str]) -> list[str]:
 
 
 class StockScenarioDeclarationTests(unittest.TestCase):
-    def test_the_scenario_is_registered_with_two_arms(self) -> None:
+    def test_the_scenario_is_registered_with_three_arms(self) -> None:
         scenario = scenario_by_name(SCENARIO_NAME)
         self.assertEqual(
-            [arm.name for arm in scenario.arms], ["baseline", "titan_stock"]
+            [arm.name for arm in scenario.arms], ["titan_compiled", "titan_eager", "megatron_stock"]
         )
 
     def test_the_stock_arm_names_the_stock_launcher_and_profile(self) -> None:
@@ -296,13 +296,8 @@ class StockScenarioDeclarationTests(unittest.TestCase):
         arm = _titan_arm()
         self.assertEqual(arm.launcher, "torchtitan")
         self.assertEqual(arm.validation, "torchtitan")
-        # It reuses the scenario workload's pre-tokenized config, exactly as
-        # the arm of the same name in piper1b_megatron does.
+        # It reuses the scenario workload's pre-tokenized config.
         self.assertIsNone(arm.config)
-        self.assertEqual(
-            scenario_by_name(SCENARIO_NAME).workload,
-            scenario_by_name("piper1b_megatron").workload,
-        )
 
     def test_the_scenario_declares_no_regions(self) -> None:
         """Rule 7 guards nothing here, so it must not claim to.
@@ -1625,7 +1620,10 @@ class StockRunResolutionTests(unittest.TestCase):
 
     def test_the_uncompiled_mode_is_refused_for_the_megatron_arm(self) -> None:
         """The subset exception is for TorchTitan-only selections alone."""
-        for names in (("baseline",), ("baseline", "titan_stock")):
+        for names in (
+            ("megatron_stock",),
+            ("megatron_stock", "titan_compiled"),
+        ):
             with self.subTest(names=names):
                 with self.assertRaisesRegex(
                     ValueError, "does not support compile mode"
@@ -1636,8 +1634,8 @@ class StockRunResolutionTests(unittest.TestCase):
         self,
     ) -> None:
         """Cell 2 of the run matrix. It needs no Megatron opponent."""
-        resolved = self._resolve(("titan_stock",), "none", "none")
-        self.assertEqual([arm.name for arm in resolved[2]], ["titan_stock"])
+        resolved = self._resolve(("titan_compiled",), "none", "none")
+        self.assertEqual([arm.name for arm in resolved[2]], ["titan_compiled"])
         self.assertEqual(resolved[7], "none")
 
 

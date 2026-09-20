@@ -34,7 +34,8 @@ from benchmarks.e2e.parallelism import (
     n_microbatches,
 )
 from benchmarks.e2e.registry import (
-    PIPER_1B_MEGATRON,
+    Arm,
+    ENGINES,
     scenario_by_name,
 )
 from benchmarks.e2e.validation import (
@@ -46,6 +47,7 @@ from benchmarks.execution.environment import LOG_RANK_TEMPLATE
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.environment import runtime_environment
 from tests.test_runner import (
+    OVERRIDE_ARM,
     PIPER_OPTIMIZED_SWIGLU_OVERRIDE,
     _SAC_LINE,
     _SIZE_LINE,
@@ -211,7 +213,7 @@ def _titan_log(spec: ParallelismSpec = PP2) -> str:
     """
     markers = "\n".join(
         VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            spec, PIPER_1B_MEGATRON.workload, "stock"
+            spec, ENGINES.workload, "stock"
         )
     )
     return (
@@ -237,10 +239,10 @@ class PerRankLogRuleTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary))
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
             validate_arm(
-                PIPER_1B_MEGATRON.arm("titan_stock"),
+                ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 parallelism=PP2,
             )
 
@@ -262,10 +264,10 @@ class PerRankLogRuleTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "rank 1"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
@@ -280,10 +282,10 @@ class PerRankLogRuleTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "did not complete"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
@@ -294,7 +296,7 @@ class PerRankLogRuleTests(unittest.TestCase):
         while building the whole model, before ``pipelining_fn`` splits it.
         Both counts are therefore the whole model's on every rank.
         """
-        arm = PIPER_1B_MEGATRON.arm("titan_swiglu")
+        arm = OVERRIDE_ARM
         applied = (
             f"[Override] {PIPER_OPTIMIZED_SWIGLU_OVERRIDE}: "
             "model_spec.model.layers.0.moe ...\n"
@@ -309,7 +311,7 @@ class PerRankLogRuleTests(unittest.TestCase):
                 arm,
                 fixture.root,
                 fixture.log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 parallelism=PP2,
             )
 
@@ -320,7 +322,7 @@ class PerRankLogRuleTests(unittest.TestCase):
                     arm,
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
@@ -334,10 +336,10 @@ class RankCoverageTests(unittest.TestCase):
             fixture.write({0: _TITAN_TAIL})
             with self.assertRaisesRegex(RuntimeError, "wrote nothing"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
@@ -352,10 +354,10 @@ class RankCoverageTests(unittest.TestCase):
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
             with self.assertRaisesRegex(RuntimeError, "no trace"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
@@ -372,10 +374,10 @@ class RankCoverageTests(unittest.TestCase):
             # pipeline nobody requested.
             fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
             validate_arm(
-                PIPER_1B_MEGATRON.arm("titan_stock"),
+                ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 parallelism=TRIVIAL_SPEC,
             )
 
@@ -402,10 +404,10 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
             fixture.log.write_text(_titan_log(PP2) + "\n")
             with self.assertRaisesRegex(RuntimeError, "declares no pipeline"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=TRIVIAL_SPEC,
                 )
 
@@ -414,10 +416,10 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
             fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
             validate_arm(
-                PIPER_1B_MEGATRON.arm("titan_stock"),
+                ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 parallelism=TRIVIAL_SPEC,
             )
 
@@ -458,10 +460,10 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
                 RuntimeError, "declares no data parallelism"
             ):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=TRIVIAL_SPEC,
                 )
 
@@ -470,10 +472,10 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
             fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
             validate_arm(
-                PIPER_1B_MEGATRON.arm("titan_stock"),
+                ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 parallelism=TRIVIAL_SPEC,
             )
 
@@ -581,10 +583,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
                 + "Training completed\n"
             )
             validate_arm(
-                PIPER_1B_MEGATRON.arm("titan_stock"),
+                ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
             )
 
     def test_a_missing_mesh_line_fails_the_arm(self) -> None:
@@ -598,10 +600,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
             fixture.write({0: without, 1: _TITAN_TAIL})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
@@ -613,10 +615,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
             fixture.write({0: wrong, 1: wrong})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
@@ -632,16 +634,16 @@ class ArmRuleTwelveTests(unittest.TestCase):
             fixture.write({0: wrong, 1: wrong})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=PP2,
                 )
 
     def test_the_titan_markers_name_the_degrees_and_the_schedule(self) -> None:
         markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            PP2, PIPER_1B_MEGATRON.workload, "stock"
+            PP2, ENGINES.workload, "stock"
         )
         self.assertEqual(
             markers,
@@ -668,7 +670,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         )
 
         markers = VALIDATION_PROFILES["torchtitan"].parallelism_markers(
-            DP2, PIPER_1B_MEGATRON.workload, "stock"
+            DP2, ENGINES.workload, "stock"
         )
         self.assertIn(
             DATA_PARALLEL_LINE.format(replicate=2, shard=1), markers
@@ -685,7 +687,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
                 markers = VALIDATION_PROFILES[
                     "torchtitan"
                 ].parallelism_markers(
-                    spec, PIPER_1B_MEGATRON.workload, "stock"
+                    spec, ENGINES.workload, "stock"
                 )
                 self.assertEqual(
                     [m for m in markers if "data parallel" in m], []
@@ -708,10 +710,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
             fixture.write({0: unwrapped, 1: unwrapped})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=DP2,
                 )
 
@@ -741,10 +743,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
                         RuntimeError, f"rank {missing}'s profiler traces"
                     ):
                         validate_arm(
-                            PIPER_1B_MEGATRON.arm("titan_stock"),
+                            ENGINES.arm("titan_compiled"),
                             fixture.root,
                             fixture.log,
-                            PIPER_1B_MEGATRON.workload,
+                            ENGINES.workload,
                             parallelism=DP2,
                         )
 
@@ -759,10 +761,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary))
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
             validate_arm(
-                PIPER_1B_MEGATRON.arm("titan_stock"),
+                ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 parallelism=PP2,
             )
 
@@ -789,10 +791,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
             fixture.write({0: log, 1: log})
             with self.assertRaisesRegex(RuntimeError, "carry no"):
                 validate_arm(
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     parallelism=DP2,
                 )
 
@@ -816,10 +818,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     log = _titan_log(DP2)
                     fixture.write({0: log, 1: log})
                     validate_arm(
-                        PIPER_1B_MEGATRON.arm("titan_stock"),
+                        ENGINES.arm("titan_compiled"),
                         fixture.root,
                         fixture.log,
-                        PIPER_1B_MEGATRON.workload,
+                        ENGINES.workload,
                         parallelism=DP2,
                     )
 
@@ -858,7 +860,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     VALIDATION_PROFILES["megatron"].parallelism_markers(
-                        spec, PIPER_1B_MEGATRON.workload, "stock"
+                        spec, ENGINES.workload, "stock"
                     ),
                     tuple(printed),
                 )
@@ -904,10 +906,10 @@ class ArmRuleTwelveTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "logs nothing"):
                     validate_arm(
-                        PIPER_1B_MEGATRON.arm("titan_stock"),
+                        ENGINES.arm("titan_compiled"),
                         fixture.root,
                         fixture.log,
-                        PIPER_1B_MEGATRON.workload,
+                        ENGINES.workload,
                         parallelism=PP2,
                     )
 
@@ -924,13 +926,23 @@ def _megatron_log(spec: ParallelismSpec, p2p_line: str | None) -> str:
         "Megatron-LM training loop (mode=default, graphs=none)",
         _SIZE_LINE.rstrip("\n"),
         *profile.parallelism_markers(
-            spec, PIPER_1B_MEGATRON.workload, "stock"
+            spec, ENGINES.workload, "stock"
         ),
     ]
     if p2p_line is not None:
         lines.append(p2p_line)
     lines.append("Training completed")
     return "\n".join(lines)
+
+
+# The tuned megatron driver has no registered arm. Its validation profile
+# is still live, so the rules that read it run against a synthetic arm.
+TUNED_MEGATRON_ARM = Arm(
+    name="tuned_megatron",
+    description="the tuned megatron driver, which no scenario selects",
+    launcher="megatron",
+    validation="megatron",
+)
 
 
 class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
@@ -983,8 +995,8 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
         ``False`` passes ``off`` and fails ``on``; a log with no line fails
         both. The failure names the token the log lacked.
         """
-        scenario = scenario_by_name("piper1b_megatron")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("engines")
+        arm = TUNED_MEGATRON_ARM
         on_line = train.P2P_LINE.format(comm=True, sync=True)
         off_line = train.P2P_LINE.format(comm=True, sync=False)
         cases = (
@@ -1031,8 +1043,8 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
         """The rule runs per rank, so a stage that kept the sync under an
         ``off`` label is caught even when the other stage dropped it."""
-        scenario = scenario_by_name("piper1b_megatron")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("engines")
+        arm = TUNED_MEGATRON_ARM
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(
                 Path(temporary), markers=arm.trace_kernel_markers
@@ -1076,7 +1088,7 @@ def _stock_log(
     them would fail every stock arm.
     """
     profile = VALIDATION_PROFILES["megatron_stock"]
-    workload = scenario_by_name("piper_megatron_stock").workload
+    workload = scenario_by_name("engines").workload
     lines = [
         profile.mode_line("default"),
         # The driver prints these on its own mode line, off the arguments
@@ -1134,8 +1146,8 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
         self.assertEqual(tuned.nan_guard_markers("on"), ())
         with self.assertRaisesRegex(ValueError, "no NaN guard"):
             tuned.nan_guard_markers("off")
-        scenario = scenario_by_name("piper1b_megatron")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("engines")
+        arm = TUNED_MEGATRON_ARM
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(
                 Path(temporary), ranks=(0,), markers=arm.trace_kernel_markers
@@ -1162,8 +1174,8 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
         ``False`` passes ``off`` and fails ``on``; a log with no line fails
         both. The failure names the token the log lacked.
         """
-        scenario = scenario_by_name("piper_megatron_stock")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("engines")
+        arm = scenario.arm("megatron_stock")
         cases = (
             (self.ON_LINE, "on", None),
             (self.ON_LINE, "off", "check_for_nan_in_loss_and_grad=False"),
@@ -1207,8 +1219,8 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
         """The rule runs per rank, so a stage that kept the guard under an
         ``off`` label is caught even when the other stage dropped it."""
-        scenario = scenario_by_name("piper_megatron_stock")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("engines")
+        arm = scenario.arm("megatron_stock")
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(
                 Path(temporary), markers=arm.trace_kernel_markers
@@ -1293,8 +1305,8 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         self,
     ) -> None:
         """Asked at the trivial spec, where the mesh markers ask nothing."""
-        scenario = scenario_by_name("piper_megatron_stock")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("engines")
+        arm = scenario.arm("megatron_stock")
         cases = (
             ("stock", "stock", None),
             ("stock", "lean", "use_precision_aware_optimizer=True"),
@@ -1342,8 +1354,8 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
     def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
         """The rule runs per rank, so a stage that kept the stock optimizer
         under a ``lean`` label is caught."""
-        scenario = scenario_by_name("piper_megatron_stock")
-        arm = scenario.arm("baseline")
+        scenario = scenario_by_name("engines")
+        arm = scenario.arm("megatron_stock")
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(
                 Path(temporary), markers=arm.trace_kernel_markers

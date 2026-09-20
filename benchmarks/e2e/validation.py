@@ -760,9 +760,8 @@ VALIDATION_PROFILES = {
         # None on purpose: megatron-core sets jit_fuser = torch.compile at
         # import and decorates 41 functions with it, so no log line proves a
         # megatron arm ran uncompiled, and disable_jit_fuser() cannot make
-        # one true (see the piper1b_megatron declaration). That scenario
-        # declines the uncompiled modes, and validate_arm refuses one here if
-        # it ever reaches this profile.
+        # one true. No scenario selects this driver today, and validate_arm
+        # refuses an uncompiled mode here if one ever reaches this profile.
         compiled_marker=None,
         failure_markers=(),
         check_ac_line=False,
@@ -784,7 +783,7 @@ VALIDATION_PROFILES = {
         nan_guard_markers=_tuned_megatron_nan_guard_markers,
         precision_markers=_tuned_megatron_precision_markers,
     ),
-    # The stock arm of piper_megatron_stock. It runs megatron.training's own
+    # The stock arm of the engines scenario. It runs megatron.training's own
     # pretrain() through pretrain_gpt's providers, so nothing here may assume
     # the tuned driver's lines: every marker below carries the word "stock",
     # and the driver prints the same strings.

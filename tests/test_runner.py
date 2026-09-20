@@ -21,7 +21,7 @@ from benchmarks.e2e.registry import (
     COMPILE_MODES,
     SCENARIOS,
     TORCH_COMPILE_MODE,
-    PIPER_1B_MEGATRON,
+    ENGINES,
     PIPER_1B_MEGATRON_WORKLOAD,
     scenario_by_name,
 )
@@ -35,7 +35,7 @@ from benchmarks.models.piper_qwen3.components.lm_head.losses import (
 )
 from benchmarks.models.piper_qwen3.config_registry import (
     qwen3_piper_1b,
-    qwen3_piper_1b_piper_optimized_te_ce,
+    qwen3_piper_1b_pretokenized,
 )
 from torchtitan.components.loss import CrossEntropyLoss
 from benchmarks.models.piper_qwen3.parallelize import (
@@ -55,6 +55,15 @@ from torchtitan.distributed import ParallelDims
 PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
     "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu."
     "piper_optimized_inductor_fused_grouped_experts"
+)
+
+# No registered arm carries an override today. The plumbing stays, so the
+# rules that guard it are exercised against a synthetic arm.
+OVERRIDE_ARM = Arm(
+    name="override_arm",
+    description="a synthetic arm that swaps one config node per block",
+    override_imports=(PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
+    overrides_per_block=1,
 )
 
 
@@ -125,7 +134,7 @@ class SelectedArmTests(unittest.TestCase):
     """Repeated ``--arm`` is an ordered subset, never a second scenario."""
 
     def setUp(self) -> None:
-        self.scenario = scenario_by_name("piper1b_megatron")
+        self.scenario = scenario_by_name("engines")
         self.metadata = {
             "requested_gpu": "0",
             "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
@@ -139,20 +148,20 @@ class SelectedArmTests(unittest.TestCase):
         self.assertEqual(select_arms(self.scenario, ()), self.scenario.arms)
 
     def test_one_name_selects_one_arm(self) -> None:
-        selected = select_arms(self.scenario, ("titan_stock",))
-        self.assertEqual([arm.name for arm in selected], ["titan_stock"])
+        selected = select_arms(self.scenario, ("titan_compiled",))
+        self.assertEqual([arm.name for arm in selected], ["titan_compiled"])
 
     def test_several_names_preserve_request_order(self) -> None:
         selected = select_arms(
-            self.scenario, ("titan_stock", "baseline")
+            self.scenario, ("titan_compiled", "megatron_stock")
         )
         self.assertEqual(
-            [arm.name for arm in selected], ["titan_stock", "baseline"]
+            [arm.name for arm in selected], ["titan_compiled", "megatron_stock"]
         )
 
     def test_a_duplicate_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"--arm repeats 'baseline'"):
-            select_arms(self.scenario, ("baseline", "baseline"))
+        with self.assertRaisesRegex(ValueError, r"--arm repeats 'megatron_stock'"):
+            select_arms(self.scenario, ("megatron_stock", "megatron_stock"))
 
     def test_unknown_names_are_refused_together(self) -> None:
         with self.assertRaisesRegex(
@@ -173,10 +182,10 @@ class SelectedArmTests(unittest.TestCase):
 
     def test_compile_mode_acceptance_depends_on_the_selected_engines(self) -> None:
         cases = (
-            (("baseline", "titan_stock"), "default", True),
-            (("titan_stock",), "none", True),
-            (("baseline",), "none", False),
-            (("baseline", "titan_stock"), "none", False),
+            (("megatron_stock", "titan_compiled"), "default", True),
+            (("titan_compiled",), "none", True),
+            (("megatron_stock",), "none", False),
+            (("megatron_stock", "titan_compiled"), "none", False),
             ((), "none", False),
         )
         with mock.patch(
@@ -220,8 +229,8 @@ class SelectedArmTests(unittest.TestCase):
             execute_run(
                 RunRequest(
                     gpu="0",
-                    scenario_name="piper1b_megatron",
-                    arm_names=("titan_swiglu", "titan_stock"),
+                    scenario_name="engines",
+                    arm_names=("titan_eager", "titan_compiled"),
                     out_dir=out_dir,
                     ac_mode="none",
                 ),
@@ -230,22 +239,22 @@ class SelectedArmTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             state = json.loads((out_dir / "run_state.json").read_text())
-            self.assertEqual(launched, ["titan_swiglu", "titan_stock"])
+            self.assertEqual(launched, ["titan_eager", "titan_compiled"])
             self.assertEqual(
-                manifest["selected_arms"], ["titan_swiglu", "titan_stock"]
+                manifest["selected_arms"], ["titan_eager", "titan_compiled"]
             )
             self.assertEqual(
-                list(manifest["commands"]), ["titan_swiglu", "titan_stock"]
+                list(manifest["commands"]), ["titan_eager", "titan_compiled"]
             )
             self.assertEqual(
-                list(state["arms"]), ["titan_swiglu", "titan_stock"]
+                list(state["arms"]), ["titan_eager", "titan_compiled"]
             )
 
             with self.assertRaisesRegex(ValueError, "selected_arms"):
                 execute_run(
                     RunRequest(
                         gpu="0",
-                        arm_names=("titan_stock", "titan_swiglu"),
+                        arm_names=("titan_compiled", "titan_eager"),
                         resume_dir=out_dir,
                     ),
                     process_runner=fake_process,
@@ -291,7 +300,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         gpu: str = "0,1",
         parallelism: ParallelismSpec | None = None,
         megatron_p2p_sync: str | None = "off",
-        scenario_name: str = "piper1b_megatron",
+        scenario_name: str = "engines",
     ):
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
@@ -325,7 +334,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, pattern):
                 _resolve_run(
                     RunRequest(
-                        scenario_name="piper1b_megatron",
+                        scenario_name="engines",
                         out_dir=Path("/tmp/p2p-sync-test"),
                         ac_mode="none",
                         **keywords,
@@ -339,7 +348,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         self._refused_before_any_probe(
             "no pipeline message",
             gpu="0",
-            arm_names=("baseline",),
+            arm_names=("megatron_stock",),
             megatron_p2p_sync="off",
         )
 
@@ -355,7 +364,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         self._refused_before_any_probe(
             "reaches no arm",
             gpu="0,1",
-            arm_names=("titan_stock",),
+            arm_names=("titan_compiled",),
             parallelism=self.PP2,
             megatron_p2p_sync="off",
         )
@@ -364,7 +373,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         self._refused_before_any_probe(
             "unknown megatron p2p sync",
             gpu="0,1",
-            arm_names=("baseline",),
+            arm_names=("megatron_stock",),
             parallelism=self.PP2,
             megatron_p2p_sync="false",
         )
@@ -375,23 +384,23 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         """``run --arm`` narrows the engine set, and a mixed selection is
         legal: the megatron arm gets the flag and the titan arm gets
         nothing."""
-        resolved = self._resolve(("baseline", "titan_stock"))
+        resolved = self._resolve(("megatron_stock", "titan_compiled"))
         self.assertEqual(resolved[12], "off")
         commands = resolved[6]
-        megatron = commands["baseline"]
-        self.assertEqual(megatron[-3:-1], ["--batch-p2p-sync", "off"])
-        self.assertEqual(_p2p_flags(commands["titan_stock"]), [])
+        megatron = commands["megatron_stock"]
+        self.assertEqual(megatron[-2:], ["--bench-batch-p2p-sync", "off"])
+        self.assertEqual(_p2p_flags(commands["titan_compiled"]), [])
 
     def test_a_megatron_only_subset_passes(self) -> None:
-        resolved = self._resolve(("baseline",))
-        self.assertEqual([arm.name for arm in resolved[2]], ["baseline"])
+        resolved = self._resolve(("megatron_stock",))
+        self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
         self.assertEqual(resolved[12], "off")
 
     def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
         for requested in (None, "on"):
             with self.subTest(requested=requested):
                 resolved = self._resolve(
-                    ("baseline", "titan_stock"), megatron_p2p_sync=requested
+                    ("megatron_stock", "titan_compiled"), megatron_p2p_sync=requested
                 )
                 self.assertEqual(resolved[12], "on")
                 for name, command in resolved[6].items():
@@ -399,18 +408,18 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
 
     def test_the_stock_scenario_takes_the_value_too(self) -> None:
         resolved = self._resolve(
-            ("baseline",), scenario_name="piper_megatron_stock"
+            ("megatron_stock",), scenario_name="engines"
         )
-        command = resolved[6]["baseline"]
+        command = resolved[6]["megatron_stock"]
         self.assertEqual(command[-2:], ["--bench-batch-p2p-sync", "off"])
 
     def _write_manifest(self, out_dir: Path, megatron_p2p_sync: str) -> None:
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         write_manifest(
             out_dir,
             scenario,
-            (scenario.arm("baseline"),),
-            {"baseline": ["cmd"]},
+            (scenario.arm("megatron_stock"),),
+            {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
@@ -435,7 +444,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
                 RunRequest(
                     gpu="0,1",
                     scenario_name=None,
-                    arm_names=("baseline",),
+                    arm_names=("megatron_stock",),
                     resume_dir=out_dir,
                     parallelism=self.PP2,
                     megatron_p2p_sync=megatron_p2p_sync,
@@ -457,7 +466,8 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             self.assertEqual(resolved[12], "off")
             self.assertTrue(resolved[11])
             self.assertEqual(
-                resolved[6]["baseline"][-3:-1], ["--batch-p2p-sync", "off"]
+                resolved[6]["megatron_stock"][-2:],
+                ["--bench-batch-p2p-sync", "off"],
             )
             with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
                 self._resume(out_dir, megatron_p2p_sync="on")
@@ -478,7 +488,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
             resolved = self._resume(out_dir, megatron_p2p_sync=None)
             self.assertEqual(resolved[12], "on")
-            self.assertEqual(_p2p_flags(resolved[6]["baseline"]), [])
+            self.assertEqual(_p2p_flags(resolved[6]["megatron_stock"]), [])
             with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
                 self._resume(out_dir, megatron_p2p_sync="off")
 
@@ -499,8 +509,8 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             execute_run(
                 RunRequest(
                     gpu="0,1",
-                    scenario_name="piper1b_megatron",
-                    arm_names=("baseline",),
+                    scenario_name="engines",
+                    arm_names=("megatron_stock",),
                     out_dir=Path(temporary) / "run",
                     ac_mode="none",
                     parallelism=self.PP2,
@@ -533,8 +543,8 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
                 execute_run(
                     RunRequest(
                         gpu="0,1",
-                        scenario_name="piper1b_megatron",
-                        arm_names=("baseline",),
+                        scenario_name="engines",
+                        arm_names=("megatron_stock",),
                         out_dir=Path(temporary) / "run",
                         ac_mode="none",
                         parallelism=self.PP2,
@@ -576,7 +586,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         names: tuple[str, ...],
         *,
         megatron_nan_guard: str | None = "off",
-        scenario_name: str = "piper_megatron_stock",
+        scenario_name: str = "engines",
     ):
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
@@ -625,8 +635,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
     ) -> None:
         """A TorchTitan-only run gives the value nothing to reach."""
         for scenario_name, names in (
-            ("piper1b_megatron", ("titan_stock",)),
-            ("piper_megatron_stock", ("titan_stock",)),
+            ("engines", ("titan_compiled",)),
+            ("engines", ("titan_compiled",)),
         ):
             with self.subTest(scenario=scenario_name):
                 self._refused_before_any_probe(
@@ -636,28 +646,11 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                     megatron_nan_guard="off",
                 )
 
-    def test_off_with_the_tuned_megatron_arm_is_refused_before_any_probe(
-        self,
-    ) -> None:
-        """The tuned driver has no guard to turn off, so a run holding it
-        would record ``off`` for an arm the value never reached. Its
-        refusal names the arm and the repair, and it wins over the
-        no-arm refusal when both would apply."""
-        for names in (("baseline",), ("baseline", "titan_stock"), ()):
-            with self.subTest(arms=names):
-                self._refused_before_any_probe(
-                    r"requested with baseline, whose driver "
-                    r"benchmarks/e2e/megatron/train.py has no NaN guard",
-                    "piper1b_megatron",
-                    arm_names=names,
-                    megatron_nan_guard="off",
-                )
-
     def test_an_unknown_value_is_refused(self) -> None:
         self._refused_before_any_probe(
             "unknown megatron nan guard",
-            "piper_megatron_stock",
-            arm_names=("baseline",),
+            "engines",
+            arm_names=("megatron_stock",),
             megatron_nan_guard="false",
         )
 
@@ -665,24 +658,24 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         """A mixed selection is legal: the stock arm gets Megatron's own
         token, once, ahead of the harness group, and the titan arm gets
         nothing."""
-        resolved = self._resolve(("baseline", "titan_stock"))
+        resolved = self._resolve(("megatron_stock", "titan_compiled"))
         self.assertEqual(resolved[13], "off")
         commands = resolved[6]
-        stock = commands["baseline"]
+        stock = commands["megatron_stock"]
         self.assertEqual(stock.count(NO_NAN_CHECK), 1)
         self.assertLess(stock.index(NO_NAN_CHECK), stock.index("--bench-arm-dir"))
-        self.assertNotIn(NO_NAN_CHECK, commands["titan_stock"])
+        self.assertNotIn(NO_NAN_CHECK, commands["titan_compiled"])
 
     def test_a_stock_only_subset_passes(self) -> None:
-        resolved = self._resolve(("baseline",))
-        self.assertEqual([arm.name for arm in resolved[2]], ["baseline"])
+        resolved = self._resolve(("megatron_stock",))
+        self.assertEqual([arm.name for arm in resolved[2]], ["megatron_stock"])
         self.assertEqual(resolved[13], "off")
 
     def test_the_default_resolves_to_on_and_adds_no_token(self) -> None:
         for requested in (None, "on"):
             with self.subTest(requested=requested):
                 resolved = self._resolve(
-                    ("baseline", "titan_stock"), megatron_nan_guard=requested
+                    ("megatron_stock", "titan_compiled"), megatron_nan_guard=requested
                 )
                 self.assertEqual(resolved[13], "on")
                 for name, command in resolved[6].items():
@@ -708,8 +701,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 execute_run(
                     RunRequest(
                         gpu="0",
-                        scenario_name="piper_megatron_stock",
-                        arm_names=("baseline",),
+                        scenario_name="engines",
+                        arm_names=("megatron_stock",),
                         out_dir=Path(temporary) / "run",
                         ac_mode="none",
                         megatron_nan_guard="off",
@@ -739,8 +732,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             execute_run(
                 RunRequest(
                     gpu="0",
-                    scenario_name="piper_megatron_stock",
-                    arm_names=("baseline",),
+                    scenario_name="engines",
+                    arm_names=("megatron_stock",),
                     out_dir=Path(temporary) / "run",
                     ac_mode="none",
                     megatron_nan_guard="off",
@@ -753,12 +746,12 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
         self.assertEqual(validate.call_args.kwargs["megatron_p2p_sync"], "on")
 
     def _write_manifest(self, out_dir: Path, megatron_nan_guard: str) -> None:
-        scenario = scenario_by_name("piper_megatron_stock")
+        scenario = scenario_by_name("engines")
         write_manifest(
             out_dir,
             scenario,
-            (scenario.arm("baseline"),),
-            {"baseline": ["cmd"]},
+            (scenario.arm("megatron_stock"),),
+            {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
@@ -783,7 +776,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 RunRequest(
                     gpu="0",
                     scenario_name=None,
-                    arm_names=("baseline",),
+                    arm_names=("megatron_stock",),
                     resume_dir=out_dir,
                     megatron_nan_guard=megatron_nan_guard,
                 ),
@@ -803,7 +796,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             resolved = self._resume(out_dir, megatron_nan_guard=None)
             self.assertEqual(resolved[13], "off")
             self.assertTrue(resolved[11])
-            self.assertIn(NO_NAN_CHECK, resolved[6]["baseline"])
+            self.assertIn(NO_NAN_CHECK, resolved[6]["megatron_stock"])
             with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
                 self._resume(out_dir, megatron_nan_guard="on")
 
@@ -824,7 +817,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
             resolved = self._resume(out_dir, megatron_nan_guard=None)
             self.assertEqual(resolved[13], "on")
-            self.assertNotIn(NO_NAN_CHECK, resolved[6]["baseline"])
+            self.assertNotIn(NO_NAN_CHECK, resolved[6]["megatron_stock"])
             with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
                 self._resume(out_dir, megatron_nan_guard="off")
 
@@ -862,7 +855,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         *,
         megatron_precision: str | None = "lean",
         dense_sharding: str = "zero1",
-        scenario_name: str = "piper_megatron_stock",
+        scenario_name: str = "engines",
     ):
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
@@ -913,8 +906,8 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         """TorchTitan holds its own bf16 optimizer states, so a titan-only
         run gives the value nothing to reach."""
         for scenario_name, names in (
-            ("piper1b_megatron", ("titan_stock",)),
-            ("piper_megatron_stock", ("titan_stock",)),
+            ("engines", ("titan_compiled",)),
+            ("engines", ("titan_compiled",)),
         ):
             with self.subTest(scenario=scenario_name):
                 self._refused_before_any_probe(
@@ -924,59 +917,31 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                     megatron_precision="lean",
                 )
 
-    def test_lean_with_the_tuned_megatron_arm_is_refused_before_any_probe(
-        self,
-    ) -> None:
-        """The tuned driver builds a plain torch AdamW, so it has no
-        precision-aware optimizer to configure. Its refusal names the arm
-        and the repair, and it wins over the other two when all apply."""
-        for names in (("baseline",), ("baseline", "titan_stock"), ()):
-            with self.subTest(arms=names):
-                self._refused_before_any_probe(
-                    r"requested with baseline, whose driver "
-                    r"benchmarks/e2e/megatron/train\.py builds a plain torch "
-                    r"AdamW",
-                    "piper1b_megatron",
-                    arm_names=names,
-                    megatron_precision="lean",
-                )
-
-    def test_lean_under_replicate_is_refused_before_any_probe(self) -> None:
-        """Megatron asserts ``use_distributed_optimizer`` under
-        ``--use-precision-aware-optimizer``, and ``--dense-sharding`` is
-        the one owner of that flag. The refusal names both repairs."""
-        self._refused_before_any_probe(
-            "needs --dense-sharding zero1 or --dense-sharding zero3",
-            "piper_megatron_stock",
-            arm_names=("baseline",),
-            megatron_precision="lean",
-        )
-
     def test_an_unknown_value_is_refused(self) -> None:
         self._refused_before_any_probe(
             "unknown megatron precision",
-            "piper_megatron_stock",
-            arm_names=("baseline",),
+            "engines",
+            arm_names=("megatron_stock",),
             megatron_precision="bf16",
         )
 
     def test_lean_reaches_the_stock_command_and_not_the_titan_one(self) -> None:
         """A mixed selection is legal: the stock arm gets the four flags
         and the titan arm gets none of them."""
-        resolved = self._resolve(("baseline", "titan_stock"))
+        resolved = self._resolve(("megatron_stock", "titan_compiled"))
         self.assertEqual(resolved[14], "lean")
         commands = resolved[6]
-        stock = commands["baseline"]
+        stock = commands["megatron_stock"]
         for flag in self.LEAN_FLAGS:
             with self.subTest(flag=flag):
                 self.assertEqual(stock.count(flag), 1)
-                self.assertNotIn(flag, commands["titan_stock"])
+                self.assertNotIn(flag, commands["titan_compiled"])
 
     def test_the_default_resolves_to_stock_and_adds_no_flag(self) -> None:
         for requested in (None, "stock"):
             with self.subTest(requested=requested):
                 resolved = self._resolve(
-                    ("baseline", "titan_stock"), megatron_precision=requested
+                    ("megatron_stock", "titan_compiled"), megatron_precision=requested
                 )
                 self.assertEqual(resolved[14], "stock")
                 for name, command in resolved[6].items():
@@ -990,12 +955,12 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         megatron_precision: str,
         parallelism: ParallelismSpec = TRIVIAL_SPEC,
     ) -> None:
-        scenario = scenario_by_name("piper_megatron_stock")
+        scenario = scenario_by_name("engines")
         write_manifest(
             out_dir,
             scenario,
-            (scenario.arm("baseline"),),
-            {"baseline": ["cmd"]},
+            (scenario.arm("megatron_stock"),),
+            {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
@@ -1026,7 +991,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
                 RunRequest(
                     gpu="0",
                     scenario_name=None,
-                    arm_names=("baseline",),
+                    arm_names=("megatron_stock",),
                     resume_dir=out_dir,
                     parallelism=parallelism,
                     megatron_precision=megatron_precision,
@@ -1052,7 +1017,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             resolved = self._resume(out_dir, parallelism=spec)
             self.assertEqual(resolved[14], "lean")
             self.assertIn(
-                "--use-precision-aware-optimizer", resolved[6]["baseline"]
+                "--use-precision-aware-optimizer", resolved[6]["megatron_stock"]
             )
             with self.assertRaisesRegex(ValueError, "megatron_precision"):
                 self._resume(
@@ -1077,7 +1042,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             resolved = self._resume(out_dir)
             self.assertEqual(resolved[14], "stock")
             self.assertNotIn(
-                "--use-precision-aware-optimizer", resolved[6]["baseline"]
+                "--use-precision-aware-optimizer", resolved[6]["megatron_stock"]
             )
 
 
@@ -1085,7 +1050,7 @@ class ParallelizeTests(unittest.TestCase):
     def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
         for factory in (
             qwen3_piper_1b,
-            qwen3_piper_1b_piper_optimized_te_ce,
+            qwen3_piper_1b_pretokenized,
         ):
             for size in PIPER_SHAPES:
                 with self.subTest(config=factory.__name__, size=size):
@@ -1309,23 +1274,11 @@ class ParallelizeTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
-    def test_an_arm_config_overrides_the_workload_config(self) -> None:
-        command = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_lm_head"),
-            Path("/out/titan_lm_head"),
-            [],
-        )
-        self.assertEqual(
-            command[command.index("--config") + 1],
-            "qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
-        )
-        self.assertEqual(command[command.index("--debug.seed") + 1], "42")
-
+    def test_the_workload_config_reaches_a_titan_arm(self) -> None:
         stock = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
-            Path("/out/titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
+            Path("/out/titan_compiled"),
             [],
         )
         self.assertEqual(
@@ -1340,8 +1293,8 @@ class CommandTests(unittest.TestCase):
         for size in PIPER_SHAPES:
             with self.subTest(size=size):
                 command = command_for_arm(
-                    PIPER_1B_MEGATRON.workload,
-                    PIPER_1B_MEGATRON.arm("titan_stock"),
+                    ENGINES.workload,
+                    ENGINES.arm("titan_compiled"),
                     Path("/out/titan_stock"),
                     [],
                     model_size=size,
@@ -1360,9 +1313,11 @@ class CommandTests(unittest.TestCase):
                 self.assertNotIn(f"qwen3_piper_1b_pretokenized_{size}", command)
 
     def test_command_adds_only_the_arm_override_and_dump_folder(self) -> None:
-        arm = PIPER_1B_MEGATRON.arm("titan_swiglu")
         command = command_for_arm(
-            PIPER_1B_MEGATRON.workload, arm, Path("/out/fused"), ["--debug.seed", "42"]
+            ENGINES.workload,
+            OVERRIDE_ARM,
+            Path("/out/fused"),
+            ["--debug.seed", "42"],
         )
         override_index = command.index("--override.imports")
         self.assertEqual(
@@ -1375,8 +1330,8 @@ class CommandTests(unittest.TestCase):
 
     def test_a_stock_command_has_no_override(self) -> None:
         command = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
             Path("/out/titan_stock"),
             [],
         )
@@ -1396,8 +1351,8 @@ class CommandTests(unittest.TestCase):
 
     def test_compile_mode_reaches_torchtitan_as_the_torch_level_name(self) -> None:
         command = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
             Path("/out/baseline"),
             [],
             "cuda-graph",
@@ -1409,8 +1364,8 @@ class CommandTests(unittest.TestCase):
 
     def test_default_compile_mode_leaves_the_command_untouched(self) -> None:
         command = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
             Path("/out/baseline"),
             [],
         )
@@ -1423,14 +1378,14 @@ class CommandTests(unittest.TestCase):
         # command the default mode builds, token for token: this is the
         # assertion that keeps the new mode from moving an existing default.
         compiled = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
             Path("/out/baseline"),
             [],
         )
         eager = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
             Path("/out/baseline"),
             [],
             "none",
@@ -1442,11 +1397,11 @@ class CommandTests(unittest.TestCase):
         )
 
     def test_a_megatron_command_refuses_an_uncompiled_mode(self) -> None:
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         with self.assertRaisesRegex(ValueError, "cannot apply to this arm"):
             command_for_arm(
                 scenario.workload,
-                scenario.arm("baseline"),
+                scenario.arm("megatron_stock"),
                 Path("/out/baseline"),
                 [],
                 "none",
@@ -1455,8 +1410,8 @@ class CommandTests(unittest.TestCase):
 
     def test_ac_none_adds_the_subcommand_token_last(self) -> None:
         command = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
             Path("/out/baseline"),
             [],
             "default",
@@ -1469,15 +1424,15 @@ class CommandTests(unittest.TestCase):
 
     def test_ac_sac_leaves_the_command_untouched(self) -> None:
         command = command_for_arm(
-            PIPER_1B_MEGATRON.workload,
-            PIPER_1B_MEGATRON.arm("titan_stock"),
+            ENGINES.workload,
+            ENGINES.arm("titan_compiled"),
             Path("/out/baseline"),
             [],
         )
         self.assertNotIn("activation-checkpoint:none", command)
 
     def test_megatron_launcher_builds_the_driver_command(self) -> None:
-        workload = replace(PIPER_1B_MEGATRON.workload, seed=42)
+        workload = replace(ENGINES.workload, seed=42)
         arm = Arm(name="baseline", description="megatron", launcher="megatron")
         command = command_for_arm(
             workload, arm, Path("/out/baseline"), [], "cuda-graph", "none"
@@ -1490,7 +1445,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(command[-1], "/out/baseline")
 
     def test_megatron_launcher_refuses_unsupported_requests(self) -> None:
-        workload = replace(PIPER_1B_MEGATRON.workload, seed=42)
+        workload = replace(ENGINES.workload, seed=42)
         arm = Arm(name="baseline", description="megatron", launcher="megatron")
         with self.assertRaisesRegex(ValueError, "passthrough"):
             command_for_arm(
@@ -1498,7 +1453,7 @@ class CommandTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "without recompute"):
             command_for_arm(workload, arm, Path("/out"), [], "default", "sac")
-        unseeded = replace(PIPER_1B_MEGATRON.workload, seed=None)
+        unseeded = replace(ENGINES.workload, seed=None)
         with self.assertRaisesRegex(ValueError, "seeded"):
             command_for_arm(
                 unseeded, arm, Path("/out"), [], "default", "none"
@@ -1520,49 +1475,37 @@ class CommandTests(unittest.TestCase):
                 self.assertIn(f"/out/{arm.name}", command)
 
 
-class MegatronScenarioTests(unittest.TestCase):
+class EnginesScenarioTests(unittest.TestCase):
     def test_scenario_registration(self) -> None:
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         self.assertEqual(
             [arm.name for arm in scenario.arms],
-            [
-                "baseline",
-                "titan_stock",
-                "titan_swiglu",
-                "titan_lm_head",
-                "titan_swiglu_lm_head",
-            ],
+            ["titan_compiled", "titan_eager", "megatron_stock"],
         )
-        baseline = scenario.arm("baseline")
-        self.assertEqual(baseline.launcher, "megatron")
-        self.assertEqual(baseline.validation, "megatron")
-        self.assertIn("--ac never affects this arm", baseline.description)
-        self.assertIn("tuned BASE profile", baseline.description)
-        self.assertIn("fastest-available TE fused CE", baseline.description)
-        self.assertIn(
-            "not accepted by stock pretrain_gpt.py", baseline.description
+        stock = scenario.arm("megatron_stock")
+        self.assertEqual(stock.launcher, "megatron_stock")
+        self.assertEqual(stock.validation, "megatron_stock")
+        self.assertIn("NOT PLAIN BF16", stock.description)
+        self.assertEqual(
+            stock.trace_kernel_markers,
+            ("cudnn_generated_fort_native_sdpa", "_mul_silu_split"),
         )
         self.assertEqual(scenario.supported_ac_modes, ("none",))
-        # The complete roster declines the titan-only uncompiled treatment;
-        # an explicit all-titan subset is the narrow runner-level exception.
-        self.assertEqual(
-            scenario.supported_compile_modes, ("default", "cuda-graph")
-        )
+        self.assertEqual(scenario.supported_compile_modes, ("default",))
         self.assertEqual(scenario.regions, ())
         self.assertEqual(scenario.workload.seed, 42)
-        for arm in scenario.arms[1:]:
+        for arm in scenario.arms[:2]:
             self.assertEqual(arm.launcher, "torchtitan")
 
-    def test_pretokenized_config_twins_build(self) -> None:
+    def test_every_titan_arm_reads_the_replay_stream(self) -> None:
         import benchmarks.models.piper_qwen3.config_registry as registry
         from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataLoader
-        from benchmarks.models.piper_qwen3.components.lm_head.losses import (
-            PiperOptimizedCrossEntropyLoss,
-        )
 
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         config_names = {
-            arm.config or scenario.workload.config for arm in scenario.arms[1:]
+            arm.config or scenario.workload.config
+            for arm in scenario.arms
+            if arm.launcher == "torchtitan"
         }
         for name in sorted(config_names):
             config = getattr(registry, name)()
@@ -1570,25 +1513,23 @@ class MegatronScenarioTests(unittest.TestCase):
                 config.dataloader, PretokenizedReplayDataLoader.Config, name
             )
             self.assertEqual(config.dataloader.replay_steps, 40, name)
-        te_ce = registry.qwen3_piper_1b_piper_optimized_te_ce_pretokenized()
-        self.assertIsInstance(te_ce.loss, PiperOptimizedCrossEntropyLoss.Config)
 
     def test_every_arm_command_builds_at_ac_none(self) -> None:
-        scenario = scenario_by_name("piper1b_megatron")
+        scenario = scenario_by_name("engines")
         for arm in scenario.arms:
             command = command_for_arm(
                 scenario.workload,
                 arm,
                 Path("/out") / arm.name,
                 [],
-                "cuda-graph",
+                "default",
                 "none",
             )
             self.assertTrue(command, arm.name)
 
     def test_run_refuses_sac_for_the_megatron_scenario(self) -> None:
         request = RunRequest(
-            gpu="0", scenario_name="piper1b_megatron", ac_mode="sac"
+            gpu="0", scenario_name="engines", ac_mode="sac"
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
@@ -1596,7 +1537,7 @@ class MegatronScenarioTests(unittest.TestCase):
     def test_run_refuses_the_uncompiled_mode_for_the_megatron_scenario(self) -> None:
         request = RunRequest(
             gpu="0",
-            scenario_name="piper1b_megatron",
+            scenario_name="engines",
             compile_mode="none",
             ac_mode="none",
         )
@@ -1677,8 +1618,8 @@ class CpuPinningTests(unittest.TestCase):
 
 class ManifestTests(unittest.TestCase):
     def test_manifest_records_run_configuration(self) -> None:
-        scenario = scenario_by_name("piper1b_megatron")
-        selected = (scenario.arm("titan_swiglu"),)
+        scenario = scenario_by_name("engines")
+        selected = (scenario.arm("titan_eager"),)
         extra_args = ["--debug.seed", "42"]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
@@ -1717,18 +1658,17 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(
             manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
         )
-        self.assertEqual(manifest["scenario"], "piper1b_megatron")
+        self.assertEqual(manifest["scenario"], "engines")
         self.assertEqual(manifest["hardware"], "rtx-a6000")
         self.assertEqual(manifest["hardware_metadata"], metadata)
         self.assertEqual(manifest["workload"]["local_batch_size"], 4)
         self.assertEqual(manifest["workload"]["seq_len"], 1024)
-        self.assertEqual(manifest["selected_arms"], ["titan_swiglu"])
+        self.assertEqual(manifest["selected_arms"], ["titan_eager"])
         self.assertEqual(manifest["regions"], [])
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
-        fused_command = manifest["commands"]["titan_swiglu"]
-        self.assertIn(PIPER_OPTIMIZED_SWIGLU_OVERRIDE, fused_command)
-        self.assertIn("--debug.seed", fused_command)
-        self.assertEqual(fused_command[-2], "--dump-folder")
+        titan_command = manifest["commands"]["titan_eager"]
+        self.assertIn("--debug.seed", titan_command)
+        self.assertEqual(titan_command[-2], "--dump-folder")
 
 
 class UncompiledRunTests(unittest.TestCase):
@@ -1767,8 +1707,8 @@ class UncompiledRunTests(unittest.TestCase):
             execute_run(
                 RunRequest(
                     gpu="0",
-                    scenario_name="piper1b_megatron",
-                    arm_names=("titan_stock",),
+                    scenario_name="engines",
+                    arm_names=("titan_compiled",),
                     out_dir=out_dir,
                     compile_mode="none",
                     ac_mode="none",
@@ -1788,7 +1728,7 @@ class UncompiledRunTests(unittest.TestCase):
         # eager run emits none. The run says so rather than declare a region
         # rule 7 would then fail to find.
         self.assertEqual(manifest["regions"], [])
-        self.assertNotIn("--compile.enable", manifest["commands"]["titan_stock"])
+        self.assertNotIn("--compile.enable", manifest["commands"]["titan_compiled"])
 
     def test_a_resume_refuses_to_cross_the_uncompiled_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1798,7 +1738,7 @@ class UncompiledRunTests(unittest.TestCase):
                 execute_run(
                     RunRequest(
                         gpu="0",
-                        arm_names=("titan_stock",),
+                        arm_names=("titan_compiled",),
                         resume_dir=out_dir,
                         compile_mode="default",
                     ),
@@ -1837,7 +1777,7 @@ _SIZE_LINE = (
 
 class ValidationTests(unittest.TestCase):
     def test_validation_requires_completion_overrides_and_trace_windows(self) -> None:
-        arm = PIPER_1B_MEGATRON.arm("titan_swiglu")
+        arm = OVERRIDE_ARM
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for iteration in ("iteration_20", "iteration_40"):
@@ -1855,18 +1795,18 @@ class ValidationTests(unittest.TestCase):
             completed = _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             log.write_text(completed + applied * 16)
             self.assertEqual(len(trace_files(root)), 2)
-            validate_arm(arm, root, log, PIPER_1B_MEGATRON.workload)
+            validate_arm(arm, root, log, ENGINES.workload)
 
             log.write_text(completed + applied * 15)
             with self.assertRaisesRegex(RuntimeError, "expected 16 override"):
-                validate_arm(arm, root, log, PIPER_1B_MEGATRON.workload)
+                validate_arm(arm, root, log, ENGINES.workload)
 
             log.write_text(
                 completed
                 + "[Override] torchtitan.overrides.other.thing: fqn ...\n" * 16
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(arm, root, log, PIPER_1B_MEGATRON.workload)
+                validate_arm(arm, root, log, ENGINES.workload)
 
     def _rope_baseline_fixture(self, root: Path, *, cudagraphs: bool) -> Path:
         for iteration in ("iteration_20", "iteration_40"):
@@ -1879,7 +1819,7 @@ class ValidationTests(unittest.TestCase):
         return root / "baseline.log"
 
     def test_the_applied_mode_must_match_the_requested_one(self) -> None:
-        arm = PIPER_1B_MEGATRON.arm("titan_stock")
+        arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=True)
@@ -1890,13 +1830,13 @@ class ValidationTests(unittest.TestCase):
                 _compiled_line("reduce-overhead") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             validate_arm(
-                arm, root, log, PIPER_1B_MEGATRON.workload, compile_mode="cuda-graph"
+                arm, root, log, ENGINES.workload, compile_mode="cuda-graph"
             )
 
             log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    arm, root, log, PIPER_1B_MEGATRON.workload, compile_mode="cuda-graph"
+                    arm, root, log, ENGINES.workload, compile_mode="cuda-graph"
                 )
 
             log.write_text(
@@ -1904,11 +1844,11 @@ class ValidationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
                 validate_arm(
-                    arm, root, log, PIPER_1B_MEGATRON.workload, compile_mode="cuda-graph"
+                    arm, root, log, ENGINES.workload, compile_mode="cuda-graph"
                 )
 
     def test_default_run_requires_the_default_mode_line(self) -> None:
-        arm = PIPER_1B_MEGATRON.arm("titan_stock")
+        arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
@@ -1916,16 +1856,16 @@ class ValidationTests(unittest.TestCase):
             log.write_text(
                 _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
-            validate_arm(arm, root, log, PIPER_1B_MEGATRON.workload)
+            validate_arm(arm, root, log, ENGINES.workload)
 
             log.write_text(
                 _compiled_line("reduce-overhead") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(arm, root, log, PIPER_1B_MEGATRON.workload)
+                validate_arm(arm, root, log, ENGINES.workload)
 
     def test_cudagraph_mode_requires_a_graph_launch_in_the_traces(self) -> None:
-        arm = PIPER_1B_MEGATRON.arm("titan_stock")
+        arm = ENGINES.arm("titan_compiled")
         applied = _compiled_line("reduce-overhead") + _SAC_LINE
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1936,7 +1876,7 @@ class ValidationTests(unittest.TestCase):
                     arm,
                     root,
                     log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     compile_mode="cuda-graph",
                 )
 
@@ -1948,7 +1888,7 @@ class ValidationTests(unittest.TestCase):
                 arm,
                 root,
                 log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 compile_mode="cuda-graph",
             )
 
@@ -1974,7 +1914,7 @@ class ValidationTests(unittest.TestCase):
                 arm,
                 root,
                 log,
-                PIPER_1B_MEGATRON.workload,
+                ENGINES.workload,
                 compile_mode="cuda-graph",
                 ac_mode="none",
             )
@@ -1989,7 +1929,7 @@ class ValidationTests(unittest.TestCase):
                     arm,
                     root,
                     log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     compile_mode="cuda-graph",
                     ac_mode="none",
                 )
@@ -2004,13 +1944,13 @@ class ValidationTests(unittest.TestCase):
                     arm,
                     root,
                     log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     compile_mode="cuda-graph",
                     ac_mode="none",
                 )
 
     def test_an_uncompiled_mode_requires_the_compile_line_to_be_absent(self) -> None:
-        arm = PIPER_1B_MEGATRON.arm("titan_stock")
+        arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
@@ -2018,7 +1958,7 @@ class ValidationTests(unittest.TestCase):
             # No compile line at all: this is what an eager arm looks like.
             log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
             validate_arm(
-                arm, root, log, PIPER_1B_MEGATRON.workload, compile_mode="none"
+                arm, root, log, ENGINES.workload, compile_mode="none"
             )
 
             # The block compile line proves the arm was compiled, so the run
@@ -2029,7 +1969,7 @@ class ValidationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "engine compiled the model"):
                 validate_arm(
-                    arm, root, log, PIPER_1B_MEGATRON.workload, compile_mode="none"
+                    arm, root, log, ENGINES.workload, compile_mode="none"
                 )
 
             # The loss compile line proves it too: one marker covers every
@@ -2040,7 +1980,7 @@ class ValidationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "engine compiled the model"):
                 validate_arm(
-                    arm, root, log, PIPER_1B_MEGATRON.workload, compile_mode="none"
+                    arm, root, log, ENGINES.workload, compile_mode="none"
                 )
 
     def test_an_engine_that_cannot_prove_eager_execution_is_refused(self) -> None:
@@ -2062,7 +2002,7 @@ class ValidationTests(unittest.TestCase):
                     arm,
                     root,
                     log,
-                    PIPER_1B_MEGATRON.workload,
+                    ENGINES.workload,
                     compile_mode="none",
                     ac_mode="none",
                 )
@@ -2092,7 +2032,7 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(VALIDATION_PROFILES["megatron"].mode_line(mode), rendered)
 
     def test_ac_mode_must_match_the_applied_treatment(self) -> None:
-        arm = PIPER_1B_MEGATRON.arm("titan_stock")
+        arm = ENGINES.arm("titan_compiled")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._rope_baseline_fixture(root, cudagraphs=False)
@@ -2100,7 +2040,7 @@ class ValidationTests(unittest.TestCase):
             # sac requested, SelectiveAC absent: the run measured no-AC.
             log.write_text(_compiled_line("default") + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "ac mode 'sac'"):
-                validate_arm(arm, root, log, PIPER_1B_MEGATRON.workload)
+                validate_arm(arm, root, log, ENGINES.workload)
 
             # none requested, SelectiveAC applied: the run measured SAC.
             log.write_text(
@@ -2108,13 +2048,13 @@ class ValidationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "ac mode 'none'"):
                 validate_arm(
-                    arm, root, log, PIPER_1B_MEGATRON.workload, ac_mode="none"
+                    arm, root, log, ENGINES.workload, ac_mode="none"
                 )
 
             # none requested, SelectiveAC absent: valid.
             log.write_text(_compiled_line("default") + _SIZE_LINE + "Training completed\n")
             validate_arm(
-                arm, root, log, PIPER_1B_MEGATRON.workload, ac_mode="none"
+                arm, root, log, ENGINES.workload, ac_mode="none"
             )
 
 
@@ -2236,8 +2176,8 @@ class ResumeTests(unittest.TestCase):
             environment = {"PATH": os.environ["PATH"]}
             request = RunRequest(
                 gpu="0",
-                scenario_name="piper1b_megatron",
-                arm_names=("titan_stock",),
+                scenario_name="engines",
+                arm_names=("titan_compiled",),
                 out_dir=out_dir,
                 ac_mode="none",
                 seq_len=512,
@@ -2254,7 +2194,7 @@ class ResumeTests(unittest.TestCase):
             resumed = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_names=("titan_stock",),
+                arm_names=("titan_compiled",),
                 resume_dir=out_dir,
             )
             process = mock.Mock(side_effect=fake_process)
@@ -2267,7 +2207,7 @@ class ResumeTests(unittest.TestCase):
             process.assert_not_called()
             self.assertTrue(any(event.kind == "skip" for event in events))
 
-            (out_dir / "titan_stock.log").write_text("interrupted\n")
+            (out_dir / "titan_compiled.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
                 resumed,
@@ -2289,16 +2229,16 @@ class ResumeTests(unittest.TestCase):
             )
             self.assertIn("--debug.deterministic", retry_command)
             archived_logs = list(
-                (out_dir / "attempts").glob("*/titan_stock/titan_stock.log")
+                (out_dir / "attempts").glob("*/titan_compiled/titan_compiled.log")
             )
             self.assertEqual(len(archived_logs), 1)
             self.assertIn("interrupted", archived_logs[0].read_text())
-            self.assertIn("Training completed", (out_dir / "titan_stock.log").read_text())
+            self.assertIn("Training completed", (out_dir / "titan_compiled.log").read_text())
 
             incompatible = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_names=("titan_stock",),
+                arm_names=("titan_compiled",),
                 resume_dir=out_dir,
                 steps=80,
             )
@@ -2312,7 +2252,7 @@ class ResumeTests(unittest.TestCase):
             conflicting_args = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_names=("titan_stock",),
+                arm_names=("titan_compiled",),
                 resume_dir=out_dir,
                 extra_args=("--debug.seed", "7"),
             )
@@ -2326,9 +2266,9 @@ class ResumeTests(unittest.TestCase):
             conflicting_mode = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_names=("titan_stock",),
+                arm_names=("titan_compiled",),
                 resume_dir=out_dir,
-                compile_mode="cuda-graph",
+                compile_mode="none",
             )
             with self.assertRaisesRegex(ValueError, "compile_mode"):
                 execute_run(
@@ -2340,7 +2280,7 @@ class ResumeTests(unittest.TestCase):
             conflicting_size = RunRequest(
                 gpu="0",
                 scenario_name=None,
-                arm_names=("titan_stock",),
+                arm_names=("titan_compiled",),
                 resume_dir=out_dir,
                 model_size="huge",
             )
@@ -2359,15 +2299,12 @@ class ResumeTests(unittest.TestCase):
             "torchtitan_git_rev": "titan-rev",
             "benchmarks_git_rev": "bench-rev",
         }
-        mode = "cuda-graph"
+        mode = "none"
 
         def fake_process(command, **kwargs):
-            kwargs["stdout"].write(
-                _compiled_line("reduce-overhead") + _SIZE_LINE + "Training completed\n"
-            )
+            kwargs["stdout"].write(_SIZE_LINE + "Training completed\n")
             _write_block_traces(
-                Path(command[command.index("--dump-folder") + 1]),
-                cudagraphs=True,
+                Path(command[command.index("--dump-folder") + 1])
             )
             return SimpleNamespace(returncode=0)
 
@@ -2383,8 +2320,8 @@ class ResumeTests(unittest.TestCase):
             execute_run(
                 RunRequest(
                     gpu="0",
-                    scenario_name="piper1b_megatron",
-                    arm_names=("titan_stock",),
+                    scenario_name="engines",
+                    arm_names=("titan_compiled",),
                     out_dir=out_dir,
                     compile_mode=mode,
                     ac_mode="none",
@@ -2395,25 +2332,22 @@ class ResumeTests(unittest.TestCase):
             manifest = json.loads((out_dir / "manifest.json").read_text())
             self.assertEqual(manifest["compile_mode"], mode)
 
-            (out_dir / "titan_stock.log").write_text("interrupted\n")
+            (out_dir / "titan_compiled.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
                 RunRequest(
                     gpu="0",
                     scenario_name=None,
-                    arm_names=("titan_stock",),
+                    arm_names=("titan_compiled",),
                     resume_dir=out_dir,
                 ),
                 process_runner=retry_process,
                 environment=environment,
             )
             retry_command = retry_process.call_args.args[0]
-            self.assertEqual(
-                retry_command[retry_command.index("--compile.mode") + 1],
-                "reduce-overhead",
-            )
+            self.assertNotIn("--compile.enable", retry_command)
             self.assertIn(
-                "Training completed", (out_dir / "titan_stock.log").read_text()
+                "Training completed", (out_dir / "titan_compiled.log").read_text()
             )
 
 

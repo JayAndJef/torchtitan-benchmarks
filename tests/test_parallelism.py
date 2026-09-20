@@ -1103,7 +1103,9 @@ class MegatronLauncherSetTest(unittest.TestCase):
             for scenario in SCENARIOS.values()
             for arm in scenario.arms
         }
-        self.assertEqual(MEGATRON_LAUNCHERS - launchers, set())
+        # The tuned driver keeps its launcher name until the driver itself
+        # is deleted; no arm selects it.
+        self.assertEqual(MEGATRON_LAUNCHERS - launchers, {"megatron"})
 
     def test_the_set_does_not_hold_the_titan_launcher(self):
         self.assertNotIn("torchtitan", MEGATRON_LAUNCHERS)
@@ -1690,8 +1692,10 @@ class Rule16TheTunedMegatronDriverTakesNeitherTest(unittest.TestCase):
             for scenario in SCENARIOS.values()
             for arm in scenario.arms
         }
+        # "megatron" is the tuned driver, which no arm selects today; the
+        # table still classifies it until the driver is deleted.
         self.assertEqual(
-            set(self.IMPLEMENTS_NEITHER),
+            set(self.IMPLEMENTS_NEITHER) - {"megatron"},
             launchers,
             "classify every registry launcher in IMPLEMENTS_NEITHER: say "
             "whether its driver implements the sharded parity and an "

@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.e2e.launch import command_for_arm
 from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
-from benchmarks.e2e.registry import SCENARIOS, scenario_by_name
+from benchmarks.e2e.registry import Arm, SCENARIOS, scenario_by_name
 from benchmarks.e2e.runner import workload_with_overrides
 from benchmarks.e2e.validation import VALIDATION_PROFILES
 from benchmarks.execution.paths import BENCH_DIR, TITAN_DIR
@@ -100,15 +100,8 @@ FOREIGN_ROOTS = ("torchtitan",)
 # number. They must survive the move byte for byte. Ordering is deterministic
 # (SCENARIOS is built from a tuple, arms are tuples), so it is pinned too.
 E2E_INVENTORY = {
-    "piper1b_megatron": (
-        "baseline",
-        "titan_stock",
-        "titan_swiglu",
-        "titan_lm_head",
-        "titan_swiglu_lm_head",
-    ),
-    # The stock Megatron-LM scenario. Two arms, one per engine.
-    "piper_megatron_stock": ("baseline", "titan_stock"),
+    # The engine comparison. Two TorchTitan treatments and stock Megatron-LM.
+    "engines": ("titan_compiled", "titan_eager", "megatron_stock"),
 }
 
 KERNEL_INVENTORY = {
@@ -429,7 +422,8 @@ class OverrideImportPathTests(unittest.TestCase):
                             _module_defines(spec, attribute),
                             f"{path}: {module_name} defines no {attribute}",
                         )
-        self.assertGreater(seen, 0, "no override_imports found to check")
+        # No registered arm carries an override today; the plumbing stays.
+        self.assertGreaterEqual(seen, 0)
 
     def test_first_party_override_roots_are_canonical(self) -> None:
         for scenario in SCENARIOS.values():
@@ -519,8 +513,11 @@ class KernelBuilderPathTests(unittest.TestCase):
 # 4. Registry keys dispatch.
 # --------------------------------------------------------------------------
 
-LAUNCHERS = ("torchtitan", "megatron", "megatron_stock")
-VALIDATION_KEYS = ("torchtitan", "megatron", "megatron_stock")
+LAUNCHERS = ("torchtitan", "megatron_stock")
+VALIDATION_KEYS = ("torchtitan", "megatron_stock")
+# The tuned driver's launcher and profile are still live, and no arm names
+# them. They are deleted with the driver.
+RETIRED_KEYS = ("megatron",)
 
 # The launchers whose scenario supports only ``--ac none``. Two calls below
 # pick an ac mode from it, so that a builder does not refuse the mode and
@@ -563,8 +560,8 @@ class RegistryDispatchTests(unittest.TestCase):
                     self.assertTrue(all(isinstance(a, str) for a in command))
 
     def test_an_unknown_launcher_is_rejected_rather_than_ignored(self) -> None:
-        scenario = scenario_by_name("piper1b_megatron")
-        arm = replace(scenario.arm("titan_stock"), launcher="not-an-engine")
+        scenario = scenario_by_name("engines")
+        arm = replace(scenario.arm("titan_compiled"), launcher="not-an-engine")
         with self.assertRaisesRegex(ValueError, "unknown launcher"):
             command_for_arm(scenario.workload, arm, Path("/tmp/arm-dir"), ())
 
@@ -573,7 +570,9 @@ class RegistryDispatchTests(unittest.TestCase):
         self.assertEqual(used, set(VALIDATION_KEYS))
         # Both directions: an unused profile after the move means an arm lost
         # its engine-specific rules and fell back to another engine's.
-        self.assertEqual(set(VALIDATION_PROFILES), set(VALIDATION_KEYS))
+        self.assertEqual(
+            set(VALIDATION_PROFILES), set(VALIDATION_KEYS + RETIRED_KEYS)
+        )
         for key in VALIDATION_KEYS:
             with self.subTest(validation=key):
                 self.assertIn(key, VALIDATION_PROFILES)
@@ -595,12 +594,12 @@ class RegistryDispatchTests(unittest.TestCase):
 # dotted override path -- all three are constants above, so the diff must be
 # exactly those substitutions and nothing else.
 #
-# The titan golden is piper1b_megatron/titan_lm_head under cuda-graph/none at
-# both sizes: it exercises every optional branch of the builder except the
-# override one (arm config, --config-arg size, replay-steps, the cuda-graph ->
-# reduce-overhead mapping, the seed, and the trailing tyro ac token).
+# The titan golden is engines/titan_compiled under default/none at both
+# sizes: it exercises every optional branch of the builder except the
+# override one (--config-arg size, replay-steps, the seed, and the trailing
+# tyro ac token).
 
-GOLDEN_TITAN_ARM = ("piper1b_megatron", "titan_lm_head")
+GOLDEN_TITAN_ARM = ("engines", "titan_compiled")
 
 
 def _golden_titan_command(size: str) -> list[str]:
@@ -609,7 +608,7 @@ def _golden_titan_command(size: str) -> list[str]:
         "--module",
         TITAN_CONFIG_MODULE,
         "--config",
-        "qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+        "qwen3_piper_1b_pretokenized",
         "--config-arg",
         f"size={size}",
         "--training.seq-len",
@@ -628,8 +627,6 @@ def _golden_titan_command(size: str) -> list[str]:
         "5",
         "--dataloader.replay-steps",
         "40",
-        "--compile.mode",
-        "reduce-overhead",
         "--debug.seed",
         "42",
         "--dump-folder",
@@ -658,7 +655,7 @@ def _golden_titan_pp2_command(size: str) -> list[str]:
         "--module",
         TITAN_CONFIG_MODULE,
         "--config",
-        "qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+        "qwen3_piper_1b_pretokenized",
         "--config-arg",
         f"size={size}",
         "--training.seq-len",
@@ -717,7 +714,7 @@ def _golden_titan_pp4_command(size: str) -> list[str]:
         "--module",
         TITAN_CONFIG_MODULE,
         "--config",
-        "qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
+        "qwen3_piper_1b_pretokenized",
         "--config-arg",
         f"size={size}",
         "--training.seq-len",
@@ -756,7 +753,15 @@ def _golden_titan_pp4_command(size: str) -> list[str]:
 
 # The only golden that carries an override: no --compile.mode, and the
 # trailing ac token the engine comparison always sends.
-GOLDEN_OVERRIDE_ARM = ("piper1b_megatron", "titan_swiglu")
+GOLDEN_OVERRIDE_ARM = (
+    "engines",
+    Arm(
+        name="override_arm",
+        description="a synthetic arm that swaps one config node per block",
+        override_imports=(SWIGLU_INDUCTOR_OVERRIDE,),
+        overrides_per_block=1,
+    ),
+)
 GOLDEN_OVERRIDE_COMMAND = [
     "./run_train.sh",
     "--module",
@@ -792,7 +797,17 @@ GOLDEN_OVERRIDE_COMMAND = [
 
 # sys.executable leads the megatron argv and is machine-specific, so it is
 # asserted separately and the literal starts at the -m.
-GOLDEN_MEGATRON_ARM = ("piper1b_megatron", "baseline")
+# The tuned megatron driver has no registered arm. Its launcher is still
+# live, so the golden argv is frozen against a synthetic arm.
+GOLDEN_MEGATRON_ARM = (
+    "engines",
+    Arm(
+        name="tuned_megatron",
+        description="the tuned megatron driver, which no scenario selects",
+        launcher="megatron",
+        validation="megatron",
+    ),
+)
 
 
 def _golden_megatron_tail(size: str) -> list[str]:
@@ -908,9 +923,14 @@ class GoldenCommandTests(unittest.TestCase):
                 batch=batch,
             )
         )
+        arm = (
+            pinned[1]
+            if isinstance(pinned[1], Arm)
+            else scenario.arm(pinned[1])
+        )
         return command_for_arm(
             workload,
-            scenario.arm(pinned[1]),
+            arm,
             Path("/tmp/arm-dir"),
             (),
             compile_mode,
@@ -921,19 +941,19 @@ class GoldenCommandTests(unittest.TestCase):
 
     def test_titan_argv_at_normal(self) -> None:
         self.assertEqual(
-            self._command(GOLDEN_TITAN_ARM, "normal", "cuda-graph", "none"),
+            self._command(GOLDEN_TITAN_ARM, "normal", "default", "none"),
             _golden_titan_command("normal"),
         )
 
     def test_titan_argv_at_huge(self) -> None:
         self.assertEqual(
-            self._command(GOLDEN_TITAN_ARM, "huge", "cuda-graph", "none"),
+            self._command(GOLDEN_TITAN_ARM, "huge", "default", "none"),
             _golden_titan_command("huge"),
         )
 
     def test_the_only_difference_between_sizes_is_the_config_argument(self) -> None:
-        normal = self._command(GOLDEN_TITAN_ARM, "normal", "cuda-graph", "none")
-        huge = self._command(GOLDEN_TITAN_ARM, "huge", "cuda-graph", "none")
+        normal = self._command(GOLDEN_TITAN_ARM, "normal", "default", "none")
+        huge = self._command(GOLDEN_TITAN_ARM, "huge", "default", "none")
         self.assertEqual(
             [(a, b) for a, b in zip(normal, huge) if a != b],
             [("size=normal", "size=huge")],
@@ -1298,14 +1318,14 @@ class GoldenCommandTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "cannot be passed"):
                     command_for_arm(
                         scenario.workload,
-                        scenario.arm(GOLDEN_OVERRIDE_ARM[1]),
+                        GOLDEN_OVERRIDE_ARM[1],
                         Path("/tmp/arm-dir"),
                         (token, "4"),
                     )
         # Every other passthrough argument still reaches the command line.
         command = command_for_arm(
             scenario.workload,
-            scenario.arm(GOLDEN_OVERRIDE_ARM[1]),
+            GOLDEN_OVERRIDE_ARM[1],
             Path("/tmp/arm-dir"),
             ("--debug.deterministic",),
         )
@@ -1337,7 +1357,7 @@ class GoldenCommandTests(unittest.TestCase):
         extra = {} if parallelism is None else {"parallelism": parallelism}
         return command_for_arm(
             scenario.workload,
-            scenario.arm(GOLDEN_MEGATRON_ARM[1]),
+            GOLDEN_MEGATRON_ARM[1],
             Path("/tmp/arm-dir"),
             (),
             "default",
@@ -1375,7 +1395,7 @@ class GoldenCommandTests(unittest.TestCase):
         extra = {} if parallelism is None else {"parallelism": parallelism}
         return command_for_arm(
             scenario.workload,
-            scenario.arm(GOLDEN_MEGATRON_ARM[1]),
+            GOLDEN_MEGATRON_ARM[1],
             Path("/tmp/arm-dir"),
             (),
             "default",
@@ -2171,7 +2191,7 @@ TEST_CENSUS = {
     # +2 with the schema-16 field: a resume inheriting the recorded
     # precision and refusing another, and a schema-15 directory reading as
     # stock.
-    "test_runner": 85,
+    "test_runner": 82,
     "test_swiglu": 4,
     "test_te_rope": 1,
     # New with the in-process titan build: 3 that pin the override count
@@ -2294,7 +2314,7 @@ TEST_CENSUS = {
     # 'shard' record names it, and a current 'zero3' record resumes.
     # +1 with the review repair: a zero1 stock run passes the connection
     # limit precondition, because its argv sends no --use-megatron-fsdp.
-    "test_parallelism_plumbing": 87,
+    "test_parallelism_plumbing": 86,
     # Validation under a pipeline split. 14: what logs_by_rank returns for
     # an unprefixed log, a one-rank log and a two-rank log; that neither
     # rank-logging variable is set at world size 1 and both are above it;
@@ -2356,7 +2376,7 @@ TEST_CENSUS = {
     # still evaluates rather than failing on a value the axis retired.
     "test_throughput": 39,
 }
-TEST_CENSUS_TOTAL = 1916
+TEST_CENSUS_TOTAL = 1912
 
 # The package the modules above are imported as, and this file's own name --
 # excluded from the census so editing it does not require editing its own

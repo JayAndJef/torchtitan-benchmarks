@@ -311,178 +311,73 @@ PIPER_1B_MEGATRON_WORKLOAD = replace(
     replay_dataloader=True,
 )
 
-_PIPER_OPTIMIZED_SWIGLU_INDUCTOR = (
-    "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu."
-    "piper_optimized_inductor_fused_grouped_experts"
-)
-
-# The engine comparison: Megatron-LM is the baseline, the other arms are the
-# best-improved TorchTitan configurations from the compile/ac matrix, all on
-# a bit-identical pre-tokenized data stream. No per-block regions: region
-# pooling rides on Inductor's compiled-graph annotations, which an eager
-# Megatron arm honestly does not have — total GPU kernel time, tokens/s,
-# launch latency, and peak memory are the cross-engine metrics. ac mode is
-# pinned to "none": Megatron-at-its-best does no recompute and its recompute
-# options are not parity with titan's per-op SAC.
+# The engine comparison: stock TorchTitan against stock Megatron-LM on one
+# pre-tokenized c4_test stream. Three arms answer one question -- what does
+# each engine cost per token at this mesh.
 #
-# The compile axis is pinned to its two compiled modes, and the reason is
-# what the axis names: whole-block torch.compile, which apply_compile applies
-# to a titan model. Megatron never has that, so the mode has nothing to turn
-# off there, and a run recording "none" for every arm would claim a treatment
-# one arm never received.
+# No per-block regions: region pooling rides on Inductor's compiled-graph
+# annotations, which the Megatron arm honestly does not have. The
+# cross-engine metrics are tokens/s, total GPU kernel time, launch latency
+# and peak memory.
 #
-# Turning megatron's own fusion off instead was measured on 2026-08-22 and
-# rejected. megatron-core sets jit_fuser = torch.compile at import and
-# decorates 41 functions with it. It ships disable_jit_fuser(), but @jit_fuser
-# binds the value at decoration time and "import megatron.core" already
-# imports six consumers, so a later call flips the global and leaves
-# bias_swiglu, swiglu and weighted_swiglu as dynamo wrappers. No import order
-# of ours wins, because megatron/core/__init__.py runs first; megatron's own
-# --disable-jit-fuser flag has the same hole. Two stronger objections stand
-# behind the mechanics: TransformerEngine's hand-written kernels would remain,
-# so the arm still would not be eager, and handicapping megatron to match a
-# titan treatment is the mistake this file already records, where fusions off
-# cost 11.9 GPU ms/step and produced a bogus engine verdict.
+# The ac axis is pinned to "none". Megatron's recompute options are not
+# parity with TorchTitan's per-op SAC, and the Megatron arm does no
+# recompute at all.
 #
-# The list is spelled out rather than derived, so a compile mode added later
-# is declined here until somebody checks that Megatron can honor it.
-PIPER_1B_MEGATRON = Scenario(
-    name="piper1b_megatron",
-    description=(
-        "Megatron-LM (TransformerEngine) versus the best-improved TorchTitan "
-        "configurations on identical data; single GPU, plain bf16, no AC."
-    ),
-    workload=PIPER_1B_MEGATRON_WORKLOAD,
-    regions=(),
-    supported_ac_modes=("none",),
-    supported_compile_modes=("default", "cuda-graph"),
-    arms=(
-        Arm(
-            name="baseline",
-            description=(
-                "Megatron-LM + TE tuned BASE profile: native selective helper "
-                "compilation and fusions, including fastest-available TE fused "
-                "CE (not accepted by stock pretrain_gpt.py); bare GPTModel, "
-                "THD packed attention, no recompute. --ac never affects this "
-                "arm; cuda-graph uses Megatron's thinner per-layer partial "
-                "capture"
-            ),
-            launcher="megatron",
-            validation="megatron",
-            # cuDNN fused attention (a silent TE fallback to unfused
-            # attention), megatron's fused SwiGLU+probs kernel, and TE's
-            # fused MoE permute. The SwiGLU marker exists because the arm
-            # once ran the unfused chunk/silu/mul path for a whole report:
-            # it passed every other rule while costing 11.9 GPU ms/step.
-            trace_kernel_markers=(
-                "cudnn_generated_fort_native_sdpa",
-                "_mul_silu_split",
-                "_permute_kernel",
-            ),
-        ),
-        Arm(
-            name="titan_stock",
-            description=(
-                "TorchTitan qwen3_piper_1b (fused qkv, stock kernels) on the "
-                "pre-tokenized replay stream — the engine-gap bridge arm"
-            ),
-        ),
-        Arm(
-            name="titan_swiglu",
-            description=(
-                "stock + piper_optimized_inductor fused-w13 grouped experts, "
-                "via config override"
-            ),
-            override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
-            overrides_per_block=1,
-        ),
-        Arm(
-            name="titan_lm_head",
-            description="stock + the piper_optimized_te_ce loss",
-            config="qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
-            trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
-        ),
-        Arm(
-            name="titan_swiglu_lm_head",
-            description="both improvements combined",
-            config="qwen3_piper_1b_piper_optimized_te_ce_pretokenized",
-            override_imports=(_PIPER_OPTIMIZED_SWIGLU_INDUCTOR,),
-            overrides_per_block=1,
-            trace_kernel_markers=("piper_optimized_cross_entropy_kernel",),
-        ),
-    ),
-)
-
-
-# The stock-engine comparison: Megatron-LM as a stock user configures it,
-# against stock TorchTitan, on one c4_test stream. It is a separate scenario
-# and not a third arm on piper1b_megatron, because --resume compares the
-# selected arm names: a new arm there would refuse a resume of every
-# piper1b_megatron directory already on disk.
-#
-# **The Megatron arm here is not plain bf16, and the manifest cannot say
-# so.** With --bf16 and no --use-precision-aware-optimizer, Megatron keeps
-# fp32 master weights, fp32 optimizer moments, and forces
+# **The Megatron arm is not plain bf16, and the manifest cannot say so.**
+# With --bf16 and no --use-precision-aware-optimizer, Megatron keeps fp32
+# master weights, fp32 optimizer moments, and forces
 # accumulate_allreduce_grads_in_fp32, so the arm holds about 18 bytes per
-# parameter against titan's 8 and reduces gradients in fp32. That is the
-# stock treatment, and this scenario keeps it. ``execution_model`` is
-# composed from the parallelism spec, so it reads "plain-bf16" for the whole
-# run and describes the titan arm alone; the difference lives in the
-# scenario description, in the arm description, and in the report.
+# parameter against TorchTitan's 8 and reduces gradients in fp32. That is the
+# stock treatment, and this scenario keeps it. ``execution_model`` is composed
+# from the parallelism spec, so it reads "plain-bf16" for the whole run and
+# describes the TorchTitan arms alone; the difference lives in the scenario
+# description, in the arm description, and in the report.
 #
-# **At pp 1 the two arms process the batch the same way. An earlier
-# revision of this comment said they did not, and it was already stale when
-# it was written.** The flag list sends --micro-batch-size 1 at every
-# degree, and microbatch_geometry packs the whole local batch into one
-# Megatron sample at pp 1 (benchmarks/e2e/megatron_stock/flags.py). So
-# Megatron runs one forward and backward pass over local_batch_size *
-# seq_len tokens, and titan_stock runs one pass over (local_batch_size,
-# seq_len): the same tokens, the same GEMM rows, the same block-diagonal
-# mask, because cu_seqlens already marks every document. A pp 1 ratio from
-# this scenario is not biased by the batch mapping.
-#
-# The four cells of the run matrix still run pp 4, for the reason the
-# scenario exists: the claim is about eight GPUs.
-#
-# The AC axis is pinned to "none" for the reason piper1b_megatron pins it:
-# Megatron's recompute options are not parity with titan's per-op SAC, and
-# this arm does no recompute at all.
-#
-# The compile axis is pinned to "default" alone, which is narrower than
-# piper1b_megatron's pair. "none" turns off the whole-block torch.compile a
-# titan arm gets, and Megatron never has one. "cuda-graph" is declined for a
-# second reason: this driver calls megatron.training.pretrain and asks for no
-# graph capture, so a run recording that mode would claim a treatment no arm
-# received. A titan-only --arm subset may still use "none"; the runner admits
-# an uncompiled run when every selected arm is TorchTitan, which is what the
-# eager reference cell of the run matrix needs.
-PIPER_MEGATRON_STOCK = Scenario(
-    name="piper_megatron_stock",
+# **At pp 1 the arms process the batch the same way.** The flag list sends
+# --micro-batch-size 1 at every degree, and microbatch_geometry packs the
+# whole local batch into one Megatron sample at pp 1
+# (benchmarks/e2e/megatron_stock/flags.py). So Megatron runs one forward and
+# backward pass over local_batch_size * seq_len tokens, and each titan arm
+# runs one pass over (local_batch_size, seq_len): the same tokens, the same
+# GEMM rows, the same block-diagonal mask, because cu_seqlens already marks
+# every document. A pp 1 ratio is not biased by the batch mapping.
+ENGINES = Scenario(
+    name="engines",
     description=(
-        "Piper-inspired stock Megatron-LM against stock TorchTitan on one "
-        "c4_test stream. This is a systems-throughput claim about two "
-        "configured engines, and four deliberate differences each move the "
-        "number: the Megatron arm keeps fp32 master weights and reduces "
-        "gradients in fp32, runs Megatron's unfused native cross entropy, "
-        "keeps --init-method-std 0.01 with no weight transfer, and applies "
-        "no permutation fusion. State all four beside every number. The "
-        "manifest's execution_model reads plain-bf16 because it is composed "
-        "from the parallelism spec; it describes the TorchTitan arm and not "
-        "this one."
+        "Stock TorchTitan, compiled and eager, against stock Megatron-LM on "
+        "one pre-tokenized c4_test stream. This is a systems-throughput "
+        "claim about configured engines, and four deliberate differences "
+        "each move the number: the Megatron arm keeps fp32 master weights "
+        "and reduces gradients in fp32, runs Megatron's unfused native cross "
+        "entropy, keeps --init-method-std 0.01 with no weight transfer, and "
+        "applies no permutation fusion. State all four beside every number. "
+        "The manifest's execution_model reads plain-bf16 because it is "
+        "composed from the parallelism spec; it describes the TorchTitan "
+        "arms and not the Megatron one."
     ),
     workload=PIPER_1B_MEGATRON_WORKLOAD,
-    # Region pooling reads Inductor's compiled-graph annotations around whole
-    # transformer blocks. Stock Megatron has none, and a pipelined run of
-    # either engine reaches a different invocation count per rank. So
-    # validation rule 7 guards nothing here. What guards this scenario is the
-    # mode line, the parameter-count line, the two mesh lines and the
-    # all-reduce trace marker.
     regions=(),
     supported_ac_modes=("none",),
     supported_compile_modes=("default",),
     arms=(
         Arm(
-            name="baseline",
+            name="titan_compiled",
+            description=(
+                "TorchTitan qwen3_piper_1b on the pre-tokenized replay "
+                "stream, with whole-block torch.compile"
+            ),
+        ),
+        Arm(
+            name="titan_eager",
+            description=(
+                "the same model and stream, and it runs eager once compile "
+                "is an arm property; today the run axis --compile-mode none "
+                "selects the eager treatment"
+            ),
+        ),
+        Arm(
+            name="megatron_stock",
             description=(
                 "stock megatron.training.pretrain through pretrain_gpt's own "
                 "providers: alltoall dispatcher, grouped GEMM, no aux router "
@@ -492,7 +387,7 @@ PIPER_MEGATRON_STOCK = Scenario(
                 "optimizer moments and an fp32 gradient reduction, which is "
                 "about 18 bytes of state per parameter against TorchTitan's "
                 "8. The manifest's execution_model says plain-bf16 and "
-                "describes the other arm"
+                "describes the other arms"
             ),
             launcher="megatron_stock",
             validation="megatron_stock",
@@ -511,25 +406,11 @@ PIPER_MEGATRON_STOCK = Scenario(
                 "_mul_silu_split",
             ),
         ),
-        Arm(
-            name="titan_stock",
-            description=(
-                "TorchTitan qwen3_piper_1b on the pre-tokenized replay "
-                "stream, identical to the arm of the same name in "
-                "piper1b_megatron"
-            ),
-        ),
     ),
 )
 
 
-SCENARIOS = {
-    scenario.name: scenario
-    for scenario in (
-        PIPER_1B_MEGATRON,
-        PIPER_MEGATRON_STOCK,
-    )
-}
+SCENARIOS = {"engines": ENGINES}
 
 
 def scenario_by_name(name: str) -> Scenario:
