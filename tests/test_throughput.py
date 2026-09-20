@@ -98,6 +98,7 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             megatron_p2p_sync="on",
             megatron_nan_guard="on",
             megatron_precision="stock",
+            profile=False,
         )
 
     def test_the_manifest_names_what_a_tokens_per_second_figure_counts(self) -> None:
@@ -178,6 +179,7 @@ class _RunFixture:
     ) -> None:
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
+            "profile": True,
             "scenario": "synthetic",
             "hardware": "test-gpu",
             "workload": WORKLOAD,
@@ -605,6 +607,7 @@ class WholeEvaluationTests(unittest.TestCase):
             out_dir = Path(temporary)
             manifest = {
                 "schema_version": MANIFEST_SCHEMA_VERSION,
+                "profile": True,
                 "scenario": "synthetic",
                 "hardware": "test-gpu",
                 "workload": {},
@@ -648,6 +651,7 @@ class WholeEvaluationTests(unittest.TestCase):
             out_dir = Path(temporary)
             manifest = {
                 "schema_version": MANIFEST_SCHEMA_VERSION,
+                "profile": True,
                 "scenario": "synthetic",
                 "hardware": "test-gpu",
                 "workload": WORKLOAD,

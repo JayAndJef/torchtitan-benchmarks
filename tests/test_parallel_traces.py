@@ -130,6 +130,7 @@ def two_rank_arm(arm_dir: Path) -> None:
 def two_rank_run(out_dir: Path) -> None:
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
+        "profile": True,
         "parallelism": {"world_size": 1},
         "scenario": "synthetic_parallel",
         "hardware": "test-gpu",
@@ -457,6 +458,7 @@ class SteplessRankTests(unittest.TestCase):
         """Rank 1 does ten times rank 0's work and declares no step."""
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
+            "profile": True,
             "parallelism": {"world_size": 1},
             "scenario": "synthetic_parallel",
             "hardware": "test-gpu",
@@ -610,6 +612,7 @@ class TheBaselineRatioSaysWhichRanksItDividedTests(unittest.TestCase):
     def _evaluate(self, out_dir: Path, arms: tuple[str, ...]):
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
+            "profile": True,
             "parallelism": {"world_size": 1},
             "scenario": "synthetic_parallel",
             "hardware": "test-gpu",

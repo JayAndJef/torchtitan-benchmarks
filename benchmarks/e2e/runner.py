@@ -38,6 +38,7 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
+    DEFAULT_PROFILE,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
@@ -127,6 +128,12 @@ class RunRequest:
     # ``stock``. The value reaches the stock megatron launcher alone, and
     # ``lean`` needs a sharded dense value.
     megatron_precision: str | None = None
+    # Whether the run collects profiler traces. ``None`` means "not
+    # requested", as above: a resume inherits the recorded value and a
+    # fresh run takes ``DEFAULT_PROFILE``, which is off. It reaches both
+    # engines, the 40-step floor and every trace rule of
+    # ``benchmarks/e2e/validation.py``.
+    profile: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -169,8 +176,16 @@ def workload_with_overrides(
     steps: int | None = None,
     batch: int | None = None,
     environment: Mapping[str, str] | None = None,
+    profile: bool,
 ) -> Workload:
-    """Apply portable size overrides without changing scenario arms."""
+    """Apply portable size overrides without changing scenario arms.
+
+    ``profile`` decides the step floor. Two profiler windows are what arm
+    rule 5 and the per-step trace metrics rest on, so a profiled run needs
+    ``profile_freq * min_trace_windows`` steps, which is 40. A run that
+    collects no trace has no window to fill, and the floor does not apply
+    to it.
+    """
     environment = environment or os.environ
     workload = scenario.workload
     resolved_seq_len = seq_len if seq_len is not None else environment.get("SEQ")
@@ -183,7 +198,7 @@ def workload_with_overrides(
     if resolved_batch is not None:
         workload = replace(workload, local_batch_size=int(resolved_batch))
     minimum_steps = workload.profile_freq * workload.min_trace_windows
-    if workload.steps < minimum_steps:
+    if profile and workload.steps < minimum_steps:
         raise ValueError(
             f"steps ({workload.steps}) must be at least {minimum_steps} to collect "
             f"{workload.min_trace_windows} profiler windows"
@@ -211,6 +226,7 @@ def _resolve_run(
     str,
     str,
     str,
+    bool,
 ]:
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
@@ -277,13 +293,22 @@ def _resolve_run(
             if request.megatron_precision is None
             else request.megatron_precision
         )
+        profile = (
+            bool(existing_manifest["profile"])
+            if request.profile is None
+            else request.profile
+        )
     else:
+        profile = (
+            DEFAULT_PROFILE if request.profile is None else request.profile
+        )
         workload = workload_with_overrides(
             scenario,
             seq_len=request.seq_len,
             steps=request.steps,
             batch=request.batch,
             environment=environment,
+            profile=profile,
         )
         extra_args = request.extra_args or ()
         ac_mode = request.ac_mode or DEFAULT_AC_MODE
@@ -460,6 +485,7 @@ def _resolve_run(
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
+            profile=profile,
         )
         for arm in arms
     }
@@ -478,6 +504,7 @@ def _resolve_run(
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
+            profile=profile,
         )
         if mismatches:
             raise ValueError(
@@ -499,6 +526,7 @@ def _resolve_run(
         megatron_p2p_sync,
         megatron_nan_guard,
         megatron_precision,
+        profile,
     )
 
 
@@ -598,6 +626,7 @@ def execute_run(
         megatron_p2p_sync,
         megatron_nan_guard,
         megatron_precision,
+        profile,
     ) = _resolve_run(request, host_environment, event_handler=event_handler)
 
     if resumed:
@@ -619,6 +648,7 @@ def execute_run(
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
+            profile=profile,
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
@@ -652,6 +682,7 @@ def execute_run(
     _emit(
         event_handler, "summary", f"megatron precision: {megatron_precision}"
     )
+    _emit(event_handler, "summary", f"profile: {'on' if profile else 'off'}")
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
@@ -676,6 +707,7 @@ def execute_run(
                     megatron_p2p_sync=megatron_p2p_sync,
                     megatron_nan_guard=megatron_nan_guard,
                     megatron_precision=megatron_precision,
+                    profile=profile,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -740,6 +772,7 @@ def execute_run(
                 megatron_p2p_sync=megatron_p2p_sync,
                 megatron_nan_guard=megatron_nan_guard,
                 megatron_precision=megatron_precision,
+                profile=profile,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

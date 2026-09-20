@@ -56,6 +56,7 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     BENCH_FLAGS,
     BENCH_FLAGS_OMITTED_BY_DEFAULT,
     BENCH_PP_SCHEDULE,
+    BENCH_PROFILE,
     DATA_PARALLEL_OPTIMIZERS,
     DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
@@ -1294,6 +1295,10 @@ def stock_args(**overrides):
         bench_model_size="1b",
         bench_seq_len=1024,
         bench_rows_per_sample=32,
+        bench_profile=True,
+        bench_profile_freq=20,
+        bench_profiler_warmup=5,
+        bench_profiler_active=5,
         bench_min_trace_windows=2,
         seq_length=32 * 1024,
         micro_batch_size=1,
@@ -2645,7 +2650,11 @@ class HarnessArgumentTest(unittest.TestCase):
         bench_only, index = [], 0
         while index < len(emitted):
             token = emitted[index]
-            if token.startswith("--bench-"):
+            if token == BENCH_PROFILE:
+                # The one harness flag that carries no value.
+                bench_only.append(token)
+                index += 1
+            elif token.startswith("--bench-"):
                 bench_only.extend(emitted[index : index + 2])
                 index += 2
             else:
@@ -2679,7 +2688,11 @@ class HarnessArgumentTest(unittest.TestCase):
         bench_only, index = [], 0
         while index < len(emitted):
             token = emitted[index]
-            if token.startswith("--bench-"):
+            if token == BENCH_PROFILE:
+                # The one harness flag that carries no value.
+                bench_only.append(token)
+                index += 1
+            elif token.startswith("--bench-"):
                 bench_only.extend(emitted[index : index + 2])
                 index += 2
             else:

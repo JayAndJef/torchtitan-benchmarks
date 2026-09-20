@@ -146,6 +146,10 @@ def manifest_data(
     # would record ``stock`` for a run that held 10 bytes for each
     # parameter rather than 18.
     megatron_precision: str,
+    # No default, for the same reason once more: a writer that defaulted it
+    # would claim a trace layout the run did not write, and every trace rule
+    # of benchmarks/e2e/validation.py reads this axis.
+    profile: bool,
 ) -> dict[str, Any]:
     # Recorded canonically, so a fresh manifest never carries a retired name.
     model_size = canonical_size_name(model_size)
@@ -168,6 +172,7 @@ def manifest_data(
         "megatron_p2p_sync": megatron_p2p_sync,
         "megatron_nan_guard": megatron_nan_guard,
         "megatron_precision": megatron_precision,
+        "profile": profile,
         "throughput_definition": THROUGHPUT_DEFINITION,
         "execution_model": execution_model(parallelism),
     }
@@ -188,6 +193,7 @@ def write_manifest(
     megatron_p2p_sync: str,
     megatron_nan_guard: str,
     megatron_precision: str,
+    profile: bool,
 ) -> None:
     atomic_write_json(
         out_dir / "manifest.json",
@@ -204,6 +210,7 @@ def write_manifest(
             megatron_p2p_sync=megatron_p2p_sync,
             megatron_nan_guard=megatron_nan_guard,
             megatron_precision=megatron_precision,
+            profile=profile,
         ),
     )
 
@@ -240,6 +247,7 @@ def _resume_mismatches(
     megatron_p2p_sync: str,
     megatron_nan_guard: str,
     megatron_precision: str,
+    profile: bool,
 ) -> list[str]:
     expected = {
         "scenario": scenario.name,
@@ -251,6 +259,7 @@ def _resume_mismatches(
         "megatron_p2p_sync": megatron_p2p_sync,
         "megatron_nan_guard": megatron_nan_guard,
         "megatron_precision": megatron_precision,
+        "profile": profile,
         "parallelism": _parallelism_record(scenario, parallelism),
     }
     mismatches = [

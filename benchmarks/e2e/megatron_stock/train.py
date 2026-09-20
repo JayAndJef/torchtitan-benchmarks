@@ -69,7 +69,9 @@ from benchmarks.e2e.megatron_stock.flags import (
     BENCH_MIN_TRACE_WINDOWS,
     BENCH_MODEL_SIZE,
     BENCH_PP_SCHEDULE,
+    BENCH_PROFILE,
     BENCH_PROFILE_FREQ,
+    BENCH_PROFILE_SCHEDULE_FLAGS,
     BENCH_PROFILER_ACTIVE,
     BENCH_PROFILER_WARMUP,
     BENCH_ROWS_PER_SAMPLE,
@@ -272,18 +274,25 @@ def add_bench_args(parser: Any) -> Any:
     reads them back from ``args`` after Megatron resolved them, and a degree
     the engine resolved is stronger evidence than a degree the harness
     asserted.
+
+    ``--bench-profile`` and the four schedule flags are optional, and
+    ``refuse_unsupported_run`` is what pairs them: the four are required
+    under the token and refused without it. Argparse cannot state that
+    rule, and a schedule flag alone would otherwise install a profiler the
+    run does not declare.
     """
     group = parser.add_argument_group(title="torchtitan-benchmarks harness")
     group.add_argument(BENCH_ARM_DIR, type=Path, required=True)
     group.add_argument(BENCH_MODEL_SIZE, type=str, required=True)
     group.add_argument(BENCH_LOCAL_BATCH_SIZE, type=int, required=True)
-    group.add_argument(BENCH_PROFILE_FREQ, type=int, required=True)
-    group.add_argument(BENCH_PROFILER_WARMUP, type=int, required=True)
-    group.add_argument(BENCH_PROFILER_ACTIVE, type=int, required=True)
+    group.add_argument(BENCH_PROFILE, action="store_true")
+    group.add_argument(BENCH_PROFILE_FREQ, type=int, default=None)
+    group.add_argument(BENCH_PROFILER_WARMUP, type=int, default=None)
+    group.add_argument(BENCH_PROFILER_ACTIVE, type=int, default=None)
     group.add_argument(BENCH_PP_SCHEDULE, type=str, default=None)
     group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
     group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
-    group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, required=True)
+    group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, default=None)
     # Defaulted rather than required, and the default is the literal
     # ``on``: the flag list omits the token at ``on``, so an argv without
     # it reaches Megatron's own default for the field. The literal is what
@@ -344,6 +353,33 @@ def refuse_unsupported_run(args: Any) -> None:
     of these would train something the manifest does not name, which is a
     wrong number rather than a crash.
     """
+    # The profiler group, refused in both directions. A schedule flag
+    # without the token asks for a window the run does not declare, and the
+    # token without the schedule leaves the shim no cycle to install.
+    schedule_given = {
+        flag: getattr(args, flag[2:].replace("-", "_"))
+        for flag in BENCH_PROFILE_SCHEDULE_FLAGS
+    }
+    if args.bench_profile:
+        missing = sorted(
+            flag for flag, value in schedule_given.items() if value is None
+        )
+        if missing:
+            raise ValueError(
+                f"{BENCH_PROFILE} needs the whole profiler schedule, and "
+                f"{', '.join(missing)} is absent; the shim cannot build a "
+                "schedule from a partial group"
+            )
+    else:
+        extra = sorted(
+            flag for flag, value in schedule_given.items() if value is not None
+        )
+        if extra:
+            raise ValueError(
+                f"{', '.join(extra)} was given without {BENCH_PROFILE}; the "
+                "run collects no trace, so a schedule would name a window "
+                "nothing writes"
+            )
     pipeline_degree = args.pipeline_model_parallel_size
     if pipeline_degree > 1:
         if args.bench_pp_schedule != SUPPORTED_PP_SCHEDULE:
@@ -926,12 +962,21 @@ def main(argv: list[str] | None = None) -> int:
     # Megatron's own resolved rank, read from RANK by its parser. The
     # profiler shim names the trace file after it, and torch.distributed is
     # not up until pretrain() starts.
-    shim = profiling.install_profiler_shim(
-        arm_dir=args.bench_arm_dir,
-        rank=args.rank,
-        profile_freq=args.bench_profile_freq,
-        profiler_warmup=args.bench_profiler_warmup,
-        profiler_active=args.bench_profiler_active,
+    # Installed only under --bench-profile. Without it Megatron builds no
+    # profiler at all, because the argv carries no --profile, so a shim
+    # would replace an attribute nothing calls and
+    # ``assert_windows_written`` would refuse the run for a window it never
+    # asked for.
+    shim = (
+        profiling.install_profiler_shim(
+            arm_dir=args.bench_arm_dir,
+            rank=args.rank,
+            profile_freq=args.bench_profile_freq,
+            profiler_warmup=args.bench_profiler_warmup,
+            profiler_active=args.bench_profiler_active,
+        )
+        if args.bench_profile
+        else None
     )
     install_step_log_shim(
         # The titan row length, not --seq-length: that one is the packed
@@ -968,13 +1013,14 @@ def main(argv: list[str] | None = None) -> int:
     # workload_with_overrides refuses steps below
     # profile_freq * min_trace_windows. Taking the larger of the two keeps
     # the guard from ever evaluating to "any count is acceptable".
-    expected_windows = max(
-        args.bench_min_trace_windows,
-        args.train_iters // args.bench_profile_freq,
-    )
-    profiling.assert_windows_written(
-        shim, min_trace_windows=expected_windows
-    )
+    if shim is not None:
+        expected_windows = max(
+            args.bench_min_trace_windows,
+            args.train_iters // args.bench_profile_freq,
+        )
+        profiling.assert_windows_written(
+            shim, min_trace_windows=expected_windows
+        )
     # Every rank prints it: arm rule 1 runs per rank, and megatron's own
     # completion line is rank 0 only.
     print(TRAINING_COMPLETED, flush=True)

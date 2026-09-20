@@ -70,6 +70,7 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
+    DEFAULT_PROFILE,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_PRECISION_MODES,
     MEGATRON_P2P_SYNC_MODES,
@@ -136,6 +137,13 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     reason again, and it has one more agreement to keep: ``lean`` needs a
     sharded ``--zero`` level, so an exported value would fail every
     replicated run on a flag nobody passed.
+
+    ``--profile`` takes no environment variable for the reason the five
+    above give, and its partner is ``--steps``. A profiled run needs at
+    least 40 steps, so an exported ``PROFILE=1`` would refuse a plain
+    ``run 0 --steps 12`` on a flag the operator never passed. It defaults
+    to ``None`` as the options above do: a resume inherits the recorded
+    value, and a fresh run takes ``DEFAULT_PROFILE``.
     """
     options = [
         click.option(
@@ -297,6 +305,23 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "Megatron asserts the distributed optimizer under it, and "
                 "it reaches the stock megatron arm alone. Results are only "
                 "comparable within one value."
+            ),
+        ),
+        # No envvar; the docstring above gives the reason.
+        # A boolean pair rather than a bare flag, so an omitted option
+        # reaches ``RunRequest`` as ``None`` and a resume can inherit the
+        # recorded value.
+        click.option(
+            "--profile/--no-profile",
+            "profile",
+            default=None,
+            help=(
+                "Whether the run collects profiler traces [default: "
+                f"{'on' if DEFAULT_PROFILE else 'off'}]. On, both engines "
+                "write <arm>/profiling/traces/iteration_*/ and every trace "
+                "rule applies, and --steps must be at least 40. Off, the "
+                "run writes no trace and the evaluation publishes no kernel "
+                "time. Results are only comparable within one value."
             ),
         ),
     ]
