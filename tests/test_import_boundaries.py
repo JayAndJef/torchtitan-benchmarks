@@ -1179,5 +1179,31 @@ class KernelWorkerImportCostTest(unittest.TestCase):
         )
 
 
+class AbsoluteImportTest(unittest.TestCase):
+    """Every import in this repository names its module in full.
+
+    A relative import also escapes two checks that read the source: the
+    layering test and the boundary test above both skip an import node that
+    carries a ``level``.
+    """
+
+    def test_no_module_uses_a_relative_import(self):
+        offenders = []
+        for path in tracked_python_files():
+            tree = ast.parse((REPO_ROOT / path).read_text(), filename=path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.level:
+                    dots = "." * node.level
+                    offenders.append(
+                        f"{path}:{node.lineno}: from {dots}{node.module or ''}"
+                    )
+        self.assertEqual(
+            offenders,
+            [],
+            "relative imports, which the layering and boundary tests cannot "
+            "see; spell the module in full:\n  " + "\n  ".join(offenders),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
