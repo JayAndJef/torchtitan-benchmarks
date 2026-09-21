@@ -26,7 +26,7 @@ from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
     ENGINES,
-    PIPER_1B_MEGATRON_WORKLOAD,
+    C4_REPLAY_WORKLOAD,
     scenario_by_name,
 )
 from benchmarks.e2e.results import stable_tps, training_metrics
@@ -145,16 +145,16 @@ class ScenarioTests(unittest.TestCase):
 
     def test_every_scenario_uses_the_fixed_piper_workload(self) -> None:
         for scenario in SCENARIOS.values():
-            self.assertIs(scenario.workload, PIPER_1B_MEGATRON_WORKLOAD)
+            self.assertIs(scenario.workload, C4_REPLAY_WORKLOAD)
         self.assertEqual(
-            PIPER_1B_MEGATRON_WORKLOAD.module, "benchmarks.models.piper_qwen3"
+            C4_REPLAY_WORKLOAD.module, "benchmarks.models.piper_qwen3"
         )
         self.assertEqual(
-            PIPER_1B_MEGATRON_WORKLOAD.config, "qwen3_piper_1b_pretokenized"
+            C4_REPLAY_WORKLOAD.config, "qwen3_piper_1b_pretokenized"
         )
-        self.assertEqual(PIPER_1B_MEGATRON_WORKLOAD.local_batch_size, 4)
-        self.assertEqual(PIPER_1B_MEGATRON_WORKLOAD.seq_len, 1024)
-        self.assertEqual(PIPER_1B_MEGATRON_WORKLOAD.steps, 40)
+        self.assertEqual(C4_REPLAY_WORKLOAD.local_batch_size, 4)
+        self.assertEqual(C4_REPLAY_WORKLOAD.seq_len, 1024)
+        self.assertEqual(C4_REPLAY_WORKLOAD.steps, 40)
 
 
 class UncompiledScheduleRefusalTests(unittest.TestCase):

@@ -72,7 +72,7 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
 )
 from benchmarks.e2e.schema import ParallelismSpec
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.registry import PIPER_1B_MEGATRON_WORKLOAD  # noqa: E402
+from benchmarks.e2e.registry import C4_REPLAY_WORKLOAD  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     GRAD_NORM_METRIC,
     LOSS_METRIC,
@@ -92,7 +92,7 @@ PP4_SPEC = ParallelismSpec(
 # two run matrices use overlapping cell numbers for different cells.
 SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, zero=1)
 EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
-BATCH_32 = dataclasses.replace(PIPER_1B_MEGATRON_WORKLOAD, local_batch_size=32)
+BATCH_32 = dataclasses.replace(C4_REPLAY_WORKLOAD, local_batch_size=32)
 # Read as text rather than imported, so the check needs no megatron import
 # and no GPU. DATA_PARALLEL_OPTIMIZERS is a claim about this file.
 MEGATRON_OPTIMIZER_SOURCE = (
