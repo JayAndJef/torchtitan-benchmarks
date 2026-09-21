@@ -17,8 +17,6 @@ command construction (``benchmarks.e2e.launch``), validation
 (``benchmarks.artifacts.manifests``).
 """
 
-from dataclasses import replace
-
 from benchmarks.e2e.schema import Arm, Scenario, Workload
 
 
@@ -147,21 +145,23 @@ effects are unmeasured.
 DEFAULT_MEGATRON_PRECISION = "stock"
 
 
-PIPER_1B_WORKLOAD = Workload(
+C4_REPLAY_WORKLOAD = Workload(
     module="benchmarks.models.piper_qwen3",
-    config="qwen3_piper_1b",
+    config="qwen3_piper_1b_pretokenized",
     seq_len=1024,
     steps=40,
     local_batch_size=4,
-)
-
-
-PIPER_1B_MEGATRON_WORKLOAD = replace(
-    PIPER_1B_WORKLOAD,
-    config="qwen3_piper_1b_pretokenized",
     seed=42,
     replay_dataloader=True,
 )
+"""The one workload every arm of every scenario runs.
+
+The shape is not here. ``--model-size`` picks it at run time, and the
+config name is a fixed token of the fork's config manager rather than a
+shape. ``seed`` and ``replay_dataloader`` serve both engines: the launcher
+reads them for the TorchTitan arms and the flag list reads the seed for the
+Megatron arm.
+"""
 
 ENGINES = Scenario(
     name="engines",
@@ -177,14 +177,14 @@ ENGINES = Scenario(
         "composed from the parallelism spec; it describes the TorchTitan "
         "arms and not the Megatron one."
     ),
-    workload=PIPER_1B_MEGATRON_WORKLOAD,
+    workload=C4_REPLAY_WORKLOAD,
     supported_ac_modes=("none",),
     arms=(
         Arm(
             name="titan_compiled",
             description=(
-                "TorchTitan qwen3_piper_1b on the pre-tokenized replay "
-                "stream, with whole-block torch.compile"
+                "TorchTitan on the pre-tokenized replay stream, with "
+                "whole-block torch.compile"
             ),
             compile="torch",
         ),
@@ -219,9 +219,8 @@ ENGINES = Scenario(
             # arm does not declare it: --moe-permute-fusion is off here,
             # because stock Megatron defaults it off.
             #
-            # That is one mesh at one shape. A deeper split gives each stage
-            # fewer layers, so re-read every rank at pp 8 before citing a
-            # marker there.
+            # A deeper split gives each stage fewer layers, so re-read
+            # every rank at pp 8 before citing a marker there.
             trace_kernel_markers=(
                 "cudnn_generated_fort_native_sdpa",
                 "_mul_silu_split",

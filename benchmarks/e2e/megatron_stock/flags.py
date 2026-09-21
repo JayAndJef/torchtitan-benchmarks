@@ -23,13 +23,13 @@ after a submodule bump, from the repository root::
     from megatron.training.arguments import add_megatron_arguments
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
     from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-    from benchmarks.e2e.registry import PIPER_1B_MEGATRON_WORKLOAD
+    from benchmarks.e2e.registry import C4_REPLAY_WORKLOAD
     from benchmarks.models.piper_qwen3.shape import PIPER_1B
     parser = argparse.ArgumentParser(allow_abbrev=False)
     add_megatron_arguments(parser)
     known = {s for a in parser._actions for s in a.option_strings}
     emitted = stock_megatron_flags(
-        PIPER_1B, PIPER_1B_MEGATRON_WORKLOAD, TRIVIAL_SPEC,
+        PIPER_1B, C4_REPLAY_WORKLOAD, TRIVIAL_SPEC,
         arm_dir="/tmp/x", model_size="1b",
     )
     unknown = [
