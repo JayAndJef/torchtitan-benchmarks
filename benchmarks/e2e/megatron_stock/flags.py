@@ -75,7 +75,8 @@ and ``train.py`` prints the value Megatron parsed. The token is omitted at
 
 from __future__ import annotations
 
-from benchmarks.e2e.schema import ParallelismSpec, Workload
+from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.schema import Workload
 from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_P2P_SYNC,

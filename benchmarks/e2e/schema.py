@@ -1,19 +1,18 @@
-"""The e2e type declarations, in one module that imports nothing first-party.
+"""What a scenario declaration is made of: ``Workload``, ``Arm``, ``Scenario``.
 
-Every other e2e module builds instances of these types, reads them or
-records them. They are declarations and nothing else: no table, no
-instance, no rule. The owning module keeps those.
+These three are the declarative vocabulary, and ``benchmarks.e2e.registry``
+builds the one scenario from them. They are declarations and nothing else:
+no table, no instance, no rule.
 
-The module imports the standard library alone. A module that only needs a
-type therefore pays for no scenario table, no schedule table and no
-validator, and the layering test in ``tests/test_schema.py`` holds that
-property.
+The module imports the standard library alone, so a module that needs only
+a type pays for no scenario table and no validator. The layering test in
+``tests/test_schema.py`` holds that property.
 
-``Workload``, ``Arm`` and ``Scenario`` describe a scenario.
-``ParallelismSpec`` and ``PipelineSchedule`` describe the parallelism run
-axis. The run axes live in ``benchmarks.e2e.axes``, the validation profile
-in ``benchmarks.e2e.validation``, the engine record in
-``benchmarks.e2e.engines`` and the resolved run in
+Every other e2e record belongs to the module that builds it: the
+parallelism spec and the pipeline schedule to
+``benchmarks.e2e.parallelism``, the run axes to ``benchmarks.e2e.axes``,
+the validation profile to ``benchmarks.e2e.validation``, the engine record
+to ``benchmarks.e2e.engines`` and the resolved run to
 ``benchmarks.e2e.runner``.
 """
 
@@ -117,151 +116,3 @@ class Scenario:
             f"Unknown arm {name!r} for scenario {self.name!r}. "
             f"Available arms: {', '.join(arm.name for arm in self.arms)}"
         )
-
-
-@dataclass(frozen=True)
-class PipelineSchedule:
-    """One pipeline schedule, and what a run may do with it.
-
-    ``titan_name`` is the exact string TorchTitan's
-    ``--parallelism.pipeline-parallel-schedule`` accepts. It is a separate
-    field from ``name`` so that our own roster name can never be assumed to
-    be the framework's: the two agree for all five registered schedules
-    today, and a test pins each ``titan_name`` against
-    ``torch.distributed.pipelining.schedules.get_schedule_class``'s own map.
-
-    ``stages_per_rank`` is how many pipeline stages one rank holds under this
-    schedule. It is 1 for the single-stage schedules and 2 for the
-    multi-stage ones, which is TorchTitan's own default
-    (``pipeline_parallel.py``: ``stages_per_rank = 1 if
-    is_single_stage_schedule else 2``). Rules 7 and 12 both read it: the
-    layer count has to divide by ``pp * stages_per_rank``, and a rank's
-    warmup depth -- and therefore its peak activation memory -- grows with
-    it.
-
-    ``megatron_supported`` says whether **Megatron-LM** implements this
-    schedule at all. Three of the five are PyTorch-only, so a run holding a
-    megatron arm has no opponent for them and rule 5 refuses the
-    combination.
-
-    **It is not the same question as "can this repo's megatron driver run
-    it", and rule 5 deliberately asks the library's question.**
-    ``Interleaved1F1B`` is the case where the two answers differ: Megatron-LM
-    implements it, so a cross-engine row is possible in principle, but
-    our stock driver refuses a virtual pipeline degree.
-    Rule 5 therefore lets that spec through and the driver fails it -- the
-    declaration-without-a-builder pattern the kernel spans already use, where
-    the failure lands at the place that owns the missing work rather than at
-    a validator claiming the library cannot do it. A test pins that this
-    combination passes, so nobody "fixes" it by writing a false ``False``
-    here.
-
-    ``requires_uncompiled`` records that the schedule raises on a compiled
-    stage module. Only three of PyTorch's schedule classes call
-    ``_check_torch_compile_compatibility``, and they are exactly the three
-    marked here.
-    """
-
-    name: str
-    titan_name: str
-    megatron_supported: bool
-    stages_per_rank: int
-    requires_uncompiled: bool
-    description: str
-
-
-ZERO_MODES: tuple[int, ...] = (0, 1)
-"""How the run holds the dense parameters.
-
-A dense parameter is every parameter that is not a routed expert weight.
-Each value names one ZeRO level, and the number is that level. ``0`` keeps
-a whole copy of everything on each rank. ``1`` shards the optimizer states
-alone.
-
-Under ``1`` Megatron gets ``--use-distributed-optimizer`` alone, and
-TorchTitan gets the whole data-parallel width as ``dp_shard`` plus
-``--parallelism.fsdp-reshard-after-forward never``. The two engines then
-move the same bytes per step: one parameter all-gather and one gradient
-reduce-scatter.
-
-Two statements this axis must not make. Communication volume does not
-separate ZeRO-1 from ZeRO-2, because both move twice the parameters and
-only the gradient lifetime differs. And no ZeRO level shards the activation
-gradients, which belong to the ``--ac`` axis.
-
-It is a comparability boundary at any expert degree, because it decides how
-much optimizer state one rank holds and what the ranks exchange each step.
-Every published number was measured under ``zero 0``, which is the default.
-
-It is also what makes an expert degree legal, for a TorchTitan reason
-rather than a preference: TorchTitan cannot split the experts while it
-keeps the dense parameters replicated, because the expert mesh degree
-``efsdp = dp_shard * cp * tp // ep`` needs ``dp_shard >= ep``. Megatron
-holds every parity, so the two engines compare under an expert degree only
-when both shard, and spec rule 14 refuses the replicated combination.
-"""
-DEFAULT_ZERO = 0
-
-
-@dataclass(frozen=True)
-class ParallelismSpec:
-    """The parallelism degrees and pipeline settings for one run.
-
-    Every field defaults to the single-GPU value, so ``ParallelismSpec()`` is
-    the run this repo has always done and ``TRIVIAL_SPEC`` is that object.
-
-    ``__post_init__`` enforces well-formedness only -- every degree is a
-    positive count, and ``zero`` names a declared ZeRO level. That is
-    not one of the sixteen validator rules; it is the precondition they
-    assume. Without it a spec of ``dp=-1, pp=-1`` would have ``world_size``
-    1 and walk past rule 1 on a one-GPU box, which is exactly the illegal
-    mesh the rules exist to refuse. ``PiperShape`` guards its geometry the
-    same way and for the same reason.
-
-    **``zero`` takes the same treatment, and it must.**
-    ``titan_mesh`` and ``execution_model`` are total functions over a spec
-    and both branch on this value, so a spec carrying a level neither
-    branch knows must not exist. A validator rule would be too late: both
-    functions run on specs the validator never sees.
-
-    ``zero`` sits here rather than beside ``--model-size`` as a
-    run axis of its own, for the reason ``pp_schedule`` and
-    ``pp_microbatch_size`` do: it is a treatment of one parallelism axis,
-    and every function that needs it already takes the spec.
-    """
-
-    dp: int = 1
-    pp: int = 1
-    ep: int = 1
-    pp_schedule: str | None = None
-    pp_microbatch_size: int = 1
-    zero: int = DEFAULT_ZERO
-
-    def __post_init__(self) -> None:
-        for field, value in (
-            ("dp", self.dp),
-            ("pp", self.pp),
-            ("ep", self.ep),
-            ("pp_microbatch_size", self.pp_microbatch_size),
-        ):
-            if value < 1:
-                raise ValueError(
-                    f"{field} must be >= 1, got {value}: a degree counts "
-                    "ranks and a microbatch size counts rows"
-                )
-        if self.zero not in ZERO_MODES:
-            raise ValueError(
-                f"Unknown zero level {self.zero!r}. Available: "
-                + ", ".join(str(mode) for mode in ZERO_MODES)
-            )
-
-    @property
-    def world_size(self) -> int:
-        """The number of ranks the run needs: ``dp * pp``.
-
-        ``ep`` is absent on purpose. Both engines carve the expert ranks out
-        of the data-parallel axis rather than adding a dimension, so ``ep``
-        redistributes the ``dp`` ranks and never asks for more. Rule 9
-        enforces the other half of that: ``ep`` has to divide ``dp``.
-        """
-        return self.dp * self.pp

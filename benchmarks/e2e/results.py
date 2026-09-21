@@ -33,8 +33,7 @@ from typing import Any
 from benchmarks.artifacts.layout import atomic_write_json, logs_by_rank
 from benchmarks.artifacts.manifests import load_run
 from benchmarks.artifacts.summaries import _value
-from benchmarks.e2e.schema import DEFAULT_ZERO, ParallelismSpec
-from benchmarks.e2e.parallelism import zero_warnings
+from benchmarks.e2e.parallelism import DEFAULT_ZERO, ParallelismSpec, zero_warnings
 
 
 STEP_METRICS = re.compile(

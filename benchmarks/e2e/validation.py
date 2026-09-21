@@ -54,6 +54,7 @@ from benchmarks.e2e.megatron_stock.flags import (
 )
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
+    ParallelismSpec,
     TRIVIAL_SPEC,
     n_microbatches,
     titan_mesh,
@@ -63,7 +64,7 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MEGATRON_PRECISION,
 )
-from benchmarks.e2e.schema import Arm, ParallelismSpec, Workload
+from benchmarks.e2e.schema import Arm, Workload
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 

@@ -72,8 +72,6 @@ DECLARED_TYPES = (
     "Workload",
     "Arm",
     "Scenario",
-    "PipelineSchedule",
-    "ParallelismSpec",
 )
 
 

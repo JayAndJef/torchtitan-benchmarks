@@ -28,14 +28,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.e2e.schema import (
+from benchmarks.e2e.schema import Workload
+from benchmarks.e2e.parallelism import (
     DEFAULT_ZERO,
     ParallelismSpec,
     PipelineSchedule,
-    Workload,
     ZERO_MODES,
-)
-from benchmarks.e2e.parallelism import (
     zero_warnings,
     titan_reshard_after_forward,
     MAX_PP,
