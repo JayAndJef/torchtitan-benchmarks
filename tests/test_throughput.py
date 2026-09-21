@@ -30,7 +30,7 @@ from benchmarks.e2e.megatron_stock.train import (  # noqa: E402
     tokens_per_second,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC  # noqa: E402
-from benchmarks.e2e.schema import RunAxes  # noqa: E402
+from benchmarks.e2e.axes import RunAxes  # noqa: E402
 from benchmarks.e2e.registry import SCENARIOS  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     evaluate_run,

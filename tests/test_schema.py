@@ -48,6 +48,7 @@ LAYER_ORDER = (
     "benchmarks.artifacts.layout",
     "benchmarks.artifacts.run_state",
     "benchmarks.e2e.parallelism",
+    "benchmarks.e2e.axes",
     "benchmarks.e2e.registry",
     "benchmarks.e2e.megatron_stock.flags",
     "benchmarks.e2e.megatron_stock.train",
@@ -75,10 +76,7 @@ DECLARED_TYPES = (
     "ParallelismSpec",
     "ValidationProfile",
     "Engine",
-    "RequestedAxes",
     "ResolvedRun",
-    "RunAxes",
-    "RunRequest",
 )
 
 

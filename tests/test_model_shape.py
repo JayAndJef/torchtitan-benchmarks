@@ -30,7 +30,7 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
     scenario_by_name,
 )
-from benchmarks.e2e.schema import RequestedAxes, RunAxes, RunRequest
+from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
 from benchmarks.e2e.runner import execute_run
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning

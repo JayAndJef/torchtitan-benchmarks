@@ -31,7 +31,7 @@ from benchmarks.e2e.megatron_stock.flags import (
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.schema import RunAxes
+from benchmarks.e2e.axes import RunAxes
 from benchmarks.e2e.registry import DEFAULT_PROFILE, ENGINES, scenario_by_name
 from benchmarks.e2e.runner import workload_with_overrides
 from benchmarks.e2e.validation import validate_arm
