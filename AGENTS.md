@@ -108,10 +108,15 @@ do not overwrite each other. `manifest.json` records the plain name.
 
 **The default shape does not fit one GPU.** `30b-a3b` is the paper headline
 shape: 30,532,122,624 parameters, about 227.5 GiB for the TorchTitan arms
-against an H200's 139.81 GiB. The default run therefore needs a mesh that
-splits it, such as `--pp 8`. Pass `--model-size 1b` for a one-GPU run. The
-harness does not refuse the combination; the training process runs out of
-memory.
+against an H200's 139.81 GiB. The harness does not refuse a one-GPU run of
+it, because the parallelism rules read layer counts and not memory; the
+training process runs out of memory instead. Pass `--model-size 1b` for a
+one-GPU run.
+
+The default therefore needs a mesh that splits it. `--pp 8` also needs
+`--batch 16`, because parallelism rules 11 and 12 ask for a microbatch
+count that divides the pipeline degree and is at least twice the stage
+count.
 
 ### Flag table
 
