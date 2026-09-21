@@ -74,7 +74,6 @@ DECLARED_TYPES = (
     "Scenario",
     "PipelineSchedule",
     "ParallelismSpec",
-    "ValidationProfile",
     "Engine",
     "ResolvedRun",
 )
