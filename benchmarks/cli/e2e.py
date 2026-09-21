@@ -149,8 +149,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
     environment variable, and the asymmetry costs something: an exported
     ``WARMUP_STEPS`` refuses every ``--profile`` run, on a flag the
     operator did not pass. Unset it before a profiled run. It is exported
-    because the matrix supervisor drives a sweep of unprofiled cells and
-    one value serves the whole sweep, which is the case ``AC_MODE`` and
+    because the matrix supervisor drives many unprofiled cells and one
+    value serves them all, which is the case ``AC_MODE`` and
     ``MODEL_SIZE`` are exported for.
     """
     options = [
@@ -562,7 +562,7 @@ def run_command(
         executed = True
     if not executed:
         raise click.ClickException(
-            "every scenario of this sweep declines one of the run axes, so "
+            "every selected scenario declines one of the run axes, so "
             "nothing ran:\n  "
             + "\n  ".join(skipped)
             + "\nChange the axis, or name a scenario with --scenario to get "

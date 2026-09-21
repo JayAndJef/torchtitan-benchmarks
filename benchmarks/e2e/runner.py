@@ -509,7 +509,7 @@ def megatron_nan_guard_refusal(
     One refusal, naming its repair. A run with no stock megatron arm
     gives the value nothing to reach, which is the ``--megatron-p2p-sync``
     refusal with a smaller engine set. ``_resolve_run`` raises the
-    string, and the ``--all-scenarios`` sweep prints it and skips the
+    string, and the skip pre-pass prints it and skips the
     scenario.
 
     The gate reads the literal ``on`` and never the axis default. ``on``

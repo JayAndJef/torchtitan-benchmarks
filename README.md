@@ -197,7 +197,7 @@ scenario against the span's one, so a span ratio is biased in the span's own
 favour, by more as the range grows.
 
 Each number is the burst-amortized per-call cost under back-to-back
-dispatch, repeated over replicate sweeps so drift affects every arm equally.
+dispatch, repeated over replicate passes so drift affects every arm equally.
 It is not device time: where the host cannot keep the stream fed, the
 measured interval holds host stalls as well. Every arm is timed in its own
 process, and the correctness pass is the exception: it gates the whole

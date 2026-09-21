@@ -482,7 +482,7 @@ every scenario, arm and span with its description, and
 | `--scenario` | all 17 | Scenario subset; repeat per scenario. |
 | `--arm` | every arm | Arm subset within one scenario; repeat per arm. |
 | `--span` | none | Span to measure; repeat per span. |
-| `--replicates` | `5` | Sweeps of every arm; the unit the interval is taken over. |
+| `--replicates` | `5` | Passes over every arm; the unit the interval is taken over. |
 | `--replicates-per-process` | `1` | Consecutive replicates of one arm per worker process. |
 | `--samples-per-replicate` | `40` | Timed bursts per arm per mode. |
 | `--burst-k` | `16` | Calls per timed burst. |
@@ -533,7 +533,7 @@ Method, and the rules a reader needs:
 Output goes to `out/<timestamp>/kernels/<scenario>/<hardware>/`, holding a
 manifest, a results file and `kernel_bench.log`. A span writes one directory
 deeper, under `out/<timestamp>/kernels/spans/<span>/<hardware>/`, so a
-shallow glob of the scenarios cannot sweep one up. The raw per-replicate
+shallow glob of the scenarios cannot reach one. The raw per-replicate
 samples stay in the results file, so a run can be re-analyzed without
 re-measuring.
 

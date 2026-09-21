@@ -1,54 +1,22 @@
 """GPU worker entry point for one kernel-benchmark pass.
 
-Launched by the parent as ``numactl ... python -m benchmarks.kernel.worker``
-inside the prepared environment (CUDA_VISIBLE_DEVICES, cache dirs, compiler
-env). One invocation runs **one** pass and writes **one** JSON fragment; the
-parent merges the fragments into ``results.json``.
+The parent launches this module in the prepared environment. One invocation
+runs one pass over one unit, which ``--scenario`` or ``--span`` names, and
+the parent merges the fragments into ``results.json``. A span composes a
+``KernelScenario``, and that composed scenario is what this worker measures.
 
-Two modes, matching the two passes:
+One arm per process keeps an arm's dependencies out of every other arm's
+interpreter. ``--replicate-count`` adds replicates to that process and never
+a second arm, so it costs no isolation.
 
-Either ``--scenario NAME`` or ``--span NAME`` names the unit. A span composes
-a ``KernelScenario`` -- its own head-to-head -- and that is what is measured
-here; the parent assembles the span's second total, the sum of the scenarios
-it replaces, because no worker sees a second unit.
-
-* ``--mode correctness`` builds every arm and gates them. Once per scenario,
-  and first -- a failed gate means no timing is worth taking. ``--skip-arm``
-  removes an arm this host cannot run, so a missing compiler costs the TE arm
-  and not the whole scenario.
-* ``--mode timing --arm NAME --replicate N`` builds that one arm and times it
-  for replicates ``N`` through ``N + --replicate-count - 1``, writing one
-  fragment per replicate under ``--fragments-dir``.
-
-The timing mode is why this file exists in this shape. **One arm per process**
-is what keeps an arm's dependencies out of every other arm's interpreter: a
-build failure, a leaked CUDA context or a JIT-built CUDA extension in one arm
-cannot reach another. ``--replicate-count`` moves replicates into
-that process and never a second arm, so the isolation the split exists for is
-untouched by it. What it does cost is stated where the parent chooses the
-value: ``benchmarks.kernel.runner``.
-
-The batch is written at the end rather than replicate by replicate. A worker
-that dies mid-batch costs the arm either way -- the merge requires a complete
-replicate set and fails the arm without one -- so there is nothing for a
-partial write to save.
-
-Exit codes: 0 success; 3 correctness gates failed (the fragment is still
-written); 2 bad arguments; 1 build or environment failure.
+Exit codes: 0 success; 3 correctness gates failed, with the fragment still
+written; 2 bad arguments; 1 build or environment failure.
 
 Module scope stays stdlib-only, so ``--help`` and an argument error return
 without paying for torch. ``tests/test_import_boundaries.py`` pins that.
 
-**The process is ended, not unwound** -- see ``_exit_now``. A worker is one
-pass and its whole product is the fragment; a graceful interpreter shutdown
-after that costs several seconds and buys nothing.
-
-Every fragment carries a **phase table** -- named wall-clock spans from
-process exec to the end of the pass. It is provenance, not a result: the
-merge reads no phase and ``results.json`` carries none. It rides in the
-fragment because the fragment is the one artifact a worker already writes,
-and a phase table is worth nothing unless it survives the process that
-produced it.
+Every fragment also carries a phase table of named wall-clock spans. It is
+provenance, and the merge reads no phase.
 """
 
 from __future__ import annotations
@@ -145,9 +113,7 @@ def main(argv: list[str] | None = None) -> int:
 
     startup = phases.process_start_offset()
     if startup is not None:
-        # Interpreter startup plus this module's stdlib imports plus argument
-        # parsing. Not timed from inside, because it begins before any of our
-        # Python runs.
+        # Interpreter startup and argument parsing, which begin before us.
         phases.record("process_startup", startup)
 
     with phases.phase("import_registry"):
@@ -180,11 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     with phases.phase("import_torch"):
         from torch._functorch import config as functorch_config
 
-    # Backward-mode timing re-runs a compiled backward graph with
-    # retain_graph=True; AOT autograd's donated-buffer optimization forbids
-    # re-execution and raises on arms that save intermediates
-    # (expert_mlp's gate_up). Disabling it changes backward buffer reuse, not the
-    # generated kernels, and applies to every arm alike.
+    # Backward timing re-runs the graph, and a donated buffer forbids that.
+    # This changes backward buffer reuse alone, for every arm alike.
     functorch_config.donated_buffer = False
 
     with phases.phase("import_engine"):
@@ -212,11 +175,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             written.append((args.fragment, fragment))
         else:
-            # The build, the replicate loop and the rule that the per-arm
-            # extras attach to replicate 0 all live in the engine, in one
-            # function. At --replicate-count 1 it is the order the
-            # single-replicate pass has always used, because
-            # run_timing_pass is now the same function's count=1 case.
+            # The engine owns the build, the loop and the rule that the
+            # per-arm extras attach to replicate 0.
             fragments = time_replicate_block(
                 scenario,
                 args.arm,
@@ -239,10 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         return 1
 
-    # Provenance, not a result: the merge reads no phase and results.json
-    # carries none. See this module's docstring. The table describes the
-    # *process*, so every fragment a batched worker writes carries the same
-    # one.
+    # The table describes the process, so every fragment carries the same one.
     table = phases.phases()
     for path, payload in written:
         payload["phases"] = table
@@ -266,81 +223,29 @@ def main(argv: list[str] | None = None) -> int:
 def _exit_now(code: int) -> None:
     """End the process at ``code`` without unwinding the interpreter.
 
-    A worker's whole product is the fragment, and ``main`` has written it
-    before this runs. What a graceful shutdown does after that is release
-    state the kernel is about to reclaim anyway: a compiled graph, its Triton
-    modules, the device allocations, the CUDA context, and above all
-    Inductor's compile-worker pool. The first ``torch.compile`` in the
-    process starts 32 ``compile_worker`` subprocesses, each of which imports
-    torch, and an ``atexit`` handler joins them. Measured on an H200,
-    rope/baseline: the worker reaches the end of ``main`` at 11.0 s, finishes
-    its ``atexit`` handlers at 16.6 s and exits at 18.3 s.
+    ``main`` writes the fragment before this runs, so a graceful shutdown
+    only releases state the kernel reclaims anyway. What it costs is the
+    ``atexit`` join of Inductor's 32 compile workers: measured on an H200 at
+    rope/baseline, the worker reaches the end of ``main`` at 11.0 s and
+    exits at 18.3 s. Those seconds were read at load average 28 to 81, so
+    they order the two paths and may not be cited.
 
-    Ending the process instead is safe here for four separate reasons, and
-    each was checked rather than assumed:
+    The flushes below keep the diagnostics, because ``os._exit`` flushes
+    neither Python's buffers nor libc's. The alternative,
+    ``torch._inductor.config.compile_threads = 1``, saves the same seconds
+    but also takes those 32 subprocesses off a host-bound measurement, so it
+    needs a re-baseline and this exit does not.
 
-    * **It cannot move a number.** Every sample is taken, every gate is run
-      and the fragment is on disk before this line. There is no measurement
-      left to disturb.
-    * **The fragment survives.** ``atomic_write_json`` writes a temporary
-      file, closes it and renames it, all before ``main`` returns. Page-cache
-      data outlives ``_exit``; only unflushed *process* buffers do not, which
-      is what the three flushes below are for. There are three because
-      Python owns two of the process's buffers and libc owns the rest: a
-      normal ``exit()`` flushes libc's streams and ``os._exit`` does not, and
-      the parent redirects this process's stdout to a file, so libc's
-      ``stdout`` is block-buffered rather than line-buffered. Any C or C++
-      extension that prints through ``printf`` or ``std::cout`` -- CUDA,
-      cuDNN and TransformerEngine all can -- would otherwise lose its output.
-      That output is never a measurement, but it is diagnostic, and the exit
-      codes it matters most for are 1 and 3, whose whole report to the
-      operator is a tail of this log.
-    * **The compile caches survive.** Both Inductor and Triton write their
-      artifacts when the kernel is compiled, not at exit. A cold-cache pass
-      run both ways left 13 inductor files and 65 triton files either way,
-      1,168,648 against 1,168,632 bytes.
-    * **The compile pool is not orphaned.** Each of those subprocesses is
-      given ``--parent`` and exits when it is reparented. Counted on the
-      hardware: the ``compile_worker`` processes of one worktree rise to 15
-      during a helion build and are back to the pre-run count within two
-      seconds of the worker ending.
-
-    ``main`` itself only *returns* the code, so a caller that imports this
-    module decides its own exit and is unaffected.
-
-    The alternative -- ``torch._inductor.config.compile_threads = 1``, so
-    there is no pool to join -- saves the same seconds and is *not*
-    equivalent: it also removes those 32 subprocesses from the host during
-    the timed region, and this workload is host-dispatch bound. Measured at
-    n=3 it cut the per-run standard deviation 3-11x on the dispatch-bound
-    arms while the medians moved in both directions. That is a change to the
-    measurement and needs a re-baseline. This one does not.
-
-    The saving: 4.5-6 s of a 12-18 s worker across seven arms A/B'd back to
-    back. **Every one of those numbers was measured on a box carrying load
-    average 28-81 from concurrent agents, so each is uncitable and pending
-    re-measurement on an idle box.** The reason to do this is the causal
-    argument above, not the size of the number.
-
-    **Two limits on the four facts, so the next reader does not inherit them
-    as unconditional.**
-
-    * The facts are scoped to today's torch. The exit skips ``atexit``
-      *unconditionally*, so anything a later torch registers there is skipped
-      too. Re-check the compile-cache fact after a torch bump.
-    * **Do not copy this into the e2e training driver.** That process writes
-      profiler traces, and a trace is written by machinery this argument has
-      not been checked against. The cache check above was run for Inductor
-      and Triton only.
+    Two limits. The exit skips ``atexit`` unconditionally, so re-check the
+    compile-cache fact after a torch bump: a cold-cache pass wrote the same
+    13 Inductor and 65 Triton files either way. Do not copy this into the e2e
+    training driver, because nobody checked this argument against the
+    machinery that writes a profiler trace.
     """
     sys.stdout.flush()
     sys.stderr.flush()
-    # libc's own streams, which the two flushes above do not reach and
-    # ``os._exit`` does not flush. ``fflush(NULL)`` flushes every open output
-    # stream. Deferred rather than imported at module scope, so an argument
-    # error still returns without paying for it, and guarded because a
-    # failure to flush a diagnostic must never change the exit code the
-    # parent reads.
+    # libc's own streams, which the two flushes above and ``os._exit`` miss.
+    # The import is deferred, and a failed flush must not change the code.
     try:
         import ctypes
 

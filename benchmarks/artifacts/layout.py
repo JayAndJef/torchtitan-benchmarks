@@ -200,7 +200,7 @@ def archive_incomplete_arm(out_dir: Path, arm_name: str) -> Path | None:
 
 
 def run_timestamp() -> str:
-    """Directory-safe UTC stamp; shared across a multi-scenario sweep."""
+    """Directory-safe UTC stamp; shared by every scenario of one run."""
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
