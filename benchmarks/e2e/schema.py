@@ -11,17 +11,17 @@ property.
 
 ``Workload``, ``Arm`` and ``Scenario`` describe a scenario.
 ``ParallelismSpec`` and ``PipelineSchedule`` describe the parallelism run
-axis. ``Engine`` joins an engine's command builder to its validation
-profile, which ``benchmarks.e2e.validation`` owns. ``ResolvedRun`` is one
-run with every open question answered. The run axes themselves live in
-``benchmarks.e2e.axes``.
+axis. ``ResolvedRun`` is one run with every open question answered. The run
+axes live in ``benchmarks.e2e.axes``, the validation profile in
+``benchmarks.e2e.validation`` and the engine record in
+``benchmarks.e2e.engines``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
@@ -266,33 +266,6 @@ class ParallelismSpec:
         enforces the other half of that: ``ep`` has to divide ``dp``.
         """
         return self.dp * self.pp
-
-
-@dataclass(frozen=True)
-class Engine:
-    """One training engine: how to launch an arm, and how to validate it.
-
-    ``Arm.engine`` names a record of this type. The record is the one place
-    that joins the two halves, so an arm cannot take one engine's command
-    builder and another engine's validation profile. That pairing used to
-    be two independent strings on the arm.
-
-    ``command`` builds the argv for one arm. Every builder takes the same
-    parameters, including the megatron run axes an engine may ignore, so
-    the dispatcher passes one call through and no caller branches on the
-    engine.
-
-    ``is_megatron`` says whether this engine runs Megatron-LM. The
-    parallelism rules and the three megatron run axes read it. It is a
-    declared field rather than a name prefix: a prefix test fails open, and
-    an engine that spelled the library another way would walk past a rule
-    it needs.
-    """
-
-    name: str
-    command: Callable[..., list[str]]
-    validation: ValidationProfile
-    is_megatron: bool
 
 
 @dataclass(frozen=True)

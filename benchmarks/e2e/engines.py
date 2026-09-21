@@ -16,7 +16,9 @@ records, so it cannot sit in ``launch.py`` below them.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from benchmarks.e2e.launch import megatron_stock_command, titan_command
 from benchmarks.e2e.parallelism import ParallelismSpec, TRIVIAL_SPEC
@@ -25,11 +27,39 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MEGATRON_PRECISION,
 )
-from benchmarks.e2e.schema import Arm, Engine, Workload
+from benchmarks.e2e.schema import Arm, Workload
 from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
     TORCHTITAN_PROFILE,
+    ValidationProfile,
 )
+
+
+@dataclass(frozen=True)
+class Engine:
+    """One training engine: how to launch an arm, and how to validate it.
+
+    ``Arm.engine`` names a record of this type. The record is the one place
+    that joins the two halves, so an arm cannot take one engine's command
+    builder and another engine's validation profile. That pairing used to
+    be two independent strings on the arm.
+
+    ``command`` builds the argv for one arm. Every builder takes the same
+    parameters, including the megatron run axes an engine may ignore, so
+    the dispatcher passes one call through and no caller branches on the
+    engine.
+
+    ``is_megatron`` says whether this engine runs Megatron-LM. The
+    parallelism rules and the three megatron run axes read it. It is a
+    declared field rather than a name prefix: a prefix test fails open, and
+    an engine that spelled the library another way would walk past a rule
+    it needs.
+    """
+
+    name: str
+    command: Callable[..., list[str]]
+    validation: ValidationProfile
+    is_megatron: bool
 
 
 ENGINES: dict[str, Engine] = {
