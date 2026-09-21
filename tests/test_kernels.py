@@ -355,7 +355,7 @@ class RegistryTests(unittest.TestCase):
 
 class ShapeAndWorkloadTests(unittest.TestCase):
     def test_shape_arithmetic(self) -> None:
-        shape, workload = resolve_shape_and_workload()
+        shape, workload = resolve_shape_and_workload(model_size="1b")
         self.assertEqual((workload.batch, workload.seq_len), (4, 1024))
         expert_mlp = shape_summary("expert_mlp", shape, workload)
         self.assertEqual(expert_mlp["x"], [8192, 1024])
@@ -395,14 +395,16 @@ class ShapeAndWorkloadTests(unittest.TestCase):
             resolve_shape_and_workload(model_size="enormous")
 
     def test_workload_overrides_apply(self) -> None:
-        shape, workload = resolve_shape_and_workload(batch=1, seq_len=2048)
+        shape, workload = resolve_shape_and_workload(
+            model_size="1b", batch=1, seq_len=2048
+        )
         self.assertEqual(
             shape_summary("expert_mlp", shape, workload)["x"], [4096, 1024]
         )
 
     def test_seq_len_is_bounded_by_the_shapes_ceiling(self) -> None:
         with self.assertRaisesRegex(ValueError, "exceeds max_seq_len"):
-            resolve_shape_and_workload(seq_len=8192)
+            resolve_shape_and_workload(model_size="1b", seq_len=8192)
 
     def test_max_seq_len_override_replaces_the_shape_before_the_check(
         self,
@@ -410,13 +412,15 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         """Ordering is load-bearing: the attention_core sweep raises the
         ceiling precisely so it can then set seq_len above the old one."""
         shape, workload = resolve_shape_and_workload(
-            seq_len=8192, max_seq_len=8192
+            model_size="1b", seq_len=8192, max_seq_len=8192
         )
         self.assertEqual(shape.max_seq_len, 8192)
         self.assertEqual(workload.seq_len, 8192)
         # replace() on the registered shape, not a mutation of it.
         self.assertEqual(shape.name, "1b")
-        self.assertEqual(resolve_shape_and_workload()[0].max_seq_len, 4096)
+        self.assertEqual(
+            resolve_shape_and_workload(model_size="1b")[0].max_seq_len, 4096
+        )
         self.assertEqual(
             shape_summary("attention_core", shape, workload)["max_seq_len"],
             8192,
@@ -425,15 +429,15 @@ class ShapeAndWorkloadTests(unittest.TestCase):
     def test_routing_needs_an_even_row_count(self) -> None:
         """rows = batch * seq_len * top_k, and both shapes carry top_k 2 with
         4 experts, so the split fails exactly when batch * seq_len is odd."""
-        shape, workload = resolve_shape_and_workload(batch=3, seq_len=1025)
+        shape, workload = resolve_shape_and_workload(model_size="1b", batch=3, seq_len=1025)
         self.assertFalse(routing_divides_evenly(shape, workload))  # 6150 rows
         # An odd batch alone is fine at the default even seq_len: 3 * 1024 * 2
         # = 6144 rows, which 4 experts do split.
         self.assertTrue(
-            routing_divides_evenly(*resolve_shape_and_workload(batch=3))
+            routing_divides_evenly(*resolve_shape_and_workload(model_size="1b", batch=3))
         )
         self.assertTrue(
-            routing_divides_evenly(*resolve_shape_and_workload(batch=4))
+            routing_divides_evenly(*resolve_shape_and_workload(model_size="1b", batch=4))
         )
 
     def test_split_covers_every_former_spec_field(self) -> None:
@@ -478,7 +482,7 @@ class BalancedRoutingInvariantTests(unittest.TestCase):
     def test_run_kernel_scenario_rejects_an_uneven_split(self) -> None:
         from benchmarks.kernel.engine.run import RunOptions, run_kernel_scenario
 
-        shape, workload = resolve_shape_and_workload(batch=3, seq_len=1025)
+        shape, workload = resolve_shape_and_workload(model_size="1b", batch=3, seq_len=1025)
         with self.assertRaises(ValueError) as caught:
             run_kernel_scenario(
                 kernel_scenario_by_name("expert_mlp"),

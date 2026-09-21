@@ -76,6 +76,7 @@ from benchmarks.kernel.results.schema import (
     write_kernel_results,
 )
 from benchmarks.kernel.schema import (
+    DEFAULT_MODEL_SIZE,
     KernelScenario,
     KernelSpan,
     KernelWorkload,
@@ -187,7 +188,7 @@ class KernelRunRequest:
     burst_k: int = 16
     warmup_calls: int = 30
     burst: bool = False
-    model_size: str = "1b"
+    model_size: str = DEFAULT_MODEL_SIZE
     batch: int | None = None
     seq_len: int | None = None
     max_seq_len: int | None = None

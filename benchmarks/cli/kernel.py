@@ -14,8 +14,8 @@ and ``--compiler-env`` read one; ``--out``, ``--seq-len``, ``--batch`` and
 ``--model-size`` are flags only, so an ``OUT``/``SEQ``/``BATCH`` environment
 exported for an end-to-end session cannot leak into a kernel measurement
 (CLAUDE.md, "Kernel-isolation benchmarks"). That is also why ``--model-size``
-is declared twice in this package rather than shared: this one defaults to
-``1b`` and shows it, while ``benchmarks/cli/e2e.py``'s carries
+is declared twice in this package rather than shared: this one shows its
+default, while ``benchmarks/cli/e2e.py``'s carries
 ``envvar="MODEL_SIZE"`` and no default so a resume can tell an unrequested
 size from an explicit one. Two options that share a spelling; see that
 module's docstring for the other half.
@@ -57,6 +57,7 @@ from benchmarks.kernel.results.reporting import (
 )
 from benchmarks.kernel.results.schema import KernelSpanResult
 from benchmarks.kernel.runner import KernelRunRequest, execute_kernel_run
+from benchmarks.kernel.schema import DEFAULT_MODEL_SIZE
 from benchmarks.kernel.spans import KERNEL_SPANS
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
@@ -151,7 +152,7 @@ from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 )
 @click.option(
     "--model-size",
-    default="1b",
+    default=DEFAULT_MODEL_SIZE,
     show_default=True,
     type=click.Choice(MODEL_SIZE_CHOICES),
     help=(

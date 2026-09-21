@@ -480,7 +480,7 @@ every scenario, arm and span with its description, and
 | `--burst-k` | `16` | Calls per timed burst. |
 | `--warmup-calls` | `30` | Untimed calls per arm per mode. |
 | `--burst` | off | Adds the 1/4/16/64 dispatch-cost diagnostic. |
-| `--model-size` | `1b` | Model shape; sizes the geometry alone. |
+| `--model-size` | `30b-a3b` | Model shape; sizes the geometry alone. |
 | `--batch` | none | Batch size run through the model. |
 | `--seq-len` | none | Sequence length run through the model. |
 | `--max-seq-len` | none | Raises the shape's sequence ceiling. |
