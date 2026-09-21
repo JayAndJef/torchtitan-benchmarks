@@ -46,12 +46,7 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
     scenario_by_name,
 )
-from benchmarks.e2e.schema import (
-    Arm,
-    ResolvedRun,
-    Scenario,
-    Workload,
-)
+from benchmarks.e2e.schema import Arm, Scenario, Workload
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
@@ -148,6 +143,40 @@ def workload_with_overrides(
             "publishes no throughput"
         )
     return workload
+
+
+@dataclass(frozen=True)
+class ResolvedRun:
+    """One run, with every question the request left open answered.
+
+    ``_resolve_run`` builds this record and does every refusal on the way:
+    the scenario name, the arm subset, the mesh, the three megatron axes
+    and the resume comparison. Whatever it returns is startable, so the
+    caller reads fields instead of repeating checks.
+
+    Attributes:
+        paths: The resolved repository, cache and compiler-env locations.
+        scenario: The scenario, with the size overrides already applied to
+            its workload.
+        arms: The arms this run starts, in the order the operator asked
+            for.
+        hardware: The provenance label of the output directory.
+        metadata: The provenance block, including the CPU pinning.
+        out_dir: Where the run writes.
+        commands: One argv per arm name.
+        axes: The eight global run axes, resolved.
+        resumed: Whether the run continues a recorded directory.
+    """
+
+    paths: RuntimePaths
+    scenario: Scenario
+    arms: tuple[Arm, ...]
+    hardware: str
+    metadata: dict[str, str]
+    out_dir: Path
+    commands: dict[str, list[str]]
+    axes: RunAxes
+    resumed: bool
 
 
 def _resolve_run(
