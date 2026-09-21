@@ -324,10 +324,8 @@ def stable_tps(
 ) -> list[int]:
     """Select post-compile steps before each profiler warmup begins.
 
-    The sample rule of a **profiled** run. The profiler costs host and GPU
-    time on every warmup and active step, so the samples are the steps of
-    each cycle that carry none: steps 2 to ``wait`` of every
-    ``profile_freq``. Step 1 of each cycle is dropped as startup noise.
+    The sample rule of a profiled run, and a different figure from
+    ``measured_tps``.
     """
     profile_freq = int(workload.get("profile_freq", 20))
     wait = profile_freq - int(workload.get("profiler_warmup", 5)) - int(
@@ -345,16 +343,9 @@ def measured_tps(
 ) -> list[int]:
     """Select every step after the warmup.
 
-    The sample rule of an **unprofiled** run, and it is a different figure
-    from ``stable_tps`` rather than a wider reading of the same one. There
-    is no profiler to sample around, so every step after the warmup is a
-    sample: the count grows with ``--steps`` where the profiled rule's does
-    not, and the median is taken over steps the profiled rule discards.
-    Numbers are only comparable within one value of ``--profile``, and
-    within one ``--warmup-steps``.
-
-    The step numbers come from the engine's own log lines, which both
-    engines number from 1.
+    The sample rule of an unprofiled run, and a different figure from
+    ``stable_tps``. Numbers are comparable within one ``--profile`` value
+    and one ``--warmup-steps``.
     """
     return [tps for step, _, tps in rows if step > warmup_steps]
 
@@ -434,26 +425,15 @@ def evaluate_run(
     manifest, arms = load_run(out_dir, arms_override)
     warnings: list[str] = []
 
-    # The run axis, read back from the manifest. It picks the sample rule
-    # alone: every figure below comes from the step lines, which both modes
-    # print.
+    # The run axis, which picks the sample rule and nothing else.
     profile = bool(manifest["profile"])
 
     workload = manifest["workload"]
     # The declared mesh, read back from the manifest.
     recorded_parallelism = manifest["parallelism"]
     world_size = int(recorded_parallelism.get("world_size", 1))
-    # The two ZeRO-level warnings reach the artifact as well as the
-    # console. The runner says them when the run starts, and a reader of
-    # results.json was not there. The file is what a report quotes.
-    #
-    # ``zero_warnings`` reads a spec, so the record becomes a spec
-    # again. Only the fields that function reads are rebuilt: a record also
-    # carries keys the spec derives for itself, such as ``world_size``.
-    #
-    # It also reads the engines the evaluated arms run on, because one
-    # warning is about TorchTitan's FSDP2 alone. The manifest arm records
-    # carry the engine, so the file states the same facts the console did.
+    # The two ZeRO-level warnings reach the file too, because a reader of
+    # results.json did not see the console.
     warnings.extend(
         zero_warnings(
             ParallelismSpec(
@@ -472,10 +452,7 @@ def evaluate_run(
     raw_training = {
         arm: per_rank_training_metrics(out_dir / f"{arm}.log") for arm in arms
     }
-    # The sample rule follows the axis the run was measured under. A
-    # profiled run samples around its profiler windows; an unprofiled one
-    # takes every step after its warmup. Choosing by the manifest is what
-    # keeps a directory readable by the rule that produced it.
+    # The sample rule follows the axis the run was measured under.
     if profile:
         def _samples(rows: list[tuple[int, float, int]]) -> list[int]:
             return stable_tps(rows, workload)
@@ -499,9 +476,7 @@ def evaluate_run(
     published_throughput_rank = {
         arm: _slowest_rank(by_rank) for arm, by_rank in throughput.items()
     }
-    # One step's tokens, and the degree that divides its cost. Both come
-    # from the manifest, so a directory reports the step cost of the run
-    # that wrote it.
+    # One step's tokens, and the degree that divides its cost.
     tokens_per_step = int(workload["local_batch_size"]) * int(
         workload["seq_len"]
     )
@@ -553,9 +528,7 @@ def evaluate_run(
                 "rank is starved or the ranks are not running one job"
             )
 
-    # One rank's trajectory, not every rank's concatenated. Under a pipeline
-    # split the loss lives on the last stage, and a rank without it still
-    # prints a step line -- carrying TorchTitan's -1.0 sentinel.
+    # One rank's trajectory: under a pipeline split only one rank holds it.
     trajectory_rank = loss_visible_rank(world_size=world_size, pp=pp)
     # Before anything is published. Every rank's lines, not only the
     # published rank's; see refuse_non_finite_trajectories.

@@ -445,25 +445,10 @@ def zero_warnings(
 ) -> tuple[str, ...]:
     """What a reader must not conclude from this spec's own mesh.
 
-    Both cases below are legal, and neither refuses anything. Each names a
-    cell whose recorded ``zero`` level describes a mechanism the run does
-    not really have, so a reader who takes the level at face value reads
-    the cell wrongly.
-
-    ``engines`` is the set of ``Arm.engine`` names the run holds. The
-    second warning is about TorchTitan's FSDP2 alone, so a run of megatron
-    arms alone does not get it: Megatron builds a ``DistributedOptimizer``
-    and holds ZeRO-1 exactly, at every mesh. An empty set therefore emits
-    the first warning only.
-
-    **Nothing is emitted above ``dp`` 1 and above ``pp`` 1.** That is the
-    configuration this axis exists to run. A warning on the intended cell is
-    noise. An operator then ignores every warning.
-
-    ``benchmarks/e2e/runner.py`` emits these when it resolves a run, and
-    ``benchmarks/e2e/results.py`` appends them to ``results.json``, so the
-    operator meets them while the run starts and a later reader meets them in
-    the artifact.
+    Two legal cells whose recorded ``zero`` level names a mechanism the run
+    does not have. ``engines`` is the set of arm engines the run holds,
+    because the second warning is about TorchTitan's FSDP2 alone. Nothing
+    is emitted above ``dp`` 1 and ``pp`` 1, which is the intended cell.
     """
     warnings: list[str] = []
     if spec.zero != 0 and spec.dp == 1:
@@ -659,22 +644,14 @@ def validate_parallelism(
     engines = frozenset(engines)
     local_batch_size = workload.local_batch_size
 
-    # A precondition on the one argument this module does not own, checked
-    # before the numbered rules so those rules may assume it.
-    #
-    # The batch is the one integer the microbatch arithmetic divides, and
-    # neither Workload nor workload_with_overrides bounds it -- --batch takes
-    # a bare int. Without this, batch 0 and batch -4 pass every rule at pp 1
-    # and reach the manifest as n_microbatches 0 and -4.
+    # A precondition, checked first so the numbered rules may assume it.
     if local_batch_size < 1:
         raise ValueError(
             f"local batch size {local_batch_size} must be >= 1; it is the "
             "count the microbatch split divides"
         )
 
-    # 1. The mesh has to be exactly the devices the operator asked for. Not
-    #    "at most": a spec that under-fills the request would leave a GPU
-    #    idle and publish the number under the full device list.
+    # 1. The mesh is exactly the devices asked for, never fewer.
     if spec.world_size != device_count:
         raise ValueError(
             f"parallelism world size {spec.world_size} (dp {spec.dp} x pp "
@@ -683,16 +660,8 @@ def validate_parallelism(
             "multiplies the world size"
         )
 
-    # 2. The budget for this pass, in two halves.
-    #
-    #    **The pipeline half runs first, and the order is load-bearing.**
-    #    The world size is ``dp * pp`` and is never below ``pp``, so every
-    #    spec above MAX_PP is also above MAX_WORLD_SIZE now that the two
-    #    caps are equal. Testing the world size first would make the
-    #    pipeline half unreachable and every deep-pipeline refusal would
-    #    name the GPU budget instead of the cap somebody has to lift.
-    #    Both halves refuse every spec they refused before; this only
-    #    chooses the more specific of two true messages.
+    # 2. The budget, pipeline half first, so the message names the cap
+    #    somebody has to lift.
     if spec.pp > MAX_PP:
         raise ValueError(
             f"pipeline degree {spec.pp} exceeds the supported maximum "
@@ -718,11 +687,6 @@ def validate_parallelism(
             + ", ".join(PP_SCHEDULE_CHOICES)
         )
     #    The microbatch size is the schedule's twin and takes the same rule.
-    #    TorchTitan reads pipeline_parallel_microbatch_size only inside
-    #    _build_pipeline_schedule, which runs only when pp > 1, so a value
-    #    set at pp 1 is recorded in the manifest and delivered to nothing --
-    #    and, because --resume gates on the parallelism record, it would make
-    #    two otherwise identical single-GPU runs refuse to resume each other.
     if spec.pp == 1 and spec.pp_microbatch_size != 1:
         raise ValueError(
             f"pp_microbatch_size {spec.pp_microbatch_size} was requested at "
@@ -741,15 +705,8 @@ def validate_parallelism(
                 + ", ".join(PP_SCHEDULE_CHOICES)
             ) from error
 
-    # 5. A schedule Megatron does not implement has no cross-engine opponent,
-    #    so a run holding a megatron arm cannot use it. The check reads the
-    #    engines rather than the scenario name: a titan-only run may use a
-    #    PyTorch-only schedule.
-    #
-    #    It reads MEGATRON_ENGINES rather than one engine name. A
-    #    command builder is not a spec rule: it runs after the manifest
-    #    records the mesh, and it cannot refuse a mesh nobody builds a
-    #    command for.
+    # 5. A schedule Megatron does not implement has no cross-engine
+    #    opponent, so it reads the engines and not the scenario name.
     if (
         schedule is not None
         and engines & MEGATRON_ENGINES
@@ -761,28 +718,10 @@ def validate_parallelism(
             "no cross-engine comparison"
         )
 
-    # 6. DELETED. It refused a schedule that raises on a compiled stage
-    #    module. Compile is an arm property, so a spec alone cannot answer
-    #    it; ``_resolve_run`` (benchmarks.e2e.runner) reads the selected
-    #    arms and names the one that compiles.
+    # 6. DELETED. Compile is an arm property, so _resolve_run asks it.
 
-    # 7. Every stage holds the same number of transformer layers. An uneven
-    #    split is a different model per rank, and TorchTitan produces one
-    #    without a warning.
-    #
-    #    **This test is only the right test when the harness sends
-    #    ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
-    #    last-stage twin.** Both default to 1, which makes TorchTitan's
-    #    divisor ``n_layers + 2`` rather than ``n_layers``: at 16 layers over
-    #    4 stages weight 1 splits [4, 5, 4, 3] where Megatron splits
-    #    [4, 4, 4, 4], and this rule would pass both. Four stages are
-    #    reachable at pp 2, eight at pp 4 and sixteen at pp 8, because four
-    #    of the five registered schedules ask for two stages per rank.
-    #    ``launch.py`` sends both flags at every ``pp > 1``, and this rule
-    #    assumes that.
-    #
-    #    Megatron needs no flag: it divides ``config.num_layers`` and asserts
-    #    the remainder itself.
+    # 7. Every stage holds the same layer count, which assumes launch.py
+    #    sends both less-layers flags at every pp > 1.
     stages_per_rank = schedule.stages_per_rank if schedule is not None else 1
     total_stages = spec.pp * stages_per_rank
     if shape.n_layers % total_stages:
@@ -792,13 +731,8 @@ def validate_parallelism(
             f"(pp {spec.pp} x {stages_per_rank} stage(s) per rank)"
         )
 
-    # 8 and 9. The expert split. Both rules are reachable since rule 14
-    # stopped refusing every expert degree, and both were written and tested
-    # through that whole refusal: an expert count that does not divide gives
-    # the ranks different expert counts, and an ep that does not divide dp
-    # cannot be carved out of the data-parallel axis at all. They run before
-    # rule 14, so an illegal count is named by its own rule under either
-    # parity.
+    # 8 and 9. The expert split, before rule 14, so an illegal count is
+    # named by its own rule.
     if spec.ep > shape.num_experts:
         raise ValueError(
             f"expert degree {spec.ep} exceeds shape {shape.name!r}'s "
@@ -823,23 +757,8 @@ def validate_parallelism(
         )
     microbatches = n_microbatches(spec, local_batch_size=local_batch_size)
 
-    # 11. Both engines derive the same microbatch group size only when the
-    #     count divides by the PP degree. PyTorch relaxes that rule and
-    #     recomputes the group size (``ScheduleInterleaved1F1B.__init__``:
-    #     ``number_of_rounds = max(1, n_microbatches // pp_group_size)``);
-    #     Megatron does not, so the two would run different schedules under
-    #     one label. Vacuous at pp 1, which is why it is unconditional.
-    #
-    #     **It is conservative for plain 1F1B, deliberately.** That
-    #     relaxation lives in the interleaved class, which ``Schedule1F1B``
-    #     never touches: it has no group-size concept, and Megatron's
-    #     ``forward_backward_pipelining_without_interleaving`` has none
-    #     either, so both engines agree at any count. So this rule costs the
-    #     odd-microbatch cells (pp 2 at batch 5, 7, ...) for no mechanism the
-    #     targeted schedule has. It is kept whole because refusing a legal
-    #     cell is the safe direction and admitting an illegal one is not;
-    #     narrow it per schedule only with a measured interleaved cell in
-    #     hand.
+    # 11. The two engines derive one microbatch group size only when the
+    #     count divides by pp. Conservative for plain 1F1B on purpose.
     if microbatches % spec.pp:
         raise ValueError(
             f"{microbatches} microbatches do not divide evenly across "
@@ -847,14 +766,8 @@ def validate_parallelism(
             "different microbatch group sizes and run different schedules"
         )
 
-    # 12. Rank 0 holds `pp * stages_per_rank` microbatches at its warmup
-    #     peak, so a count below twice that makes 1F1B hold as much as GPipe
-    #     and save nothing.
-    #
-    #     Guarded on pp > 1, and that guard is load-bearing: there are no
-    #     microbatches without a pipeline, and `--batch` takes any positive
-    #     integer, so an unconditional rule would refuse the legal
-    #     single-GPU `--batch 1` run this repo can do today.
+    # 12. Below twice the stage count, 1F1B holds as much as GPipe. Guarded
+    #     on pp > 1, or it would refuse the legal single-GPU --batch 1 run.
     if spec.pp > 1 and microbatches < 2 * total_stages:
         raise ValueError(
             f"{microbatches} microbatches is below the {2 * total_stages} "
@@ -863,25 +776,10 @@ def validate_parallelism(
             "--pp-microbatch-size"
         )
 
-    # 13. DELETED. It refused a parallel run under graph capture, and
-    #     graph capture no longer exists.
+    # 13. DELETED with graph capture.
 
-    # 14. Expert parallelism needs the sharded dense parity, on both
-    #     engines. TorchTitan cannot split the experts while it keeps the
-    #     dense parameters replicated: apply_fsdp_to_decoder sends every
-    #     non-expert parameter to Shard(0) on the dense mesh, and the expert
-    #     mesh degree efsdp = dp_shard * cp * tp // ep needs dp_shard >= ep.
-    #     Megatron holds every parity. So an ep row under `--zero 0` would
-    #     compare EP plus sharding against EP plus replication, which is two
-    #     changes rather than one.
-    #
-    #     **The test is `== 0`, so level 1 passes.** titan_mesh gives it the
-    #     whole data-parallel width as dp_shard, so dp_shard >= ep holds.
-    #
-    #     The refusal names the flags that repair it. The operator declares
-    #     the parity rather than the rule deriving one from ep, so that the
-    #     sharded ep 1 control cell can be expressed and the ep row carries
-    #     one change against it.
+    # 14. TorchTitan cannot split the experts and keep the dense parameters
+    #     replicated, so an ep row under --zero 0 would carry two changes.
     if spec.ep > 1 and spec.zero == 0:
         raise ValueError(
             f"expert degree {spec.ep} needs --zero 1. TorchTitan cannot "
@@ -891,30 +789,13 @@ def validate_parallelism(
             "rather than one"
         )
 
-    # 15. DELETED, and the number is kept empty on purpose. The rule refused
-    #     a sharded value at dp 1, because the shard degree is 1 there
-    #     whatever the value says.
-    #
-    #     **It refused the agreed 30B-A3B matrix.** That matrix is
-    #     `dp 1 x pp 8`, which is the deepest split eight GPUs hold, and it
-    #     asks for --zero 1 to cut the optimizer states. Neither engine refuses
-    #     that mesh: Megatron builds a DistributedOptimizer over one rank and
-    #     TorchTitan skips its data-parallel path. A rule that blocks a legal
-    #     run to protect a reader is the wrong tool.
-    #
-    #     **A warning replaced it.** `zero_warnings` says the same
-    #     thing to the same reader, at the same mesh, and takes no GPU away.
-    #     The runner emits it and results.json records it.
-    #
-    #     **The numbers of the deleted rules stay empty.** The messages,
-    #     the tests and the agent guide all name the rules that remain, so
-    #     a renumber would break more than it tidies.
+    # 15. DELETED. It refused a sharded value at dp 1, which refused the
+    #     agreed 30B-A3B matrix; zero_warnings says the same thing instead.
 
-    # 16. DELETED, and the number is kept empty on purpose. The rule refused
-    #     a sharded parity and an expert degree to an earlier megatron
-    #     driver that implemented neither. The stock driver implements both.
+    # 16. DELETED. It refused a sharded parity and an expert degree to an
+    #     earlier driver; the stock driver implements both.
 
-    # 17. DELETED with ZeRO level 3. The rule refused that level under
-    #     a pipeline, because Megatron's own sharded wrapper factors the
-    #     world size into terms with no pipeline term. The level is gone,
-    #     and the number is kept empty on purpose.
+    # 17. DELETED with ZeRO level 3.
+
+    # A deleted number stays empty, because the messages, the tests and the
+    # agent guide all name the rules that remain.

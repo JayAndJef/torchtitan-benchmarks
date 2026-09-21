@@ -109,14 +109,9 @@ def workload_with_overrides(
 ) -> Workload:
     """Apply portable size overrides without changing scenario arms.
 
-    ``profile`` decides which step floor applies. Two profiler windows are
-    what arm rule 5 and the per-step trace metrics rest on, so a profiled
-    run needs ``profile_freq * min_trace_windows`` steps, which is 40.
-
-    ``warmup_steps`` is the floor of an unprofiled run, and it is
-    ``None`` under ``--profile``, where the axis is refused. A run must
-    take at least one step after its warmup, or it measures nothing and
-    publishes an empty sample set as a throughput.
+    ``profile`` decides which step floor applies: a profiled run needs
+    ``profile_freq * min_trace_windows`` steps, and an unprofiled one needs
+    more than ``warmup_steps``.
     """
     environment = environment or os.environ
     workload = scenario.workload
@@ -185,7 +180,7 @@ def _resolve_run(
     *,
     event_handler: EventHandler | None = None,
 ) -> ResolvedRun:
-    """Answer every question the request left open, and refuse the rest.
+    """Resolve one request into the arms, the run axes and one argv per arm.
 
     Whatever this returns is startable: the scenario, the arm subset, the
     mesh, the three megatron axes and the resume comparison are all checked
@@ -263,9 +258,7 @@ def _resolve_run(
             else requested.profile
         )
         recorded_warmup = existing_manifest["warmup_steps"]
-        # A request wins, and the mismatch check below refuses it against
-        # another recorded value -- including a recorded ``null``, which is
-        # what a profiled directory carries.
+        # A request wins; the mismatch check below refuses a disagreement.
         warmup_steps = (
             requested.warmup_steps
             if requested.warmup_steps is not None
@@ -275,8 +268,7 @@ def _resolve_run(
         profile = (
             DEFAULT_PROFILE if requested.profile is None else requested.profile
         )
-        # ``None`` under a profiled run: the profiler schedule decides the
-        # sample set there, and the CLI refuses the two together.
+        # None under a profiled run, where the schedule decides the samples.
         warmup_steps = (
             None
             if profile
@@ -326,9 +318,7 @@ def _resolve_run(
         raise ValueError(
             f"unknown ac mode {ac_mode!r}. Available: {', '.join(AC_MODES)}"
         )
-    # Resolved once, here: everything downstream -- the manifest record, the
-    # --config-arg the training command carries, the resume comparison -- must
-    # see the canonical name rather than a retired alias.
+    # Resolved once here, so nothing downstream sees a retired alias.
     model_size = canonical_size_name(model_size)
     if model_size not in PIPER_SHAPES:
         raise ValueError(
@@ -344,12 +334,7 @@ def _resolve_run(
             f"(supported: {', '.join(scenario.supported_ac_modes)})"
         )
 
-    # The fourth global axis, resolved and checked before any host probe.
-    # ``engines`` is the engine set of the arms this run will really start,
-    # so the Megatron restrictions follow the arms rather than a scenario
-    # name. ``run --arm NAME`` narrows that set on purpose: a run of one
-    # titan arm has no megatron opponent to match, and refusing it for the
-    # sake of an arm nobody asked for would refuse a legal run.
+    # Checked before any host probe, against the arms this run really starts.
     parallelism = requested.parallelism or TRIVIAL_SPEC
     devices = parse_devices(request.gpu)
     validate_parallelism(
@@ -359,13 +344,8 @@ def _resolve_run(
         engines={arm.engine for arm in arms},
         device_count=len(devices),
     )
-    # PyTorch's zero-bubble and DualPipeV classes call
-    # ``_check_torch_compile_compatibility``, which raises on a compiled
-    # stage module. Compile is a property of each arm, so the spec alone
-    # cannot answer this and ``validate_parallelism`` no longer asks it.
-    # The refusal names the arm, because the repair is to drop that arm or
-    # to choose another schedule. Refusing here beats failing inside the
-    # training subprocess.
+    # Three schedules raise on a compiled stage module, and compile is an
+    # arm property, so the spec alone cannot answer this.
     schedule = (
         PP_SCHEDULES.get(parallelism.pp_schedule)
         if parallelism.pp_schedule is not None
@@ -380,41 +360,15 @@ def _resolve_run(
                 "torch.compile; select the eager arms alone, or choose "
                 "another --pp-schedule"
             )
-    # Both engines start a second rank now, so the blanket refusal that stood
-    # here is gone. What refuses an unimplemented mesh is the sixteen rules
-    # above plus the engines themselves: ``parallelize_piper1b`` refuses a
-    # tensor or context degree, a dropped shard-degree flag and a mesh that
-    # replicates and shards at once, and the Megatron driver refuses a
-    # schedule it does not implement. Each failure lands on the module that
-    # owns the missing work.
-
-    # Two legal meshes a reader can misread, said where the operator meets
-    # them. Neither refuses anything, so each is a warning and not a rule.
-    #
-    # **This lands before any host probe**, which is the line below that
-    # calls ``hardware_metadata``. So the operator reads the warning before
-    # the run claims a GPU, and a run that dies later still printed it.
-    #
-    # ``zero_warnings`` is the one statement of both facts, and
-    # ``benchmarks/e2e/results.py`` appends the same strings to
-    # ``results.json``. A second copy of the text here could drift from the
-    # copy the artifact carries.
+    # Two legal meshes a reader can misread. Printed before the host probe,
+    # so the operator reads them before the run claims a GPU.
     for warning in zero_warnings(
         parallelism, engines=[arm.engine for arm in arms]
     ):
         _emit(event_handler, "summary", f"WARNING: {warning}")
 
-    # The p2p sync treatment, refused parent-side for two reasons that each
-    # name their own cause. Without a pipeline there is no message to
-    # synchronize, so the field is inert and the manifest would record a
-    # treatment the run did not have. Without a megatron arm the value
-    # reaches nothing: TorchTitan sends no pipeline message through
-    # Megatron. ``run --arm`` narrows the engine set on purpose, so a
-    # megatron-only subset passes.
-    #
-    # The gate reads the literal ``on`` and never the axis default. ``on``
-    # is the value that asks for a synchronize, so it is the value a mesh
-    # without pipeline messages cannot honor.
+    # The literal ``on``, never the default: it is the value that asks for
+    # a synchronize, so it is the value a mesh without messages cannot honor.
     if megatron_p2p_sync == "on":
         if parallelism.pp == 1:
             raise ValueError(
@@ -431,26 +385,19 @@ def _resolve_run(
                 f"{DEFAULT_MEGATRON_P2P_SYNC!r}"
             )
 
-    # The NaN-guard treatment, refused parent-side through the helper the
-    # --all-scenarios sweep reads too, so a skipped scenario and a refused
-    # run state one reason. Legal at every mesh; what decides it is which
-    # engines the selection holds.
+    # Through the same helper the skip pre-pass reads, so both state one reason.
     refusal = megatron_nan_guard_refusal(arms, megatron_nan_guard)
     if refusal is not None:
         raise ValueError(refusal)
 
-    # The precision treatment, refused parent-side through the helper the
-    # --all-scenarios sweep reads too, so a skipped scenario and a refused
-    # run state one reason.
+    # Through the same helper the skip pre-pass reads, so both state one reason.
     refusal = megatron_precision_refusal(
         arms, megatron_precision, parallelism.zero
     )
     if refusal is not None:
         raise ValueError(refusal)
 
-    # Every axis is answered here, so the one record below carries them from
-    # this point on: to the command builder, to the manifest, to the resume
-    # check and to validation.
+    # Every axis is answered, so one record carries them from here on.
     axes = RunAxes(
         ac_mode=ac_mode,
         model_size=model_size,
@@ -527,21 +474,11 @@ def megatron_precision_refusal(
 ) -> str | None:
     """Why ``--megatron-precision lean`` cannot reach ``arms``, or ``None``.
 
-    Two refusals, each naming its repair, checked from the narrowest
-    fact outward. A run with no stock megatron arm gives the value nothing
-    to reach. And ``lean`` under ``zero 0`` asks Megatron for a
-    precision-aware optimizer without the distributed optimizer it
-    asserts.
-
-    **The second is the one that could not exist before this axis.**
-    ``optimizer_config.py`` asserts ``use_distributed_optimizer`` under
-    ``--use-precision-aware-optimizer``, and ``--zero`` is the
-    one owner of that flag. Refused here, the operator reads the repair
-    parent-side; unrefused, Megatron dies in its own config validation
-    minutes into a subprocess and names neither axis.
-
-    ``stock`` is refused nowhere: it is ``--bf16`` alone, and every arm's
-    argv is what it was before the option existed.
+    Two refusals, each naming its repair. A run with no stock megatron arm
+    gives the value nothing to reach, and ``lean`` under ``zero 0`` asks
+    Megatron for a precision-aware optimizer without the distributed
+    optimizer it asserts. Refused here, the operator reads the repair
+    parent-side rather than minutes into a subprocess.
     """
     if megatron_precision == DEFAULT_MEGATRON_PRECISION:
         return None
