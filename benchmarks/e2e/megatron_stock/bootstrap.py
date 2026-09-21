@@ -24,11 +24,13 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import socket
 import subprocess
 import sysconfig
 import typing
 from pathlib import Path
 from types import ModuleType
+from typing import MutableMapping
 
 from benchmarks.models.piper_qwen3.megatron_bootstrap import (
     add_megatron_to_path,
@@ -210,6 +212,35 @@ def _compile_dataset_helper(source: Path, target: Path) -> Path:
             f"({' '.join(command)}): {done.stderr.strip()[:400]}"
         )
     return target
+
+
+def install_allocator_defaults(
+    environ: "MutableMapping[str, str]" = os.environ,
+) -> None:
+    """Set the allocator policy the TorchTitan arms get from run_train.sh.
+
+    It has to precede the first torch import, because torch reads it when
+    it initializes CUDA. Both engines of the scenario then run one
+    allocator policy, which is the comparability property that matters.
+    """
+    environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
+
+def install_rendezvous_defaults(environ: "MutableMapping[str, str]" = os.environ) -> None:
+    """Fill the rendezvous variables at one rank, and keep the launcher's.
+
+    Megatron's ``_initialize_distributed`` calls ``init_process_group`` with
+    no store, so torch reads ``MASTER_ADDR`` and ``MASTER_PORT`` from the
+    environment. Above one rank ``torch.distributed.run`` sets both. At one
+    rank nothing did, and the arm died before it trained a step. The two
+    ``setdefault`` calls keep a value the launcher chose and fill the
+    single-rank case only.
+    """
+    environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    if "MASTER_PORT" not in environ:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            environ["MASTER_PORT"] = str(sock.getsockname()[1])
 
 
 def prepare() -> Path:
