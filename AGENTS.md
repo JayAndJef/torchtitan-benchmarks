@@ -354,6 +354,7 @@ harness connects through the arm's `engine` name alone.
 | `benchmarks/e2e/megatron_stock/markers.py` | The log lines this arm prints, and the functions that format one. |
 | `benchmarks/e2e/megatron_stock/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
 | `benchmarks/e2e/megatron_stock/model_builder.py` | Builds the stock GPT model and prints the parameter count rule 11 reads. |
+| `benchmarks/e2e/megatron_stock/dp_marker.py` | The data-parallel line, printed from the wrapper Megatron really built. |
 | `benchmarks/e2e/megatron_stock/step_log.py` | The step line the evaluation parses, and the shim that prints it. |
 | `benchmarks/e2e/megatron_stock/profiling.py` | Gives Megatron the profiler schedule and the trace path the harness reads. |
 | `benchmarks/e2e/megatron_stock/train.py` | Reproduces the stock training entry point and calls `pretrain`. |

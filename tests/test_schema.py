@@ -53,6 +53,7 @@ LAYER_ORDER = (
     "benchmarks.e2e.megatron_stock.flags",
     "benchmarks.e2e.megatron_stock.markers",
     "benchmarks.e2e.megatron_stock.step_log",
+    "benchmarks.e2e.megatron_stock.dp_marker",
     "benchmarks.e2e.megatron_stock.train",
     "benchmarks.e2e.megatron_stock.model_builder",
     "benchmarks.e2e.launch",
