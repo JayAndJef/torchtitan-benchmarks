@@ -190,9 +190,13 @@ def routing_divides_evenly(
     ) % shape.num_experts == 0
 
 
+DEFAULT_MODEL_SIZE = "30b-a3b"
+"""The shape kernel-bench measures when the operator names none."""
+
+
 def resolve_shape_and_workload(
     *,
-    model_size: str = "1b",
+    model_size: str = DEFAULT_MODEL_SIZE,
     batch: int | None = None,
     seq_len: int | None = None,
     max_seq_len: int | None = None,

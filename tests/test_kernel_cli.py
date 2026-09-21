@@ -22,6 +22,7 @@ from benchmarks.kernel.runner import (
 )
 from benchmarks.kernel.schema import (
     CORRECTNESS_FRAGMENT_KIND,
+    DEFAULT_MODEL_SIZE,
     CorrectnessCheck,
     KernelArm,
     KernelScenario,
@@ -253,13 +254,15 @@ class KernelCliTests(unittest.TestCase):
         self.assertEqual(request.model_size, "huge")
         self.assertEqual((request.batch, request.seq_len), (1, 512))
 
-    def test_model_size_defaults_to_1b_and_rejects_unknown(self) -> None:
+    def test_model_size_takes_the_default_and_rejects_unknown(self) -> None:
         with mock.patch(
             "benchmarks.cli.kernel.execute_kernel_run", return_value=()
         ) as execute:
             result = self.runner.invoke(cli, ["kernel-bench", "7"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].model_size, "1b")
+        self.assertEqual(
+            execute.call_args.args[0].model_size, DEFAULT_MODEL_SIZE
+        )
 
         result = self.runner.invoke(
             cli, ["kernel-bench", "7", "--model-size", "enormous"]
@@ -662,6 +665,7 @@ class KernelRunnerTests(unittest.TestCase):
             out_dir = Path(temporary) / "kernels"
             outcomes = execute_kernel_run(
                 KernelRunRequest(
+                    model_size="1b",
                     gpu="7",
                     scenario_names=("expert_mlp",),
                     replicates=2,
@@ -933,6 +937,7 @@ class KernelRunnerTests(unittest.TestCase):
         ):
             outcomes = execute_kernel_run(
                 KernelRunRequest(
+                    model_size="1b",
                     gpu="7",
                     scenario_names=("expert_mlp", "rope"),
                     batch=3,
