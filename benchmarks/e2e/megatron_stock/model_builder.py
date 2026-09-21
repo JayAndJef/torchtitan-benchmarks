@@ -42,7 +42,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.training import get_args
 from megatron.training.models.gpt import GPTModelBuilder, GPTModelConfig
 
-from benchmarks.e2e.megatron_stock.train import (
+from benchmarks.e2e.megatron_stock.markers import (
     MODEL_SIZE_LINE,
     STAGE_SIZE_LINE,
 )

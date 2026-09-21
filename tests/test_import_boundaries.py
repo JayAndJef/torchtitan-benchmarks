@@ -87,6 +87,9 @@ PARENT_SIDE_MODULES = (
     # imports it to build one arm's argv, so it runs in the parent
     # and must stay as torch-free as the shape registry it reads.
     "benchmarks.e2e.megatron_stock.flags",
+    # The stock arm's log-line contract. Parent-side: the validator and
+    # its tests read these strings on a host with no Megatron-LM.
+    "benchmarks.e2e.megatron_stock.markers",
     "benchmarks.e2e.runner",
     "benchmarks.e2e.results",
     "benchmarks.e2e.validation",

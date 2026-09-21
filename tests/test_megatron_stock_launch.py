@@ -1149,7 +1149,7 @@ def _driver_data_parallel_line(
     registered shape is a mixture of experts. ``grad_reduce_in_fp32``
     follows ``--megatron-precision``, and neither value is written here.
     """
-    from benchmarks.e2e.megatron_stock import train
+    from benchmarks.e2e.megatron_stock import markers
     from benchmarks.e2e.megatron_stock.flags import (
         DATA_PARALLEL_OVERLAP,
         DATA_PARALLEL_WRAPPERS,
@@ -1158,7 +1158,7 @@ def _driver_data_parallel_line(
         grad_reduce_in_fp32,
     )
 
-    return train.DATA_PARALLEL_LINE.format(
+    return markers.DATA_PARALLEL_LINE.format(
         wrapper=DATA_PARALLEL_WRAPPERS[zero],
         dp=dp,
         overlap=DATA_PARALLEL_OVERLAP[zero],
@@ -1171,12 +1171,12 @@ def _driver_data_parallel_line(
 
 def _driver_lines() -> list[str]:
     """Every line the driver prints that a marker fragment can live in."""
-    from benchmarks.e2e.megatron_stock import train
+    from benchmarks.e2e.megatron_stock import markers
 
     spec = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B")
     return [
-        train.TRAINING_COMPLETED,
-        train.MODE_LINE.format(
+        markers.TRAINING_COMPLETED,
+        markers.MODE_LINE.format(
             mode="default",
             main_params_dtype="torch.float32",
             main_grads_dtype="torch.float32",
@@ -1187,15 +1187,15 @@ def _driver_lines() -> list[str]:
             cross_entropy_loss_fusion=False,
             dispatcher="alltoall",
         ),
-        *train.parallelism_lines(_StockArgs(spec), microbatches=8),
+        *markers.parallelism_lines(_StockArgs(spec), microbatches=8),
         _driver_data_parallel_line(0, dp=2, ep=1),
         _driver_data_parallel_line(1, dp=2, ep=2),
-        train.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
-        train.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
-        train.P2P_LINE.format(comm=True, sync=True),
-        train.P2P_LINE.format(comm=True, sync=False),
-        train.NAN_GUARD_LINE.format(value=True),
-        train.NAN_GUARD_LINE.format(value=False),
+        markers.STAGE_SIZE_LINE.format(stage=0, stages=4, count=1),
+        markers.MODEL_SIZE_LINE.format(size="1b", total="1,066,241,024"),
+        markers.P2P_LINE.format(comm=True, sync=True),
+        markers.P2P_LINE.format(comm=True, sync=False),
+        markers.NAN_GUARD_LINE.format(value=True),
+        markers.NAN_GUARD_LINE.format(value=False),
     ]
 
 
@@ -1269,7 +1269,7 @@ class StockMarkerContractTests(unittest.TestCase):
         ``parallelism_lines``, which is the function a real run calls, so
         this compares the two strings and not two descriptions of them.
         """
-        from benchmarks.e2e.megatron_stock import train
+        from benchmarks.e2e.megatron_stock import markers
 
         profile = self.profile
         for spec, batch in STOCK_MESH_CASES:
@@ -1279,13 +1279,13 @@ class StockMarkerContractTests(unittest.TestCase):
                     local_batch_size=batch,
                 )
                 _, microbatches, _ = _geometry(workload, spec)
-                printed = train.parallelism_lines(
+                printed = markers.parallelism_lines(
                     _StockArgs(spec), microbatches=microbatches
                 )
-                markers = profile.parallelism_markers(
+                expected = profile.parallelism_markers(
                     spec, workload, "stock"
                 )
-                self.assertEqual(printed[0], markers[0])
+                self.assertEqual(printed[0], expected[0])
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_data_parallel_line_equals_this_profile_marker(
@@ -1311,7 +1311,7 @@ class StockMarkerContractTests(unittest.TestCase):
         the expected value from that guard's own strategy list rather than
         from the flag list.
         """
-        from benchmarks.e2e.megatron_stock import train
+        from benchmarks.e2e.megatron_stock import markers
 
         for spec, batch in STOCK_MESH_CASES:
             if spec.dp == 1:
@@ -1339,13 +1339,13 @@ class StockMarkerContractTests(unittest.TestCase):
         overlap_p2p_comm`` and forces the overlap off for the
         non-interleaved schedule.
         """
-        from benchmarks.e2e.megatron_stock import train
+        from benchmarks.e2e.megatron_stock import markers
 
         for value, sync in (("on", True), ("off", False)):
             with self.subTest(value=value):
                 self.assertEqual(
                     self.profile.p2p_markers(MESH, value),
-                    (train.P2P_LINE.format(comm=True, sync=sync),),
+                    (markers.P2P_LINE.format(comm=True, sync=sync),),
                 )
 
     def test_no_p2p_line_is_asked_below_a_pipeline(self) -> None:
@@ -1364,13 +1364,13 @@ class StockMarkerContractTests(unittest.TestCase):
         The driver formats Megatron's own bool, so the two tokens are
         ``True`` and ``False``.
         """
-        from benchmarks.e2e.megatron_stock import train
+        from benchmarks.e2e.megatron_stock import markers
 
         for value, parsed in (("on", True), ("off", False)):
             with self.subTest(value=value):
                 self.assertEqual(
                     self.profile.nan_guard_markers(value),
-                    (train.NAN_GUARD_LINE.format(value=parsed),),
+                    (markers.NAN_GUARD_LINE.format(value=parsed),),
                 )
 
     def test_the_nan_guard_line_is_asked_at_every_mesh(self) -> None:
@@ -1385,9 +1385,9 @@ class StockMarkerContractTests(unittest.TestCase):
         self,
     ) -> None:
         """The first precision marker is the prefix up to the bracket."""
-        from benchmarks.e2e.megatron_stock import train
+        from benchmarks.e2e.megatron_stock import markers
 
-        printed = train.MODE_LINE.format(
+        printed = markers.MODE_LINE.format(
             mode="default",
             main_params_dtype="torch.float32",
             main_grads_dtype="torch.float32",
@@ -1410,10 +1410,10 @@ class StockMarkerContractTests(unittest.TestCase):
         so a run that lost the wrapper shim would pass the rule the shim
         exists to enforce.
         """
-        from benchmarks.e2e.megatron_stock import train
+        from benchmarks.e2e.megatron_stock import markers
 
         spec = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B")
-        printed = train.parallelism_lines(_StockArgs(spec), microbatches=8)
+        printed = markers.parallelism_lines(_StockArgs(spec), microbatches=8)
         self.assertEqual(len(printed), 1)
         self.assertNotIn("stock data parallel", printed[0])
 

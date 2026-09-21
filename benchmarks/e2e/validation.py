@@ -269,7 +269,7 @@ def _megatron_stock_parallelism_markers(
     workload: Workload,
     megatron_precision: str,
 ) -> tuple[str, ...]:
-    """``benchmarks.e2e.megatron_stock.train``'s two lines. Keep in sync.
+    """``benchmarks.e2e.megatron_stock.markers``'s two lines. Keep in sync.
 
     ``dp``, ``pp``, ``ep`` and the microbatch count come from Megatron's
     own resolved arguments. ``schedule=1F1B`` and ``stages`` do not:
@@ -429,7 +429,7 @@ def _no_p2p_markers(
 def _megatron_stock_p2p_markers(
     spec: ParallelismSpec, megatron_p2p_sync: str
 ) -> tuple[str, ...]:
-    """``benchmarks.e2e.megatron_stock.train``'s p2p line. Keep in sync.
+    """``benchmarks.e2e.megatron_stock.markers``'s p2p line. Keep in sync.
 
     The driver prints the two fields off the config ``gpt_config_from_args``
     built, which is the config ``pretrain`` trains with. Stock Megatron
@@ -474,7 +474,7 @@ def _no_nan_guard_markers(megatron_nan_guard: str) -> tuple[str, ...]:
 def _megatron_stock_nan_guard_markers(
     megatron_nan_guard: str,
 ) -> tuple[str, ...]:
-    """``benchmarks.e2e.megatron_stock.train``'s nan guard line. Keep in sync.
+    """``benchmarks.e2e.megatron_stock.markers``'s nan guard line. Keep in sync.
 
     The driver prints ``args.check_for_nan_in_loss_and_grad`` as Megatron
     parsed it, on every rank at every mesh, and nothing in the driver sets
@@ -518,7 +518,7 @@ def _no_precision_markers(megatron_precision: str) -> tuple[str, ...]:
 def _megatron_stock_precision_markers(
     megatron_precision: str,
 ) -> tuple[str, ...]:
-    """``benchmarks.e2e.megatron_stock.train``'s precision fields. Keep in sync.
+    """``benchmarks.e2e.megatron_stock.markers``'s precision fields. Keep in sync.
 
     The driver prints all four off the arguments Megatron resolved, on
     every rank at every mesh, and nothing in the driver sets one. So a run
