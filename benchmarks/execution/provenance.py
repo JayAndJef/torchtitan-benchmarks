@@ -191,9 +191,7 @@ def hardware_metadata(
         "benchmarks_git_rev": run_text(
             ["git", "rev-parse", "HEAD"], cwd=paths.bench_dir
         ).strip(),
-        # Megatron provenance is recorded (and resume-gated) for every run:
-        # megatron_bootstrap.py never imports megatron, so this stays cheap
-        # even for pure-titan scenarios.
+        # Recorded for every run, and cheap because nothing imports megatron.
         "megatron_git_rev": _megatron_git_rev(),
         "te_version": _te_version(),
         "cudnn_torch_build": _cudnn_torch_build(),
@@ -201,11 +199,8 @@ def hardware_metadata(
     }
     if hardware_label != "auto":
         return hardware_label, metadata
-    # Unchanged, deliberately. The first comma of the whole query is the one
-    # after the first device's index, so this reads the first device's name
-    # for any device count -- and every name is the same string by the check
-    # above. Rewriting it would move the label on a box whose nvidia-smi
-    # fails, and --resume compares the label.
+    # Left as it is: rewriting it would move the label on a box whose
+    # nvidia-smi fails, and --resume compares the label.
     name = query.split(",")[1].strip() if "," in query else f"gpu{gpu}"
     label = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
     return label, metadata

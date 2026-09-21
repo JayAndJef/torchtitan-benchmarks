@@ -200,17 +200,8 @@ def trace_window_metrics(trace_path: Path) -> WindowMetrics:
     """Extract one window's measurements."""
     events = _load_events(trace_path)
 
-    # ``step_names`` decides ``profiled_steps`` and counts a step name in any
-    # category, which is what it has always done.
-    #
-    # ``step_walls`` is the separate question of how long a step took, and it
-    # reads the **host** annotation only. The profiler emits each step twice:
-    # a host ``user_annotation`` covering the whole step, and a device
-    # ``gpu_user_annotation`` covering only the part the GPU spent inside it.
-    # The step's wall clock is the host one. Taking the longer of the two
-    # instead would be right on a host-bound run and wrong on a device-bound
-    # one, and it would let any annotation carrying the step's name decide
-    # the figure.
+    # ``step_walls`` reads the host annotation alone, because the step's
+    # wall clock is the host one.
     step_names: set[str] = set()
     step_walls: dict[str, float] = {}
     device_intervals: list[tuple[float, float]] = []

@@ -91,13 +91,8 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
-        # Each data-parallel rank materializes its OWN shard of the stream.
-        # ``HuggingFaceTextDataset`` calls ``split_dataset_by_node(ds,
-        # dp_rank, dp_world_size)``, so the two arguments below are what give
-        # the ranks different tokens; the megatron driver drains the same
-        # class with the same two values, which is what keeps the two engines
-        # bit-identical under a data-parallel degree as well. The count is
-        # per rank, so a dp 2 run still replays ``replay_steps`` steps.
+        # The two arguments below give each data-parallel rank its own
+        # shard, and the megatron driver passes the same two values.
         inner = HuggingFaceTextDataset(
             dataset_name=config.dataset,
             dataset_path=config.dataset_path,

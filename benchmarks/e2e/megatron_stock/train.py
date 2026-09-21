@@ -96,9 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap.install_rendezvous_defaults()
     bootstrap.prepare()
 
-    # Deferred, and it has to be: both modules import torch at module
-    # scope, and ``python -m benchmarks.e2e.megatron_stock.train --help``
-    # must not pay for the ML stack.
+    # Deferred, so a --help run does not pay for the ML stack.
     from benchmarks.e2e.megatron_stock import data, profiling
 
     import pretrain_gpt
@@ -123,9 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_p2p_sync(args)
 
     shape = shape_by_name(args.bench_model_size)
-    # The engine's own count, not the harness's arithmetic. Megatron
-    # resolved it from --global-batch-size, --micro-batch-size and the
-    # data-parallel degree it derived from WORLD_SIZE.
+    # The engine's own count, never the harness's arithmetic.
     microbatches = get_num_microbatches()
     print(mode_line(args), flush=True)
     # From the parsed value, on every rank. Arm rule 12 reads it at every
@@ -134,14 +130,8 @@ def main(argv: list[str] | None = None) -> int:
     for line in parallelism_lines(args, microbatches=microbatches):
         print(line, flush=True)
 
-    # Megatron's own resolved rank, read from RANK by its parser. The
-    # profiler shim names the trace file after it, and torch.distributed is
-    # not up until pretrain() starts.
-    # Installed only under --bench-profile. Without it Megatron builds no
-    # profiler at all, because the argv carries no --profile, so a shim
-    # would replace an attribute nothing calls and
-    # ``assert_windows_written`` would refuse the run for a window it never
-    # asked for.
+    # Only under --bench-profile: without it Megatron builds no profiler,
+    # and the window guard would refuse a run that asked for none.
     shim = (
         profiling.install_profiler_shim(
             arm_dir=args.bench_arm_dir,
@@ -181,13 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         get_embedding_ranks=pretrain_gpt.get_embedding_ranks,
     )
 
-    # The windows the shimmed schedule must have written. Megatron calls
-    # prof.step() once per training iteration, and the schedule flushes one
-    # window every --bench-profile-freq steps, so the count is exact. The
-    # workload's own requirement is the floor, and it is never below it:
-    # workload_with_overrides refuses steps below
-    # profile_freq * min_trace_windows. Taking the larger of the two keeps
-    # the guard from ever evaluating to "any count is acceptable".
+    # The exact window count, floored by the workload's own requirement,
+    # so the guard never evaluates to "any count is acceptable".
     if shim is not None:
         expected_windows = max(
             args.bench_min_trace_windows,

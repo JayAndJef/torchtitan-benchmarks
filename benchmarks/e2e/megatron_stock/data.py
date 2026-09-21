@@ -185,9 +185,7 @@ def _microbatch(
         "position_ids": positions.unsqueeze(0),
         "cu_seqlens": padded.unsqueeze(0),
         "max_seqlen": torch.tensor([longest], dtype=torch.int32),
-        # Megatron builds no mask tensor under
-        # --no-create-attention-mask-in-dataloader, and it needs no padded
-        # cu_seqlens without context parallelism.
+        # No mask tensor, and no padded cu_seqlens without context parallelism.
         "attention_mask": None,
         "cu_seqlens_padded": None,
     }
@@ -225,10 +223,8 @@ class StockReplayIterator:
             samples[start : start + rows_per_sample]
             for start in range(0, len(samples), rows_per_sample)
         ]
-        # One padded width for the whole run, taken over this rank's own
-        # packs. Every rank holds different documents, so this number is a
-        # per-rank number -- and it may be, because Megatron strips the
-        # padding inside each rank and no collective reads the width.
+        # One padded width per rank, which is legal because no collective
+        # reads it.
         self._padded_documents = max(
             document_offsets(
                 torch.cat([row[1] for row in group]), self._packed_len
@@ -319,17 +315,8 @@ def train_valid_test_datasets_provider(
     from megatron.training import get_args
 
     args = get_args()
-    # Megatron resolves the data-parallel degree twice: the parser derives
-    # ``args.data_parallel_size`` from ``WORLD_SIZE`` and the other degrees,
-    # and ``initialize_model_parallel`` builds the group this reads. The
-    # marker line arm rule 12 matches states the first. The token slice
-    # below uses the second. A disagreement would put the wrong shard on
-    # this rank while the log named the right mesh, and every rule would
-    # pass. This is where the stock driver makes the check, because
-    # ``pretrain()`` owns ``initialize_model_parallel``.
-    # It is not the first of our code to run after that call -- the model
-    # provider and install_data_parallel_marker's wrapper run first -- but
-    # it is before any token is read, which is the property that matters.
+    # Megatron resolves the data-parallel degree twice, so the two are
+    # checked here, before this rank reads a token.
     resolved = mpu.get_data_parallel_world_size()
     if resolved != args.data_parallel_size:
         raise RuntimeError(

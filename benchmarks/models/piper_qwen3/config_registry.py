@@ -124,12 +124,8 @@ def _piper_1b_model(
     )
 
 
-# **The ``1b`` in every public name below is the config family, not the
-# geometry.** ``--config qwen3_piper_1b --config-arg size=48b`` builds a 48B
-# model, and that is correct: the size is one argument and the config is
-# another. The names are not renamed to match, because they are a contract --
-# the fork's ``ConfigManager`` resolves ``--config`` by ``getattr`` on this
-# module, and every manifest on disk records the name it used in ``commands``.
+# The ``1b`` in every public name below is the config family and not the
+# geometry. The names are a contract, so do not rename them.
 def qwen3_piper_1b(*, size: str = "1b") -> Trainer.Config:
     return _piper_1b_trainer(
         fuse_qkv=True,
@@ -200,9 +196,8 @@ def _piper_1b_trainer(
             local_batch_size=4,
             seq_len=1024,
             steps=40,
-            # Plain bf16 params/grads/optimizer states, matching piper. No
-            # FSDP means no mixed-precision engine, so this is the only bf16
-            # mechanism; parallelize_piper1b enforces it.
+            # The only bf16 mechanism here, because there is no FSDP
+            # mixed-precision engine.
             dtype="bfloat16",
         ),
         checkpoint=CheckpointManager.Config(

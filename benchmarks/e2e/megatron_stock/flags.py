@@ -570,10 +570,8 @@ def _geometry_flags(
         "1",
         "--seq-length",
         str(megatron_seq_length),
-        # Megatron asserts max_position_embeddings >= seq_length, and the
-        # packed sample is longer than one titan row. The rope table is
-        # indexed by position, so a longer one does not move the entries a
-        # shorter one held; every document still starts at position 0.
+        # Megatron asserts it is at least seq_length, and a longer rope
+        # table does not move the entries a shorter one held.
         "--max-position-embeddings",
         str(max(shape.max_seq_len, megatron_seq_length)),
         "--position-embedding-type",
@@ -900,12 +898,8 @@ def _bench_flags(
     ]
     if spec.pp > 1:
         flags.extend((BENCH_PP_SCHEDULE, str(spec.pp_schedule)))
-    # The literal, never the axis default: the driver reads ``on`` when
-    # the token is absent, so the token has to follow the treatment.
-    #
-    # Gated on the pipeline too. There is no pipeline message to
-    # synchronize at ``pp`` 1, so the token would name a treatment the run
-    # did not have, and the driver refuses it there.
+    # The literal, never the axis default, and gated on the pipeline: at
+    # pp 1 there is no message to synchronize.
     if spec.pp > 1 and megatron_p2p_sync == "off":
         flags.extend((BENCH_BATCH_P2P_SYNC, megatron_p2p_sync))
     return flags
@@ -986,27 +980,8 @@ def stock_megatron_flags(
             f"the stock driver; it runs {SUPPORTED_PP_SCHEDULE!r} alone"
         )
     if profile and workload.steps % workload.profile_freq:
-        # **This arm rides Megatron's own loop, and that loop keeps calling
-        # prof.step() after it has called prof.stop().** The stop is guarded
-        # on ``iteration == --profile-step-end``; the step at the top of
-        # the loop body is guarded only on ``--profile``. So every iteration
-        # after the stop transits a dead Kineto session.
-        #
-        # Ending the profiler on the last whole cycle does not fix that. It
-        # only delays the first bad transit: measured against the pinned
-        # torch, a 50-step run reaches ``NONE -> WARMUP`` on a stopped
-        # profiler, and a 57-step run reaches eight such transits. Ending it
-        # at ``--train-iters`` instead trades them for a **truncated**
-        # window -- 3 recorded steps rather than 5 at 57 steps -- which
-        # ``assert_windows_written`` does not catch, because it refuses a
-        # count below the requirement and not a short window. A truncated
-        # window is pooled with the full ones and moves every per-step
-        # figure.
-        #
-        # A whole number of cycles removes the case: ``--profile-step-end``
-        # is then ``--train-iters``, no iteration follows the stop, and
-        # every window holds its full ``profiler_active`` steps. Verified
-        # against the pinned torch at 40, 60, 80, 100 and 200 steps.
+        # Megatron's loop keeps stepping the profiler after it stops it,
+        # so only a whole number of cycles avoids a dead session.
         raise ValueError(
             f"steps ({workload.steps}) must be a whole number of profiler "
             f"cycles of {workload.profile_freq} for the stock megatron arm: "
@@ -1017,9 +992,8 @@ def stock_megatron_flags(
     rows_per_sample, microbatches, megatron_seq_length = (
         microbatch_geometry(workload, spec)
     )
-    # A whole number of cycles, refused above, so this is workload.steps.
-    # See _data_flags, and the refusal above for why it may not be less.
-    # ``None`` under no profile, which drops the profiler tokens.
+    # A whole number of cycles, so this is workload.steps; None under no
+    # profile, which drops the profiler tokens.
     profile_step_end = (
         (workload.steps // workload.profile_freq) * workload.profile_freq
         if profile
@@ -1081,10 +1055,8 @@ def add_bench_args(parser: Any) -> Any:
     group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
     group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
     group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, default=None)
-    # Defaulted rather than required, and the default is the literal
-    # ``on``: the flag list omits the token at ``on``, so an argv without
-    # it reaches Megatron's own default for the field. The literal is what
-    # keeps that true when the harness axis default moves.
+    # The literal ``on``, so an argv without the token still reaches
+    # Megatron's own default when the harness axis default moves.
     group.add_argument(
         BENCH_BATCH_P2P_SYNC,
         type=str,
@@ -1119,9 +1091,8 @@ def refuse_unsupported_run(args: Any) -> None:
     of these would train something the manifest does not name, which is a
     wrong number rather than a crash.
     """
-    # The profiler group, refused in both directions. A schedule flag
-    # without the token asks for a window the run does not declare, and the
-    # token without the schedule leaves the shim no cycle to install.
+    # The profiler group, refused in both directions: neither half works
+    # without the other.
     schedule_given = {
         flag: getattr(args, flag[2:].replace("-", "_"))
         for flag in BENCH_PROFILE_SCHEDULE_FLAGS
@@ -1173,11 +1144,8 @@ def refuse_unsupported_run(args: Any) -> None:
             f"pipeline degree of {args.virtual_pipeline_model_parallel_size} "
             "is refused; the parameter check compares a whole stage"
         )
-    # One Megatron sample is one packed sequence. flags.py's
-    # microbatch_geometry gives the reason: at a micro batch size above 1
-    # the pipeline receive buffer is (S, m, H) where the activation is
-    # (m*S, 1, H), so the next stage reads a permuted tensor and nothing
-    # raises. Assert the packing rather than divide and hope.
+    # One Megatron sample is one packed sequence: above a micro batch size
+    # of 1 the next pipeline stage reads a permuted tensor and nothing raises.
     if args.micro_batch_size != 1:
         raise ValueError(
             f"--micro-batch-size {args.micro_batch_size} would send the next "

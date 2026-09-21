@@ -144,12 +144,8 @@ def manifest_data(
     metadata: dict[str, str],
     extra_args: list[str] | tuple[str, ...],
     *,
-    # No default, and ``RunAxes`` gives none of its fields one either. This
-    # record is what the manifest *claims* the run was, and
-    # ``_resume_mismatches`` below compares every field of it; a writer that
-    # defaults what the checker demands is the asymmetry that lets a huge
-    # run be recorded, resumed and published as "1b", or a two-GPU run be
-    # recorded as one.
+    # No default, because the resume check compares every field: a writer
+    # that defaults what the checker demands records the wrong run.
     axes: RunAxes,
 ) -> dict[str, Any]:
     shape = shape_by_name(canonical_size_name(axes.model_size))
@@ -225,9 +221,7 @@ def _resume_mismatches(
     axes: RunAxes,
 ) -> list[str]:
     axis_record = _axis_record(scenario, axes)
-    # Compared below on its own, because the registry still resolves the
-    # retired alias "normal" to the 1B shape and a recorded manifest may
-    # carry either spelling.
+    # Compared on its own, because a recorded manifest may carry an alias.
     del axis_record["model_size"]
     expected = {
         "scenario": scenario.name,
