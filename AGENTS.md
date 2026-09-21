@@ -362,7 +362,7 @@ harness connects through the arm's `engine` name alone.
 The driver substitutes **one** provider, the dataset provider. The model
 builder, the optimizer, the schedule, the distributed setup, the forward
 step and the training loop all stay Megatron's. No file of the Megatron-LM
-checkout is edited; three shims run in the driver process instead.
+checkout is edited; four shims run in the driver process instead.
 
 Faithfulness guarantees that hold today:
 
@@ -570,11 +570,13 @@ Four structural tests deserve naming:
   as a submodule is bumped. It also bans a `#` comment above a dataclass
   field and above a module-level constant; both belong in a docstring.
 - `tests/test_schema.py` pins the e2e layering. `benchmarks/e2e/schema.py`
-  imports the standard library alone, and every other module may import only
-  modules earlier in the declared order.
+  holds `Workload`, `Arm` and `Scenario` alone and imports the standard
+  library alone. Every other record belongs to the module that builds it,
+  and every module may import only modules earlier in the declared order.
 - `tests/test_import_boundaries.py` enumerates every module under
   `benchmarks/`, as parent-side or worker-side. **Every module you add or
-  delete edits that list, in the same commit.**
+  delete edits that list, in the same commit.** It also bans a relative
+  import, which the two layering checks above cannot see.
 - `tests/test_docs.py` checks this file and `README.md`: every path exists,
   every documented flag is a real parameter, every documented identifier
   imports, and every default in the table above matches the code.
