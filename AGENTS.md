@@ -350,7 +350,7 @@ harness connects through the arm's `engine` name alone.
 | module | job |
 |---|---|
 | `benchmarks/e2e/megatron_stock/bootstrap.py` | Adds `typing.override` for Python 3.10, then puts Megatron on `sys.path`. |
-| `benchmarks/e2e/megatron_stock/flags.py` | The whole Megatron command line, as data. Torch-free, so a CPU test reads it. |
+| `benchmarks/e2e/megatron_stock/flags.py` | The whole Megatron command line, as data, plus the harness parser and the run refusals. Torch-free, so a CPU test reads it. |
 | `benchmarks/e2e/megatron_stock/markers.py` | The log lines this arm prints, and the functions that format one. |
 | `benchmarks/e2e/megatron_stock/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
 | `benchmarks/e2e/megatron_stock/model_builder.py` | Builds the stock GPT model and prints the parameter count rule 11 reads. |

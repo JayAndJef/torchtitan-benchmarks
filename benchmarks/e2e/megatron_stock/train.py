@@ -58,26 +58,14 @@ from __future__ import annotations
 import os
 import socket
 import time
-from pathlib import Path
 from typing import Any, Callable, MutableMapping
 
 from benchmarks.e2e.megatron_stock import bootstrap
 from benchmarks.e2e.megatron_stock.flags import (
-    BENCH_ARM_DIR,
-    BENCH_BATCH_P2P_SYNC,
-    BENCH_LOCAL_BATCH_SIZE,
-    BENCH_MIN_TRACE_WINDOWS,
-    BENCH_MODEL_SIZE,
-    BENCH_PP_SCHEDULE,
-    BENCH_PROFILE,
-    BENCH_PROFILE_FREQ,
-    BENCH_PROFILE_SCHEDULE_FLAGS,
-    BENCH_PROFILER_ACTIVE,
-    BENCH_PROFILER_WARMUP,
-    BENCH_ROWS_PER_SAMPLE,
-    BENCH_SEQ_LEN,
     NO_SHARD_STRATEGY,
-    SUPPORTED_PP_SCHEDULE,
+    add_bench_args,
+    apply_p2p_sync,
+    refuse_unsupported_run,
 )
 from benchmarks.e2e.megatron_stock.markers import (
     DATA_PARALLEL_LINE,
@@ -91,153 +79,16 @@ from benchmarks.e2e.megatron_stock.markers import (
     p2p_line,
     parallelism_lines,
 )
-from benchmarks.e2e.registry import MEGATRON_P2P_SYNC_MODES
-
-
-def add_bench_args(parser: Any) -> Any:
-    """Add the harness group to Megatron's own parser.
-
-    Megatron parses these, so an unknown one fails at parse time rather
-    than being ignored. The flag names live in ``flags.py``, which builds
-    the command line, so one rename reaches both sides.
-
-    The data-parallel and pipeline degrees are **not** here. The driver
-    reads them back from ``args`` after Megatron resolved them, and a degree
-    the engine resolved is stronger evidence than a degree the harness
-    asserted.
-
-    ``--bench-profile`` and the four schedule flags are optional, and
-    ``refuse_unsupported_run`` is what pairs them: the four are required
-    under the token and refused without it. Argparse cannot state that
-    rule, and a schedule flag alone would otherwise install a profiler the
-    run does not declare.
-    """
-    group = parser.add_argument_group(title="torchtitan-benchmarks harness")
-    group.add_argument(BENCH_ARM_DIR, type=Path, required=True)
-    group.add_argument(BENCH_MODEL_SIZE, type=str, required=True)
-    group.add_argument(BENCH_LOCAL_BATCH_SIZE, type=int, required=True)
-    group.add_argument(BENCH_PROFILE, action="store_true")
-    group.add_argument(BENCH_PROFILE_FREQ, type=int, default=None)
-    group.add_argument(BENCH_PROFILER_WARMUP, type=int, default=None)
-    group.add_argument(BENCH_PROFILER_ACTIVE, type=int, default=None)
-    group.add_argument(BENCH_PP_SCHEDULE, type=str, default=None)
-    group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
-    group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
-    group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, default=None)
-    # Defaulted rather than required, and the default is the literal
-    # ``on``: the flag list omits the token at ``on``, so an argv without
-    # it reaches Megatron's own default for the field. The literal is what
-    # keeps that true when the harness axis default moves.
-    group.add_argument(
-        BENCH_BATCH_P2P_SYNC,
-        type=str,
-        choices=MEGATRON_P2P_SYNC_MODES,
-        default="on",
-    )
-    return parser
-
-
-def apply_p2p_sync(args: Any) -> Any:
-    """Set ``args.batch_p2p_sync`` False under ``--bench-batch-p2p-sync off``.
-
-    Megatron lists ``batch_p2p_sync`` under the config fields no CLI
-    argument exists for, so its parser never sets the attribute.
-    ``core_transformer_config_from_args`` copies every ``args`` attribute
-    whose name is a config field, which is what makes this assignment reach
-    ``TransformerConfig`` through Megatron's own path.
-
-    Under ``on`` the attribute is left absent, so Megatron's dataclass
-    default rules exactly as it did before the option existed. Returns
-    ``args`` for the caller's convenience.
-    """
-    if args.bench_batch_p2p_sync == "off":
-        args.batch_p2p_sync = False
-    return args
 
 
 
 
 
 
-def refuse_unsupported_run(args: Any) -> None:
-    """Reject a run this driver cannot honour, before it builds anything.
 
-    Each refusal lands where the missing work is. A driver that ignored one
-    of these would train something the manifest does not name, which is a
-    wrong number rather than a crash.
-    """
-    # The profiler group, refused in both directions. A schedule flag
-    # without the token asks for a window the run does not declare, and the
-    # token without the schedule leaves the shim no cycle to install.
-    schedule_given = {
-        flag: getattr(args, flag[2:].replace("-", "_"))
-        for flag in BENCH_PROFILE_SCHEDULE_FLAGS
-    }
-    if args.bench_profile:
-        missing = sorted(
-            flag for flag, value in schedule_given.items() if value is None
-        )
-        if missing:
-            raise ValueError(
-                f"{BENCH_PROFILE} needs the whole profiler schedule, and "
-                f"{', '.join(missing)} is absent; the shim cannot build a "
-                "schedule from a partial group"
-            )
-    else:
-        extra = sorted(
-            flag for flag, value in schedule_given.items() if value is not None
-        )
-        if extra:
-            raise ValueError(
-                f"{', '.join(extra)} was given without {BENCH_PROFILE}; the "
-                "run collects no trace, so a schedule would name a window "
-                "nothing writes"
-            )
-    pipeline_degree = args.pipeline_model_parallel_size
-    if pipeline_degree > 1:
-        if args.bench_pp_schedule != SUPPORTED_PP_SCHEDULE:
-            raise ValueError(
-                f"{BENCH_PP_SCHEDULE} {args.bench_pp_schedule!r} is not "
-                f"implemented by the stock driver; it runs "
-                f"{SUPPORTED_PP_SCHEDULE!r} alone"
-            )
-    elif args.bench_pp_schedule is not None:
-        raise ValueError(
-            f"{BENCH_PP_SCHEDULE} {args.bench_pp_schedule!r} was given at "
-            "pipeline degree 1, where there is no pipeline to schedule"
-        )
-    if pipeline_degree == 1 and args.bench_batch_p2p_sync == "off":
-        # The field is inert without a pipeline message, so the run would
-        # print a treatment it did not have.
-        raise ValueError(
-            f"{BENCH_BATCH_P2P_SYNC} {args.bench_batch_p2p_sync!r} was given "
-            "at pipeline degree 1, where there is no pipeline message to "
-            "synchronize"
-        )
-    if args.virtual_pipeline_model_parallel_size is not None:
-        raise ValueError(
-            "the stock driver builds one model chunk per rank, so a virtual "
-            f"pipeline degree of {args.virtual_pipeline_model_parallel_size} "
-            "is refused; the parameter check compares a whole stage"
-        )
-    # One Megatron sample is one packed sequence. flags.py's
-    # microbatch_geometry gives the reason: at a micro batch size above 1
-    # the pipeline receive buffer is (S, m, H) where the activation is
-    # (m*S, 1, H), so the next stage reads a permuted tensor and nothing
-    # raises. Assert the packing rather than divide and hope.
-    if args.micro_batch_size != 1:
-        raise ValueError(
-            f"--micro-batch-size {args.micro_batch_size} would send the next "
-            "pipeline stage a permuted activation; the stock arm packs its "
-            "rows itself and always runs a micro batch size of 1"
-        )
-    packed = args.bench_rows_per_sample * args.bench_seq_len
-    if packed != args.seq_length:
-        raise ValueError(
-            f"{args.bench_rows_per_sample} row(s) of {args.bench_seq_len} "
-            f"tokens is {packed}, not the --seq-length {args.seq_length} "
-            "Megatron will size its pipeline buffers from"
-        )
+
+
+
 
 
 

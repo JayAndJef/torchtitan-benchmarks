@@ -46,6 +46,7 @@ import torch  # noqa: E402
 from benchmarks.e2e.megatron_stock import (  # noqa: E402
     bootstrap,
     data,
+    flags,
     markers,
     profiling,
     train,
@@ -1712,7 +1713,7 @@ class DriverRefusalTest(unittest.TestCase):
 
     def test_a_schedule_other_than_1f1b_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            train.refuse_unsupported_run(
+            flags.refuse_unsupported_run(
                 stock_args(
                     pipeline_model_parallel_size=4,
                     bench_pp_schedule="Interleaved1F1B",
@@ -1722,11 +1723,11 @@ class DriverRefusalTest(unittest.TestCase):
 
     def test_a_schedule_at_pipeline_degree_one_is_refused(self) -> None:
         with self.assertRaises(ValueError):
-            train.refuse_unsupported_run(stock_args(bench_pp_schedule="1F1B"))
+            flags.refuse_unsupported_run(stock_args(bench_pp_schedule="1F1B"))
 
     def test_a_virtual_pipeline_degree_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            train.refuse_unsupported_run(
+            flags.refuse_unsupported_run(
                 stock_args(virtual_pipeline_model_parallel_size=2)
             )
         self.assertIn("virtual pipeline", str(caught.exception))
@@ -1734,21 +1735,21 @@ class DriverRefusalTest(unittest.TestCase):
     def test_a_batched_microbatch_is_refused(self) -> None:
         """It would send the next pipeline stage a permuted activation."""
         with self.assertRaises(ValueError) as caught:
-            train.refuse_unsupported_run(stock_args(micro_batch_size=4))
+            flags.refuse_unsupported_run(stock_args(micro_batch_size=4))
         self.assertIn("permuted", str(caught.exception))
 
     def test_a_packing_that_does_not_match_seq_length_is_refused(
         self,
     ) -> None:
         with self.assertRaises(ValueError) as caught:
-            train.refuse_unsupported_run(
+            flags.refuse_unsupported_run(
                 stock_args(bench_rows_per_sample=8)
             )
         self.assertIn("--seq-length", str(caught.exception))
 
     def test_the_declared_run_is_accepted(self) -> None:
-        train.refuse_unsupported_run(stock_args())
-        train.refuse_unsupported_run(
+        flags.refuse_unsupported_run(stock_args())
+        flags.refuse_unsupported_run(
             stock_args(
                 world_size=8,
                 pipeline_model_parallel_size=4,
@@ -1763,12 +1764,12 @@ class DriverRefusalTest(unittest.TestCase):
         """The field is inert without a pipeline message, and the run would
         print a treatment it did not have."""
         with self.assertRaises(ValueError) as caught:
-            train.refuse_unsupported_run(stock_args(bench_batch_p2p_sync="off"))
+            flags.refuse_unsupported_run(stock_args(bench_batch_p2p_sync="off"))
         self.assertIn(BENCH_BATCH_P2P_SYNC, str(caught.exception))
         self.assertIn("no pipeline message", str(caught.exception))
 
     def test_p2p_sync_off_under_a_pipeline_is_accepted(self) -> None:
-        train.refuse_unsupported_run(
+        flags.refuse_unsupported_run(
             stock_args(
                 world_size=4,
                 pipeline_model_parallel_size=4,
@@ -1790,14 +1791,14 @@ class P2pSyncMappingTest(unittest.TestCase):
     """
 
     def test_off_sets_the_field_false_on_args(self) -> None:
-        args = train.apply_p2p_sync(stock_args(bench_batch_p2p_sync="off"))
+        args = flags.apply_p2p_sync(stock_args(bench_batch_p2p_sync="off"))
         self.assertIs(args.batch_p2p_sync, False)
 
     def test_on_leaves_the_attribute_absent(self) -> None:
         """Megatron's dataclass default must rule, exactly as it did before
         the option existed. An attribute set to True would be copied too,
         and a Megatron bump that moved the default would then be masked."""
-        args = train.apply_p2p_sync(stock_args())
+        args = flags.apply_p2p_sync(stock_args())
         self.assertFalse(hasattr(args, "batch_p2p_sync"))
 
     def test_the_line_reads_the_built_transformer_config(self) -> None:
@@ -2639,7 +2640,7 @@ class HarnessArgumentTest(unittest.TestCase):
     def test_the_group_accepts_the_emitted_flags(self) -> None:
         import argparse
 
-        parser = train.add_bench_args(
+        parser = flags.add_bench_args(
             argparse.ArgumentParser(allow_abbrev=False)
         )
         emitted = flags_for("1b", PP4_SPEC)
@@ -2677,7 +2678,7 @@ class HarnessArgumentTest(unittest.TestCase):
     ) -> None:
         import argparse
 
-        parser = train.add_bench_args(
+        parser = flags.add_bench_args(
             argparse.ArgumentParser(allow_abbrev=False)
         )
         emitted = flags_for("1b", PP4_SPEC, megatron_p2p_sync="off")
