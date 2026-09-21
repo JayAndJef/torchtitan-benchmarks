@@ -49,6 +49,7 @@ from benchmarks.e2e.megatron_stock import (  # noqa: E402
     flags,
     markers,
     profiling,
+    step_log,
     train,
 )
 from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
@@ -1984,7 +1985,7 @@ class StepLineTest(unittest.TestCase):
             mfu=12.5,
         )
         fields.update(overrides)
-        return train.step_log_line(**fields)
+        return step_log.step_log_line(**fields)
 
     def test_the_three_regexes_read_it(self) -> None:
         line = self.line()
@@ -2018,17 +2019,17 @@ class StepLineTest(unittest.TestCase):
 
     def test_tokens_per_second_divides_by_the_pipeline_degree(self) -> None:
         """The published figure is per device, as TorchTitan's is."""
-        self.assertEqual(train.tokens_per_second(32768, 1.0, 1), 32768)
-        self.assertEqual(train.tokens_per_second(32768, 1.0, 4), 8192)
+        self.assertEqual(step_log.tokens_per_second(32768, 1.0, 1), 32768)
+        self.assertEqual(step_log.tokens_per_second(32768, 1.0, 4), 8192)
         with self.assertRaises(ValueError):
-            train.tokens_per_second(32768, 1.0, 0)
+            step_log.tokens_per_second(32768, 1.0, 0)
 
     def test_loss_value_reads_megatron_s_dict(self) -> None:
-        self.assertIsNone(train.loss_value({}))
+        self.assertIsNone(step_log.loss_value({}))
         self.assertAlmostEqual(
-            train.loss_value({"lm loss": torch.tensor(1.25)}), 1.25
+            step_log.loss_value({"lm loss": torch.tensor(1.25)}), 1.25
         )
-        self.assertIsNone(train.loss_value({"skipped iterations": 0}))
+        self.assertIsNone(step_log.loss_value({"skipped iterations": 0}))
 
 
 class LossBroadcastTest(unittest.TestCase):
@@ -2041,8 +2042,8 @@ class LossBroadcastTest(unittest.TestCase):
 
     def test_the_loss_is_unchanged_without_a_process_group(self) -> None:
         """One rank is the whole pipeline, so there is nobody to ask."""
-        self.assertEqual(train.broadcast_pipeline_loss(1.25), 1.25)
-        self.assertIsNone(train.broadcast_pipeline_loss(None))
+        self.assertEqual(step_log.broadcast_pipeline_loss(1.25), 1.25)
+        self.assertIsNone(step_log.broadcast_pipeline_loss(None))
 
     def test_the_step_line_takes_its_loss_from_the_broadcast(self) -> None:
         """The shim must not print this rank's own empty ``loss_dict``.
@@ -2053,7 +2054,7 @@ class LossBroadcastTest(unittest.TestCase):
         """
         inner = [
             const
-            for const in train.install_step_log_shim.__code__.co_consts
+            for const in step_log.install_step_log_shim.__code__.co_consts
             if isinstance(const, types.CodeType)
             and const.co_name == "replacement"
         ]

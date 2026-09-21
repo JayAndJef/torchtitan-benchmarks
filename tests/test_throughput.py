@@ -26,7 +26,7 @@ from benchmarks.artifacts.manifests import (  # noqa: E402
     THROUGHPUT_DEFINITION,
     manifest_data,
 )
-from benchmarks.e2e.megatron_stock.train import (  # noqa: E402
+from benchmarks.e2e.megatron_stock.step_log import (  # noqa: E402
     tokens_per_second,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC  # noqa: E402

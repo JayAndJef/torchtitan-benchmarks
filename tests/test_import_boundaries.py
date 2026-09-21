@@ -212,6 +212,9 @@ WORKER_SIDE_MODULES = (
 # dynamic ML-free probe that the parent-side modules get -- the deferral is
 # the property worth locking.
 WORKER_SIDE_DEFERRED_MODULES = (
+    # The step line and its training_log shim. Deferred: every torch and
+    # megatron import sits inside a function, as the driver's do.
+    "benchmarks.e2e.megatron_stock.step_log",
     "benchmarks.e2e.megatron_stock.train",
     # The typing shim and the Megatron path setup. It runs in the
     # worker, it imports no ML stack, and it *cannot*: it is what
