@@ -22,6 +22,7 @@ from benchmarks.artifacts.run_state import (
     load_run_state,
     update_run_state,
 )
+from benchmarks.e2e.axes import RunAxes, RunRequest
 from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.parallelism import (
     MEGATRON_ENGINES,
@@ -48,8 +49,6 @@ from benchmarks.e2e.registry import (
 from benchmarks.e2e.schema import (
     Arm,
     ResolvedRun,
-    RunAxes,
-    RunRequest,
     Scenario,
     Workload,
 )

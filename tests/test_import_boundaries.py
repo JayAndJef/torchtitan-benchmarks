@@ -68,6 +68,9 @@ PARENT_SIDE_MODULES = (
     "benchmarks.cli.e2e",
     "benchmarks.cli.kernel",
     "benchmarks.cli.rendering",
+    # The run axes, requested and resolved. Parent-side: the CLI builds
+    # one, the runner resolves it and the manifest writer records it.
+    "benchmarks.e2e.axes",
     "benchmarks.e2e.registry",
     # The e2e type declarations. Parent-side, and the cheapest module in the
     # tree: it imports the standard library alone.

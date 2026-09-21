@@ -33,13 +33,14 @@ that is not, which is why the whole of the edge described below now lands in
 one file.
 
 **Structural edge, almost closed.** A manifest serializes a run's scenario
-and arms, so the builders here need those types by construction. They now
-come from ``benchmarks.e2e.schema``, which imports nothing first-party, so
-``Arm``, ``Scenario``, ``RunAxes`` and ``RunRequest`` cost a
-stdlib-only module at runtime and need no ``TYPE_CHECKING`` block. The
+and arms, so the builders here need those types by construction. ``Arm``
+and ``Scenario`` come from ``benchmarks.e2e.schema``, which imports nothing
+first-party, and ``RunAxes`` and ``RunRequest`` from
+``benchmarks.e2e.axes``. Neither needs a ``TYPE_CHECKING`` block. The
 ``RunRequest`` import is the sharpest case: it used to come from
 ``e2e/runner.py``, which imports this module, and only the
-``TYPE_CHECKING`` guard kept that pair out of a module-level cycle.
+``TYPE_CHECKING`` guard kept that pair out of a module-level cycle. It sits
+in ``axes.py`` now, below this module, so the cycle cannot come back.
 
 No name crosses to ``benchmarks.e2e.registry`` any more. ``Workload``,
 which ``_resume_workload`` reconstructs and revalidates from recorded JSON,
@@ -62,6 +63,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from benchmarks.artifacts.layout import atomic_write_json
+from benchmarks.e2e.axes import RunAxes, RunRequest
 from benchmarks.e2e.parallelism import (
     describe as describe_parallelism,
     execution_model,
@@ -69,8 +71,6 @@ from benchmarks.e2e.parallelism import (
 from benchmarks.e2e.schema import (
     Arm,
     ParallelismSpec,
-    RunAxes,
-    RunRequest,
     Scenario,
     Workload,
 )

@@ -26,7 +26,7 @@ from benchmarks.artifacts.manifests import (
 )
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.schema import RunAxes
+from benchmarks.e2e.axes import RunAxes
 from benchmarks.e2e.registry import (
     DEFAULT_WARMUP_STEPS,
     ENGINES,

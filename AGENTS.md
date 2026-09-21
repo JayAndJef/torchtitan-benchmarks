@@ -70,7 +70,7 @@ shares one pre-push hook.
 | path | contents |
 |---|---|
 | `benchmarks/cli/` | The Click CLI: `benchmarks/cli/e2e.py`, `benchmarks/cli/kernel.py`, and the group in `benchmarks/cli/main.py`. |
-| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/launch.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines.py`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
+| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/launch.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines.py`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
 | `benchmarks/e2e/megatron_stock/` | The stock Megatron-LM driver and its command line. |
 | `benchmarks/e2e/data/piper_qwen3.py` | The pre-tokenized replay dataloader. |
 | `benchmarks/artifacts/` | `manifest.json`, `run_state.json`, the output layout and the atomic JSON writer. |
