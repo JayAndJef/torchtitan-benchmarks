@@ -10,8 +10,8 @@ not readable which surface a given ``click.option`` belonged to.
 This module declares it with ``envvar="MODEL_SIZE"`` and no default, so an
 unrequested size reaches ``RunRequest`` as ``None`` -- which is what lets
 ``run --resume`` tell "inherit the size recorded in the manifest" from
-"the caller asked for ``1b``". ``benchmarks/cli/kernel.py`` declares its
-own with ``default="1b"`` and no envvar, because ``kernel-bench`` takes
+"the caller asked for the default". ``benchmarks/cli/kernel.py`` declares
+its own with an explicit default and no envvar, because ``kernel-bench`` takes
 flags only, so that an ``OUT``/``SEQ``/``BATCH`` environment exported for an
 end-to-end shell cannot leak into a kernel measurement. They are two
 different options that share a spelling, and unifying them would change
@@ -72,6 +72,7 @@ from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
     DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MEGATRON_P2P_SYNC,
+    DEFAULT_MODEL_SIZE,
     DEFAULT_PROFILE,
     DEFAULT_WARMUP_STEPS,
     MEGATRON_NAN_GUARD_MODES,
@@ -204,7 +205,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             envvar="MODEL_SIZE",
             show_envvar=True,
             help=(
-                "Model shape applied to every arm in the run [default: 1b]. "
+                "Model shape applied to every arm in the run "
+                f"[default: {DEFAULT_MODEL_SIZE}]. "
                 "See benchmarks/models/piper_qwen3/shape.py. Results are only "
                 "comparable within one size."
             ),
