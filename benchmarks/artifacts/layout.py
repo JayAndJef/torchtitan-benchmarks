@@ -47,7 +47,10 @@ second as its predecessor.
 
 ``run_timestamp`` is public because ``benchmarks.cli.e2e`` generates one
 stamp and hands it to every scenario of a multi-scenario ``run``,
-which is what groups them under a single ``out/<timestamp>/``.
+which is what groups them under a single ``out/<timestamp>/``. A run may
+name one scenario twice, so the second and later occurrences of a name take
+a ``-run<n>`` suffix; without it they would share one directory and the
+later one would die at ``mkdir`` after the earlier one had finished.
 ``_default_output_dir`` takes a ``Scenario`` only to read its ``.name``, so
 the annotation lives under ``TYPE_CHECKING`` and this module keeps no
 runtime dependency on ``benchmarks.e2e`` at all.
@@ -207,9 +210,11 @@ def _default_output_dir(
     requested: Path | None,
     environment: Mapping[str, str],
     timestamp: str | None = None,
+    occurrence: int = 1,
 ) -> Path:
     if requested is not None:
         return requested.expanduser().resolve()
     if env_out := environment.get("OUT"):
         return Path(env_out).expanduser().resolve()
-    return BENCH_DIR / "out" / (timestamp or run_timestamp()) / scenario.name / hardware
+    directory = scenario.name if occurrence == 1 else f"{scenario.name}-run{occurrence}"
+    return BENCH_DIR / "out" / (timestamp or run_timestamp()) / directory / hardware
