@@ -46,6 +46,7 @@ import torch  # noqa: E402
 from benchmarks.e2e.megatron_stock import (  # noqa: E402
     bootstrap,
     data,
+    markers,
     profiling,
     train,
 )
@@ -1536,7 +1537,7 @@ class MarkerStringTest(unittest.TestCase):
     """The driver's own strings against the plan's, character for character."""
 
     def test_the_mode_line_carries_the_declared_prefix(self) -> None:
-        line = train.mode_line(stock_args())
+        line = markers.mode_line(stock_args())
         self.assertTrue(line.startswith(PLAN_MODE_PREFIX))
         for field in (
             "main_params_dtype=torch.float32",
@@ -1559,7 +1560,7 @@ class MarkerStringTest(unittest.TestCase):
         optimizer exists, so the line prints ``torch.bfloat16`` where the
         flag says ``bf16``.
         """
-        line = train.mode_line(
+        line = markers.mode_line(
             stock_args(
                 use_precision_aware_optimizer=True,
                 main_grads_dtype=torch.bfloat16,
@@ -1597,34 +1598,34 @@ class MarkerStringTest(unittest.TestCase):
             ),
         }
         for value, args in cases.items():
-            line = train.mode_line(args)
+            line = markers.mode_line(args)
             for marker in profile.precision_markers(value):
                 with self.subTest(value=value, marker=marker):
                     self.assertIn(marker, line)
 
     def test_the_parallelism_templates_match_the_plan(self) -> None:
-        self.assertEqual(train.PARALLELISM_LINE, PLAN_PARALLELISM_LINE)
-        self.assertEqual(train.DATA_PARALLEL_LINE, PLAN_DATA_PARALLEL_LINE)
+        self.assertEqual(markers.PARALLELISM_LINE, PLAN_PARALLELISM_LINE)
+        self.assertEqual(markers.DATA_PARALLEL_LINE, PLAN_DATA_PARALLEL_LINE)
         self.assertEqual(
-            train.MODE_LINE[: len(PLAN_MODE_PREFIX)], PLAN_MODE_PREFIX
+            markers.MODE_LINE[: len(PLAN_MODE_PREFIX)], PLAN_MODE_PREFIX
         )
-        self.assertEqual(train.TRAINING_COMPLETED, "Training completed")
+        self.assertEqual(markers.TRAINING_COMPLETED, "Training completed")
 
     def test_the_parameter_templates_match_the_plan(self) -> None:
-        self.assertEqual(train.STAGE_SIZE_LINE, PLAN_STAGE_SIZE_LINE)
-        self.assertEqual(train.MODEL_SIZE_LINE, PLAN_MODEL_SIZE_LINE)
+        self.assertEqual(markers.STAGE_SIZE_LINE, PLAN_STAGE_SIZE_LINE)
+        self.assertEqual(markers.MODEL_SIZE_LINE, PLAN_MODEL_SIZE_LINE)
 
     def test_the_p2p_template_matches_the_plan(self) -> None:
-        self.assertEqual(train.P2P_LINE, PLAN_P2P_LINE)
+        self.assertEqual(markers.P2P_LINE, PLAN_P2P_LINE)
 
     def test_the_nan_guard_template_matches_the_plan(self) -> None:
-        self.assertEqual(train.NAN_GUARD_LINE, PLAN_NAN_GUARD_LINE)
+        self.assertEqual(markers.NAN_GUARD_LINE, PLAN_NAN_GUARD_LINE)
 
     def test_the_model_size_line_carries_a_thousands_separator(self) -> None:
         """Arm rule 11 builds its target with ``f"{param_count:,}"``."""
         for name, shape in PIPER_SHAPES.items():
             with self.subTest(size=name):
-                line = train.MODEL_SIZE_LINE.format(
+                line = markers.MODEL_SIZE_LINE.format(
                     size=name, total=f"{shape.param_count:,}"
                 )
                 self.assertIn(
@@ -1634,11 +1635,11 @@ class MarkerStringTest(unittest.TestCase):
     def test_no_mesh_line_at_world_size_one(self) -> None:
         """Arm rule 12 is consulted only above one rank."""
         self.assertEqual(
-            train.parallelism_lines(stock_args(), microbatches=1), []
+            markers.parallelism_lines(stock_args(), microbatches=1), []
         )
 
     def test_a_pipeline_prints_one_line(self) -> None:
-        lines = train.parallelism_lines(
+        lines = markers.parallelism_lines(
             stock_args(
                 world_size=4,
                 pipeline_model_parallel_size=4,
@@ -1662,7 +1663,7 @@ class MarkerStringTest(unittest.TestCase):
         carries a wrapper. A copy derived from ``args`` would satisfy arm
         rule 12 without the wrapper, so this function must not print one.
         """
-        lines = train.parallelism_lines(
+        lines = markers.parallelism_lines(
             stock_args(
                 world_size=8,
                 pipeline_model_parallel_size=4,
@@ -1687,7 +1688,7 @@ class MarkerStringTest(unittest.TestCase):
         exists yet. ``install_data_parallel_marker`` reads the built group
         later and refuses a disagreement.
         """
-        lines = train.parallelism_lines(
+        lines = markers.parallelism_lines(
             stock_args(
                 world_size=8,
                 pipeline_model_parallel_size=4,
@@ -1814,7 +1815,7 @@ class P2pSyncMappingTest(unittest.TestCase):
                     )
                 )
                 self.assertEqual(
-                    train.p2p_line(model_cfg),
+                    markers.p2p_line(model_cfg),
                     "Megatron-LM stock p2p: batch_p2p_comm=True "
                     f"batch_p2p_sync={sync}",
                 )
@@ -1849,7 +1850,7 @@ class NanGuardLineTest(unittest.TestCase):
         for value in (True, False):
             with self.subTest(value=value):
                 self.assertEqual(
-                    train.nan_guard_line(
+                    markers.nan_guard_line(
                         stock_args(check_for_nan_in_loss_and_grad=value)
                     ),
                     "Megatron-LM stock nan guard: "
@@ -2285,7 +2286,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         chunk.ddp_config = self.ddp_config()
         self.assertEqual(
             self.run_shim(chunk),
-            train.DATA_PARALLEL_LINE.format(
+            markers.DATA_PARALLEL_LINE.format(
                 wrapper="DistributedDataParallel",
                 dp=2,
                 overlap=False,

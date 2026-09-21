@@ -26,7 +26,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import logs_by_rank
-from benchmarks.e2e.megatron_stock import train as stock_train
+from benchmarks.e2e.megatron_stock import markers as stock_markers
 from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.parallelism import (
@@ -905,8 +905,8 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     the token cannot be published under the label it was asked for.
     """
 
-    ON_LINE = stock_train.NAN_GUARD_LINE.format(value=True)
-    OFF_LINE = stock_train.NAN_GUARD_LINE.format(value=False)
+    ON_LINE = stock_markers.NAN_GUARD_LINE.format(value=True)
+    OFF_LINE = stock_markers.NAN_GUARD_LINE.format(value=False)
 
     def test_the_stock_line_is_pinned_to_the_driver_constant(self) -> None:
         """The validator and the driver state one line in two places, and
@@ -1012,8 +1012,8 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
     them fails a lean one.
     """
 
-    NAN_GUARD_ON = stock_train.NAN_GUARD_LINE.format(value=True)
-    NAN_GUARD_OFF = stock_train.NAN_GUARD_LINE.format(value=False)
+    NAN_GUARD_ON = stock_markers.NAN_GUARD_LINE.format(value=True)
+    NAN_GUARD_OFF = stock_markers.NAN_GUARD_LINE.format(value=False)
 
     def test_the_stock_markers_are_the_driver_line_and_four_fields(
         self,
