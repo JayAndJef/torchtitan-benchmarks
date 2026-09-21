@@ -1076,16 +1076,23 @@ class MicrobatchContractTest(unittest.TestCase):
             data.document_offsets(positions, 16)
         self.assertIn("document start", str(caught.exception))
 
-    def test_the_provider_is_distributed(self) -> None:
-        """Every rank builds its own stream.
+    def test_main_marks_the_provider_distributed_before_pretrain(self) -> None:
+        """Every rank builds its own stream, and ``main`` says so.
 
         Under ``--dataloader-inter-document-masking`` the middle pipeline
         stages read the batch too, so a provider that built on tensor rank 0
-        alone would leave them with no iterator.
+        alone would leave them with no iterator. ``main`` sets the flag
+        where ``pretrain_gpt.py`` sets it, so this reads the source rather
+        than the imported module.
         """
-        self.assertIs(
-            data.train_valid_test_datasets_provider.is_distributed, True
+        import inspect
+
+        source = inspect.getsource(train.main)
+        marked = source.index(
+            'setattr(data.train_valid_test_datasets_provider, '
+            '"is_distributed", True)'
         )
+        self.assertLess(marked, source.index("\n    pretrain(\n"))
 
 
 # --------------------------------------------------------------------------

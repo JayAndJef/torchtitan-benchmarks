@@ -352,9 +352,3 @@ def train_valid_test_datasets_provider(
         None,
     )
 
-
-# Megatron reads this flag to decide whether every rank builds the data, or
-# only tensor-parallel rank 0 does (``training.py``'s
-# ``build_train_valid_test_data_loaders``). Every rank must build one here:
-# see rule 1 in this module's docstring.
-train_valid_test_datasets_provider.is_distributed = True
