@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import logs_by_rank
 from benchmarks.e2e.megatron_stock import train as stock_train
-from benchmarks.e2e.schema import Arm, ParallelismSpec
+from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
     n_microbatches,

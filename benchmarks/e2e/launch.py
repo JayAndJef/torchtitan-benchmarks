@@ -20,7 +20,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from benchmarks.e2e.schema import Arm, ParallelismSpec, Workload
+from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.schema import Arm, Workload
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
     TRIVIAL_SPEC,

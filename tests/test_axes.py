@@ -42,7 +42,7 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.axes import RequestedAxes, RunAxes
-from benchmarks.e2e.schema import ZERO_MODES
+from benchmarks.e2e.parallelism import ZERO_MODES
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
 

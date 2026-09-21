@@ -42,7 +42,7 @@ from benchmarks.cli.e2e import (
 )
 from benchmarks.cli.main import cli
 from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
-from benchmarks.e2e.schema import ParallelismSpec
+from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
     describe,

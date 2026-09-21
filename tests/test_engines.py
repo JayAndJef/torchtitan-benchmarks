@@ -29,7 +29,8 @@ from benchmarks.e2e.engines import ENGINES, command_for_arm, engine_for_arm
 from benchmarks.e2e.launch import megatron_stock_command, titan_command
 from benchmarks.e2e.parallelism import MEGATRON_ENGINES
 from benchmarks.e2e.registry import SCENARIOS
-from benchmarks.e2e.schema import Arm, ParallelismSpec
+from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
     TORCHTITAN_PROFILE,

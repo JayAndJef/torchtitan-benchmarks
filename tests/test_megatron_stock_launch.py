@@ -38,7 +38,8 @@ from benchmarks.e2e.launch import (
     STOCK_MEGATRON_PP_SCHEDULE,
 )
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
-from benchmarks.e2e.schema import Arm, ParallelismSpec
+from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,

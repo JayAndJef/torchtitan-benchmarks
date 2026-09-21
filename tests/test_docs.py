@@ -47,7 +47,7 @@ from benchmarks.e2e.registry import (
     DEFAULT_WARMUP_STEPS,
     ENGINES,
 )
-from benchmarks.e2e.schema import DEFAULT_ZERO, ParallelismSpec
+from benchmarks.e2e.parallelism import DEFAULT_ZERO, ParallelismSpec
 
 DOCS = ("AGENTS.md", "README.md")
 

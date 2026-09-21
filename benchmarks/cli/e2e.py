@@ -56,14 +56,12 @@ from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
-from benchmarks.e2e.schema import (
-    DEFAULT_ZERO,
-    ParallelismSpec,
-    ZERO_MODES,
-)
 from benchmarks.e2e.parallelism import (
+    DEFAULT_ZERO,
     MEGATRON_ENGINES,
     PP_SCHEDULE_CHOICES,
+    ParallelismSpec,
+    ZERO_MODES,
 )
 from benchmarks.e2e.registry import (
     AC_MODES,

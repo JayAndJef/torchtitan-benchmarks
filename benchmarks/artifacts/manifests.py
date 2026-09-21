@@ -65,15 +65,11 @@ from typing import Any, Mapping
 from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.e2e.axes import RunAxes, RunRequest
 from benchmarks.e2e.parallelism import (
+    ParallelismSpec,
     describe as describe_parallelism,
     execution_model,
 )
-from benchmarks.e2e.schema import (
-    Arm,
-    ParallelismSpec,
-    Scenario,
-    Workload,
-)
+from benchmarks.e2e.schema import Arm, Scenario, Workload
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
     shape_by_name,

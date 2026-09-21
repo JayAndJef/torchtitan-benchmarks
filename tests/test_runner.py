@@ -16,7 +16,8 @@ from benchmarks.artifacts.layout import trace_files
 from benchmarks.artifacts.manifests import write_manifest
 from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
-from benchmarks.e2e.schema import Arm, ParallelismSpec
+from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
