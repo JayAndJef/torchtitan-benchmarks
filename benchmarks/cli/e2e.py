@@ -208,8 +208,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "comparable within one size."
             ),
         ),
-        # The six parallelism options. No envvar on any of them; the
-        # docstring above gives the reason.
         click.option(
             "--dp",
             "dp",
@@ -265,7 +263,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "needs 1. Results are only comparable within one level."
             ),
         ),
-        # No envvar; the docstring above gives the reason.
         click.option(
             "--megatron-p2p-sync",
             "megatron_p2p_sync",
@@ -278,7 +275,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "are only comparable within one value."
             ),
         ),
-        # No envvar; the docstring above gives the reason.
         click.option(
             "--megatron-nan-guard",
             "megatron_nan_guard",
@@ -292,7 +288,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "Results are only comparable within one value."
             ),
         ),
-        # No envvar; the docstring above gives the reason.
         click.option(
             "--megatron-precision",
             "megatron_precision",
@@ -308,10 +303,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "comparable within one value."
             ),
         ),
-        # No envvar; the docstring above gives the reason.
-        # A boolean pair rather than a bare flag, so an omitted option
-        # reaches ``RunRequest`` as ``None`` and a resume can inherit the
-        # recorded value.
+        # A boolean pair, so an omitted option reaches RunRequest as None.
         click.option(
             "--profile/--no-profile",
             "profile",
@@ -549,14 +541,13 @@ def run_command(
                 continue
         if len(selected) > 1:
             click.echo(f"\n===== scenario: {name} =====")
-        # A copy per scenario: ``_axes`` pops the axis options out of it.
+        # A copy per scenario, because _axes pops the axis options out.
         scenario_options: dict[str, Any] = dict(options)
         _run_and_evaluate(
             _request(
                 gpu,
                 torchtitan_args,
-                # A resume reads the scenario from the manifest, so an
-                # operator who named none leaves the question to it.
+                # A resume reads the scenario from the manifest.
                 scenario_name=(
                     name if requested or resume_dir is None else None
                 ),
@@ -630,15 +621,13 @@ def _refuse_a_single_run_option(
 
 
 def _skip_reason(name: str, options: dict[str, Any]) -> str | None:
-    """Why a swept scenario declines one of the global axes, or ``None``.
+    """Why a scenario declines one of the global axes, or ``None``.
 
-    A sweep skips such a scenario and says why, rather than aborting: the
-    restriction is a declaration, not a fault. A ``--scenario`` that names
-    the scenario gets the matching refusal from ``_resolve_run`` instead.
-
-    A sweep that skips every scenario is a different case, and ``run``
-    refuses it: the command ran no arm, and an exit code of 0 would report
-    a measurement that never happened.
+    A run that selected every scenario skips such a scenario and says why,
+    because the restriction is a declaration and not a fault. A
+    ``--scenario`` that names it gets the matching refusal instead. A run
+    that skips every scenario is refused, because an exit code of 0 would
+    report a measurement that never happened.
     """
     scenario = SCENARIOS[name]
     ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
@@ -651,8 +640,7 @@ def _skip_reason(name: str, options: dict[str, Any]) -> str | None:
     megatron_precision = (
         options.get("megatron_precision") or DEFAULT_MEGATRON_PRECISION
     )
-    # Read rather than popped: ``_axes`` pops it from the per-scenario copy,
-    # and this needs the value alone.
+    # Read, not popped: _axes pops it from the per-scenario copy.
     zero = options.get("zero")
     if zero is None:
         zero = DEFAULT_ZERO

@@ -110,9 +110,7 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     """
     flags: list[str] = []
     if spec.pp > 1:
-        # Rules 3 and 4 already refuse both cases for a run. Restated here
-        # because a caller may build a command line without a run, and a
-        # bare KeyError names neither the flag nor the reason.
+        # Restated here, because a caller may build an argv without a run.
         if spec.pp_schedule not in PP_SCHEDULES:
             raise ValueError(
                 f"pp {spec.pp} needs a registered pipeline schedule, got "
@@ -211,32 +209,15 @@ def titan_command(
 ) -> list[str]:
     """Launch command for one TorchTitan arm.
 
-    ``parallelism`` defaults to ``TRIVIAL_SPEC``, which is the identity:
-    ``_titan_parallelism_flags`` returns an empty tuple there, so the argv
-    below it is the argv this repo has always built.
-
-    The three megatron values are accepted and ignored. Every engine builder
-    takes the same parameters, so ``benchmarks.e2e.engines`` dispatches one
-    call and no caller branches on the engine. A TorchTitan arm sends no
-    pipeline message through Megatron and holds no Megatron optimizer, so
-    none of the three can change this argv; ``_resolve_run``
-    (``benchmarks.e2e.runner``) is what refuses a non-default value for a
-    run that holds no megatron arm.
-
-    ``profile`` decides the profiler block alone. Under ``False`` the arm
-    passes no profiler token and writes no trace.
+    ``parallelism`` defaults to the identity spec, which adds no flag. The
+    three megatron values are accepted and ignored, because every engine
+    builder takes the same parameters. ``profile`` decides the profiler
+    block alone.
     """
     _refuse_parallelism_passthrough(arm, extra_args)
-    # CompileConfig.enable is False in the fork, so an eager arm omits the
-    # flag: there is no negation to pass. The flag keeps its position in the
-    # list, so a compiled arm builds the command line it built before
-    # compile became an arm property.
+    # The fork defaults it off, so an eager arm passes no negation.
     compile_flags = ("--compile.enable",) if arm.compile == "torch" else ()
-    # TorchTitan's profiler is off unless these tokens ask for it
-    # (``CompileConfig``'s sibling ``ProfilingConfig``), so an unprofiled
-    # run drops the block and passes no negation. The flags keep their
-    # position, so a profiled arm builds the command line it built before
-    # the axis existed.
+    # Off unless these tokens ask for it, so an unprofiled run drops them.
     profiler_flags = (
         (
             "--profiler.enable_profiling",
@@ -256,9 +237,7 @@ def titan_command(
         workload.module,
         "--config",
         arm.config or workload.config,
-        # The fork's ConfigManager forwards --config-arg pairs as keyword
-        # arguments to the config function, which resolves the name through
-        # benchmarks.models.piper_qwen3.shape.shape_by_name.
+        # The fork forwards a --config-arg pair as a config keyword.
         "--config-arg",
         f"size={model_size}",
         "--training.seq-len",
@@ -282,10 +261,7 @@ def titan_command(
         args.extend(("--override.imports", ",".join(arm.override_imports)))
     args = args + list(extra_args) + ["--dump-folder", str(arm_dir)]
     if ac_mode == "none":
-        # tyro subcommand token selecting activation_checkpoint=None; the
-        # flag-style spelling does not exist for subcommand unions, and tyro
-        # attributes any flags after the token to the (fieldless) subcommand,
-        # so the token must come last.
+        # A tyro subcommand token, which has to come last.
         args.append("activation-checkpoint:none")
     return args
 
@@ -392,15 +368,12 @@ def megatron_stock_command(
             f"{arm.name}: the stock megatron arm runs without recompute; "
             f"ac mode {ac_mode!r} has no Megatron parity (use --ac none)"
         )
-    # ``flags.py`` refuses this one too, with its own message. Refused here
-    # as well, so a caller that never reaches the flag module still gets the
-    # arm's name.
+    # Refused here too, so the message names the arm.
     if workload.seed is None:
         raise ValueError(
             f"{arm.name}: megatron arms require a seeded workload"
         )
-    # ``flags.py`` refuses this one too. See the docstring for why the
-    # harness keeps its own copy.
+    # Refused here too; the docstring says why the harness keeps a copy.
     if (
         parallelism.pp > 1
         and parallelism.pp_schedule != STOCK_MEGATRON_PP_SCHEDULE
@@ -410,16 +383,10 @@ def megatron_stock_command(
             f"{STOCK_MEGATRON_PP_SCHEDULE!r} alone, and this run asks for "
             f"{parallelism.pp_schedule!r}"
         )
-    # Imported here, and below every refusal above. Two reasons. Only this
-    # branch of the dispatch needs the stock flag list, so no other arm's
-    # command line imports it. And a refused request must fail with its own
-    # message, not with whatever the flag module raises first.
+    # Below the refusals, so a refused request fails with its own message.
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
-    # ``model_size`` is passed on as the operator typed it.
-    # ``_resolve_run`` canonicalizes
-    # the name before it reaches here, and ``shape_by_name`` resolves an
-    # alias either way, so the flag list and the shape cannot disagree.
+    # Passed on as typed; shape_by_name resolves an alias either way.
     return [
         *_megatron_launcher(parallelism),
         STOCK_MEGATRON_DRIVER_MODULE,
@@ -429,20 +396,13 @@ def megatron_stock_command(
             parallelism,
             arm_dir=str(arm_dir),
             model_size=model_size,
-            # flags.py refuses off at pp 1 and an unknown value, with its
-            # own messages; a run never reaches either, because
-            # _resolve_run refuses both first.
+            # flags.py refuses the illegal values; a run never reaches them.
             megatron_p2p_sync=megatron_p2p_sync,
-            # Megatron's own token under off, nothing under on; flags.py
-            # refuses an unknown value with its own message.
+            # Megatron's own token under off, and nothing under on.
             megatron_nan_guard=megatron_nan_guard,
-            # Four flags under lean, nothing under stock. flags.py refuses
-            # an unknown value, and lean under a replicated dense value,
-            # each with its own message; _resolve_run refuses both first.
+            # Four flags under lean, and nothing under stock.
             megatron_precision=megatron_precision,
-            # Megatron's own profiler flags and the harness schedule group
-            # under True, and the --bench-profile token with them; nothing
-            # at all under False.
+            # Megatron's profiler flags and the schedule group, or nothing.
             profile=profile,
         ),
     ]
