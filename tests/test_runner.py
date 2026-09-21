@@ -153,7 +153,7 @@ class ScenarioTests(unittest.TestCase):
             C4_REPLAY_WORKLOAD.config, "qwen3_piper_1b_pretokenized"
         )
         self.assertEqual(C4_REPLAY_WORKLOAD.local_batch_size, 4)
-        self.assertEqual(C4_REPLAY_WORKLOAD.seq_len, 1024)
+        self.assertEqual(C4_REPLAY_WORKLOAD.seq_len, 4096)
         self.assertEqual(C4_REPLAY_WORKLOAD.steps, 40)
 
 
@@ -1710,7 +1710,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["model_size"], "1b")
         self.assertEqual(manifest["megatron_p2p_sync"], "on")
         self.assertEqual(manifest["megatron_nan_guard"], "on")
-        self.assertEqual(manifest["model_shape"], PIPER_1B.describe(seq_len=1024))
+        self.assertEqual(manifest["model_shape"], PIPER_1B.describe(seq_len=4096))
         self.assertEqual(
             manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
         )
@@ -1718,7 +1718,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["hardware"], "rtx-a6000")
         self.assertEqual(manifest["hardware_metadata"], metadata)
         self.assertEqual(manifest["workload"]["local_batch_size"], 4)
-        self.assertEqual(manifest["workload"]["seq_len"], 1024)
+        self.assertEqual(manifest["workload"]["seq_len"], 4096)
         self.assertEqual(manifest["selected_arms"], ["titan_eager"])
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
         titan_command = manifest["commands"]["titan_eager"]
@@ -1762,6 +1762,7 @@ class EagerArmTests(unittest.TestCase):
             execute_run(
                 RunRequest(
                     axes=RequestedAxes(
+                        model_size="1b",
                         ac_mode="none",
                     ),
                     gpu="0",
@@ -2030,6 +2031,7 @@ class ResumeTests(unittest.TestCase):
             environment = {"PATH": os.environ["PATH"]}
             request = RunRequest(
                 axes=RequestedAxes(
+                    model_size="1b",
                     ac_mode="none",
                 ),
                 gpu="0",
@@ -2164,6 +2166,7 @@ class ResumeTests(unittest.TestCase):
             execute_run(
                 RunRequest(
                     axes=RequestedAxes(
+                        model_size="1b",
                         ac_mode=mode,
                     ),
                     gpu="0",

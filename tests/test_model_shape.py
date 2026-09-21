@@ -1383,7 +1383,7 @@ class ManifestAndResumeTests(unittest.TestCase):
 
         self.assertEqual(manifest["schema_version"], 17)
         self.assertEqual(manifest["model_size"], "huge")
-        self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=1024))
+        self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=4096))
         command = manifest["commands"]["titan_compiled"]
         self.assertEqual(
             command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"

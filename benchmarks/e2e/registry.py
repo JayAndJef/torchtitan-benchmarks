@@ -45,7 +45,7 @@ DEFAULT_AC_MODE = "none"
 ``_resolve_run`` and the sweep pre-pass read these constants. Neither site
 repeats the literal value.
 """
-DEFAULT_MODEL_SIZE = "1b"
+DEFAULT_MODEL_SIZE = "30b-a3b"
 
 DEFAULT_PROFILE = False
 """Whether a run collects profiler traces.
@@ -148,7 +148,7 @@ DEFAULT_MEGATRON_PRECISION = "stock"
 C4_REPLAY_WORKLOAD = Workload(
     module="benchmarks.models.piper_qwen3",
     config="qwen3_piper_1b_pretokenized",
-    seq_len=1024,
+    seq_len=4096,
     steps=40,
     local_batch_size=4,
     seed=42,

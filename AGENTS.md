@@ -5,8 +5,9 @@
 Two measurement systems share one CLI. Never mix their numbers.
 
 **End-to-end throughput.** One scenario, `engines`, trains the same
-Qwen3-1B MoE model on one pre-tokenized c4_test stream and publishes
-tokens/s, step time and peak memory. It has three arms:
+Qwen3 MoE model on one pre-tokenized c4_test stream and publishes tokens/s,
+step time and peak memory. `--model-size` picks the shape. It has three
+arms:
 
 | arm | engine | treatment |
 |---|---|---|
@@ -105,6 +106,13 @@ repeat. Each repeat is another run of that scenario. The second and later
 runs of one name take a `-run<n>` suffix on the scenario directory, so they
 do not overwrite each other. `manifest.json` records the plain name.
 
+**The default shape does not fit one GPU.** `30b-a3b` is the paper headline
+shape: 30,532,122,624 parameters, about 227.5 GiB for the TorchTitan arms
+against an H200's 139.81 GiB. The default run therefore needs a mesh that
+splits it, such as `--pp 8`. Pass `--model-size 1b` for a one-GPU run. The
+harness does not refuse the combination; the training process runs out of
+memory.
+
 ### Flag table
 
 Each row of the table below is `| flag | env | default | meaning |`. The
@@ -120,13 +128,13 @@ parses this table and compares each default against the code.
 | `--results` | -- | `--` | JSON destination for the evaluation. |
 | `--hardware` | -- | `auto` | Provenance label; `auto` uses the GPU name. |
 | `--out` | `OUT` | `--` | Output directory. |
-| `--seq-len` | `SEQ` | `1024` | Sequence length. |
+| `--seq-len` | `SEQ` | `4096` | Sequence length. |
 | `--steps` | `STEPS` | `40` | Training steps per arm. |
 | `--batch` | `BATCH` | `4` | Local batch size. |
 | `--cache-root` | `BENCHMARK_CACHE_ROOT` | `--` | Root of the build caches. |
 | `--compiler-env` | `BENCH_COMPILER_ENV` | `--` | Shell script that enables the host compiler. |
 | `--ac` | `AC_MODE` | `none` | Activation checkpointing: `sac` or `none`. |
-| `--model-size` | `MODEL_SIZE` | `1b` | Model shape from `benchmarks/models/piper_qwen3/shape.py`. |
+| `--model-size` | `MODEL_SIZE` | `30b-a3b` | Model shape from `benchmarks/models/piper_qwen3/shape.py`. |
 | `--dp` | -- | `1` | Data-parallel degree. |
 | `--pp` | -- | `1` | Pipeline-parallel degree. |
 | `--ep` | -- | `1` | Expert-parallel degree. |
