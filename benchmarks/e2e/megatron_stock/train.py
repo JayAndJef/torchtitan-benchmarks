@@ -12,14 +12,22 @@ distributed setup, the forward step, the embedding-rank rule and the
 training loop all stay Megatron's. That is the point of the arm: the
 driver replicates none of the TorchTitan treatment.
 
-**No file of the Megatron-LM checkout is edited.** Three shims run in this
-process instead:
+**No file of the Megatron-LM checkout is edited.** Four shims run in this
+process instead, each one in a module of its own:
 
 * ``bootstrap.install_typing_override`` adds one name Python 3.10 lacks;
 * ``profiling.install_profiler_shim`` gives Megatron the trace schedule and
-  the trace path the harness reads; and
-* ``install_step_log_shim`` below adds the step line
-  ``benchmarks/e2e/results.py`` parses.
+  the trace path the harness reads;
+* ``step_log.install_step_log_shim`` adds the step line
+  ``benchmarks/e2e/results.py`` parses; and
+* ``dp_marker.install_data_parallel_marker`` prints the wrapper Megatron
+  really built.
+
+**One upstream call is deliberately absent.** ``pretrain_gpt.py`` wraps
+``pretrain`` with ``inprocess_restart.maybe_wrap_for_inprocess_restart``
+and passes the resulting ``store``. A benchmark arm must fail rather than
+restart itself, because a restarted rank publishes a number nobody asked
+for.
 
 **One config field takes a value Megatron has no flag for.**
 ``--bench-batch-p2p-sync off`` makes ``apply_p2p_sync`` set
@@ -105,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from benchmarks.e2e.megatron_stock.model_builder import BenchGPTModelConfig
     from benchmarks.models.piper_qwen3.shape import shape_by_name
+
+    # Every rank builds the data, as the stock entry point asks for.
+    setattr(data.train_valid_test_datasets_provider, "is_distributed", True)
 
     args = parse_and_validate_args(extra_args_provider=add_bench_args)
     refuse_unsupported_run(args)
