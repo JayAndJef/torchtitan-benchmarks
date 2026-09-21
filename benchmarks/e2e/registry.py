@@ -42,7 +42,7 @@ entirely, delivered to TorchTitan as the tyro subcommand token
 DEFAULT_AC_MODE = "none"
 """The default values of the global run axes.
 
-``_resolve_run`` and the sweep pre-pass read these constants. Neither site
+``_resolve_run`` and the skip pre-pass read these constants. Neither site
 repeats the literal value.
 """
 DEFAULT_MODEL_SIZE = "30b-a3b"

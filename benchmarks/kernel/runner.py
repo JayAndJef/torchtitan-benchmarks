@@ -1,46 +1,23 @@
 """Orchestrate kernel-isolation measurements from the torch-free CLI.
 
-A run measures two kinds of unit. A **scenario** cuts the model at one
-boundary and ranks the implementations there. A **span** fuses across a cut,
-so it is declared over an ordered scenario range and its claim is the span
-against the sum of the scenarios it replaces. ``measurement_plan`` puts every
-enclosed scenario ahead of its span and each scenario once, and the span
-merge takes its second total from those results -- so both sides of the claim
-share one request's hardware, shape, workload, seed, ``burst_k``, replicate
-count and NUMA pinning by construction rather than by a re-check.
+A run measures two kinds of unit. A scenario cuts the model at one boundary
+and ranks the implementations there. A span fuses across a cut, so its claim
+is the span against the sum of the scenarios it replaces.
+``measurement_plan`` puts every enclosed scenario ahead of its span, and each
+scenario once, so both sides of the claim share one request's hardware,
+shape, workload, seed, ``burst_k``, replicate count and NUMA pinning.
 
-Mirrors ``e2e/runner.py``: the parent resolves provenance and pinning, writes
-the manifest, spawns pinned GPU workers so CUDA device selection, NUMA
-binding and the TE build's compiler environment all apply to the measuring
-process, and assembles the results. Scenarios are independent short runs, so
-unlike the e2e sweep the parent continues past a failing scenario and reports
-all outcomes.
+The parent resolves provenance and pinning, writes the manifest, spawns the
+pinned GPU workers and assembles the results. Each timing worker builds one
+arm, which keeps one arm's dependencies out of another arm's interpreter,
+and only the parent sees every fragment, so only the parent writes
+``results.json``. Scenarios are independent short runs, so the parent
+continues past a failing one and reports every outcome.
 
-**One process per pass, not one per scenario.** A scenario is a correctness
-worker followed by ``blocks x arms`` timing workers, each building a single
-arm. A block is ``replicates_per_process`` consecutive replicates, so at the
-default of 1 there are ``replicates x arms`` of them. That is what keeps one
-arm's dependencies out of another arm's interpreter -- a build failure, a
-leaked CUDA context or a JIT-built CUDA extension in one arm cannot reach
-another -- and it is why the parent, not a worker, writes ``results.json``:
-only the parent sees every fragment.
-
-**The sweep is block-major.** A block is ``replicates_per_process``
-consecutive replicates of one arm; the outer loop walks the blocks and the
-inner loop walks the arms. At the default of one replicate per process a
-block is one replicate and this is the replicate-major sweep it has always
-been: drift is shared across arms rather than charged to whichever arm
-happened to be running, and the anchor sits in every replicate slot. Raising
-it trades that adjacency for the arm builds it stops repeating; the trade is
-stated on ``KernelRunRequest``.
-
-**Workers run strictly sequentially.** A shared GPU invalidates timings
-(CLAUDE.md operating rules), so the parent never has two in flight.
-
-A crashed timing worker does not abort the sweep: it is reported the moment
-it happens, and the merge decides what the scenario can still say. Losing a
-non-anchor arm costs that arm; losing the anchor fails the scenario, because
-every comparison is a ratio against it.
+The parent runs the workers strictly one at a time, because a shared GPU
+invalidates a timing. A crashed timing worker costs its own arm. A crashed
+anchor fails the scenario, because every comparison is a ratio against the
+anchor.
 """
 
 from __future__ import annotations
@@ -93,94 +70,45 @@ from benchmarks.models.piper_qwen3.shape import (
 )
 
 
-# 2: the single flat shape record was replaced by model_size + model_shape
-# (the same describe() the e2e manifest records) plus the workload.
-#
-# 3: n/warmup counted round-robin cycles and were replaced by the
-# burst-timing parameters, matching the results schema. This file is
-# write-only provenance -- no loader reads it -- so the bump is labelling.
-#
-# 4: a scenario is no longer one worker invocation, so the single "command"
-# became "commands", one argv per pass. Renamed rather than redefined: a
-# reader of the old field would take the correctness worker's argv for the
-# whole run.
-#
-# 5: "skipped_arms" records the arms this host never launched, and why. The
-# roster in "arms" is the registry's, so a manifest-only reader previously
-# had to diff it against "commands" to learn that an arm was dropped -- and
-# would read a schema-4 manifest written after this change identically to
-# one written before it. This file is write-only provenance, so the bump is
-# labelling, exactly as 3 was.
-#
-# 6: "replicates_per_process" records how many of an arm's replicates shared
-# a worker. A schema-5 manifest was always 1 -- the field did not exist
-# because the choice did not -- so its absence is unambiguous, and the bump
-# is labelling again rather than a reinterpretation. The timing entries of
-# "commands" also change shape here, from "--fragment <path>" to
-# "--fragments-dir <dir>": a worker that measures a block writes a file per
-# replicate, so it is handed the directory. Nothing reads the field, but a
-# reader diffing a schema-5 manifest against a schema-6 one meets the change
-# and this is where it is explained.
-#
-# 7: a run measures two kinds of unit. A **span** fuses across a scenario
-# cut, so it is declared over an ordered scenario range and its claim is the
-# span against the sum of the scenarios it replaces. The manifest gains
-# "unit_kind", "span_scenarios" and "parts", and its "kind" value changes
-# from "kernel" to "kernel_scenario" or "kernel_span" -- the same rename the
-# results file makes at schema 7, and for the same reason: "kernel" named the
-# family and one member of it at once. This file is write-only provenance
-# with no loader, so the bump is labelling, exactly as 3, 5 and 6 were.
 KERNEL_MANIFEST_SCHEMA_VERSION = 7
+"""The schema version of the manifest this runner writes.
+
+No loader reads the file, so each bump labels a change rather than
+reinterprets one. Schema 7 tells the two unit kinds apart: "kind" holds
+``kernel_scenario`` or ``kernel_span``, and the file gains "unit_kind",
+"span_scenarios" and "parts".
+"""
 
 
 @dataclass(frozen=True)
 class KernelRunRequest:
     """One kernel-bench invocation.
 
-    ``replicates_per_process`` is the one field here that is a methodology
-    choice rather than a workload one. It says how many consecutive
-    replicates of an arm share a worker process, and it trades measurement
-    cost against the property the replicate exists for.
-
-    At ``1`` every replicate is a fresh process and the sweep is
-    replicate-major: an arm's five replicates are spread across the run, each
-    within seconds of every other arm's matching replicate, so drift that
-    moves a whole replicate cancels in the per-replicate log-ratio the
-    bootstrap runs on. That is what makes the CI an honest statement about
-    the ratio.
-
-    Above ``1`` an arm's replicates become consecutive measurements inside
-    one process, separated by milliseconds rather than by a rebuild. Two
-    things follow, and both are costs. The replicates stop sampling
-    process-to-process variation, so the CI narrows without the underlying
-    quantity having become better known -- measured at 26-48% narrower while
-    the point estimate's round-to-round spread did not improve, **on a box at
-    load average 28 to 81, on the retired ``qkv`` scenario alone, two arms,
-    one of them the anchor**. That figure is the record of what was tried and may not be
-    cited. And the arms move apart in time -- at the extreme, arm A's whole
-    block runs, then arm B's -- so drift between the blocks lands in the point
-    estimate instead of cancelling. The same measurement could only have
-    resolved a shift in the point estimate larger than 4.2-6.3%, and
-    ``backward`` moved -4.78%, so a bias of a few percent in the noisiest mode
-    is not ruled out. The results file renames every degraded statistic
-    accordingly; see ``benchmarks.kernel.results.merge``.
-
-    Raise it to buy wall-clock, and say in the report that you did. Use 1 for
-    anything published.
+    Attributes:
+        arm_names: The operator's ``--arm`` choice, empty for every arm. It
+            names arms of one scenario, and what it leaves out is skipped
+            for a reason that says so. ``resolve_arm_skips`` refuses a
+            selection it cannot honour.
+        span_names: The spans this run measures, and never a default. One
+            span adds every scenario it replaces to the run, so a bare
+            ``kernel-bench <gpu>`` asks for no span.
+        replicates_per_process: How many consecutive replicates of one arm
+            share a worker process. It is a methodology choice, not a
+            workload one. At 1 each replicate is a fresh process, and every
+            arm runs within seconds of every other, so drift that moves a
+            whole replicate cancels in the per-replicate log-ratio. Above 1
+            the replicates stop sampling process-to-process variation and
+            the arms move apart in time, so the interval narrows and drift
+            lands in the point estimate. The results file renames every
+            degraded statistic. Use 1 for anything published. The one
+            measurement of the trade gave an interval 26-48% narrower with
+            no better point estimate, on a box at load average 28 to 81, so
+            that figure records what was tried and may not be cited.
     """
 
     gpu: str
     scenario_names: tuple[str, ...]
-    # The operator's --arm choice, empty for every arm. It names arms of one
-    # scenario, and it is a request rather than a capability: what it leaves
-    # out is skipped for a reason that says so. resolve_arm_skips refuses a
-    # selection it cannot honour.
     arm_names: tuple[str, ...] = ()
-    # The spans this run measures, and never a default. A span is compared
-    # against the sum of the scenarios it replaces, and those scenarios are
-    # measured in the same run -- so one span can drag six scenarios into a
-    # run that asked for none of them. Making it opt-in keeps a bare
-    # ``kernel-bench <gpu>`` meaning what it has always meant.
     span_names: tuple[str, ...] = ()
     replicates: int = 5
     replicates_per_process: int = 1
@@ -204,11 +132,12 @@ class KernelRunRequest:
 class KernelScenarioOutcome:
     """What one measurement unit produced.
 
-    ``scenario`` is the unit's name and ``unit_kind`` says which kind of unit
-    it names. The published artifacts keep the two apart by shape -- a span
-    writes a ``kernel_span`` results file with a ``span`` field, and never a
-    ``scenario`` one -- and this type is the in-memory hand-off that carries
-    both to the reporter.
+    Attributes:
+        scenario: The unit's name, whichever kind of unit it names.
+        unit_kind: Which kind of unit that is.
+        failed_passes: The (arm, replicate) pairs whose worker wrote no
+            fragment. The scenario still reports what the survivors
+            measured, and it still exits nonzero.
     """
 
     scenario: str
@@ -217,18 +146,11 @@ class KernelScenarioOutcome:
     correctness_failed: bool = False
     error: str | None = None
     unit_kind: str = "scenario"
-    # (arm, replicate) pairs whose worker did not produce a fragment. The
-    # scenario still reports whatever the survivors measured, but it exits
-    # nonzero: a partial roster published as a whole one is the failure this
-    # harness exists to prevent.
     failed_passes: tuple[str, ...] = ()
 
     @property
     def failed(self) -> bool:
-        # A ``failed`` arm in the results counts too, and it is not covered by
-        # ``failed_passes``: an arm whose workers all wrote a fragment and
-        # measured nothing in it never lost a pass. The scenario still
-        # published a short roster, so it still exits nonzero.
+        # A ``failed`` arm lost no pass, and it still shortens the roster.
         arms = self.result.arms.values() if self.result is not None else ()
         return (
             self.correctness_failed
@@ -242,14 +164,12 @@ class KernelScenarioOutcome:
 class MeasurementUnit:
     """One thing this run measures: a scenario, or a span.
 
-    ``measurement`` is what the workers build and time, and it is a
-    ``KernelScenario`` either way -- a span composes one. That is what keeps
-    ``benchmarks.kernel.engine`` free of any knowledge that spans exist.
-
-    ``span`` is set only for a span, and it is what the merge needs on top of
-    the measurement: the ordered range and what each arm replaces. The
-    runner reads it for the output directory, the manifest, the worker argv
-    and the merge, and for nothing else.
+    Attributes:
+        measurement: What the workers build and time. It is a
+            ``KernelScenario`` either way, so ``benchmarks.kernel.engine``
+            never learns that spans exist.
+        span: Set for a span alone. It holds the ordered range and what
+            each arm replaces, which the merge needs.
     """
 
     measurement: KernelScenario
@@ -267,17 +187,9 @@ class MeasurementUnit:
 def measurement_plan(request: KernelRunRequest) -> tuple[MeasurementUnit, ...]:
     """Every unit this run measures, in the order it measures them.
 
-    **Scenarios first, then spans.** A span's claim is against the sum of the
-    scenarios it replaces, and the merge takes that sum from the results of
-    the same run -- so every enclosed scenario must have finished before the
-    span is merged. Running them together is what makes the two sides share a
-    hardware label, a shape, a workload, a seed, a ``burst_k``, a replicate
-    count and a NUMA pinning by construction rather than by a re-check.
-
-    **Each scenario appears once.** A scenario the operator asked for and a
-    scenario two spans both enclose is still one scenario. Measuring it twice
-    would spend the GPU on it twice and produce two different numbers for one
-    thing, and nothing would say which of them a span summed.
+    Scenarios come first, because the merge takes a span's second total
+    from the results of this same run. Each scenario appears once, so no cut
+    is measured twice and no span sums an ambiguous number.
     """
     ordered: list[str] = list(request.scenario_names)
     for span_name in request.span_names:
@@ -311,17 +223,13 @@ def worker_command(
     replicate_count: int = 1,
     skip_arms: Sequence[str] = (),
 ) -> list[str]:
-    """The argv for one worker pass. Deterministic, so the manifest can list
-    every command the run will issue before the first one starts.
+    """The argv for one worker pass.
 
-    A timing worker is handed the fragments directory rather than a path,
-    because a batched one writes a file per replicate. The correctness worker
-    writes exactly one file and is still handed it by name.
-
-    A span is named with ``--span`` and never with ``--scenario``. The worker
-    resolves it through the span registry and measures ``span.measurement``,
-    so the recorded argv says which roster the name belongs to and a reader
-    of the manifest never has to guess.
+    It is deterministic, so the manifest lists every command before the
+    first one starts. A timing worker takes the fragments directory, because
+    a batched one writes a file per replicate. A span is named with
+    ``--span`` and never with ``--scenario``, so the recorded argv says
+    which roster the name belongs to.
     """
     command = list(prefix) + [
         sys.executable,
@@ -338,13 +246,7 @@ def worker_command(
         else ["--fragment", str(fragments_dir / "correctness.json")]
     )
     command += [
-        # Neither worker pass reads --replicates. The parent owns the sweep,
-        # and a timing worker measures the block --replicate and
-        # --replicate-count name, which is one replicate at the default.
-        # It is forwarded as provenance: the manifest publishes this argv as
-        # the record of the run, so each command states the whole request it
-        # came from, and the worker's own default of 5 never stands in for a
-        # count the operator chose.
+        # Provenance alone. No worker pass reads it; the parent owns the order.
         "--replicates",
         str(request.replicates),
         "--samples-per-replicate",
@@ -355,9 +257,7 @@ def worker_command(
         str(request.warmup_calls),
         "--seed",
         str(request.seed),
-        # Unconditional, unlike the overrides below: the run always has a
-        # model size, and the worker must not fall back to its own default.
-        # Canonical, so a recorded command never carries a retired alias.
+        # Always sent and canonical: no worker default, no retired alias.
         "--model-size",
         canonical_size_name(request.model_size),
     ]
@@ -386,8 +286,7 @@ def replicate_blocks(
     """The (first replicate, count) pairs one arm's timing workers cover.
 
     The blocks tile ``range(replicates)`` in order, and only the last one is
-    short. ``replicates_per_process=1`` gives one block per replicate, which
-    is the historical sweep.
+    short. One replicate per process gives one block per replicate.
     """
     size = max(1, replicates_per_process)
     return tuple(
@@ -401,19 +300,11 @@ def _selection_skips(
 ) -> dict[str, str]:
     """The arms ``--arm`` leaves out, keyed by name, with the reason.
 
-    The reason names the flag, so ``results.json`` and the manifest keep the
-    operator's choice apart from the host's capability. "Nobody asked for it"
-    and "this host cannot run it" are different facts about an arm, and a
-    reader who takes one for the other misreads the roster.
-
-    **A selection this scenario cannot honour is refused, never repaired.**
-    Three cases raise, and each names what is missing. An unknown name is a
-    typo, and a typo must not quietly measure a smaller set. A selection
-    without the anchor arm publishes no ratio at all, because every
-    comparison is one against the anchor. A selection that leaves out a
-    selected arm's correctness reference cannot gate that arm, because a
-    check needs both sides in one process. Adding the missing arm silently is
-    the alternative, and it measures something the operator did not ask for.
+    The reason names the flag, so a reader tells the operator's choice from
+    the host's capability. A selection this scenario cannot honour is
+    refused, never repaired: an unknown name, a missing anchor arm and a
+    missing correctness reference each raise, and each names what is
+    missing.
     """
     roster = [arm.name for arm in scenario.arms]
     unknown = sorted(set(selected) - set(roster))
@@ -433,8 +324,7 @@ def _selection_skips(
         if arm.name not in chosen:
             continue
         for check in arm.correctness:
-            # "fp64" is the scenario's own reference builder rather than an
-            # arm, so it is present whatever the selection.
+            # "fp64" is the scenario's own builder, so it is always present.
             if check.reference == "fp64" or check.reference in chosen:
                 continue
             raise ValueError(
@@ -460,41 +350,17 @@ def resolve_arm_skips(
 ) -> dict[str, str]:
     """Which arms this run does not measure, and why, keyed by arm name.
 
-    **Requirements belong to the arm, not to the scenario.** Without a C++20
-    host compiler, rope loses ``titan/te`` and still measures its other four
-    arms. The scenario-level ``requires_gcc_toolset`` is an OR across arms, so
-    using it to decide cost every arm of the scenario; it keeps its one honest
-    use, which is asking whether anything here needs the compiler at all.
+    A requirement belongs to an arm, not to a scenario, so a missing C++20
+    host compiler costs ``titan/te`` alone. ``requires_gcc_toolset`` is a
+    property of the host. ``KernelArm.requirement`` is the other kind: a
+    parent-side predicate the shape and the workload answer. Both run in the
+    parent, before a GPU is claimed, so the arm is never built and nothing
+    has to tell a requirement from a bug.
 
-    **Two kinds of requirement, and the second needs the workload.**
-    ``requires_gcc_toolset`` is a property of the host, answerable before the
-    shape is known. ``KernelArm.requirement`` is the other kind: a dotted
-    path to a parent-side predicate, called with ``(shape, workload)``, that
-    returns the reason this arm cannot run here or ``None``. An unfused
-    attention arm whose dense score tensor grows with the square of the
-    sequence length is the case that forced it, and it is why a sequence
-    sweep was impossible before: one builder raising killed the whole
-    scenario, because the correctness pass builds every arm in one process
-    and catches nothing.
-
-    **The probe runs in the parent, before a GPU is claimed.** That is what
-    makes it a probe rather than a rescue: the arm is never built, so nothing
-    has to decide whether an exception was a requirement or a bug. A builder
-    that raises for an undeclared reason still fails the scenario, which is
-    what it is.
-
-    **The set is closed over correctness references.** An arm whose reference
-    is skipped is skipped too. The alternative is to time an arm that nothing
-    checked, which is the silent wrongness the gates exist to prevent. The
-    compiler skip has never reached that closure -- ``titan/te`` is a
-    referrer, never a reference -- but a workload skip does: an arm dropped
-    at a long sequence takes with it anything gated against it.
-
-    ``selected`` is the operator's ``--arm`` choice, and an empty one means
-    every arm. **It is resolved first**, so an arm nobody asked for keeps
-    that reason rather than a capability reason it never had to meet: an arm
-    outside the selection is never probed, and its row says the operator did
-    not select it. ``_selection_skips`` states what a selection may not do.
+    The set is closed over correctness references, because an arm nothing
+    checked must not be timed. ``selected`` is the operator's ``--arm``
+    choice, and it resolves first, so an arm nobody asked for keeps that
+    reason rather than a capability reason it never had to meet.
     """
     skipped: dict[str, str] = (
         _selection_skips(scenario, selected) if selected else {}
@@ -534,28 +400,15 @@ def timing_passes(
 ) -> tuple[tuple[str, int, int], ...]:
     """The ``(arm, first replicate, count)`` of every timing pass, in order.
 
-    **Block-major**: the outer loop walks the replicate blocks and the inner
-    loop walks the arms, so every arm is measured once before any arm is
-    measured again. At ``replicates_per_process=1`` a block is one replicate
-    and this is exactly the replicate-major sweep -- every arm is timed
-    within seconds of every other, and drift that moves a whole replicate
-    cancels in the ratio. At a larger value the blocks get longer and that
-    adjacency coarsens; ``KernelRunRequest.replicates_per_process`` states
-    what it costs.
+    The order is block-major: the outer loop walks the replicate blocks and
+    the inner loop walks the arms, so every arm runs once before any arm
+    runs again. At one replicate per process a block is one replicate, and
+    drift that moves a whole replicate cancels in the ratio. A skipped arm
+    appears in no pass.
 
-    A skipped arm appears in no pass, and the manifest therefore lists what
-    the run really does rather than what a fully-equipped host would have
-    done.
-
-    The sweep is described here, once, because two callers need it: the
-    manifest writer turns each triple into an argv, and the spawn loop needs
-    the same triple back to know which fragments to look for. The spawn loop
-    used to recover it by parsing the argv it had just generated -- which
-    tested ``"--replicate-count" in command`` over the whole list, so a
-    *value* equal to that string would have matched as readily as the flag.
-    A worker must not learn a convention by string surgery on what it was
-    handed (``benchmarks.kernel.schema.timing_fragment_path``), and neither
-    must the parent.
+    Two callers need this order, so one function states it. The manifest
+    writer turns each triple into an argv, and the spawn loop needs the same
+    triple back. Neither side may recover it by string surgery on an argv.
     """
     return tuple(
         (arm.name, first, count)
@@ -576,10 +429,8 @@ def planned_commands(
 ) -> list[list[str]]:
     """Every worker argv this unit will issue, in the order it issues it.
 
-    The correctness pass first, then one argv per entry of
-    ``timing_passes``, which is where the order is decided. A span's passes
-    are a scenario's passes: it composes a ``KernelScenario`` and the workers
-    measure that.
+    The correctness pass comes first, then one argv per entry of
+    ``timing_passes``. A span's passes are a scenario's passes.
     """
     scenario = unit.measurement
     return [
@@ -621,40 +472,26 @@ def kernel_manifest_data(
     span = unit.span
     return {
         "schema_version": KERNEL_MANIFEST_SCHEMA_VERSION,
-        # Renamed at schema 7, exactly as the results file renames it: two
-        # kinds of unit now write a manifest, and "kernel" named the family
-        # and one member of it at once.
+        # Renamed at schema 7, because "kernel" named the family and a member.
         "kind": f"kernel_{unit.kind}",
         "unit_kind": unit.kind,
-        # The unit's name, under the field that says what kind of name it
-        # is. A span name is NOT a scenario name: a reader who finds one in
-        # "scenario" goes to KERNEL_SCENARIOS to look it up and finds
-        # nothing. The results file has kept these apart since schema 7 and
-        # this file put a span name in "scenario" one directory over.
+        # A span name is not a scenario name, so each kind has its own field.
         "scenario": None if span else scenario.name,
         "span": span.name if span else None,
         "description": scenario.description,
-        # The ordered range a span replaces, and what each of its arms
-        # replaces in that range. Absent on a scenario, where there is no
-        # range to name. Prefixed, unlike the results file's "scenarios",
-        # because both kinds of unit share this one dict and an unprefixed
-        # plural would sit next to "scenario" and read as its list form.
+        # The range a span replaces. The prefix keeps it apart from "scenario".
         "span_scenarios": list(span.scenarios) if span else None,
         "parts": (
             {entry.arm: list(entry.parts) for entry in span.parts}
             if span
             else None
         ),
-        # The shape's own name, which is canonical by construction: an
-        # alias reaching the record would name a size no reader can look up.
+        # Canonical by construction; an alias would name a size nobody reads.
         "model_size": shape.name,
-        # The same record the e2e manifest writes, so both systems state
-        # model identity identically.
+        # The same record the e2e manifest writes, so both state one identity.
         "model_shape": shape.describe(seq_len=workload.seq_len),
         "workload": asdict(workload),
-        # A span's inputs are the first cut's and its outputs are the last
-        # cut's, so no single entry describes it and shape_summary knows
-        # scenario names only. The union of the range is what a reader needs.
+        # No single entry describes a span, so a span records the whole range.
         "shapes": (
             {
                 name: shape_summary(name, shape, workload)
@@ -664,17 +501,11 @@ def kernel_manifest_data(
             else shape_summary(scenario.name, shape, workload)
         ),
         "arms": [asdict(arm) for arm in scenario.arms],
-        # "arms" is the registry's roster, so it names arms this host never
-        # ran. The reason is recorded beside the name: a reader of the
-        # manifest alone can then tell a missing arm from a dropped one,
-        # without a diff of "arms" against "commands".
+        # "arms" holds the registry's roster, so a dropped arm needs a reason.
         "skipped_arms": dict(skipped),
         "baseline_arm": scenario.baseline_arm,
         "replicates": request.replicates,
-        # How many of them shared a process. A reader comparing two runs
-        # needs it: at 1 the sweep is replicate-major and the per-replicate
-        # ratios cancel drift, and above 1 they do so less. It is not
-        # derivable from "commands" without parsing every argv.
+        # At 1 the per-replicate ratios cancel drift; above 1 they do so less.
         "replicates_per_process": request.replicates_per_process,
         "samples_per_replicate": request.samples_per_replicate,
         "burst_k": request.burst_k,
@@ -735,9 +566,7 @@ def execute_kernel_run(
     _emit(event_handler, "summary", metadata["nvidia_smi"])
     _emit(event_handler, "summary", f"cpu pinning: {pinning.description}")
 
-    # Resolved once per run, not once per scenario and certainly not once per
-    # worker: add_compiler_environment shells out to bash, and the answer
-    # cannot change between two scenarios of the same run.
+    # Resolved once per run: add_compiler_environment shells out to bash.
     plan = measurement_plan(request)
     compiler_environment = base_environment
     compiler_unavailable: str | None = None
@@ -764,21 +593,13 @@ def execute_kernel_run(
             )
 
     outcomes = []
-    # Every scenario this run measured, for the span merges below. A span's
-    # second total is the sum of its scenarios, and the plan guarantees they
-    # ran first and in this same run.
+    # The scenarios this run measured, which the span merges below sum.
     measured: dict[str, MeasuredScenario] = {}
     for unit in plan:
         scenario = unit.measurement
         name = unit.name
-        # A span sits under its own directory, so a glob of
-        # out/*/kernels/*/*/ over the scenarios does not sweep up a span
-        # beside them: a span total and a scenario total answer different
-        # questions and must not be pooled by a path pattern.
-        #
-        # This guards the shallow-glob reader only. A recursive walk meets
-        # both shapes whatever the directory is, and what separates them
-        # there is the "kind" value the results file carries.
+        # A span sits one directory deeper, so a shallow glob cannot pool it
+        # with the scenarios. A recursive walk must read the "kind" value.
         root = BENCH_DIR / "out" / timestamp / "kernels"
         if unit.span is not None:
             root = root / "spans"
@@ -794,8 +615,7 @@ def execute_kernel_run(
             selected=request.arm_names,
         )
         if scenario.baseline_arm in skipped:
-            # The anchor carries every ratio, so losing it is the one skip
-            # that costs the scenario rather than an arm.
+            # The anchor carries every ratio, so its loss costs the scenario.
             outcome = KernelScenarioOutcome(
                 scenario=name,
                 out_dir=out_dir,
@@ -815,8 +635,7 @@ def execute_kernel_run(
         if scenario.requires_balanced_routing and not routing_divides_evenly(
             shape, workload
         ):
-            # Loudly skipped rather than quietly rounded: an unbalanced split
-            # would silently measure a different workload per expert.
+            # Skipped loudly: an uneven split changes the workload per expert.
             rows = workload.batch * workload.seq_len * shape.top_k
             outcome = KernelScenarioOutcome(
                 scenario=name,
@@ -860,9 +679,7 @@ def execute_kernel_run(
         )
 
         log_path = out_dir / "kernel_bench.log"
-        # One log for the whole scenario: every worker of every pass appends
-        # to it, so a crashed arm's traceback sits in sequence with the passes
-        # around it rather than in a file per process.
+        # One log for the whole scenario, so a traceback sits in pass order.
         with log_path.open("w") as log:
 
             def spawn(command: list[str], log: IO[str] = log) -> int:
@@ -875,14 +692,11 @@ def execute_kernel_run(
                     stderr=subprocess.STDOUT,
                     check=False,
                 )
-                # The log stays open for the whole scenario, so a tail read
-                # after a crash would otherwise see an empty buffer.
+                # The log stays open, so a tail read needs this flush.
                 log.flush()
                 return completed.returncode
 
-            # Gates first. A failed gate means no timing is worth taking, so
-            # the timing workers never launch -- unlike the single-process
-            # predecessor, which measured an arm it already knew was wrong.
+            # Gates first: a failed gate means no timing is worth taking.
             correctness_code = spawn(commands[0])
             correctness = _read_fragment(fragments_dir / "correctness.json")
             if correctness is None:
@@ -901,13 +715,8 @@ def execute_kernel_run(
                 outcomes.append(outcome)
                 continue
 
-            # The exit code and the fragment are two independent statements of
-            # one verdict, and either one failing is a failure. The worker
-            # writes the fragment *before* it computes the code, so a process
-            # that dies in that window -- a signal, an OSError on the report,
-            # an OOM kill -- leaves "all_passed": false beside a code that is
-            # not 3. Reading the code alone published a failed gate as a pass,
-            # with a full set of timings under it.
+            # The code and the fragment state one verdict twice. Either one
+            # failing is a failure; the code alone once passed a failed gate.
             gates_failed = correctness_code == 3 or not correctness.get(
                 "all_passed"
             )
@@ -921,22 +730,15 @@ def execute_kernel_run(
                     "timed. See the report below",
                 )
             else:
-                # In lockstep with commands[1:], which planned_commands built
-                # from this same sequence. The pass is read from the plan, not
-                # parsed back out of the argv the plan produced.
-                # strict, so a plan and a sweep of different lengths raise
-                # rather than silently dropping the tail of the longer one.
+                # In lockstep with commands[1:]. strict=True, so a plan and a
+                # run of different lengths raise instead of dropping a tail.
                 passes = timing_passes(scenario, request, skipped)
                 for (arm, first, count), command in zip(
                     passes, commands[1:], strict=True
                 ):
                     code = spawn(command)
-                    # One worker, one fragment per replicate it covered. A
-                    # batched worker that died mid-block leaves some of them
-                    # missing, and each missing one is reported on its own:
-                    # the merge counts replicates, not workers, and an arm
-                    # short of one is incomplete however few processes lost
-                    # it.
+                    # One fragment per replicate, reported one by one: the
+                    # merge counts replicates rather than workers.
                     missing = False
                     for replicate in range(first, first + count):
                         fragment = _read_fragment(
@@ -946,10 +748,7 @@ def execute_kernel_run(
                             missing = True
                             label = f"{arm} r{replicate}"
                             failed_passes.append(label)
-                            # Reported as it happens rather than at the end:
-                            # the sweep continues, and an operator watching a
-                            # long run should not learn about the first crash
-                            # last.
+                            # Reported now, because the run continues.
                             _emit(
                                 event_handler,
                                 "error",
@@ -961,11 +760,8 @@ def execute_kernel_run(
                     if missing:
                         continue
                     if code != 0:
-                        # The samples stand -- the worker writes its fragments
-                        # before it returns -- so this costs the arm nothing.
-                        # It is still said out loud: the code reports a death
-                        # after the write, and a discarded exit code is how a
-                        # silent failure starts.
+                        # The samples stand, because the worker writes first.
+                        # A discarded exit code starts a silent failure.
                         block = (
                             f"r{first}"
                             if count == 1
@@ -998,11 +794,8 @@ def execute_kernel_run(
         )
         try:
             if unit.span is not None:
-                # ``measured`` holds the scenarios this same run produced.
-                # The plan put every one of them ahead of the span, so the
-                # sum is taken from results that share this run's hardware,
-                # shape, workload, seed, burst_k and replicate count by
-                # construction.
+                # ``measured`` holds this run's scenarios, which the plan put
+                # ahead of the span, so the sum shares every run axis.
                 result = merge_kernel_span_fragments(
                     span=unit.span, parts=measured, **shared
                 )
@@ -1026,9 +819,7 @@ def execute_kernel_run(
             unit_kind=unit.kind,
             failed_passes=tuple(failed_passes),
         )
-        # Report a failure the moment it happens. Scenarios continue past one
-        # another, so holding this until the end would show a first-scenario
-        # failure only after every later scenario had run.
+        # Reported now, because the later scenarios still have to run.
         if outcome.error:
             _emit(event_handler, "error", f"ERROR {outcome.error}")
         outcomes.append(outcome)

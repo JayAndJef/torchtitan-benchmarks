@@ -1,44 +1,13 @@
 """The ``kernel-bench`` command: the kernel-isolation family, on its own.
 
-One command and its own option stack. The option count that used to open this
-paragraph is gone: it was stale two commits after it was written, and a
-reader can list the options from the file below. With the end-to-end family
-the command shares the group, the event renderer and the model-shape
-registry, and nothing else -- different request type, different runner,
-different results schema, different reporter -- so its options no longer sit
-two hundred lines below ``_execution_options``, an eleven-option block that
-never applied to it.
+``--out``, ``--seq-len``, ``--batch`` and ``--model-size`` read no
+environment variable, so an ``OUT``, ``SEQ`` or ``BATCH`` exported for an
+end-to-end session cannot reach a kernel measurement. Only ``--cache-root``
+and ``--compiler-env`` read one. That is why ``--model-size`` is declared
+twice in this package; ``benchmarks/cli/e2e.py`` holds the other half.
 
-**Environment variables are declined here on purpose.** Only ``--cache-root``
-and ``--compiler-env`` read one; ``--out``, ``--seq-len``, ``--batch`` and
-``--model-size`` are flags only, so an ``OUT``/``SEQ``/``BATCH`` environment
-exported for an end-to-end session cannot leak into a kernel measurement
-(CLAUDE.md, "Kernel-isolation benchmarks"). That is also why ``--model-size``
-is declared twice in this package rather than shared: this one shows its
-default, while ``benchmarks/cli/e2e.py``'s carries
-``envvar="MODEL_SIZE"`` and no default so a resume can tell an unrequested
-size from an explicit one. Two options that share a spelling; see that
-module's docstring for the other half.
-
-The single ``--out`` guard is here rather than in ``KernelRunRequest``
-because it is a usage error about flags, not a property of a request: without
-it, several scenarios would resolve to the same directory and overwrite each
-other's ``results.json``. It refuses ``--span`` outright, because a span run
-always measures the scenarios the span replaces as well and is therefore
-never one unit. ``--arm`` refuses ``--span`` for the other half of the same
-fact: an arm name belongs to one scenario's roster, and a span run has
-several rosters, so the selection cannot say which one it names. Everything
-else this function does after the runner returns is reporting -- errors were
-already streamed through the shared renderer as they happened, so only the
-successful scenarios' reports are printed, and a nonzero exit summarizes the
-failures.
-
-Two import facts. ``from benchmarks.kernel...`` inside a module named
-``benchmarks.cli.kernel`` resolves to the top-level package, not to this one:
-Python 3 imports are absolute. And the command is declared with a plain
-``@click.command`` and attached by ``benchmarks/cli/main.py`` via
-``cli.add_command``, so importing ``main`` is what populates the group and no
-command module imports it back.
+``benchmarks/cli/main.py`` attaches this plain ``@click.command`` through
+``cli.add_command``, so no command module imports the group back.
 """
 
 from __future__ import annotations
@@ -100,16 +69,9 @@ from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
     "--replicates",
     default=5,
     show_default=True,
-    # Each of the three counts something a run cannot have none of, and none
-    # of the three refused a zero here. ``--replicates 0`` reached median()
-    # with an empty list and died on a StatisticsError from the standard
-    # library; ``--samples-per-replicate 0`` timed one burst and discarded
-    # it, so every arm produced an empty mode map; ``--burst-k 0`` divided a
-    # burst by no calls and was caught only inside the worker. The range
-    # check states the requirement where the operator reads it, before a GPU
-    # is claimed.
+    # min=1: a zero count was caught only deep in the run, never at the flag.
     type=click.IntRange(min=1),
-    help="Sweeps of every arm; the repetition unit the CI is taken over.",
+    help="Passes over every arm; the repetition unit the CI is taken over.",
 )
 @click.option(
     "--replicates-per-process",
@@ -118,7 +80,7 @@ from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
     type=click.IntRange(min=1),
     help=(
         "Consecutive replicates of one arm per worker process. 1 rebuilds the "
-        "arm for every replicate and keeps the replicate-major sweep; higher "
+        "arm for every replicate and keeps the replicate-major order; higher "
         "values buy wall-clock and cost the drift cancellation the ratio "
         "relies on, so the results file publishes the interval as "
         "within_process_ratio_ci_* instead. Two arms never share a process at "
@@ -175,7 +137,7 @@ from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
     type=int,
     help=(
         "Raise the shape's max_seq_len ceiling (default 4096); needed to "
-        "sweep attention_core past 4096. Also sizes the RoPE cos/sin "
+        "run attention_core past 4096. Also sizes the RoPE cos/sin "
         "tables."
     ),
 )
@@ -214,10 +176,7 @@ def kernel_bench_command(
     **options: Any,
 ) -> None:
     """Benchmark kernel implementations head-to-head in isolation."""
-    # One device, always. A kernel worker builds one arm in one process and
-    # times it against one anchor, so a second device would sit idle under a
-    # label that names it. The parser is the e2e one, so both surfaces read
-    # the ``<gpu>`` positional the same way.
+    # One device, always: a worker builds one arm, so a second device idles.
     try:
         devices = parse_devices(gpu)
     except ValueError as error:
@@ -226,35 +185,23 @@ def kernel_bench_command(
         raise click.UsageError(
             f"kernel-bench measures one device; {gpu!r} names {len(devices)}"
         )
-    # ``--scenario`` defaults to every scenario; ``--span`` defaults to none.
-    # A span drags every scenario it encloses into the run, so a default of
-    # "all spans" would silently change what a bare invocation costs. An
-    # explicit ``--span`` with no ``--scenario`` measures that span and its
-    # range, and nothing else.
+    # ``--span`` defaults to none, because one span adds every scenario it
+    # encloses to the run.
     selected = scenario_names or (() if span_names else tuple(KERNEL_SCENARIOS))
     if out_dir is not None and (len(selected) != 1 or span_names):
-        # A span is never allowed here, whatever else was asked for: it
-        # measures the scenarios it replaces in the same run, so a span run
-        # is always several units and they would all resolve to this one
-        # directory.
+        # A span run is always several units, and they share this directory.
         raise click.UsageError(
             "--out requires exactly one --scenario and no --span; a span "
             "also measures every scenario it replaces, so the units would "
             "overwrite each other"
         )
-    # ``--arm`` and ``--span`` do not combine. A span run always measures
-    # several scenarios -- the span itself and every scenario it replaces --
-    # so one arm selection cannot say which roster it names, and a per-
-    # scenario selection has no meaning across a range.
+    # A span run has several rosters, so one arm selection cannot pick one.
     if arm_names and span_names:
         raise click.UsageError(
             "--arm does not combine with --span; a span run measures several "
             "scenarios and an arm selection belongs to one roster"
         )
-    # An arm name belongs to one roster. Two scenarios share neither their
-    # arms nor their anchor, so a selection applied to both would mean a
-    # different thing in each, and a name valid in one would be a typo in the
-    # other. The roster itself is checked in resolve_arm_skips.
+    # An arm name belongs to one roster; resolve_arm_skips checks the roster.
     if arm_names and len(selected) != 1:
         raise click.UsageError(
             "--arm requires exactly one --scenario; arm names are per "
