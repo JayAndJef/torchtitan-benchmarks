@@ -1,6 +1,6 @@
 # torchtitan-benchmarks
 
-End-to-end and kernel benchmarks for the Piper Qwen3-1B TorchTitan port. The
+End-to-end and kernel benchmarks for the Piper Qwen3 TorchTitan port. The
 repository is out-of-tree: it registers the `benchmarks.models.piper_qwen3`
 module and its experiment overrides without modifying the TorchTitan
 checkout.
@@ -24,7 +24,7 @@ holds the argv-driven operator scripts.
 | `benchmarks/cli/` | Click CLI and the `python -m benchmarks.cli` entry point. |
 | `benchmarks/e2e/` | End-to-end system: scenario registry, runner, subprocess launch, validation, results. The stock Megatron-LM driver sits under `benchmarks/e2e/megatron_stock/`. |
 | `benchmarks/kernel/` | Kernel-isolation system: scenario registry, span registry, runner and worker, timing engine, arm builders, results. |
-| `benchmarks/models/piper_qwen3/` | Piper Qwen3-1B config port, model shape, and the benchmark-local kernel components. Also the Megatron model builder and the submodule bootstrap. |
+| `benchmarks/models/piper_qwen3/` | Piper Qwen3 config port, the model shapes, and the benchmark-local kernel components. Also the Megatron model builder and the submodule bootstrap. |
 | `benchmarks/traces/` | Chrome-trace parsing, read under `--profile` alone. |
 | `benchmarks/artifacts/` | Manifest and run-state IO, output layout, shared sample summaries. |
 | `benchmarks/execution/` | Subprocess environment: repository paths, CPU pinning, hardware metadata. |
@@ -33,8 +33,10 @@ holds the argv-driven operator scripts.
 | `third_party/torchtitan/` | Pinned TorchTitan submodule; installed editable into `.venv`. |
 | `third_party/Megatron-LM/` | Pinned Megatron-LM submodule; placed on `sys.path`, not pip-installed. |
 
-The model configuration is registered as `qwen3_piper_1b`. The port
-represents Piper's 1B routed-MoE Qwen3 variant.
+The model configuration is registered as `qwen3_piper_1b`. The name is a
+config family and not a shape: `--model-size` picks the shape, and the
+default is `30b-a3b`. The port represents Piper's routed-MoE Qwen3
+variant.
 
 ## The scenario
 
