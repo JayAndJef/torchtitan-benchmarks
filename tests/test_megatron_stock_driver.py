@@ -46,6 +46,7 @@ import torch  # noqa: E402
 from benchmarks.e2e.megatron_stock import (  # noqa: E402
     bootstrap,
     data,
+    dp_marker,
     flags,
     markers,
     profiling,
@@ -2224,7 +2225,7 @@ class DataParallelMarkerTest(unittest.TestCase):
             with self.expert_group_of(
                 ep if built_ep is None else built_ep
             ):
-                train.install_data_parallel_marker(
+                dp_marker.install_data_parallel_marker(
                     data_parallel_size=dp, expert_parallel_size=ep
                 )
                 with contextlib.redirect_stdout(stream):
@@ -2257,7 +2258,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         """Below dp 2 there is no wrapper, and rule 12 asks for no line."""
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
-            train.install_data_parallel_marker(data_parallel_size=1)
+            dp_marker.install_data_parallel_marker(data_parallel_size=1)
         self.assertEqual(stream.getvalue(), "")
 
     def test_a_missing_wrapper_raises(self) -> None:
@@ -2272,7 +2273,7 @@ class DataParallelMarkerTest(unittest.TestCase):
             lambda *args, **keywords: ([torch.nn.Linear(2, 2)], None, None)
         )
         try:
-            train.install_data_parallel_marker(data_parallel_size=2)
+            dp_marker.install_data_parallel_marker(data_parallel_size=2)
             with self.assertRaises(RuntimeError) as caught:
                 megatron_training.setup_model_and_optimizer()
         finally:
@@ -2387,7 +2388,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         This needs no megatron, because it reads the function alone.
         """
         self.assertEqual(
-            train.optimizer_class_name(
+            dp_marker.optimizer_class_name(
                 type("DistributedOptimizer", (), {})()
             ),
             "DistributedOptimizer",
@@ -2415,7 +2416,7 @@ class DataParallelMarkerTest(unittest.TestCase):
                 type("DistributedOptimizer", (), {})()
                 for _ in range(count)
             ]
-            return train.optimizer_class_name(optimizer)
+            return dp_marker.optimizer_class_name(optimizer)
 
         self.assertEqual(chain(1), chain(2))
         self.assertEqual(chain(1), data_parallel_optimizer(1))
@@ -2508,7 +2509,7 @@ class DataParallelMarkerTest(unittest.TestCase):
             lambda *args, **keywords: ([chunk], None, None)
         )
         try:
-            train.install_data_parallel_marker(data_parallel_size=2)
+            dp_marker.install_data_parallel_marker(data_parallel_size=2)
             with self.assertRaises(RuntimeError) as caught:
                 megatron_training.setup_model_and_optimizer()
         finally:
@@ -2625,7 +2626,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         megatron_training.setup_model_and_optimizer = stub
         try:
             with self.expert_group_of(1):
-                train.install_data_parallel_marker(data_parallel_size=2)
+                dp_marker.install_data_parallel_marker(data_parallel_size=2)
                 with contextlib.redirect_stdout(io.StringIO()):
                     megatron_training.setup_model_and_optimizer()
             self.assertIs(
