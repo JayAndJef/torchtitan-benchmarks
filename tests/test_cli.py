@@ -16,6 +16,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.artifacts.layout import _default_output_dir
 from benchmarks.cli.e2e import run_command
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import (
@@ -554,6 +555,58 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(stamps), 1)
         self.assertIsNotNone(requests[0].timestamp)
         self.assertIn("===== scenario: engines_copy =====", result.output)
+
+    def test_a_repeated_scenario_runs_again_under_its_own_directory(self) -> None:
+        """A name given twice is two runs, and the second takes a suffix."""
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute:
+                result = self.runner.invoke(
+                    cli,
+                    ["run", "0", "--scenario", "engines", "--scenario", "engines"],
+                )
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            [request.scenario_name for request in requests], ["engines", "engines"]
+        )
+        self.assertEqual([request.occurrence for request in requests], [1, 2])
+        directories = {
+            _default_output_dir(
+                ENGINES, "h200", None, {}, request.timestamp, request.occurrence
+            )
+            for request in requests
+        }
+        self.assertEqual(len(directories), 2)
+
+    def test_two_different_scenarios_each_keep_their_plain_name(self) -> None:
+        """The suffix counts one name, so two names never take one."""
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = SimpleNamespace(out_dir=Path(temporary))
+            with mock.patch.dict(
+                "benchmarks.cli.e2e.SCENARIOS",
+                self._two_scenarios(),
+                clear=True,
+            ), mock.patch(
+                "benchmarks.cli.e2e.execute_run", return_value=completed
+            ) as execute:
+                result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        requests = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual([request.occurrence for request in requests], [1, 1])
+        self.assertEqual(
+            _default_output_dir(ENGINES, "h200", None, {}, "STAMP", 1).name, "h200"
+        )
+        self.assertEqual(
+            _default_output_dir(ENGINES, "h200", None, {}, "STAMP", 1).parent.name,
+            "engines",
+        )
+        self.assertEqual(
+            _default_output_dir(ENGINES, "h200", None, {}, "STAMP", 2).parent.name,
+            "engines-run2",
+        )
 
     def test_run_does_not_evaluate_a_failed_execution(self) -> None:
         with mock.patch(

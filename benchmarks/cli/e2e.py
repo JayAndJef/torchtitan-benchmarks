@@ -46,6 +46,7 @@ where those names are bound.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -515,9 +516,11 @@ def run_command(
 ) -> None:
     """Run, validate and evaluate arms; pass TorchTitan arguments after --.
 
-    Every scenario runs unless ``--scenario`` narrows the set. The sweep is
-    fail-fast: the first failing arm stops it, and the scenarios behind it
-    never start.
+    Every scenario runs unless ``--scenario`` narrows the set. Named
+    scenarios run one at a time, in the order given, and a name may repeat:
+    each repeat is another run of it, under an output directory of its own.
+    The run is fail-fast: the first failing arm stops it, and the scenarios
+    behind it never start.
     """
     requested = bool(scenario_names)
     selected = scenario_names if requested else tuple(SCENARIOS)
@@ -532,13 +535,13 @@ def run_command(
         ),
     )
 
-    # One stamp for the whole sweep, so every scenario lands under the same
-    # out/<stamp>/ root. A single scenario takes none and the layout builds
-    # its own.
+    # One stamp above every scenario of a multi-scenario run.
     timestamp = run_timestamp() if len(selected) > 1 else None
     skipped: list[str] = []
     executed = False
+    occurrences: Counter[str] = Counter()
     for name in selected:
+        occurrences[name] += 1
         if not requested:
             reason = _skip_reason(name, options)
             if reason is not None:
@@ -561,6 +564,7 @@ def run_command(
                 arm_names=arm_names,
                 resume_dir=resume_dir,
                 timestamp=timestamp,
+                occurrence=occurrences[name],
                 **scenario_options,
             ),
             results_path,

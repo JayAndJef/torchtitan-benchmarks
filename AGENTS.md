@@ -97,8 +97,13 @@ shares one pre-push hook.
 index is stable and the world size follows the request.
 
 `run` executes, validates and evaluates. It runs every scenario unless
-`--scenario` narrows the set, and the sweep is fail-fast: the first failing
-arm stops it. Pass extra TorchTitan arguments after `--`.
+`--scenario` narrows the set, and it is fail-fast: the first failing arm
+stops it. Pass extra TorchTitan arguments after `--`.
+
+Named scenarios run one at a time, in the order given, and a name may
+repeat. Each repeat is another run of that scenario. The second and later
+runs of one name take a `-run<n>` suffix on the scenario directory, so they
+do not overwrite each other. `manifest.json` records the plain name.
 
 ### Flag table
 
@@ -109,7 +114,7 @@ parses this table and compares each default against the code.
 
 | flag | env | default | meaning |
 |---|---|---|---|
-| `--scenario` | -- | `--` | Scenario to run; repeat per scenario. Omit to run every scenario. |
+| `--scenario` | -- | `--` | Scenario to run, in the order given; repeat a name to run it again. Omit to run every scenario. |
 | `--arm` | -- | `--` | Arm subset; repeat per arm. It applies to every selected scenario. |
 | `--resume` | -- | `--` | Resume an output directory and retry the incomplete arms. |
 | `--results` | -- | `--` | JSON destination for the evaluation. |

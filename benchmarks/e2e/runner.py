@@ -441,7 +441,12 @@ def _resolve_run(
     pinning = resolve_cpu_pinning(request.gpu)
     metadata = {**metadata, "cpu_pinning": pinning.description}
     out_dir = resume_dir or _default_output_dir(
-        scenario, hardware, request.out_dir, environment, request.timestamp
+        scenario,
+        hardware,
+        request.out_dir,
+        environment,
+        request.timestamp,
+        request.occurrence,
     )
     commands = {
         arm.name: list(pinning.prefix)
