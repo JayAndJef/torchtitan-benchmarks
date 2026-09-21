@@ -27,9 +27,8 @@ import torch
 
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
-# The component each transfer belongs to. A caller filters on these; they are
-# named after the model components a cross-engine comparison cuts on, not
-# after megatron's module tree.
+# The component each transfer belongs to, named after the cross-engine
+# cuts rather than after megatron's module tree.
 COMPONENTS = (
     "embedding",
     "qkv",
@@ -137,9 +136,7 @@ def weight_transfers(
                 shape,
             ),
         )
-        # The attention-input norm is fused into megatron's linear_qkv, which
-        # is why it is tagged qkv and not a norm of its own: there is no
-        # megatron module that holds it separately.
+        # Tagged qkv because megatron fuses this norm into linear_qkv.
         yield (
             "qkv",
             f"{mega}.self_attention.linear_qkv.layer_norm_weight",

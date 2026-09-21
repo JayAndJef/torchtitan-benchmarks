@@ -59,9 +59,7 @@ def scenarios_command() -> None:
         for arm in scenario.arms:
             click.echo(f"  {arm.name} — {arm.description}")
 
-    # Listed even when the roster is empty. A span is a second kind of unit
-    # and it is the only one that is not a default, so a reader who never
-    # sees the heading has no way to learn that --span exists.
+    # Listed even when the roster is empty, or nobody learns --span exists.
     click.echo("\nkernel spans (kernel-bench --span):")
     if not KERNEL_SPANS:
         click.echo("(none declared)")

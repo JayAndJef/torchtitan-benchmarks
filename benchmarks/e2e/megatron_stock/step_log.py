@@ -234,9 +234,8 @@ def broadcast_pipeline_loss(loss: "Any") -> "Any":
     group = mpu.get_pipeline_model_parallel_group()
     if torch.distributed.get_world_size(group=group) == 1:
         return loss
-    # The last stage is the source. Its global rank is the last entry of
-    # this rank's own pipeline group, which every rank of that group agrees
-    # on, so no rank has to guess.
+    # The last stage is the source, and every rank of the group agrees
+    # which rank that is.
     ranks = torch.distributed.get_process_group_ranks(group)
     source = ranks[-1]
     device = torch.cuda.current_device()

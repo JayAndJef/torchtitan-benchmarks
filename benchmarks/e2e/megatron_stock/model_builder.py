@@ -102,12 +102,8 @@ class CountingGPTModelBuilder(GPTModelBuilder):
         stages = args.pipeline_model_parallel_size
         stage = mpu.get_pipeline_model_parallel_rank()
         counted = sum(parameter.numel() for parameter in model.parameters())
-        # The expert degree divides the routed experts a rank holds, so the
-        # guard has to know it or it refuses an honest expert-parallel run.
-        # It is read from the arguments rather than from ``mpu`` because
-        # ``install_data_parallel_marker`` separately reads the BUILT expert
-        # group and raises when the two disagree. So the argument is checked
-        # against the world by that shim, and used here.
+        # From the arguments, which the dp marker shim checks against the
+        # expert group Megatron built.
         expected = shape.stage_param_count(
             pipeline_degree=stages,
             stage_index=stage,

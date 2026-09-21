@@ -549,23 +549,14 @@ def _megatron_stock_precision_markers(
 
 TORCHTITAN_PROFILE = ValidationProfile(
     completion_marker="Training completed",
-    # Carried by both of TorchTitan's compile log lines -- the per-block
-    # line and the loss function's -- so one check covers every
-    # component --compile.enable switches on, in both directions.
+    # Both of TorchTitan's compile lines carry it, in both directions.
     compile_marker="with torch.compile",
     failure_markers=("falling back to the PyTorch",),
     check_ac_line=True,
     parallelism_markers=_titan_parallelism_markers,
-    # TorchTitan logs this from _build_pipeline_schedule, which
-    # runs only when the pipeline degree is above 1.
+    # Logged only above one pipeline rank.
     pipelined_pattern=re.compile(r"Using pipeline schedule"),
-    # Two independent witnesses of a data-parallel degree, because one
-    # of them is not ours. ``ParallelDims.build_mesh`` logs the resolved
-    # mesh on every rank whatever this repo's code does, so a degree
-    # above 1 shows there even in a run that never reached
-    # ``parallelize_piper1b``; the second alternative is our own line.
-    # A ``pp 2, dp 1`` run logs ``dp_replicate=1, dp_shard=1`` and
-    # matches neither, which was checked against a real one.
+    # Two witnesses, because the resolved mesh line is not ours.
     data_parallel_pattern=re.compile(
         r"dp_replicate=(?!1\b)\d+"
         r"|dp_shard=(?!1\b)\d+"
@@ -584,24 +575,16 @@ The ``torchtitan`` engine record carries it; nothing else reads it.
 
 MEGATRON_STOCK_PROFILE = ValidationProfile(
     completion_marker="Training completed",
-    # None on purpose: megatron-core binds jit_fuser = torch.compile at
-    # import and compiles no whole layer, so no log line proves a
-    # whole-block treatment either way. Rule 8 therefore checks nothing
-    # here, and it refuses a stock arm that declares compile="torch".
-    # The driver's own line is still matched, by the first precision
-    # marker below.
+    # None on purpose: no log line proves a whole-block treatment here.
     compile_marker=None,
     failure_markers=(),
     check_ac_line=False,
     parallelism_markers=_megatron_stock_parallelism_markers,
-    # The driver prints its own resolved degrees. Any pipeline degree
-    # other than 1 is what this must not see at the trivial spec.
+    # The driver's own resolved degrees, which the trivial spec forbids.
     pipelined_pattern=re.compile(
         r"Megatron-LM stock parallelism: dp=\d+ pp=(?!1\b)\d+"
     ),
-    # The same line's other degree, plus the wrapper's own line. The
-    # negative lookahead is what keeps dp=1 out: it refuses a 1 that ends
-    # the number and admits 10 or 12.
+    # The same line's other degree, and the wrapper's own line.
     data_parallel_pattern=re.compile(
         r"Megatron-LM stock parallelism: dp=(?!1\b)\d+"
         r"|Megatron-LM stock data parallel:"
@@ -691,13 +674,8 @@ def _validate_log(
     """
     if profile.completion_marker not in log:
         raise RuntimeError(f"{arm.name}: training did not complete{where}")
-    # Arm rule 8, read both ways off the arm's own compile treatment. Never
-    # relax the absence half into "skip the check" -- an arm that silently
-    # compiled would then publish as eager.
-    #
-    # A profile with no marker asks nothing, and only an eager arm may name
-    # such an engine. That pairing is a property of the registry, so
-    # ``tests/test_engines.py`` pins it instead of a refusal here.
+    # Arm rule 8, both ways. Never relax the absence half, or an arm that
+    # silently compiled publishes as eager.
     if profile.compile_marker is not None:
         if arm.compile == "torch":
             if profile.compile_marker not in log:
@@ -724,9 +702,8 @@ def _validate_log(
                 f"{arm.name}: ac mode 'none' requested but SelectiveAC was "
                 f"applied{where}"
             )
-    # Both engines print this line; without the check a run whose --config
-    # or --model-size silently fell back to another shape would pass every
-    # other rule and be published under the wrong size.
+    # Without it, a shape that silently fell back publishes under the
+    # wrong size.
     size_marker = f"size: {shape.param_count:,} total parameters"
     if size_marker not in log:
         raise RuntimeError(
@@ -754,9 +731,7 @@ def _validate_log(
                 f"{arm.name}: silent fallback marker {marker!r} found in the "
                 f"log{where}"
             )
-    # Arm rule 12. Empty at the trivial spec, where there are no parallelism
-    # flags to ignore. Every rank logs these, because neither engine guards
-    # the line on the rank.
+    # Arm rule 12, per rank, and empty at the trivial spec.
     for marker in parallelism_markers:
         if marker not in log:
             raise RuntimeError(
@@ -779,9 +754,7 @@ def _validate_log(
                 f"{arm.name}: the requested megatron precision did not "
                 f"apply; the engine never logged {marker!r}{where}"
             )
-    # The other half of arm rule 12. A positive marker cannot speak for a
-    # spec that asked for nothing, so the trivial spec asks the question the
-    # other way round: this log must not show a pipeline nobody requested.
+    # The other half: the trivial spec asks the question the other way.
     if spec_pp == 1:
         found = profile.pipelined_pattern.search(log)
         if found is not None:
@@ -789,12 +762,8 @@ def _validate_log(
                 f"{arm.name}: the run declares no pipeline, and the log "
                 f"records one: {found.group(0)!r}{where}"
             )
-    # The data-parallel half of the same inversion, and it guards a worse
-    # mistake than the pipeline half. A pipeline rank and a single-GPU rank
-    # publish the same per-device throughput; a data-parallel rank does not,
-    # so a dp 2 run published under the trivial spec would read as roughly
-    # twice the true rate with every other rule satisfied. The positive
-    # markers cannot ask this, because the trivial spec declares none.
+    # The worse mistake: a dp 2 run published as one GPU reads as roughly
+    # twice the true rate.
     if spec_dp == 1:
         found = profile.data_parallel_pattern.search(log)
         if found is not None:
@@ -864,9 +833,7 @@ def validate_arm(
     """
     engine_profile = profile_for_engine(arm.engine)
     shape = shape_by_name(model_size)
-    # At every world size, unlike the mesh markers below: the guard runs
-    # at pp 1 and at dp 1. Resolved before any log is read, so an unknown
-    # value lands first.
+    # At every world size, and resolved before any log is read.
     nan_guard_markers = engine_profile.nan_guard_markers(megatron_nan_guard)
     # The optimizer state has a precision at every mesh too, and both
     # values are a claim the log must carry.
@@ -875,10 +842,7 @@ def validate_arm(
         raise RuntimeError(f"{arm.name}: training log is missing: {log_path}")
     logs = logs_by_rank(log_path.read_text(errors="replace"))
     expected_ranks = set(range(parallelism.world_size))
-    # Arm rule 12 is consulted only where there is a mesh to prove. Every
-    # engine profile names at least the mesh line for a non-trivial spec,
-    # which ``tests/test_engines.py`` pins, so no run reaches this point
-    # with nothing to check.
+    # Arm rule 12 is consulted only where there is a mesh to prove.
     parallelism_markers: tuple[str, ...] = ()
     if parallelism.world_size > 1:
         parallelism_markers = engine_profile.parallelism_markers(
@@ -913,23 +877,16 @@ def validate_arm(
             precision_markers=precision_markers,
         )
 
-    # Every rule below reads a trace file. A run without --profile writes
-    # none, so the block is skipped whole rather than rule by rule: a rule
-    # that read an empty set would pass every arm and report a check it did
-    # not make.
+    # Every rule below reads a trace file, and an unprofiled run writes
+    # none, so the block is skipped whole rather than rule by rule.
     if not profile:
         return
 
-    # Arm rules 5 and 7 are per rank. Every rank runs the same number of
-    # profiler windows, so a rank short of them is as broken as a run short of
-    # them, and pooling two ranks' windows for arm rule 7 would ask one
-    # structural question of two different processes' graphs.
+    # Arm rules 5 and 7 are per rank, because every rank runs the same
+    # number of profiler windows.
     traces_by_rank = trace_files_by_rank(arm_dir)
     traces = [path for paths in traces_by_rank.values() for path in paths]
-    # A rank that wrote no trace file at all is not a key in that mapping, so
-    # neither of those two rules would fire for it and the evaluation would
-    # publish a maximum over the survivors. The declared world size is what
-    # closes that, and it is the reason this function takes one.
+    # A rank that wrote nothing is no key, so the world size closes the gap.
     if parallelism.world_size > 1 and set(traces_by_rank) != expected_ranks:
         raise RuntimeError(
             f"{arm.name}: the run declares {parallelism.world_size} ranks and "
@@ -947,39 +904,16 @@ def validate_arm(
                 "profiler windows, "
                 f"found {len(rank_traces)} {where}"
             )
-    # Arm rule 6 reads every rank's traces as one set, which is what it
-    # already did when one rank was all there was. It is deliberately NOT
-    # per rank, and this stage does not change it.
-    #
-    # Its reading stays "any rank" for now. Under PP a
-    # stage holds some of the layers, so a marker kernel can be legitimately
-    # absent from a rank: "every rank" would fail an honest run, and "any
-    # rank" passes a run where one stage silently degraded.
-    #
-    # **One PP2 megatron trace has now been read, and it says "every rank"
-    # would cost that arm nothing.** Both stages of a 16-layer ``pp 2`` run
-    # carry the cuDNN fused-attention kernel, ``_mul_silu_split`` and
-    # ``_permute_kernel``. That is one arm at one shape: a stage that holds
-    # no layer of the kind a marker names would still lack it, so the general
-    # rule needs a per-arm declaration of which ranks carry which marker
-    # rather than a blanket "every rank". Do not weaken this rule to make a
-    # hypothetical run pass, and do not tighten it on one arm's evidence.
+    # Arm rule 6 reads every rank's traces as one set, because under a
+    # pipeline a stage may legitimately lack a marker kernel.
     for marker in arm.trace_kernel_markers:
         if not any(_trace_contains(path, marker) for path in traces):
             raise RuntimeError(
                 f"{arm.name}: marker kernel {marker!r} absent from profiler traces"
             )
-    # Arm rule 9 is DELETED. It required a graph launch in the traces
-    # under graph capture, and graph capture no longer exists.
-    # Arm rule 13. **Every rank**, and that reading is provable here where
-    # arm rule 6's is not: at dp above 1 every rank sits in a data-parallel
-    # group of that size, so every rank reduces. A rank whose traces carry no
-    # all-reduce did not.
-    #
-    # The marker is the SPEC's, never an ``Arm.trace_kernel_markers`` entry.
-    # Data parallelism is a run axis, so a static declaration would fail
-    # every single-GPU run of the same arm -- there is no all-reduce there at
-    # all.
+    # Arm rule 9 is DELETED with graph capture.
+
+    # Arm rule 13, every rank, with the spec's own marker.
     if parallelism.dp > 1:
         for rank in sorted(expected_ranks):
             if not any(
@@ -992,6 +926,4 @@ def validate_arm(
                     f"{ALL_REDUCE_MARKER!r}; a rank that reduced no gradient "
                     "reports roughly twice the true throughput"
                 )
-    # Arm rule 7 is DELETED. It matched each declared compiled region
-    # against one same-phase graph in the traces, and the traces no longer
-    # carry region measurements.
+    # Arm rule 7 is DELETED with the compiled-region measurements.

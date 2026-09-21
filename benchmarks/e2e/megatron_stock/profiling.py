@@ -157,9 +157,7 @@ def install_profiler_shim(
         warmup=profiler_warmup,
         active=profiler_active,
         repeat=0,
-        # See the docstring. Megatron steps the profiler at the top of the
-        # loop and TorchTitan at the bottom, so without this the two engines
-        # are sampled in different profiler states.
+        # The two engines step the profiler at opposite ends of the loop.
         skip_first=PROFILER_STEP_OFFSET,
     )
     shim = ProfilerShim(

@@ -158,12 +158,8 @@ def install_data_parallel_marker(
                 "models and report about "
                 f"{data_parallel_size}x the true throughput"
             )
-        # The optimizer Megatron really built, beside the model. Its class
-        # is the one observation that separates zero1 from replicate: both
-        # keep the DistributedDataParallel wrapper, so the wrapper name
-        # cannot tell them apart. An absent optimizer leaves the line
-        # unable to name the class, so it raises rather than printing a
-        # ZeRO level nothing observed.
+        # The optimizer class is the one observation that separates zero1
+        # from replicate, because both keep the same wrapper.
         optimizer = result[1] if len(result) > 1 else None
         if optimizer is None:
             raise RuntimeError(
