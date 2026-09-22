@@ -97,6 +97,30 @@ class LogsByRankTests(unittest.TestCase):
         self.assertNotIn("scenario=x", split[0])
         self.assertNotIn("scenario=x", split[1])
 
+    def test_a_nul_run_before_a_prefix_does_not_hide_the_rank(self) -> None:
+        """One eight-rank run wrote 232 NUL bytes in front of rank 3's line.
+
+        Every rank writes to one descriptor, so a concurrent write can leave
+        a hole. The prefix anchor then missed the line and arm rule 1 failed
+        a rank that had trained every step.
+        """
+        text = (
+            _prefixed(0, "first stage\nTraining completed")
+            + "\x00" * 232
+            + _prefixed(3, "last stage\nTraining completed")
+        )
+        split = logs_by_rank(text)
+        self.assertEqual(sorted(split), [0, 3])
+        self.assertIn("Training completed", split[3])
+        self.assertIn("last stage", split[3])
+        self.assertNotIn("\x00", split[3])
+
+    def test_a_nul_run_inside_a_line_keeps_the_rest_of_it(self) -> None:
+        text = _prefixed(0, "alpha") + "[rank1]:\x00\x00Training completed\n"
+        split = logs_by_rank(text)
+        self.assertEqual(sorted(split), [0, 1])
+        self.assertEqual(split[1], "Training completed\n")
+
     def test_a_silent_rank_leaves_one_entry(self) -> None:
         """And the caller then sees a rank set that is not the declared one."""
         self.assertEqual(

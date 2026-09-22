@@ -154,12 +154,20 @@ def logs_by_rank(text: str) -> dict[int, str]:
     the returned ranks against the world size it asked for; this function
     reports what is in the file and repairs nothing.
 
+    **A NUL run is dropped before the split.** Every rank writes to one
+    shared descriptor, and a concurrent write can leave a hole that reads
+    back as NUL bytes. One eight-rank run put 232 of them in front of rank
+    3's completion line, which broke the prefix anchor and failed arm rule 1
+    on a rank that had trained every step. A NUL is never log content, so
+    removing it recovers the prefix and weakens no rule: the rank the line
+    names and the message it carries both survive.
+
     **Known limit.** The split reads a line prefix, so it inherits whatever
-    the launcher wrote. torchrun tees each rank's streams from separate
-    threads onto one merged descriptor, so a torn write could in principle
-    put two prefixes on one line, and this reader would credit the first.
-    Nobody has produced one. It is recorded rather than guarded.
+    the launcher wrote. A torn write could still put two prefixes on one
+    line, and this reader would credit the first. Nobody has produced one.
+    It is recorded rather than guarded.
     """
+    text = text.replace("\x00", "")
     by_rank: dict[int, list[str]] = {}
     for line in text.splitlines(keepends=True):
         match = _LOG_LINE_RANK.match(line)
