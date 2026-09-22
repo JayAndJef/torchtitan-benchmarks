@@ -206,6 +206,78 @@ class KernelCliTests(unittest.TestCase):
         for name in KERNEL_SCENARIOS:
             self.assertIn(name, result.output)
 
+    def test_scenarios_kernel_lists_only_kernel_scenarios_and_spans(
+        self,
+    ) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "kernel"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("kernel scenarios (kernel-bench --scenario):", result.output)
+        self.assertIn("kernel spans (kernel-bench --span):", result.output)
+        self.assertNotIn("end-to-end scenarios", result.output)
+        self.assertNotIn("engines:", result.output)
+        for name in KERNEL_SCENARIOS:
+            self.assertIn(name, result.output)
+
+    def test_scenarios_detail_kernel_scenario(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "detail", "moe_router"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Kernel scenario: moe_router", result.output)
+        self.assertIn(
+            "The MoE router, cross-engine: TorchTitan's TokenChoiceTopKRouter",
+            result.output,
+        )
+        self.assertIn("BOTH ENGINES ROUTE AT THE SAME PRECISION", result.output)
+        self.assertIn("copy_floor:", result.output)
+        self.assertIn("mcore/base:", result.output)
+        self.assertIn("titan:", result.output)
+
+    def test_scenarios_shorthand_detail_kernel_scenario(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "moe_router"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Kernel scenario: moe_router", result.output)
+        self.assertIn("BOTH ENGINES ROUTE AT THE SAME PRECISION", result.output)
+
+    def test_scenarios_detail_kernel_arm(self) -> None:
+        result = self.runner.invoke(
+            cli, ["scenarios", "detail", "moe_router/mcore/router_bf16"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "Kernel arm: moe_router/mcore/router_bf16", result.output
+        )
+        self.assertIn("Scenario: moe_router", result.output)
+        self.assertIn("THE DELTA IS BF16, NOT FP32", result.output)
+
+    def test_scenarios_detail_kernel_span(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "detail", "chunked_ce"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Kernel span: chunked_ce", result.output)
+        self.assertIn("Replaces: lm_head_projection + cross_entropy", result.output)
+        self.assertIn(
+            "UPSTREAM TORCHTITAN'S ACTUAL DEFAULT LOSS, AND IT MUST NEVER BE",
+            result.output,
+        )
+        self.assertIn("titan/chunked_ce:", result.output)
+        self.assertIn(
+            "Against: lm_head_projection/titan + cross_entropy/titan/full_logits",
+            result.output,
+        )
+
+    def test_scenarios_detail_kernel_span_arm(self) -> None:
+        result = self.runner.invoke(
+            cli, ["scenarios", "detail", "chunked_ce/titan/chunked_ce"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "Kernel span arm: chunked_ce/titan/chunked_ce", result.output
+        )
+        self.assertIn("Span: chunked_ce", result.output)
+        self.assertIn(
+            "Against: lm_head_projection/titan + cross_entropy/titan/full_logits",
+            result.output,
+        )
+
+
     def test_flags_map_onto_the_request(self) -> None:
         with mock.patch(
             "benchmarks.cli.kernel.execute_kernel_run", return_value=()

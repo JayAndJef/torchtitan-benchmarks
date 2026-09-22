@@ -100,6 +100,65 @@ class CliTests(unittest.TestCase):
         self.assertIn("engines", result.output)
         self.assertIn("titan_compiled", result.output)
 
+    def test_scenarios_listing_truncates_to_single_sentence(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn(
+            "engines: Stock TorchTitan, compiled and eager, against stock Megatron-LM on one pre-tokenized c4_test stream.",
+            result.output,
+        )
+        self.assertNotIn(
+            "This is a systems-throughput claim about configured engines",
+            result.output,
+        )
+
+    def test_scenarios_e2e_lists_only_e2e_scenarios(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "e2e"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("end-to-end scenarios (run --scenario):", result.output)
+        self.assertIn("engines", result.output)
+        self.assertIn("titan_compiled", result.output)
+        self.assertNotIn("kernel scenarios", result.output)
+        self.assertNotIn("kernel spans", result.output)
+        self.assertNotIn("rope", result.output)
+
+    def test_scenarios_detail_e2e(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "detail", "engines"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("End-to-end scenario: engines", result.output)
+        self.assertIn(
+            "This is a systems-throughput claim about configured engines",
+            result.output,
+        )
+        self.assertIn("titan_compiled:", result.output)
+        self.assertIn("megatron_stock:", result.output)
+
+    def test_scenarios_shorthand_detail_e2e(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "engines"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("End-to-end scenario: engines", result.output)
+        self.assertIn(
+            "This is a systems-throughput claim about configured engines",
+            result.output,
+        )
+
+    def test_scenarios_detail_arm(self) -> None:
+        result = self.runner.invoke(
+            cli, ["scenarios", "detail", "engines/megatron_stock"]
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("End-to-end arm: engines/megatron_stock", result.output)
+        self.assertIn("NOT PLAIN BF16", result.output)
+
+    def test_scenarios_detail_unknown_target(self) -> None:
+        result = self.runner.invoke(cli, ["scenarios", "detail", "nonexistent"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn(
+            "Unknown scenario, span, or arm 'nonexistent'.", result.output
+        )
+        self.assertIn("Available e2e scenarios: engines", result.output)
+
+
     def test_execution_help_shows_environment_variables(self) -> None:
         result = self.runner.invoke(cli, ["run", "--help"])
         self.assertEqual(result.exit_code, 0)
