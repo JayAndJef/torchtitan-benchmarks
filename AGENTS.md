@@ -88,7 +88,7 @@ shares one pre-push hook.
 ## 4. The `run` command
 
 ```bash
-./run_bench.sh scenarios                    # list scenarios and arms
+./run_bench.sh scenarios                    # list scenarios and arms (or scenarios e2e, kernel, detail <name>)
 ./run_bench.sh run <gpu> [OPTIONS] [-- TORCHTITAN_ARGS]
 ./run_bench.sh evaluate <out_dir> [--arm NAME]... [--results PATH]
 ```

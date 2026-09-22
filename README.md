@@ -102,8 +102,11 @@ process cannot diverge.
 ## Run
 
 ```bash
-# List every scenario and arm, end-to-end and kernel.
+# List every scenario and arm (branch with e2e or kernel, inspect with detail).
 ./run_bench.sh scenarios
+./run_bench.sh scenarios e2e
+./run_bench.sh scenarios kernel
+./run_bench.sh scenarios detail <name>
 
 # Run, validate and evaluate every arm. One command does all three.
 ./run_bench.sh run <gpu-index>
