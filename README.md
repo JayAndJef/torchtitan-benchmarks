@@ -127,9 +127,10 @@ process cannot diverge.
 ./run_bench.sh run <gpu-index> --resume out/<timestamp>/<scenario>/<hardware>
 ```
 
-`run` always evaluates, and it is fail-fast. Pass extra TorchTitan arguments
-after `--`. `--out`, `--resume` and `--results` each name one directory, so
-each needs exactly one selected scenario.
+`run` always evaluates, and it is fail-fast. Pass extra engine arguments with
+`--torchtitan-arg` and `--megatron-arg`. A perf flag passes, and a flag that a
+harness option owns is refused. `--out`, `--resume` and `--results` each name
+one directory, so each needs exactly one selected scenario.
 
 The run axes are `--ac`, `--model-size`, `--dp`, `--pp`, `--ep`, `--zero`,
 `--pp-schedule`, `--pp-microbatch-size`, `--megatron-p2p-sync`,
