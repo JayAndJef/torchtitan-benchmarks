@@ -170,7 +170,6 @@ SECTION_7_FLAGS = (
     "--bf16",
     "--transformer-impl",
     "--use-mcore-models",
-    "--no-gradient-accumulation-fusion",
     "--moe-token-dispatcher-type",
     "--moe-grouped-gemm",
     "--moe-router-load-balancing-type",
@@ -223,6 +222,17 @@ class FlagListTest(unittest.TestCase):
                 for flag in SECTION_7_FLAGS:
                     with self.subTest(size=size, pp=spec.pp, flag=flag):
                         self.assertIn(flag, emitted)
+
+    def test_gradient_accumulation_fusion_is_not_disabled(self) -> None:
+        """Stock Megatron defaults to gradient_accumulation_fusion=True.
+
+        The explicit disable flag must not be passed.
+        """
+        for size in ("1b", "9b"):
+            for spec in (TRIVIAL_SPEC, PP4_SPEC):
+                emitted = set(flags_for(size, spec))
+                with self.subTest(size=size, pp=spec.pp):
+                    self.assertNotIn("--no-gradient-accumulation-fusion", emitted)
 
     def test_the_harness_group_is_emitted(self) -> None:
         """Every ``--bench-`` flag except the two a single-stage argv omits.
