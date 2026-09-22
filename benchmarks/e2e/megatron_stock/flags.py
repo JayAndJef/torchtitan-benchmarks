@@ -610,17 +610,16 @@ def _engine_flags() -> list[str]:
     ``--use-mcore-models`` is deprecated in this rev and Megatron ignores
     it. Piper passes it, and the flag still parses, so the list keeps it.
 
-    ``--no-gradient-accumulation-fusion`` matches the tuned arm, which
-    declines the same fusion. Its fused weight-gradient path needs
-    ``main_grad`` buffers that only a data-parallel wrap provides, so the
-    fusion would otherwise be a property of the mesh and not of the arm.
+    Stock Megatron defaults to ``gradient_accumulation_fusion = True``,
+    fusing weight gradient accumulation into the backward GEMM or using
+    TransformerEngine's native accumulation. This eliminates separate
+    elementwise addition launches across microbatches.
     """
     return [
         "--bf16",
         "--transformer-impl",
         "transformer_engine",
         "--use-mcore-models",
-        "--no-gradient-accumulation-fusion",
     ]
 
 

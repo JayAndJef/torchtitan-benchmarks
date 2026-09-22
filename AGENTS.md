@@ -397,8 +397,8 @@ The arm declines `--cross-entropy-loss-fusion`, so it runs Megatron's own
 unfused native cross entropy. That path upcasts the full logits to fp32 and
 traverses them several times, and it is a large part of the engine gap. Say
 so beside any loss-path claim. The arm also declines
-`--gradient-accumulation-fusion`, `--moe-permute-fusion`,
-`--overlap-grad-reduce` and `--overlap-param-gather`.
+`--moe-permute-fusion`, `--overlap-grad-reduce` and
+`--overlap-param-gather`.
 
 The three Megatron run axes are `--megatron-p2p-sync`,
 `--megatron-nan-guard` and `--megatron-precision`. Each one reaches the
