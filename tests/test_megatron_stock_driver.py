@@ -62,12 +62,12 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     BENCH_PP_SCHEDULE,
     BENCH_PROFILE,
     DATA_PARALLEL_OPTIMIZERS,
-    DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     LEAN_PRECISION_FLAGS,
     NO_CHECK_FOR_NAN_FLAG,
     SHARDING_STRATEGIES,
     ZERO1_FLAGS,
+    data_parallel_overlap,
     microbatch_geometry,
     omitted_flags,
     refuse_unknown_nan_guard,
@@ -548,7 +548,8 @@ class FlagListTest(unittest.TestCase):
         # Level 1 reads no_shard for the same reason. It shards the
         # optimizer states through the DistributedOptimizer instead.
         self.assertEqual(SHARDING_STRATEGIES[1], "no_shard")
-        self.assertFalse(any(DATA_PARALLEL_OVERLAP.values()))
+        self.assertFalse(data_parallel_overlap())
+        self.assertTrue(data_parallel_overlap(("--overlap-grad-reduce",)))
 
     def test_lean_sends_the_four_precision_flags(self) -> None:
         """The whole recipe, and the dtype each flag carries.

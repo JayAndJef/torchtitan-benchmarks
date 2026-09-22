@@ -80,6 +80,8 @@ PARENT_SIDE_MODULES = (
     # an illegal set, and it resolves none of them against a device.
     "benchmarks.e2e.parallelism",
     "benchmarks.e2e.launch",
+    # The passthrough tables. Parent-side: the refusal runs before launch.
+    "benchmarks.e2e.passthrough",
     # The engine records. Parent-side: each pairs a command builder with a
     # validation profile, and the parent builds and validates.
     "benchmarks.e2e.engines",

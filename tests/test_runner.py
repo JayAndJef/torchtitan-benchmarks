@@ -1373,7 +1373,7 @@ class CommandTests(unittest.TestCase):
             ENGINES.workload,
             OVERRIDE_ARM,
             Path("/out/fused"),
-            ["--debug.seed", "42"],
+            ["--training.gc-freq", "7"],
         )
         override_index = command.index("--override.imports")
         self.assertEqual(
@@ -1382,7 +1382,7 @@ class CommandTests(unittest.TestCase):
         )
         self.assertNotIn("torchtitan.overrides.fused_swiglu.fused_swiglu", command)
         self.assertEqual(command[-2:], ["--dump-folder", "/out/fused"])
-        self.assertIn("--debug.seed", command)
+        self.assertIn("--training.gc-freq", command)
 
     def test_a_stock_command_has_no_override(self) -> None:
         command = command_for_arm(
@@ -1670,7 +1670,7 @@ class ManifestTests(unittest.TestCase):
     def test_manifest_records_run_configuration(self) -> None:
         scenario = scenario_by_name("engines")
         selected = (scenario.arm("titan_eager"),)
-        extra_args = ["--debug.seed", "42"]
+        extra_args = ["--training.gc-freq", "7"]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             commands = {
@@ -1718,7 +1718,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["selected_arms"], ["titan_eager"])
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
         titan_command = manifest["commands"]["titan_eager"]
-        self.assertIn("--debug.seed", titan_command)
+        self.assertIn("--training.gc-freq", titan_command)
         self.assertEqual(titan_command[-2], "--dump-folder")
 
 
@@ -2108,7 +2108,7 @@ class ResumeTests(unittest.TestCase):
                 scenario_name=None,
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
-                extra_args=("--debug.seed", "7"),
+                extra_args=("--training.gc-freq", "9"),
             )
             with self.assertRaisesRegex(ValueError, "extra_torchtitan_args"):
                 execute_run(

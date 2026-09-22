@@ -45,10 +45,10 @@ from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.megatron_stock.flags import (
-    DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     SHARDING_STRATEGIES,
     data_parallel_optimizer,
+    data_parallel_overlap,
     grad_reduce_in_fp32,
     microbatch_geometry,
 )
@@ -162,9 +162,7 @@ class ValidationProfile:
     compile_marker: str | None
     failure_markers: tuple[str, ...]
     check_ac_line: bool
-    parallelism_markers: Callable[
-        [ParallelismSpec, Workload, str], tuple[str, ...]
-    ]
+    parallelism_markers: Callable[..., tuple[str, ...]]
     pipelined_pattern: re.Pattern[str]
     data_parallel_pattern: re.Pattern[str]
     p2p_markers: Callable[[ParallelismSpec, str], tuple[str, ...]]
@@ -203,6 +201,7 @@ def _titan_parallelism_markers(
     spec: ParallelismSpec,
     workload: Workload,
     megatron_precision: str,
+    megatron_args: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """What TorchTitan logs about the mesh it really built.
 
@@ -268,6 +267,7 @@ def _megatron_stock_parallelism_markers(
     spec: ParallelismSpec,
     workload: Workload,
     megatron_precision: str,
+    megatron_args: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """``benchmarks.e2e.megatron_stock.markers``'s two lines. Keep in sync.
 
@@ -341,11 +341,9 @@ def _megatron_stock_parallelism_markers(
     and refuses a disagreement, so the two statements of the degree cannot
     differ in a run that reaches this rule.
 
-    **``overlap_grad_reduce`` reads False at both levels.** The argv omits
-    ``--overlap-grad-reduce``, so ``args`` carries False, and no wrapper
-    this suite builds mutates the field. ``DATA_PARALLEL_OVERLAP`` is the
-    table, and it lives beside the flags for the reason the other two
-    tables do.
+    **``overlap_grad_reduce`` follows ``megatron_args``.** The stock argv
+    omits ``--overlap-grad-reduce``, so the field reads False unless the
+    run's own passthrough sends it. ``data_parallel_overlap`` states that.
 
     **``grad_reduce_in_fp32`` moves with ``--megatron-precision``, and this
     rule once pinned it True.** ``--bf16`` with the default
@@ -390,7 +388,7 @@ def _megatron_stock_parallelism_markers(
             "Megatron-LM stock data parallel: "
             f"{DATA_PARALLEL_WRAPPERS[spec.zero]} over "
             f"{spec.dp} ranks (overlap_grad_reduce="
-            f"{DATA_PARALLEL_OVERLAP[spec.zero]}, "
+            f"{data_parallel_overlap(megatron_args)}, "
             "grad_reduce_in_fp32="
             f"{grad_reduce_in_fp32(megatron_precision)}, "
             "sharding_strategy="
@@ -786,8 +784,12 @@ def validate_arm(
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
     profile: bool = True,
+    megatron_args: tuple[str, ...] = (),
 ) -> None:
     """Reject partial or wrongly configured runs before analysis.
+
+    ``megatron_args`` is the run's ``--megatron-arg`` list, which moves the
+    data-parallel line's ``overlap_grad_reduce`` value.
 
     ``parallelism`` is the run's declared mesh, and it is what turns "the
     ranks that wrote something" into "the ranks this run asked for". Without
@@ -846,7 +848,7 @@ def validate_arm(
     parallelism_markers: tuple[str, ...] = ()
     if parallelism.world_size > 1:
         parallelism_markers = engine_profile.parallelism_markers(
-            parallelism, workload, megatron_precision
+            parallelism, workload, megatron_precision, megatron_args
         )
         # The p2p half may be empty and that is honest: a TorchTitan arm
         # never receives the value.

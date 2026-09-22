@@ -79,6 +79,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.passthrough import flag_names, table_entry
 from benchmarks.e2e.schema import Workload
 from benchmarks.e2e.registry import (
     DEFAULT_MEGATRON_NAN_GUARD,
@@ -120,16 +121,6 @@ SHARDING_STRATEGIES: dict[int, str] = {
 Megatron's own argparse default is ``optim_grads_params``, but it reads
 that field only under the sharded wrapper, which this suite never builds.
 A marker built from the raw field would call a replicated run sharded.
-"""
-
-DATA_PARALLEL_OVERLAP: dict[int, bool] = {
-    level: False for level in SHARDING_STRATEGIES
-}
-"""What ``overlap_grad_reduce`` reads on the wrapper, per level.
-
-False at both levels, for two independent reasons. The argv omits
-``--overlap-grad-reduce`` everywhere (see ``ALWAYS_OMITTED_FLAGS``), and
-Megatron mutates that field only inside its sharded wrapper.
 """
 
 DATA_PARALLEL_OPTIMIZERS: dict[int, str] = {
@@ -251,12 +242,11 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--grad-reduce-in-bf16",
     "--profile-ranks",
 )
-"""The flags this suite declines under every ZeRO level.
+"""The flags the stock recipe omits under every ZeRO level.
 
-The tuple exists so a test asserts their absence by name. The two overlap
-flags travel together and move the gradient bucket size, which changes what
-the run does rather than what the argv says; the marker reads the resolved
-value instead (see ``DATA_PARALLEL_OVERLAP``).
+A test asserts their absence from the builder's argv by name. The perf
+members can still reach a run through ``--megatron-arg``, which the
+manifest records; ``refuse_megatron_passthrough`` refuses the rest.
 ``--use-precision-aware-optimizer`` is absent from this tuple because
 ``--megatron-precision lean`` sends it, and ``_precision_flags`` declines it
 under the default value alone. ``--grad-reduce-in-bf16`` stays under both
@@ -342,6 +332,186 @@ The flag is ``action='store_false'``, so it turns the field off.
 ``--rerun-mode disabled`` is not enough. A test pins the spelling, the dest
 and both consumers against the pinned source.
 """
+
+
+OVERLAP_GRAD_REDUCE_FLAG = "--overlap-grad-reduce"
+"""The Megatron flag that turns on ``overlap_grad_reduce``."""
+
+
+def data_parallel_overlap(megatron_args: tuple[str, ...] = ()) -> bool:
+    """The ``overlap_grad_reduce`` value the data-parallel line must carry."""
+    return OVERLAP_GRAD_REDUCE_FLAG in flag_names(megatron_args)
+
+
+OWNED_FLAGS: dict[str, tuple[str, ...]] = {
+    "--seq-len": ("--seq-length", "--max-position-embeddings"),
+    "--steps": ("--train-iters", "--lr-decay-iters"),
+    "--batch": ("--micro-batch-size", "--global-batch-size"),
+    "--model-size": (
+        "--num-layers",
+        "--hidden-size",
+        "--num-attention-heads",
+        "--group-query-attention",
+        "--num-query-groups",
+        "--kv-channels",
+        "--ffn-hidden-size",
+        "--moe-ffn-hidden-size",
+        "--num-experts",
+        "--moe-router-topk",
+        "--moe-layer-freq",
+        "--position-embedding-type",
+        "--use-rotary-position-embeddings",
+        "--rotary-percent",
+        "--rotary-base",
+        "--normalization",
+        "--norm-epsilon",
+        "--swiglu",
+        "--disable-bias-linear",
+        "--untie-embeddings-and-output-weights",
+        "--qk-layernorm",
+        "--attention-dropout",
+        "--hidden-dropout",
+        "--init-method-std",
+        "--vocab-size",
+        "--padded-vocab-size",
+        "--no-pad-vocab-size",
+        "--disable-pad-vocab-size",
+    ),
+    "--dp/--pp/--ep": (
+        "--tensor-model-parallel-size",
+        "--pipeline-model-parallel-size",
+        "--expert-model-parallel-size",
+        "--context-parallel-size",
+        "--expert-tensor-parallel-size",
+        "--num-layers-per-virtual-pipeline-stage",
+        "--num-virtual-stages-per-pipeline-rank",
+    ),
+    "--zero": ZERO1_FLAGS,
+    "--ac": (
+        "--recompute-activations",
+        "--recompute-granularity",
+        "--recompute-method",
+        "--recompute-num-layers",
+        "--recompute-modules",
+    ),
+    "--megatron-precision": (
+        *LEAN_PRECISION_FLAGS,
+        "--main-params-dtype",
+        "--grad-reduce-in-bf16",
+        "--accumulate-allreduce-grads-in-fp32",
+        "--bf16",
+        "--fp16",
+        "--fp8-*",
+        "--fp4-*",
+        "--no-fp8-wgrad",
+        "--disable-fp8-wgrad",
+        "--first-last-layers-bf16",
+        "--num-layers-at-start-in-bf16",
+        "--num-layers-at-end-in-bf16",
+    ),
+    "--megatron-nan-guard": (NO_CHECK_FOR_NAN_FLAG, "--rerun-mode"),
+    "--megatron-p2p-sync": ("--bench-*",),
+    "--profile": (
+        "--profile",
+        "--use-pytorch-profiler",
+        "--profile-step-start",
+        "--profile-step-end",
+        "--profile-ranks",
+        "--pytorch-profiler-collect-shapes",
+        "--pytorch-profiler-collect-callstack",
+        "--pytorch-profiler-collect-chakra",
+    ),
+}
+"""The Megatron flags each harness option owns.
+
+A pattern ending in ``*`` names a flag prefix. ``--bench-*`` sits under
+``--megatron-p2p-sync`` because that option is the one harness value the
+group carries alone; the group serves every option.
+"""
+
+PINNED_FLAGS: dict[str, tuple[str, ...]] = {
+    "the optimizer matched to TorchTitan": (
+        "--lr",
+        "--lr-decay-style",
+        "--lr-warmup-iters",
+        "--min-lr",
+        "--adam-beta1",
+        "--adam-beta2",
+        "--adam-eps",
+        "--weight-decay",
+        "--clip-grad",
+    ),
+    "the routing matched to TorchTitan": (
+        "--moe-router-load-balancing-type",
+        "--moe-aux-loss-coeff",
+        "--moe-router-dtype",
+    ),
+    "the shared data stream": (
+        "--seed",
+        "--tokenizer-type",
+        "--dataloader-type",
+        "--data-path",
+        "--mock-data",
+        "--num-workers",
+        "--dataloader-inter-document-masking",
+        "--no-create-attention-mask-in-dataloader",
+    ),
+    "the step lines the evaluation reads": (
+        "--log-interval",
+        "--log-throughput",
+        "--eval-iters",
+        "--eval-interval",
+    ),
+    "the timed steps": (
+        "--save",
+        "--load",
+        "--save-interval",
+        "--persistent-save-interval",
+        "--tensorboard-dir",
+    ),
+}
+"""The Megatron flags no option owns and no passthrough may change, by reason."""
+
+PERF_FLAGS: tuple[str, ...] = (
+    "--transformer-impl",
+    "--moe-token-dispatcher-type",
+    "--moe-grouped-gemm",
+    "--use-mcore-models",
+)
+"""The flags the builder emits that a passthrough may override."""
+
+
+def passthrough_owner(name: str) -> str | None:
+    """Why ``name`` cannot pass through to Megatron, or ``None``."""
+    owner = table_entry(name, OWNED_FLAGS)
+    if owner is not None:
+        return f"owned by {owner}"
+    reason = table_entry(name, PINNED_FLAGS)
+    if reason is not None:
+        return f"pinned by {reason}"
+    return None
+
+
+def refuse_megatron_passthrough(
+    arm_name: str, megatron_args: tuple[str, ...] | list[str], zero: int
+) -> None:
+    """Raise when a ``--megatron-arg`` token would change a recorded fact."""
+    names = flag_names(megatron_args)
+    offenders = [
+        f"{name} ({owner})"
+        for name in names
+        if (owner := passthrough_owner(name)) is not None
+    ]
+    if offenders:
+        raise ValueError(
+            f"{arm_name}: {', '.join(offenders)} cannot pass through "
+            "--megatron-arg; set the owning harness option instead"
+        )
+    if "--overlap-param-gather" in names and zero == 0:
+        raise ValueError(
+            f"{arm_name}: --overlap-param-gather needs --zero 1, because "
+            "Megatron asserts a distributed optimizer for it"
+        )
 
 
 def refuse_unknown_nan_guard(megatron_nan_guard: str) -> None:
