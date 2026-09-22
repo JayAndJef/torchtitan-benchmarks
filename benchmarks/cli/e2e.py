@@ -46,6 +46,7 @@ where those names are bound.
 
 from __future__ import annotations
 
+import shlex
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -83,14 +84,15 @@ from benchmarks.e2e.runner import (
     execute_run,
     megatron_nan_guard_refusal,
     megatron_precision_refusal,
+    passthrough_refusal,
 )
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
 
-PASSTHROUGH_CONTEXT = {
-    "ignore_unknown_options": True,
-    "allow_extra_args": True,
-}
+def _split_passthrough(values: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Split each ``--*-arg`` value with shell rules; ``None`` when none is given."""
+    tokens = tuple(token for value in values for token in shlex.split(value))
+    return tokens or None
 
 
 def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
@@ -424,7 +426,6 @@ def _axes(options: dict[str, Any]) -> RequestedAxes:
 
 def _request(
     gpu: str,
-    torchtitan_args: tuple[str, ...],
     *,
     scenario_name: str | None,
     arm_names: tuple[str, ...] = (),
@@ -438,9 +439,6 @@ def _request(
         arm_names=arm_names,
         resume_dir=resume_dir,
         axes=axes,
-        extra_args=(
-            None if resume_dir is not None and not torchtitan_args else torchtitan_args
-        ),
         **options,
     )
 
@@ -462,7 +460,7 @@ def _evaluate(out_dir: Path, arms: tuple[str, ...], results_path: Path | None) -
     click.echo(f"\nmachine-readable results: {destination}")
 
 
-@click.command("run", context_settings=PASSTHROUGH_CONTEXT)
+@click.command("run")
 @click.argument("gpu")
 @click.option(
     "--scenario",
@@ -494,8 +492,26 @@ def _evaluate(out_dir: Path, arms: tuple[str, ...], results_path: Path | None) -
     type=click.Path(path_type=Path),
     help="JSON destination; defaults to <output-dir>/results.json.",
 )
+@click.option(
+    "--torchtitan-arg",
+    "torchtitan_args",
+    multiple=True,
+    help=(
+        "Extra TorchTitan argument for the TorchTitan arms; repeat per "
+        "argument. Shell rules split one value, so '--compile.mode "
+        "max-autotune' is two tokens."
+    ),
+)
+@click.option(
+    "--megatron-arg",
+    "megatron_args",
+    multiple=True,
+    help=(
+        "Extra Megatron-LM argument for the stock megatron arm; repeat per "
+        "argument. Shell rules split one value."
+    ),
+)
 @_execution_options
-@click.argument("torchtitan_args", nargs=-1, type=click.UNPROCESSED)
 def run_command(
     gpu: str,
     scenario_names: tuple[str, ...],
@@ -503,9 +519,10 @@ def run_command(
     resume_dir: Path | None,
     results_path: Path | None,
     torchtitan_args: tuple[str, ...],
+    megatron_args: tuple[str, ...],
     **options: Any,
 ) -> None:
-    """Run, validate and evaluate arms; pass TorchTitan arguments after --.
+    """Run, validate and evaluate arms.
 
     Every scenario runs unless ``--scenario`` narrows the set. Named
     scenarios run one at a time, in the order given, and a name may repeat:
@@ -534,7 +551,12 @@ def run_command(
     for name in selected:
         occurrences[name] += 1
         if not requested:
-            reason = _skip_reason(name, options)
+            reason = _skip_reason(
+                name,
+                options,
+                torchtitan_args=_split_passthrough(torchtitan_args) or (),
+                megatron_args=_split_passthrough(megatron_args) or (),
+            )
             if reason is not None:
                 click.echo(f"\n===== scenario: {name} =====\nskipped: {reason}")
                 skipped.append(f"{name}: {reason}")
@@ -546,7 +568,8 @@ def run_command(
         _run_and_evaluate(
             _request(
                 gpu,
-                torchtitan_args,
+                torchtitan_args=_split_passthrough(torchtitan_args),
+                megatron_args=_split_passthrough(megatron_args),
                 # A resume reads the scenario from the manifest.
                 scenario_name=(
                     name if requested or resume_dir is None else None
@@ -620,7 +643,13 @@ def _refuse_a_single_run_option(
             )
 
 
-def _skip_reason(name: str, options: dict[str, Any]) -> str | None:
+def _skip_reason(
+    name: str,
+    options: dict[str, Any],
+    *,
+    torchtitan_args: tuple[str, ...] = (),
+    megatron_args: tuple[str, ...] = (),
+) -> str | None:
     """Why a scenario declines one of the global axes, or ``None``.
 
     A run that selected every scenario skips such a scenario and says why,
@@ -658,10 +687,14 @@ def _skip_reason(name: str, options: dict[str, Any]) -> str | None:
             "this scenario (every arm runs on TorchTitan)"
         )
     else:
-        reason = megatron_nan_guard_refusal(
-            scenario.arms, megatron_nan_guard
-        ) or megatron_precision_refusal(
-            scenario.arms, megatron_precision, zero
+        reason = (
+            megatron_nan_guard_refusal(scenario.arms, megatron_nan_guard)
+            or megatron_precision_refusal(
+                scenario.arms, megatron_precision, zero
+            )
+            or passthrough_refusal(
+                scenario.arms, torchtitan_args, megatron_args
+            )
         )
     return reason
 

@@ -99,6 +99,7 @@ def _manifest() -> dict:
         "test-gpu",
         _METADATA,
         (),
+        megatron_args=(),
         axes=_AXES,
     )
 

@@ -515,6 +515,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -846,6 +847,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1037,6 +1039,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1688,6 +1691,7 @@ class ManifestTests(unittest.TestCase):
                 "rtx-a6000",
                 metadata,
                 extra_args,
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="none",
                     model_size="1b",
@@ -1701,7 +1705,7 @@ class ManifestTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 17)
+        self.assertEqual(manifest["schema_version"], 18)
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
         self.assertEqual(manifest["megatron_p2p_sync"], "on")
@@ -1775,7 +1779,7 @@ class EagerArmTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 17)
+        self.assertEqual(manifest["schema_version"], 18)
         self.assertNotIn("--compile.enable", manifest["commands"]["titan_eager"])
 
     def test_the_manifest_records_each_arm_compile_treatment(self) -> None:
@@ -2037,7 +2041,7 @@ class ResumeTests(unittest.TestCase):
                 seq_len=512,
                 steps=60,
                 batch=2,
-                extra_args=("--debug.deterministic",),
+                torchtitan_args=("--debug.deterministic",),
             )
             execute_run(
                 request,
@@ -2108,7 +2112,7 @@ class ResumeTests(unittest.TestCase):
                 scenario_name=None,
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
-                extra_args=("--training.gc-freq", "9"),
+                torchtitan_args=("--training.gc-freq", "9"),
             )
             with self.assertRaisesRegex(ValueError, "extra_torchtitan_args"):
                 execute_run(

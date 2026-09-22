@@ -131,6 +131,8 @@ parses this table and compares each default against the code.
 | `--arm` | -- | `--` | Arm subset; repeat per arm. It applies to every selected scenario. |
 | `--resume` | -- | `--` | Resume an output directory and retry the incomplete arms. |
 | `--results` | -- | `--` | JSON destination for the evaluation. |
+| `--torchtitan-arg` | -- | `--` | Extra TorchTitan argument for the TorchTitan arms; repeat per argument. |
+| `--megatron-arg` | -- | `--` | Extra Megatron-LM argument for the stock megatron arm; repeat per argument. |
 | `--hardware` | -- | `auto` | Provenance label; `auto` uses the GPU name. |
 | `--out` | `OUT` | `--` | Output directory. |
 | `--seq-len` | `SEQ` | `4096` | Sequence length. |

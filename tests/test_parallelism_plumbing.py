@@ -528,7 +528,7 @@ class AffinityDeviceTests(unittest.TestCase):
         )
 
 
-class ManifestSchemaSeventeenTests(unittest.TestCase):
+class ManifestSchemaEighteenTests(unittest.TestCase):
     def _manifest(
         self,
         parallelism: ParallelismSpec,
@@ -544,6 +544,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="1b",
@@ -556,9 +557,9 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
             ),
         )
 
-    def test_the_schema_is_seventeen(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 17)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 17)
+    def test_the_schema_is_eighteen(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
+        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 18)
 
     def test_a_foreign_schema_is_refused_and_both_versions_are_named(
         self,
@@ -570,7 +571,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
         names the version found and the version wanted, because those two
         numbers are what a reader acts on.
         """
-        for recorded in (8, 16, 18, None):
+        for recorded in (8, 17, 19, None):
             with self.subTest(schema_version=recorded):
                 with tempfile.TemporaryDirectory() as temporary:
                     out_dir = Path(temporary)
@@ -655,6 +656,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
                     model_size="1b",
@@ -701,6 +703,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
                     model_size="1b",
@@ -770,6 +773,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
                     model_size="1b",
@@ -792,6 +796,7 @@ class ManifestSchemaSeventeenTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
                     model_size="1b",
@@ -822,6 +827,7 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="1b",
@@ -883,6 +889,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="1b",
@@ -903,6 +910,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
                     model_size="1b",
@@ -925,6 +933,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="1b",
@@ -945,6 +954,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 "test-gpu",
                 _METADATA,
                 (),
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
                     model_size="1b",
@@ -972,6 +982,7 @@ class ResumeParallelismTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="1b",
@@ -992,6 +1003,7 @@ class ResumeParallelismTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="1b",
@@ -1075,6 +1087,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1095,6 +1108,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1148,6 +1162,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1173,6 +1188,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1226,6 +1242,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1251,6 +1268,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",

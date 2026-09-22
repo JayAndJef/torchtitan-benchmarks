@@ -112,6 +112,9 @@ class RunRequest:
             arm.
         axes: The eight global run axes, each one answered or left
             unrequested.
+        torchtitan_args: The ``--torchtitan-arg`` tokens. ``None`` means
+            "not given", which a resume answers from the manifest.
+        megatron_args: The ``--megatron-arg`` tokens, read the same way.
         occurrence: Which run of this scenario name this is, counting from
             1. A ``run`` may name one scenario twice, and the second and
             later occurrences need an output directory of their own.
@@ -126,7 +129,8 @@ class RunRequest:
     seq_len: int | None = None
     steps: int | None = None
     batch: int | None = None
-    extra_args: tuple[str, ...] | None = None
+    torchtitan_args: tuple[str, ...] | None = None
+    megatron_args: tuple[str, ...] | None = None
     timestamp: str | None = None
     occurrence: int = 1
     cache_root: Path | None = None

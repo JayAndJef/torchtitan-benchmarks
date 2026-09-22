@@ -44,6 +44,8 @@ COLUMNS = (
     ("ep", "ep"),
     ("zero", "zero"),
     ("profile", "prof"),
+    ("torchtitan_args", "titan args"),
+    ("megatron_args", "megatron args"),
     ("stable_tokens_per_second", "tokens/s"),
     ("stable_sample_count", "n"),
     ("step_ms_median", "step ms"),
@@ -81,6 +83,8 @@ def cell_axes(manifest: dict[str, Any]) -> dict[str, Any]:
         "ep": parallelism.get("ep"),
         "zero": parallelism.get("zero"),
         "parallelism": parallelism,
+        "torchtitan_args": " ".join(manifest.get("extra_torchtitan_args") or ()),
+        "megatron_args": " ".join(manifest.get("extra_megatron_args") or ()),
     }
 
 

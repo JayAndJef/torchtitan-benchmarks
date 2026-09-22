@@ -244,6 +244,7 @@ class ManifestTests(unittest.TestCase):
             "test-gpu",
             _METADATA,
             (),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -256,12 +257,12 @@ class ManifestTests(unittest.TestCase):
             ),
         )
 
-    def test_the_manifest_records_the_axis_under_schema_seventeen(
+    def test_the_manifest_records_the_axis_under_schema_eighteen(
         self,
     ) -> None:
         recorded = self._manifest(True)
         self.assertEqual(recorded["schema_version"], MANIFEST_SCHEMA_VERSION)
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 17)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
         self.assertIs(recorded["profile"], True)
         self.assertIs(self._manifest(False)["profile"], False)
         # It survives the round trip a resume reads it back through.
@@ -280,6 +281,7 @@ class ManifestTests(unittest.TestCase):
                     "test-gpu",
                     _METADATA,
                     (),
+                    megatron_args=(),
                     axes=RunAxes(
                         ac_mode="none",
                         model_size="1b",

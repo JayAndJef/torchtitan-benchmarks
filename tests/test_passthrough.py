@@ -33,6 +33,7 @@ from benchmarks.e2e.passthrough import (
     titan_refusal,
 )
 from benchmarks.e2e.registry import C4_REPLAY_WORKLOAD, scenario_by_name
+from benchmarks.e2e.runner import passthrough_refusal
 from benchmarks.e2e.schema import Arm
 from benchmarks.models.piper_qwen3.shape import PIPER_1B
 
@@ -318,6 +319,21 @@ class TitanTableTests(unittest.TestCase):
     def test_an_unknown_flag_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "not classified"):
             refuse_titan_passthrough("arm", ("--training.new-field",))
+
+
+class ReachTests(unittest.TestCase):
+    def test_a_list_must_reach_an_arm_of_its_engine(self) -> None:
+        titan = (ENGINES.arm("titan_eager"),)
+        megatron = (ENGINES.arm("megatron_stock"),)
+        self.assertIsNone(passthrough_refusal(ENGINES.arms, ("--a",), ("--b",)))
+        self.assertIn(
+            "--megatron-arg reaches no arm",
+            passthrough_refusal(titan, (), ("--moe-permute-fusion",)),
+        )
+        self.assertIn(
+            "--torchtitan-arg reaches no arm",
+            passthrough_refusal(megatron, ("--compile.mode",), ()),
+        )
 
 
 if __name__ == "__main__":
