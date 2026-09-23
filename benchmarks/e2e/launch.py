@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.passthrough import refuse_passthrough
 from benchmarks.e2e.schema import Arm, Workload
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
@@ -155,45 +156,6 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     return tuple(flags)
 
 
-def _refuse_parallelism_passthrough(
-    arm: Arm, extra_args: list[str] | tuple[str, ...]
-) -> None:
-    """Refuse a ``--parallelism.*`` token in the TorchTitan passthrough.
-
-    The passthrough lands **after** the block above, and tyro is last-wins on
-    a repeated flag: measured through the fork's own ``ConfigManager``, a
-    trailing ``--parallelism.data-parallel-shard-degree 4`` beats the ``1``
-    the harness delivered. The manifest's ``parallelism`` block would still
-    record ``dp_shard: 1``, so the run would carry a recorded fact its own
-    argv contradicts -- exactly the wrongness this axis exists to prevent.
-
-    The same route also reaches ``--parallelism.tensor-parallel-degree``,
-    which ``ParallelismSpec`` deliberately cannot express, so the spec would
-    no longer describe the mesh at all.
-
-    **Refused, not repaired.** Silently dropping the token would run a
-    command the operator did not ask for, and honoring it would publish a
-    mesh the manifest does not name. The megatron branch already refuses the
-    whole passthrough for a comparable reason.
-
-    Nothing is refused at the trivial spec that was accepted before: the
-    block is empty there, and TorchTitan's own ``ParallelDims`` assert
-    rejects any degree product other than 1 at world size 1. So this closes a
-    path rather than narrowing a working one.
-    """
-    offenders = [
-        token for token in extra_args if token.startswith("--parallelism.")
-    ]
-    if offenders:
-        raise ValueError(
-            f"{arm.name}: {', '.join(offenders)} cannot be passed through: "
-            "the parallelism block is built from --dp/--pp/--ep and "
-            "--zero, and recorded "
-            "in the manifest, and a trailing flag would override it while "
-            "the record still named the requested mesh"
-        )
-
-
 def titan_command(
     workload: Workload,
     arm: Arm,
@@ -214,7 +176,7 @@ def titan_command(
     builder takes the same parameters. ``profile`` decides the profiler
     block alone.
     """
-    _refuse_parallelism_passthrough(arm, extra_args)
+    refuse_passthrough(arm, extra_args, parallelism.zero)
     # The fork defaults it off, so an eager arm passes no negation.
     compile_flags = ("--compile.enable",) if arm.compile == "torch" else ()
     # Off unless these tokens ask for it, so an unprofiled run drops them.
@@ -358,11 +320,6 @@ def megatron_stock_command(
     parallelism rule. The refusal lands here instead, and ``flags.py``
     repeats it.
     """
-    if extra_args:
-        raise ValueError(
-            f"{arm.name}: TorchTitan passthrough arguments cannot apply to a "
-            f"megatron arm: {list(extra_args)}"
-        )
     if ac_mode != "none":
         raise ValueError(
             f"{arm.name}: the stock megatron arm runs without recompute; "
@@ -386,6 +343,8 @@ def megatron_stock_command(
     # Below the refusals, so a refused request fails with its own message.
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
+    refuse_passthrough(arm, extra_args, parallelism.zero)
+
     # Passed on as typed; shape_by_name resolves an alias either way.
     return [
         *_megatron_launcher(parallelism),
@@ -405,4 +364,6 @@ def megatron_stock_command(
             # Megatron's profiler flags and the schedule group, or nothing.
             profile=profile,
         ),
+        # Last, because Megatron's parser is last-wins.
+        *extra_args,
     ]

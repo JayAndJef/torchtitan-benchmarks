@@ -76,7 +76,7 @@ from benchmarks.models.piper_qwen3.shape import (
 )
 
 
-MANIFEST_SCHEMA_VERSION = 17
+MANIFEST_SCHEMA_VERSION = 18
 
 THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
 """What the ``tps`` step-log figure, and ``stable_tokens_per_second``, count.
@@ -142,11 +142,11 @@ def manifest_data(
     commands: dict[str, list[str]],
     hardware: str,
     metadata: dict[str, str],
-    extra_args: list[str] | tuple[str, ...],
     *,
-    extra_megatron_args: list[str] | tuple[str, ...] = (),
     # No default, because the resume check compares every field: a writer
     # that defaults what the checker demands records the wrong run.
+    torchtitan_args: list[str] | tuple[str, ...],
+    megatron_args: list[str] | tuple[str, ...],
     axes: RunAxes,
 ) -> dict[str, Any]:
     shape = shape_by_name(canonical_size_name(axes.model_size))
@@ -160,8 +160,8 @@ def manifest_data(
         "arms": [asdict(arm) for arm in scenario.arms],
         "selected_arms": [arm.name for arm in selected_arms],
         "commands": commands,
-        "extra_torchtitan_args": list(extra_args),
-        "extra_megatron_args": list(extra_megatron_args),
+        "extra_torchtitan_args": list(torchtitan_args),
+        "extra_megatron_args": list(megatron_args),
         **_axis_record(scenario, axes),
         "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
         "throughput_definition": THROUGHPUT_DEFINITION,
@@ -176,9 +176,9 @@ def write_manifest(
     commands: dict[str, list[str]],
     hardware: str,
     metadata: dict[str, str],
-    extra_args: list[str] | tuple[str, ...],
     *,
-    extra_megatron_args: list[str] | tuple[str, ...] = (),
+    torchtitan_args: list[str] | tuple[str, ...],
+    megatron_args: list[str] | tuple[str, ...],
     axes: RunAxes,
 ) -> None:
     atomic_write_json(
@@ -189,8 +189,8 @@ def write_manifest(
             commands,
             hardware,
             metadata,
-            extra_args,
-            extra_megatron_args=extra_megatron_args,
+            torchtitan_args=torchtitan_args,
+            megatron_args=megatron_args,
             axes=axes,
         ),
     )
@@ -220,9 +220,9 @@ def _resume_mismatches(
     arms: tuple[Arm, ...],
     hardware: str,
     metadata: dict[str, str],
-    extra_args: tuple[str, ...],
     *,
-    extra_megatron_args: tuple[str, ...] = (),
+    torchtitan_args: tuple[str, ...],
+    megatron_args: tuple[str, ...],
     axes: RunAxes,
 ) -> list[str]:
     axis_record = _axis_record(scenario, axes)
@@ -233,14 +233,13 @@ def _resume_mismatches(
         "workload": asdict(scenario.workload),
         "selected_arms": [arm.name for arm in arms],
         "hardware": hardware,
-        "extra_torchtitan_args": list(extra_args),
+        "extra_torchtitan_args": list(torchtitan_args),
+        "extra_megatron_args": list(megatron_args),
         **axis_record,
     }
     mismatches = [
         key for key, value in expected.items() if manifest.get(key) != value
     ]
-    if manifest.get("extra_megatron_args", []) != list(extra_megatron_args):
-        mismatches.append("extra_megatron_args")
     if canonical_size_name(
         str(manifest.get("model_size"))
     ) != canonical_size_name(axes.model_size):

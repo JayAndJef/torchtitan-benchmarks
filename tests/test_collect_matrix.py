@@ -33,7 +33,7 @@ _SPEC.loader.exec_module(collect_matrix)
 def manifest(*, model_size: str, dp: int, zero: int) -> dict:
     """A manifest with the axis keys this tool reads, and nothing else."""
     return {
-        "schema_version": 17,
+        "schema_version": 18,
         "scenario": "engines",
         "model_size": model_size,
         "ac_mode": "none",

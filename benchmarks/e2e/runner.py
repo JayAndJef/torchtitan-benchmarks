@@ -24,6 +24,7 @@ from benchmarks.artifacts.run_state import (
 )
 from benchmarks.e2e.axes import RunAxes, RunRequest
 from benchmarks.e2e.engines import command_for_arm
+from benchmarks.e2e.passthrough import reach_refusal
 from benchmarks.e2e.parallelism import (
     MEGATRON_ENGINES,
     PP_SCHEDULES,
@@ -160,6 +161,8 @@ class ResolvedRun:
         out_dir: Where the run writes.
         commands: One argv per arm name.
         axes: The eight global run axes, resolved.
+        torchtitan_args: The ``--torchtitan-arg`` tokens, resolved.
+        megatron_args: The ``--megatron-arg`` tokens, resolved.
         resumed: Whether the run continues a recorded directory.
     """
 
@@ -172,6 +175,8 @@ class ResolvedRun:
     commands: dict[str, list[str]]
     axes: RunAxes
     resumed: bool
+    torchtitan_args: tuple[str, ...]
+    megatron_args: tuple[str, ...]
 
 
 def _resolve_run(
@@ -219,13 +224,15 @@ def _resolve_run(
     scenario = scenario_by_name(str(scenario_name))
     if existing_manifest is not None:
         workload = _resume_workload(existing_manifest, request, environment)
-        recorded_extra_args = tuple(
-            existing_manifest.get("extra_torchtitan_args", ())
+        torchtitan_args = (
+            tuple(existing_manifest["extra_torchtitan_args"])
+            if request.torchtitan_args is None
+            else request.torchtitan_args
         )
-        extra_args = (
-            recorded_extra_args
-            if request.extra_args is None
-            else request.extra_args
+        megatron_args = (
+            tuple(existing_manifest["extra_megatron_args"])
+            if request.megatron_args is None
+            else request.megatron_args
         )
         ac_mode = (
             str(existing_manifest["ac_mode"])
@@ -287,7 +294,8 @@ def _resolve_run(
             profile=profile,
             warmup_steps=warmup_steps,
         )
-        extra_args = request.extra_args or ()
+        torchtitan_args = request.torchtitan_args or ()
+        megatron_args = request.megatron_args or ()
         ac_mode = requested.ac_mode or DEFAULT_AC_MODE
         model_size = requested.model_size or DEFAULT_MODEL_SIZE
         megatron_p2p_sync = (
@@ -397,6 +405,10 @@ def _resolve_run(
     if refusal is not None:
         raise ValueError(refusal)
 
+    refusal = reach_refusal(arms, torchtitan_args, megatron_args)
+    if refusal is not None:
+        raise ValueError(refusal)
+
     # Every axis is answered, so one record carries them from here on.
     axes = RunAxes(
         ac_mode=ac_mode,
@@ -429,7 +441,7 @@ def _resolve_run(
             scenario.workload,
             arm,
             out_dir / arm.name,
-            extra_args,
+            megatron_args if arm.engine in MEGATRON_ENGINES else torchtitan_args,
             axes.ac_mode,
             model_size=axes.model_size,
             parallelism=axes.parallelism,
@@ -448,7 +460,8 @@ def _resolve_run(
             arms,
             hardware,
             metadata,
-            extra_args,
+            torchtitan_args=torchtitan_args,
+            megatron_args=megatron_args,
             axes=axes,
         )
         if mismatches:
@@ -466,6 +479,8 @@ def _resolve_run(
         commands=commands,
         axes=axes,
         resumed=resumed,
+        torchtitan_args=torchtitan_args,
+        megatron_args=megatron_args,
     )
 
 
@@ -560,7 +575,8 @@ def execute_run(
             resolved.commands,
             resolved.hardware,
             resolved.metadata,
-            request.extra_args or (),
+            torchtitan_args=resolved.torchtitan_args,
+            megatron_args=resolved.megatron_args,
             axes=axes,
         )
         state = initial_run_state(arms)
@@ -635,6 +651,7 @@ def execute_run(
                     megatron_nan_guard=axes.megatron_nan_guard,
                     megatron_precision=axes.megatron_precision,
                     profile=axes.profile,
+                    megatron_args=resolved.megatron_args,
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -700,6 +717,7 @@ def execute_run(
                 megatron_nan_guard=axes.megatron_nan_guard,
                 megatron_precision=axes.megatron_precision,
                 profile=axes.profile,
+                megatron_args=resolved.megatron_args,
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

@@ -514,7 +514,8 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
-            (),
+            torchtitan_args=(),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -845,7 +846,8 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
-            (),
+            torchtitan_args=(),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1036,7 +1038,8 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
-            (),
+            torchtitan_args=(),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -1373,7 +1376,7 @@ class CommandTests(unittest.TestCase):
             ENGINES.workload,
             OVERRIDE_ARM,
             Path("/out/fused"),
-            ["--debug.seed", "42"],
+            ["--training.gc-freq", "7"],
         )
         override_index = command.index("--override.imports")
         self.assertEqual(
@@ -1382,7 +1385,7 @@ class CommandTests(unittest.TestCase):
         )
         self.assertNotIn("torchtitan.overrides.fused_swiglu.fused_swiglu", command)
         self.assertEqual(command[-2:], ["--dump-folder", "/out/fused"])
-        self.assertIn("--debug.seed", command)
+        self.assertIn("--training.gc-freq", command)
 
     def test_a_stock_command_has_no_override(self) -> None:
         command = command_for_arm(
@@ -1670,7 +1673,7 @@ class ManifestTests(unittest.TestCase):
     def test_manifest_records_run_configuration(self) -> None:
         scenario = scenario_by_name("engines")
         selected = (scenario.arm("titan_eager"),)
-        extra_args = ["--debug.seed", "42"]
+        extra_args = ["--training.gc-freq", "7"]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             commands = {
@@ -1687,7 +1690,8 @@ class ManifestTests(unittest.TestCase):
                 commands,
                 "rtx-a6000",
                 metadata,
-                extra_args,
+                torchtitan_args=extra_args,
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="none",
                     model_size="1b",
@@ -1701,7 +1705,7 @@ class ManifestTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 17)
+        self.assertEqual(manifest["schema_version"], 18)
         self.assertEqual(manifest["ac_mode"], "none")
         self.assertEqual(manifest["model_size"], "1b")
         self.assertEqual(manifest["megatron_p2p_sync"], "on")
@@ -1718,7 +1722,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["selected_arms"], ["titan_eager"])
         self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
         titan_command = manifest["commands"]["titan_eager"]
-        self.assertIn("--debug.seed", titan_command)
+        self.assertIn("--training.gc-freq", titan_command)
         self.assertEqual(titan_command[-2], "--dump-folder")
 
 
@@ -1775,7 +1779,7 @@ class EagerArmTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 17)
+        self.assertEqual(manifest["schema_version"], 18)
         self.assertNotIn("--compile.enable", manifest["commands"]["titan_eager"])
 
     def test_the_manifest_records_each_arm_compile_treatment(self) -> None:
@@ -2037,7 +2041,7 @@ class ResumeTests(unittest.TestCase):
                 seq_len=512,
                 steps=60,
                 batch=2,
-                extra_args=("--debug.deterministic",),
+                torchtitan_args=("--debug.deterministic",),
             )
             execute_run(
                 request,
@@ -2108,7 +2112,7 @@ class ResumeTests(unittest.TestCase):
                 scenario_name=None,
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
-                extra_args=("--debug.seed", "7"),
+                torchtitan_args=("--training.gc-freq", "9"),
             )
             with self.assertRaisesRegex(ValueError, "extra_torchtitan_args"):
                 execute_run(

@@ -715,13 +715,13 @@ class StockArgvRefusalTests(unittest.TestCase):
     builder is reached, which is why they all run today.
     """
 
-    def test_a_torchtitan_passthrough_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "passthrough"):
+    def test_an_owned_passthrough_flag_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "owned by --model-size"):
             command_for_arm(
                 scenario_by_name(SCENARIO_NAME).workload,
                 _stock_arm(),
                 Path("/tmp/arm-dir"),
-                ("--training.steps", "5"),
+                ("--num-layers=4",),
                 "none",
             )
 
@@ -1151,17 +1151,17 @@ def _driver_data_parallel_line(
     """
     from benchmarks.e2e.megatron_stock import markers
     from benchmarks.e2e.megatron_stock.flags import (
-        DATA_PARALLEL_OVERLAP,
         DATA_PARALLEL_WRAPPERS,
         SHARDING_STRATEGIES,
         data_parallel_optimizer,
+        data_parallel_overlap,
         grad_reduce_in_fp32,
     )
 
     return markers.DATA_PARALLEL_LINE.format(
         wrapper=DATA_PARALLEL_WRAPPERS[zero],
         dp=dp,
-        overlap=DATA_PARALLEL_OVERLAP[zero],
+        overlap=data_parallel_overlap(),
         fp32=grad_reduce_in_fp32(megatron_precision),
         sharding=SHARDING_STRATEGIES[zero],
         expert=ep,
@@ -1307,9 +1307,8 @@ class StockMarkerContractTests(unittest.TestCase):
         values, so reading the argument would give False under both.
         ``MegatronFSDP.__init__`` then sets it True on the config object it
         was handed -- the reference, not a copy -- whenever the sharding
-        strategy is one Megatron overlaps. ``DATA_PARALLEL_OVERLAP`` derives
-        the expected value from that guard's own strategy list rather than
-        from the flag list.
+        strategy is one Megatron overlaps. ``data_parallel_overlap`` gives
+        the expected value.
         """
         from benchmarks.e2e.megatron_stock import markers
 

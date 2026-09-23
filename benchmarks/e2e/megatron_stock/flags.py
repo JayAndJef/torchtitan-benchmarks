@@ -122,16 +122,6 @@ that field only under the sharded wrapper, which this suite never builds.
 A marker built from the raw field would call a replicated run sharded.
 """
 
-DATA_PARALLEL_OVERLAP: dict[int, bool] = {
-    level: False for level in SHARDING_STRATEGIES
-}
-"""What ``overlap_grad_reduce`` reads on the wrapper, per level.
-
-False at both levels, for two independent reasons. The argv omits
-``--overlap-grad-reduce`` everywhere (see ``ALWAYS_OMITTED_FLAGS``), and
-Megatron mutates that field only inside its sharded wrapper.
-"""
-
 DATA_PARALLEL_OPTIMIZERS: dict[int, str] = {
     0: "Float16OptimizerWithFloat16Params",
     1: "DistributedOptimizer",
@@ -251,12 +241,11 @@ ALWAYS_OMITTED_FLAGS: tuple[str, ...] = (
     "--grad-reduce-in-bf16",
     "--profile-ranks",
 )
-"""The flags this suite declines under every ZeRO level.
+"""The flags the stock recipe omits under every ZeRO level.
 
-The tuple exists so a test asserts their absence by name. The two overlap
-flags travel together and move the gradient bucket size, which changes what
-the run does rather than what the argv says; the marker reads the resolved
-value instead (see ``DATA_PARALLEL_OVERLAP``).
+A test asserts their absence from the builder's argv by name. The perf
+members can still reach a run through ``--megatron-arg``, which the
+manifest records; ``benchmarks/e2e/passthrough.py`` refuses the rest.
 ``--use-precision-aware-optimizer`` is absent from this tuple because
 ``--megatron-precision lean`` sends it, and ``_precision_flags`` declines it
 under the default value alone. ``--grad-reduce-in-bf16`` stays under both
@@ -342,6 +331,18 @@ The flag is ``action='store_false'``, so it turns the field off.
 ``--rerun-mode disabled`` is not enough. A test pins the spelling, the dest
 and both consumers against the pinned source.
 """
+
+
+OVERLAP_GRAD_REDUCE_FLAG = "--overlap-grad-reduce"
+"""The Megatron flag that turns on ``overlap_grad_reduce``."""
+
+
+def data_parallel_overlap(megatron_args: tuple[str, ...] = ()) -> bool:
+    """The ``overlap_grad_reduce`` value the data-parallel line must carry."""
+    return any(
+        token.split("=", 1)[0] == OVERLAP_GRAD_REDUCE_FLAG
+        for token in megatron_args
+    )
 
 
 def refuse_unknown_nan_guard(megatron_nan_guard: str) -> None:

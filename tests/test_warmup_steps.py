@@ -106,7 +106,8 @@ def _manifest(profile: bool, warmup_steps: int | None) -> dict:
         {"titan_eager": ["cmd"]},
         "test-gpu",
         _METADATA,
-        (),
+        torchtitan_args=(),
+        megatron_args=(),
         axes=RunAxes(
             ac_mode="none",
             model_size="1b",
@@ -121,12 +122,12 @@ def _manifest(profile: bool, warmup_steps: int | None) -> dict:
 
 
 class ManifestTests(unittest.TestCase):
-    def test_the_manifest_records_the_count_under_schema_seventeen(
+    def test_the_manifest_records_the_count_under_schema_eighteen(
         self,
     ) -> None:
         recorded = _manifest(False, 10)
         self.assertEqual(recorded["schema_version"], MANIFEST_SCHEMA_VERSION)
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 17)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
         self.assertEqual(recorded["warmup_steps"], 10)
 
     def test_a_profiled_run_records_null(self) -> None:
@@ -148,7 +149,8 @@ class ResumeTests(unittest.TestCase):
                     arms,
                     "test-gpu",
                     _METADATA,
-                    (),
+                    torchtitan_args=(),
+                    megatron_args=(),
                     axes=RunAxes(
                         ac_mode="none",
                         model_size="1b",

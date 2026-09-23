@@ -22,11 +22,13 @@ isolation can be irrelevant once the compiler fuses the graph around it.
 A kernel number is never an end-to-end number, and an end-to-end number is
 never a kernel number. State which system produced a figure.
 
-The `engines` scenario carries four deliberate differences, and each one
-moves the number. The Megatron arm keeps fp32 master weights, reduces
-gradients in fp32, runs Megatron's unfused native cross entropy, keeps
-`--init-method-std 0.01` with no weight transfer, and applies no permutation
-fusion. State all four beside every cross-engine number.
+The `engines` scenario carries four deliberate differences by default, and
+each one moves the number. The Megatron arm keeps fp32 master weights,
+reduces gradients in fp32, runs Megatron's unfused native cross entropy,
+keeps `--init-method-std 0.01` with no weight transfer, and applies no
+permutation fusion. A `--megatron-arg` can remove the two fusion
+differences, and the manifest records it. State the four differences and
+both passthrough lists beside every cross-engine number.
 
 ## 2. Environment
 
@@ -89,7 +91,7 @@ shares one pre-push hook.
 
 ```bash
 ./run_bench.sh scenarios                    # list scenarios and arms (or scenarios e2e, kernel, detail <name>)
-./run_bench.sh run <gpu> [OPTIONS] [-- TORCHTITAN_ARGS]
+./run_bench.sh run <gpu> [OPTIONS]
 ./run_bench.sh evaluate <out_dir> [--arm NAME]... [--results PATH]
 ```
 
@@ -99,7 +101,8 @@ index is stable and the world size follows the request.
 
 `run` executes, validates and evaluates. It runs every scenario unless
 `--scenario` narrows the set, and it is fail-fast: the first failing arm
-stops it. Pass extra TorchTitan arguments after `--`.
+stops it. Pass extra engine arguments with `--torchtitan-arg` and
+`--megatron-arg`.
 
 Named scenarios run one at a time, in the order given, and a name may
 repeat. Each repeat is another run of that scenario. The second and later
@@ -131,6 +134,8 @@ parses this table and compares each default against the code.
 | `--arm` | -- | `--` | Arm subset; repeat per arm. It applies to every selected scenario. |
 | `--resume` | -- | `--` | Resume an output directory and retry the incomplete arms. |
 | `--results` | -- | `--` | JSON destination for the evaluation. |
+| `--torchtitan-arg` | -- | `--` | Extra TorchTitan argument for the TorchTitan arms; repeat per argument. |
+| `--megatron-arg` | -- | `--` | Extra Megatron-LM argument for the stock megatron arm; repeat per argument. |
 | `--hardware` | -- | `auto` | Provenance label; `auto` uses the GPU name. |
 | `--out` | `OUT` | `--` | Output directory. |
 | `--seq-len` | `SEQ` | `4096` | Sequence length. |
@@ -156,12 +161,41 @@ The six parallelism options and the three Megatron options take no
 environment variable. Each one has to agree with the `<gpu>` positional or
 with `--arm`, and a positional has no environment form.
 
+### Engine passthrough
+
+A perf flag passes; a flag that changes a recorded fact is refused.
+
+`--torchtitan-arg` reaches the TorchTitan arms and `--megatron-arg` reaches
+the stock megatron arm. Each option is repeatable, and shell rules split one
+value, so `--megatron-arg="--moe-token-dispatcher-type flex"` is two tokens.
+A list that reaches no selected arm is refused. The tokens go after the
+harness flags, and both parsers keep the last value of a repeated flag.
+
+`benchmarks/e2e/passthrough.py` holds three tables, and each row holds
+both engines' patterns. The owned table maps each harness option to the
+flags it sets. The pinned table holds the flags that keep the two engines
+on the same work: the optimizer, the routing, the data, the step lines and
+the timed steps. The perf table holds the flags a passthrough may set. A
+passthrough flag in the owned or pinned table is refused, and the message
+names the owner.
+
+- An unlisted Megatron flag passes, so every fusion flag Megatron offers
+  passes. §7 names the stock omissions a passthrough can add.
+- An unlisted TorchTitan flag is refused, so a field that a fork bump adds
+  fails until someone classifies it.
+- `tests/test_passthrough.py` proves that no pattern sits in two rows, that
+  each flag a builder emits has one class, that each owner is a real `run`
+  option, and that each TorchTitan config field has one class.
+
+A passthrough cannot turn off a store-true flag that a builder sends,
+unless the engine has a negative form of it.
+
 ### The comparability rule
 
 Numbers are comparable only within one value of each of these: `model_size`,
 `ac_mode`, `zero`, the parallelism spec, `megatron_p2p_sync`,
 `megatron_nan_guard`, `megatron_precision`, `profile`, `warmup_steps`,
-`torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev` and
+`extra_torchtitan_args`, `extra_megatron_args`, `torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev` and
 `megatron_git_rev`. Every one of them sits in `manifest.json`. Check them
 before you compare against an older run.
 
@@ -197,11 +231,12 @@ skips the arms that pass, archives the partial artifacts under
 - `--resume` and `--out` cannot be combined.
 - `--resume` needs exactly one selected scenario, as `--out` and `--results`
   do.
-- An omitted axis inherits the recorded value. A different value is refused.
+- An omitted axis or passthrough list inherits the recorded value. A
+  different value is refused.
 - A resume does **not** inherit the parallelism spec. Omitted parallelism
   flags ask for the single-GPU spec.
 - The resume refuses a change of scenario, workload, selected arms, hardware
-  label, extra TorchTitan arguments, any of the eight run axes, `nvidia_smi`,
+  label, either passthrough list, any of the eight run axes, `nvidia_smi`,
   `cpu_pinning`, `torchtitan_git_rev`, `benchmarks_git_rev` or
   `megatron_git_rev`.
 
@@ -209,7 +244,7 @@ skips the arms that pass, archives the partial artifacts under
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 17
+  manifest.json     # schema 18
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 6
   <arm>.log         # training stdout and stderr, every rank
@@ -218,8 +253,9 @@ out/<timestamp>/<scenario>/<hardware>/
 ```
 
 The manifest records the scenario, the arms, one command line per arm, the
-eight run axes as flat keys, the model shape, the execution model, the
-throughput definition and `hardware_metadata`. The reader accepts schema 17
+eight run axes as flat keys, both passthrough lists, the model shape, the
+execution model, the throughput definition and `hardware_metadata`. The
+reader accepts schema 18
 alone and refuses any other version by name.
 
 The `tps` figure of a step line, and `stable_tokens_per_second`, are **per
@@ -393,12 +429,16 @@ The driver prints one training-loop line that names `main_params_dtype`,
 `cross_entropy_loss_fusion` and `moe_token_dispatcher_type`. Rule 12 matches
 that prefix and the four precision fields.
 
-The arm declines `--cross-entropy-loss-fusion`, so it runs Megatron's own
-unfused native cross entropy. That path upcasts the full logits to fp32 and
-traverses them several times, and it is a large part of the engine gap. Say
-so beside any loss-path claim. The arm also declines
-`--moe-permute-fusion`, `--overlap-grad-reduce` and
-`--overlap-param-gather`.
+The stock recipe omits `--cross-entropy-loss-fusion`, so by default it runs
+Megatron's own unfused native cross entropy. That path upcasts the full
+logits to fp32 and traverses them several times, and it is a large part of
+the engine gap. Say so beside any loss-path claim. The stock recipe also
+omits `--moe-permute-fusion`, `--overlap-grad-reduce` and
+`--overlap-param-gather`. A `--megatron-arg` can add each of them, and
+`--use-flash-attn` too. `--overlap-param-gather` needs `--zero 1`. Rule 12
+reads `overlap_grad_reduce` from the run's own Megatron list. A passthrough
+cannot turn off `--moe-grouped-gemm`, because Megatron has no negative form
+of it.
 
 The three Megatron run axes are `--megatron-p2p-sync`,
 `--megatron-nan-guard` and `--megatron-precision`. Each one reaches the

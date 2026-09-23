@@ -45,10 +45,10 @@ from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.megatron_stock.flags import (
-    DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     SHARDING_STRATEGIES,
     data_parallel_optimizer,
+    data_parallel_overlap,
     grad_reduce_in_fp32,
     microbatch_geometry,
 )
@@ -70,92 +70,26 @@ from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 @dataclass(frozen=True)
 class ValidationProfile:
-    """Engine-specific pieces of validate_arm, carried by an Engine.
+    """The engine-specific parts of ``validate_arm``, carried by an Engine.
 
-    The engine-neutral rules (trace-window count, kernel markers, override
-    counting when declared) are shared; these fields carry what differs:
-    the completion marker, the log line that proves the arm's compile
-    treatment, the phrases that mean a silent fallback, and whether the
-    SelectiveAC line is expected at all.
-
-    ``compile_marker`` is rule 8, and it is read both ways: the line must
-    be *present* when the arm declares ``compile="torch"``, and *absent*
-    when it declares ``compile="none"``. A profile leaves it ``None`` when
-    the engine compiles no whole block and exposes no switch for one. Rule
-    8 then checks nothing for that engine, so no arm of it may declare
-    ``"torch"``. That pairing is a property of the registry, and
-    ``tests/test_engines.py`` pins it over every arm.
-
-    ``parallelism_markers`` is arm rule 12: the log lines that prove this
-    engine really ran the requested mesh. It is a callable rather than a
-    string because every value in those lines comes from the spec, the
-    workload and the precision. Every profile must name at least the mesh
-    line for a mesh above one rank, or the run would be published under a
-    mesh nothing checked. ``tests/test_engines.py`` pins that too.
-
-    **It takes the precision because one field of the stock data-parallel
-    line moves with it, and a real run proved it.**
-    ``--megatron-precision lean`` sends ``--main-grads-dtype bf16``, so
-    Megatron reduces the gradients in bf16 and the wrapper reports it. The
-    value reaches every profile, because one call site serves all three.
-    The other two profiles read it and state nothing for it.
-
-    ``pipelined_pattern`` is the other half of arm rule 12, and it reads the
-    other way. ``parallelism_markers`` proves the engine built the mesh that
-    was asked for. It says nothing when nothing was asked for, so a log from
-    a real pipeline passed validation against the trivial spec: the run would
-    have been published as single-GPU. This pattern matches only a log that
-    built a pipeline, and at ``pp`` 1 its presence fails the arm.
-
-    This is the inversion an eager arm already uses on ``compile_marker``:
-    a run that silently compiled cannot be published as eager, and a run
-    that silently pipelined cannot be published as one GPU.
-    Measured before it was added: of 296 arm logs under ``out/``, exactly one
-    matches, and it is a deliberate ``--pp 2`` run.
-
-    ``data_parallel_pattern`` is the same inversion on the other axis, and
-    it guards a worse mistake. A pipeline rank and a single-GPU rank publish
-    the same per-device throughput, so a pipeline published as one GPU
-    misstates the mesh and not the rate. A **data-parallel** rank reads a
-    batch of its own, so a ``dp 2`` run published under the trivial spec
-    reads as roughly twice the true rate, and every other rule passes. Each
-    engine's pattern names two witnesses: the mesh line the engine logs
-    whatever this repo's code does, and the wrapper line this repo prints.
-    Neither matches a ``pp 2, dp 1`` log, which was checked against a real
-    one.
-
-    Measured before it was added, the way ``pipelined_pattern`` was: of the
-    532 arm logs under ``out/`` -- every run this repo has ever done, all of
-    them single-GPU or pipeline-only -- **none** matches either pattern. So
-    the rule refuses nothing that has already happened.
-
-    ``p2p_markers`` is the ``--megatron-p2p-sync`` half of arm rule 12. It
-    takes the spec and the requested value, and returns the line the engine
-    prints from its BUILT config, above ``pp`` 1 alone: below a pipeline
-    there is no message to synchronize, and the option is refused there
-    before a GPU is claimed. It is a second callable rather than a third
-    argument of ``parallelism_markers``, because the value is not part of
-    the mesh and a TorchTitan arm never receives it. An empty tuple here is
-    therefore not a refusal: the titan profile returns one at every mesh,
-    and ``validate_arm`` reads only the mesh markers for that.
-
-    ``nan_guard_markers`` is the ``--megatron-nan-guard`` half of the same
-    rule. It takes the requested value alone, because the guard runs at
-    every mesh: the loss check runs on the last stage at ``pp`` 1 and the
-    gradient check runs on every rank at ``dp`` 1, so there is no spec
-    below which the line is not asked. The stock profile returns the line
-    its driver prints from the value Megatron parsed. The titan profile
-    returns nothing, because the option never reaches it.
-
-    ``precision_markers`` is the ``--megatron-precision`` half of the same
-    rule, and it takes the requested value alone for the reason
-    ``nan_guard_markers`` does: the optimizer state has a precision at
-    every mesh. The stock profile asks for the four fields its driver
-    prints from the arguments Megatron resolved, under BOTH values. A
-    ``stock`` label is a claim about the precision exactly as a ``lean``
-    label is, so a run that gained the lean flags must fail a stock label
-    as surely as a run that lost them fails a lean one. The titan profile
-    returns nothing, because the option never reaches it.
+    Attributes:
+        completion_marker: Rule 1: the line a finished run prints.
+        compile_marker: Rule 8, read both ways: present under
+            ``compile="torch"``, absent under ``"none"``. ``None`` means the
+            engine has no whole-block compile, so no arm of it may ask.
+        failure_markers: Rule 4: phrases that mean a silent fallback.
+        check_ac_line: Rule 10: whether the SelectiveAC line is expected.
+        parallelism_markers: Rule 12: the lines that prove the mesh. Called
+            as ``(spec, workload, megatron_precision, megatron_args)``,
+            because the stock data-parallel line moves with the precision
+            and with ``--overlap-grad-reduce``.
+        pipelined_pattern: Rule 12 inverted: a pipeline log at ``pp`` 1.
+        data_parallel_pattern: Rule 12 inverted: a data-parallel log at
+            ``dp`` 1, which would read as twice the true rate.
+        p2p_markers: The ``--megatron-p2p-sync`` line, above ``pp`` 1.
+        nan_guard_markers: The ``--megatron-nan-guard`` line, at every mesh.
+        precision_markers: The ``--megatron-precision`` fields, at every
+            mesh and under both values.
     """
 
     completion_marker: str
@@ -163,7 +97,7 @@ class ValidationProfile:
     failure_markers: tuple[str, ...]
     check_ac_line: bool
     parallelism_markers: Callable[
-        [ParallelismSpec, Workload, str], tuple[str, ...]
+        [ParallelismSpec, Workload, str, tuple[str, ...]], tuple[str, ...]
     ]
     pipelined_pattern: re.Pattern[str]
     data_parallel_pattern: re.Pattern[str]
@@ -203,6 +137,7 @@ def _titan_parallelism_markers(
     spec: ParallelismSpec,
     workload: Workload,
     megatron_precision: str,
+    megatron_args: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """What TorchTitan logs about the mesh it really built.
 
@@ -268,6 +203,7 @@ def _megatron_stock_parallelism_markers(
     spec: ParallelismSpec,
     workload: Workload,
     megatron_precision: str,
+    megatron_args: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """``benchmarks.e2e.megatron_stock.markers``'s two lines. Keep in sync.
 
@@ -341,11 +277,9 @@ def _megatron_stock_parallelism_markers(
     and refuses a disagreement, so the two statements of the degree cannot
     differ in a run that reaches this rule.
 
-    **``overlap_grad_reduce`` reads False at both levels.** The argv omits
-    ``--overlap-grad-reduce``, so ``args`` carries False, and no wrapper
-    this suite builds mutates the field. ``DATA_PARALLEL_OVERLAP`` is the
-    table, and it lives beside the flags for the reason the other two
-    tables do.
+    **``overlap_grad_reduce`` follows ``megatron_args``.** The stock argv
+    omits ``--overlap-grad-reduce``, so the field reads False unless the
+    run's own passthrough sends it. ``data_parallel_overlap`` states that.
 
     **``grad_reduce_in_fp32`` moves with ``--megatron-precision``, and this
     rule once pinned it True.** ``--bf16`` with the default
@@ -390,7 +324,7 @@ def _megatron_stock_parallelism_markers(
             "Megatron-LM stock data parallel: "
             f"{DATA_PARALLEL_WRAPPERS[spec.zero]} over "
             f"{spec.dp} ranks (overlap_grad_reduce="
-            f"{DATA_PARALLEL_OVERLAP[spec.zero]}, "
+            f"{data_parallel_overlap(megatron_args)}, "
             "grad_reduce_in_fp32="
             f"{grad_reduce_in_fp32(megatron_precision)}, "
             "sharding_strategy="
@@ -568,10 +502,7 @@ TORCHTITAN_PROFILE = ValidationProfile(
     nan_guard_markers=_no_nan_guard_markers,
     precision_markers=_no_precision_markers,
 )
-"""The TorchTitan profile.
-
-The ``torchtitan`` engine record carries it; nothing else reads it.
-"""
+"""The TorchTitan profile."""
 
 MEGATRON_STOCK_PROFILE = ValidationProfile(
     completion_marker="Training completed",
@@ -595,11 +526,7 @@ MEGATRON_STOCK_PROFILE = ValidationProfile(
     nan_guard_markers=_megatron_stock_nan_guard_markers,
     precision_markers=_megatron_stock_precision_markers,
 )
-"""The megatron arm of the ``engines`` scenario.
-
-It runs Megatron's own ``pretrain()`` through the stock providers. Every
-marker carries the word "stock", and the driver prints the same strings.
-"""
+"""The stock Megatron profile; every marker carries the word "stock"."""
 
 
 _PROFILE_BY_ENGINE = {
@@ -608,11 +535,7 @@ _PROFILE_BY_ENGINE = {
 }
 """Which profile validates an arm of which engine.
 
-``benchmarks/e2e/engines.py`` builds the same pairing on its own records,
-from the same two constants, and ``tests/test_engines.py`` pins the two
-against each other. The duplication is the price of the import direction:
-this module sits below ``engines.py``, because an engine record carries a
-profile, so it cannot read the records back.
+``tests/test_engines.py`` pins this map to the engine records.
 """
 
 
@@ -786,8 +709,12 @@ def validate_arm(
     megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
     megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
     profile: bool = True,
+    megatron_args: tuple[str, ...] = (),
 ) -> None:
     """Reject partial or wrongly configured runs before analysis.
+
+    ``megatron_args`` is the run's ``--megatron-arg`` list, which moves the
+    data-parallel line's ``overlap_grad_reduce`` value.
 
     ``parallelism`` is the run's declared mesh, and it is what turns "the
     ranks that wrote something" into "the ranks this run asked for". Without
@@ -846,7 +773,7 @@ def validate_arm(
     parallelism_markers: tuple[str, ...] = ()
     if parallelism.world_size > 1:
         parallelism_markers = engine_profile.parallelism_markers(
-            parallelism, workload, megatron_precision
+            parallelism, workload, megatron_precision, megatron_args
         )
         # The p2p half may be empty and that is honest: a TorchTitan arm
         # never receives the value.

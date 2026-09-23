@@ -903,7 +903,8 @@ class ModelSizeAliasTests(unittest.TestCase):
             {"titan_compiled": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="normal",
@@ -942,7 +943,8 @@ class ModelSizeAliasTests(unittest.TestCase):
                     {"titan_compiled": ["cmd"]},
                     "test-gpu",
                     _METADATA,
-                    (),
+                    torchtitan_args=(),
+                    megatron_args=(),
                     axes=RunAxes(
                         ac_mode="sac",
                         model_size="1b",
@@ -964,7 +966,8 @@ class ModelSizeAliasTests(unittest.TestCase):
                         selected,
                         "test-gpu",
                         _METADATA,
-                        (),
+                        torchtitan_args=(),
+                        megatron_args=(),
                         axes=RunAxes(
                             ac_mode="sac",
                             model_size=requested,
@@ -985,7 +988,8 @@ class ModelSizeAliasTests(unittest.TestCase):
             {"titan_compiled": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
                 model_size="normal",
@@ -1004,7 +1008,8 @@ class ModelSizeAliasTests(unittest.TestCase):
                 selected,
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
+                megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
                     model_size="huge",
@@ -1381,7 +1386,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 17)
+        self.assertEqual(manifest["schema_version"], 18)
         self.assertEqual(manifest["model_size"], "huge")
         self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=4096))
         command = manifest["commands"]["titan_compiled"]

@@ -308,37 +308,54 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Invalid value", result.output)
 
-    def test_run_preserves_torchtitan_passthrough_arguments(self) -> None:
+    def _invoke_run(self, *arguments: str):
         completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
-            selected_arms=(ENGINES.arm("titan_compiled"),),
+            selected_arms=ENGINES.arms,
         )
         with mock.patch(
             "benchmarks.cli.e2e.execute_run", return_value=completed
         ) as execute:
             result = self.runner.invoke(
-                cli,
-                [
-                    "run",
-                    "2",
-                    "--scenario",
-                    "engines",
-                    "--arm",
-                    "titan_compiled",
-                    "--",
-                    "--debug.seed",
-                    "42",
-                    "--debug.deterministic",
-                ],
+                cli, ["run", "2", "--scenario", "engines", *arguments]
             )
+        return result, execute
+
+    def test_run_collects_both_passthrough_lists(self) -> None:
+        result, execute = self._invoke_run(
+            "--torchtitan-arg=--compile.mode max-autotune",
+            "--torchtitan-arg",
+            "--debug.deterministic",
+            "--megatron-arg=--cross-entropy-loss-fusion",
+            "--megatron-arg=--moe-token-dispatcher-type flex",
+        )
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
         self.assertEqual(request.gpu, "2")
-        self.assertEqual(request.arm_names, ("titan_compiled",))
         self.assertEqual(
-            request.extra_args,
-            ("--debug.seed", "42", "--debug.deterministic"),
+            request.torchtitan_args,
+            ("--compile.mode", "max-autotune", "--debug.deterministic"),
         )
+        self.assertEqual(
+            request.megatron_args,
+            (
+                "--cross-entropy-loss-fusion",
+                "--moe-token-dispatcher-type",
+                "flex",
+            ),
+        )
+
+    def test_an_absent_passthrough_reaches_the_request_as_none(self) -> None:
+        result, execute = self._invoke_run()
+        self.assertEqual(result.exit_code, 0, result.output)
+        request = execute.call_args.args[0]
+        self.assertIsNone(request.torchtitan_args)
+        self.assertIsNone(request.megatron_args)
+
+    def test_a_trailing_passthrough_is_refused(self) -> None:
+        result, execute = self._invoke_run("--", "--debug.deterministic")
+        self.assertNotEqual(result.exit_code, 0)
+        execute.assert_not_called()
 
     def test_run_collects_repeated_arms_in_command_line_order(self) -> None:
         completed = SimpleNamespace(

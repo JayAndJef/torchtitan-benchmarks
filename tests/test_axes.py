@@ -24,7 +24,6 @@ from benchmarks.artifacts.manifests import AXIS_KEYS, manifest_data
 from benchmarks.cli.e2e import run_command
 from benchmarks.e2e.megatron_stock.flags import (
     DATA_PARALLEL_OPTIMIZERS,
-    DATA_PARALLEL_OVERLAP,
     DATA_PARALLEL_WRAPPERS,
     SHARDING_FLAGS_BY_VALUE,
     SHARDING_STRATEGIES,
@@ -65,7 +64,6 @@ _CHOICE_BY_OPTION: dict[str, tuple] = {
 _ZERO_TABLES = {
     "SHARDING_FLAGS_BY_VALUE": SHARDING_FLAGS_BY_VALUE,
     "DATA_PARALLEL_WRAPPERS": DATA_PARALLEL_WRAPPERS,
-    "DATA_PARALLEL_OVERLAP": DATA_PARALLEL_OVERLAP,
     "DATA_PARALLEL_OPTIMIZERS": DATA_PARALLEL_OPTIMIZERS,
     "SHARDING_STRATEGIES": SHARDING_STRATEGIES,
 }
@@ -100,7 +98,8 @@ def _manifest() -> dict:
         {"titan_eager": ["cmd"]},
         "test-gpu",
         _METADATA,
-        (),
+        torchtitan_args=(),
+        megatron_args=(),
         axes=_AXES,
     )
 

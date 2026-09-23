@@ -98,7 +98,8 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             {scenario.arms[0].name: ["python", "-m", "x"]},
             "test-gpu",
             {"requested_gpu": "0"},
-            (),
+            torchtitan_args=(),
+            megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
                 model_size="1b",
@@ -118,8 +119,8 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
         self.assertEqual(THROUGHPUT_DEFINITION, "tokens_per_second_per_device")
 
     def test_the_schema_moved_with_the_new_key(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 17)
-        self.assertEqual(self._manifest()["schema_version"], 17)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
+        self.assertEqual(self._manifest()["schema_version"], 18)
 
 
 class PerRankLogParsingTests(unittest.TestCase):
