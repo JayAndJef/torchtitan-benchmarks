@@ -98,7 +98,7 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             {scenario.arms[0].name: ["python", "-m", "x"]},
             "test-gpu",
             {"requested_gpu": "0"},
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",

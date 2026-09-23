@@ -98,7 +98,7 @@ def _manifest() -> dict:
         {"titan_eager": ["cmd"]},
         "test-gpu",
         _METADATA,
-        (),
+        torchtitan_args=(),
         megatron_args=(),
         axes=_AXES,
     )

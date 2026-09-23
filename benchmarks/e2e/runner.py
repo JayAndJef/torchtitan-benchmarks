@@ -24,6 +24,7 @@ from benchmarks.artifacts.run_state import (
 )
 from benchmarks.e2e.axes import RunAxes, RunRequest
 from benchmarks.e2e.engines import command_for_arm
+from benchmarks.e2e.passthrough import reach_refusal
 from benchmarks.e2e.parallelism import (
     MEGATRON_ENGINES,
     PP_SCHEDULES,
@@ -404,7 +405,7 @@ def _resolve_run(
     if refusal is not None:
         raise ValueError(refusal)
 
-    refusal = passthrough_refusal(arms, torchtitan_args, megatron_args)
+    refusal = reach_refusal(arms, torchtitan_args, megatron_args)
     if refusal is not None:
         raise ValueError(refusal)
 
@@ -459,7 +460,7 @@ def _resolve_run(
             arms,
             hardware,
             metadata,
-            torchtitan_args,
+            torchtitan_args=torchtitan_args,
             megatron_args=megatron_args,
             axes=axes,
         )
@@ -481,31 +482,6 @@ def _resolve_run(
         torchtitan_args=torchtitan_args,
         megatron_args=megatron_args,
     )
-
-
-def passthrough_refusal(
-    arms: Iterable[Arm],
-    torchtitan_args: tuple[str, ...],
-    megatron_args: tuple[str, ...],
-) -> str | None:
-    """Why a passthrough list cannot reach ``arms``, or ``None``."""
-    arms = tuple(arms)
-    names = ", ".join(arm.name for arm in arms)
-    if torchtitan_args and not any(
-        arm.engine not in MEGATRON_ENGINES for arm in arms
-    ):
-        return (
-            f"--torchtitan-arg reaches no arm of this run: {names} run on "
-            "Megatron; select a TorchTitan arm, or omit the option"
-        )
-    if megatron_args and not any(
-        arm.engine in MEGATRON_ENGINES for arm in arms
-    ):
-        return (
-            f"--megatron-arg reaches no arm of this run: {names} run on "
-            "TorchTitan; select the stock megatron arm, or omit the option"
-        )
-    return None
 
 
 def megatron_precision_refusal(
@@ -599,7 +575,7 @@ def execute_run(
             resolved.commands,
             resolved.hardware,
             resolved.metadata,
-            resolved.torchtitan_args,
+            torchtitan_args=resolved.torchtitan_args,
             megatron_args=resolved.megatron_args,
             axes=axes,
         )

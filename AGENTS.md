@@ -171,20 +171,19 @@ value, so `--megatron-arg="--moe-token-dispatcher-type flex"` is two tokens.
 A list that reaches no selected arm is refused. The tokens go after the
 harness flags, and both parsers keep the last value of a repeated flag.
 
-Each engine has three tables. The owned table maps each harness option to
-the flags it sets. The pinned table holds the flags that keep the two
-engines on the same work: the optimizer, the routing, the data, the step
-lines and the timed steps. The perf table holds the flags a passthrough may
-set. A passthrough flag in the owned or pinned table is refused, and the
-message names the owner.
+`benchmarks/e2e/passthrough.py` holds three tables, and each row holds
+both engines' patterns. The owned table maps each harness option to the
+flags it sets. The pinned table holds the flags that keep the two engines
+on the same work: the optimizer, the routing, the data, the step lines and
+the timed steps. The perf table holds the flags a passthrough may set. A
+passthrough flag in the owned or pinned table is refused, and the message
+names the owner.
 
-- `benchmarks/e2e/megatron_stock/flags.py` holds the Megatron tables. A
-  Megatron flag in no table passes, so every fusion flag Megatron offers
+- An unlisted Megatron flag passes, so every fusion flag Megatron offers
   passes. §7 names the stock omissions a passthrough can add.
-- `benchmarks/e2e/passthrough.py` holds the TorchTitan tables. A TorchTitan
-  flag in no table is refused, so a field that a fork bump adds fails
-  until someone classifies it.
-- `tests/test_passthrough.py` proves that the tables are disjoint, that
+- An unlisted TorchTitan flag is refused, so a field that a fork bump adds
+  fails until someone classifies it.
+- `tests/test_passthrough.py` proves that no pattern sits in two rows, that
   each flag a builder emits has one class, that each owner is a real `run`
   option, and that each TorchTitan config field has one class.
 

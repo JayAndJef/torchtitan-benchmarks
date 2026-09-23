@@ -64,6 +64,7 @@ from benchmarks.e2e.parallelism import (
     ParallelismSpec,
     ZERO_MODES,
 )
+from benchmarks.e2e.passthrough import reach_refusal
 from benchmarks.e2e.registry import (
     AC_MODES,
     DEFAULT_AC_MODE,
@@ -84,7 +85,6 @@ from benchmarks.e2e.runner import (
     execute_run,
     megatron_nan_guard_refusal,
     megatron_precision_refusal,
-    passthrough_refusal,
 )
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
@@ -692,7 +692,7 @@ def _skip_reason(
             or megatron_precision_refusal(
                 scenario.arms, megatron_precision, zero
             )
-            or passthrough_refusal(
+            or reach_refusal(
                 scenario.arms, torchtitan_args, megatron_args
             )
         )

@@ -903,7 +903,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             {"titan_compiled": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -943,7 +943,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                     {"titan_compiled": ["cmd"]},
                     "test-gpu",
                     _METADATA,
-                    (),
+                    torchtitan_args=(),
                     megatron_args=(),
                     axes=RunAxes(
                         ac_mode="sac",
@@ -966,7 +966,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                         selected,
                         "test-gpu",
                         _METADATA,
-                        (),
+                        torchtitan_args=(),
                         megatron_args=(),
                         axes=RunAxes(
                             ac_mode="sac",
@@ -988,7 +988,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             {"titan_compiled": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -1008,7 +1008,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                 selected,
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",

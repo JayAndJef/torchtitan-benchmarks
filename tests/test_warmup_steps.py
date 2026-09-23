@@ -106,7 +106,7 @@ def _manifest(profile: bool, warmup_steps: int | None) -> dict:
         {"titan_eager": ["cmd"]},
         "test-gpu",
         _METADATA,
-        (),
+        torchtitan_args=(),
         megatron_args=(),
         axes=RunAxes(
             ac_mode="none",
@@ -149,7 +149,7 @@ class ResumeTests(unittest.TestCase):
                     arms,
                     "test-gpu",
                     _METADATA,
-                    (),
+                    torchtitan_args=(),
                     megatron_args=(),
                     axes=RunAxes(
                         ac_mode="none",

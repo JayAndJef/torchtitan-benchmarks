@@ -543,7 +543,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -655,7 +655,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
@@ -702,7 +702,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
@@ -772,7 +772,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
@@ -795,7 +795,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
                 {"baseline": ["cmd"]},
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
@@ -826,7 +826,7 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -888,7 +888,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -909,7 +909,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 self.arms,
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
@@ -932,7 +932,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -953,7 +953,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
                 self.arms,
                 "test-gpu",
                 _METADATA,
-                (),
+                torchtitan_args=(),
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="sac",
@@ -981,7 +981,7 @@ class ResumeParallelismTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -1002,7 +1002,7 @@ class ResumeParallelismTests(unittest.TestCase):
             self.arms,
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="sac",
@@ -1086,7 +1086,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -1107,7 +1107,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
             self.arms,
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -1161,7 +1161,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -1187,7 +1187,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
             self.arms,
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -1241,7 +1241,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             {"baseline": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -1267,7 +1267,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
             self.arms,
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",

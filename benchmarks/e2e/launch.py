@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.passthrough import refuse_titan_passthrough
+from benchmarks.e2e.passthrough import refuse_passthrough
 from benchmarks.e2e.schema import Arm, Workload
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
@@ -176,7 +176,7 @@ def titan_command(
     builder takes the same parameters. ``profile`` decides the profiler
     block alone.
     """
-    refuse_titan_passthrough(arm.name, extra_args)
+    refuse_passthrough(arm, extra_args, parallelism.zero)
     # The fork defaults it off, so an eager arm passes no negation.
     compile_flags = ("--compile.enable",) if arm.compile == "torch" else ()
     # Off unless these tokens ask for it, so an unprofiled run drops them.
@@ -341,12 +341,9 @@ def megatron_stock_command(
             f"{parallelism.pp_schedule!r}"
         )
     # Below the refusals, so a refused request fails with its own message.
-    from benchmarks.e2e.megatron_stock.flags import (
-        refuse_megatron_passthrough,
-        stock_megatron_flags,
-    )
+    from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
-    refuse_megatron_passthrough(arm.name, extra_args, parallelism.zero)
+    refuse_passthrough(arm, extra_args, parallelism.zero)
 
     # Passed on as typed; shape_by_name resolves an alias either way.
     return [

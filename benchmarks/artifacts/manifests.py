@@ -142,10 +142,10 @@ def manifest_data(
     commands: dict[str, list[str]],
     hardware: str,
     metadata: dict[str, str],
-    torchtitan_args: list[str] | tuple[str, ...],
     *,
     # No default, because the resume check compares every field: a writer
     # that defaults what the checker demands records the wrong run.
+    torchtitan_args: list[str] | tuple[str, ...],
     megatron_args: list[str] | tuple[str, ...],
     axes: RunAxes,
 ) -> dict[str, Any]:
@@ -176,8 +176,8 @@ def write_manifest(
     commands: dict[str, list[str]],
     hardware: str,
     metadata: dict[str, str],
-    torchtitan_args: list[str] | tuple[str, ...],
     *,
+    torchtitan_args: list[str] | tuple[str, ...],
     megatron_args: list[str] | tuple[str, ...],
     axes: RunAxes,
 ) -> None:
@@ -189,7 +189,7 @@ def write_manifest(
             commands,
             hardware,
             metadata,
-            torchtitan_args,
+            torchtitan_args=torchtitan_args,
             megatron_args=megatron_args,
             axes=axes,
         ),
@@ -220,8 +220,8 @@ def _resume_mismatches(
     arms: tuple[Arm, ...],
     hardware: str,
     metadata: dict[str, str],
-    torchtitan_args: tuple[str, ...],
     *,
+    torchtitan_args: tuple[str, ...],
     megatron_args: tuple[str, ...],
     axes: RunAxes,
 ) -> list[str]:

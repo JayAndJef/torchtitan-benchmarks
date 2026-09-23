@@ -243,7 +243,7 @@ class ManifestTests(unittest.TestCase):
             {"titan_eager": ["cmd"]},
             "test-gpu",
             _METADATA,
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -280,7 +280,7 @@ class ManifestTests(unittest.TestCase):
                     arms,
                     "test-gpu",
                     _METADATA,
-                    (),
+                    torchtitan_args=(),
                     megatron_args=(),
                     axes=RunAxes(
                         ac_mode="none",

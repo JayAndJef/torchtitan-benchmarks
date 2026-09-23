@@ -514,7 +514,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
             {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -846,7 +846,7 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
             {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -1038,7 +1038,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
             {"megatron_stock": ["cmd"]},
             "test-gpu",
             {**self.metadata, "cpu_pinning": "none: test"},
-            (),
+            torchtitan_args=(),
             megatron_args=(),
             axes=RunAxes(
                 ac_mode="none",
@@ -1690,7 +1690,7 @@ class ManifestTests(unittest.TestCase):
                 commands,
                 "rtx-a6000",
                 metadata,
-                extra_args,
+                torchtitan_args=extra_args,
                 megatron_args=(),
                 axes=RunAxes(
                     ac_mode="none",
