@@ -56,7 +56,7 @@ OPTION = re.compile(r"\A--[a-z0-9][a-z0-9-]*\Z")
 IDENTIFIER = re.compile(r"\Abenchmarks(?:\.[A-Za-z_][A-Za-z_0-9]*)+:[A-Za-z_][A-Za-z_0-9]*\Z")
 
 PATH_EXTENSIONS = (".py", ".sh", ".md", ".yml", ".toml", ".json")
-IGNORED_PREFIXES = ("out/", "reports/", ".cuda-compat/", ".venv/")
+IGNORED_PREFIXES = ("out/", "reports/", ".cuda-compat/", ".apex-wgrad/", ".venv/")
 ARTIFACT_FILE_NAMES = frozenset(
     {"manifest.json", "results.json", "run_state.json"}
 )

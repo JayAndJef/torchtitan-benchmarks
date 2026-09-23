@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
+import json
 import os
 import pathlib
 import sys
@@ -3014,6 +3015,53 @@ def _fake_compile(source: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
     """Stand in for the compiler. The test checks names, not machine code."""
     target.write_bytes(b"\x7fELF fake")
     return target
+
+
+
+class WgradExtensionCheckTest(unittest.TestCase):
+    """The apex wgrad module: refused when absent or stale, found when current."""
+
+    def setUp(self) -> None:
+        scratch = TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.build_dir = Path(scratch.name) / "build"
+        self.build_dir.mkdir()
+        self.path_before = list(sys.path)
+        self.addCleanup(setattr, sys, "path", self.path_before)
+
+    def _write(self, **changes: str) -> None:
+        stamp = {**bootstrap.wgrad_expected_stamp(), **changes}
+        (self.build_dir / "stamp.json").write_text(json.dumps(stamp))
+        (self.build_dir / f"{bootstrap.WGRAD_MODULE}.so").write_bytes(b"")
+
+    def test_a_missing_build_is_refused_and_names_the_repair(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "tools/build_wgrad_ext.py"):
+            bootstrap.add_wgrad_extension_to_path(self.build_dir)
+
+    def test_a_build_for_another_torch_is_refused(self) -> None:
+        self._write(torch_version="2.0.0")
+        with self.assertRaisesRegex(RuntimeError, "stale.*torch_version"):
+            bootstrap.add_wgrad_extension_to_path(self.build_dir)
+
+    def test_a_build_from_other_sources_is_refused(self) -> None:
+        self._write(source_sha256="0" * 64)
+        with self.assertRaisesRegex(RuntimeError, "stale.*source_sha256"):
+            bootstrap.add_wgrad_extension_to_path(self.build_dir)
+
+    def test_a_stamp_without_a_library_is_refused(self) -> None:
+        self._write()
+        (self.build_dir / f"{bootstrap.WGRAD_MODULE}.so").unlink()
+        with self.assertRaisesRegex(RuntimeError, "no fused_weight_gradient"):
+            bootstrap.add_wgrad_extension_to_path(self.build_dir)
+
+    def test_a_current_build_goes_on_the_path(self) -> None:
+        self._write()
+        bootstrap.add_wgrad_extension_to_path(self.build_dir)
+        self.assertEqual(sys.path[0], str(self.build_dir))
+
+    def test_every_vendored_file_exists(self) -> None:
+        for relative in (*bootstrap.WGRAD_SOURCES, *bootstrap.WGRAD_HEADERS):
+            self.assertTrue((bootstrap.WGRAD_SOURCE_DIR / relative).is_file(), relative)
 
 
 if __name__ == "__main__":

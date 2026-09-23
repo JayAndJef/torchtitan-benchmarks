@@ -9,3 +9,5 @@ __pycache__/
 !/.claude/skills/
 /.cuda-home/
 /database/
+/.apex-wgrad/
+/.apex-wgrad.new/

@@ -66,6 +66,12 @@ shares one pre-push hook.
   it on `sys.path`.
 - `run_bench.sh` exports `HF_DATASETS_CACHE`, because a shared `HF_HOME` may
   belong to another user.
+- Stock Megatron's gradient accumulation fusion needs apex's
+  `fused_weight_gradient_mlp_cuda`. Apex builds its core extensions all or
+  none, so `tools/build_wgrad_ext.py` builds this one alone from
+  `third_party/apex-wgrad/` into `.apex-wgrad/`. `sync.sh` runs it. The
+  stock driver refuses a missing build, or a build for another torch version.
+  Rebuild it after a torch pin bump. Pass `--check` to test it on a GPU.
 
 ## 3. Repository map
 
