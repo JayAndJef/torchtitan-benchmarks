@@ -56,6 +56,11 @@ export NVCC_THREADS="${NVCC_THREADS:-2}"
 
 uv sync "$@"
 
+# Stock Megatron's gradient accumulation fusion needs one apex extension.
+# Apex builds its eleven core extensions all or none, so this builds the one
+# from vendored sources into .apex-wgrad/, outside the venv.
+.venv/bin/python tools/build_wgrad_ext.py
+
 # Install the pre-push hook. Worktrees share one hook set, so the common dir
 # is the correct target; --git-dir would name the per-worktree directory and
 # the hook would apply to this worktree alone. The link is absolute and the
