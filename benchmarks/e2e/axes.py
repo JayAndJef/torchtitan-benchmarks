@@ -127,8 +127,17 @@ class RunRequest:
     steps: int | None = None
     batch: int | None = None
     extra_args: tuple[str, ...] | None = None
+    torchtitan_args: tuple[str, ...] = ()
+    megatron_args: tuple[str, ...] = ()
     timestamp: str | None = None
     occurrence: int = 1
     cache_root: Path | None = None
     compiler_env: Path | None = None
     axes: RequestedAxes = RequestedAxes()
+
+    def __post_init__(self) -> None:
+        if self.extra_args is not None and not self.torchtitan_args:
+            object.__setattr__(self, "torchtitan_args", self.extra_args)
+        elif self.torchtitan_args and self.extra_args is None:
+            object.__setattr__(self, "extra_args", self.torchtitan_args)
+
