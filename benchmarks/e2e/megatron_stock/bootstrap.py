@@ -14,18 +14,23 @@ rebuilds FlashAttention-3 from source, and makes every published number
 incomparable. This work rejects it.
 
 ``ensure_dataset_helpers`` answers a second environment problem. Read its
-own docstring for it.
+own docstring for it. ``add_wgrad_extension_to_path`` answers a third: the
+apex kernel that stock gradient accumulation fusion needs.
 
 This module imports no torch and no megatron.
 """
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import importlib.util
+import json
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import sysconfig
 import typing
 from pathlib import Path
@@ -33,6 +38,7 @@ from types import ModuleType
 from typing import MutableMapping
 
 from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+    REPO_ROOT,
     add_megatron_to_path,
     configure_te_environment,
 )
@@ -214,6 +220,93 @@ def _compile_dataset_helper(source: Path, target: Path) -> Path:
     return target
 
 
+WGRAD_MODULE = "fused_weight_gradient_mlp_cuda"
+"""The apex extension Megatron imports for gradient accumulation fusion."""
+
+WGRAD_SOURCE_DIR = REPO_ROOT / "third_party" / "apex-wgrad"
+"""The vendored apex sources of ``WGRAD_MODULE``, and nothing else of apex."""
+
+WGRAD_SOURCES = (
+    "csrc/megatron/fused_weight_gradient_dense.cpp",
+    "csrc/megatron/fused_weight_gradient_dense_cuda.cu",
+    "csrc/megatron/fused_weight_gradient_dense_16bit_prec_cuda.cu",
+)
+"""The compiled sources, relative to ``WGRAD_SOURCE_DIR``, as apex lists them."""
+
+WGRAD_HEADERS = ("csrc/type_shim.h",)
+"""The one apex header the sources include."""
+
+WGRAD_BUILD_DIR = REPO_ROOT / ".apex-wgrad"
+"""Where ``tools/build_wgrad_ext.py`` writes the built module and its stamp."""
+
+WGRAD_STAMP = WGRAD_BUILD_DIR / "stamp.json"
+"""The build record: the torch version and the source digest it was built from."""
+
+
+def wgrad_source_digest(source_dir: Path = WGRAD_SOURCE_DIR) -> str:
+    """Return one sha256 over every vendored source and header, in a fixed order."""
+    digest = hashlib.sha256()
+    for relative in (*WGRAD_SOURCES, *WGRAD_HEADERS):
+        digest.update(relative.encode())
+        digest.update((source_dir / relative).read_bytes())
+    return digest.hexdigest()
+
+
+def wgrad_expected_stamp(source_dir: Path = WGRAD_SOURCE_DIR) -> dict[str, str]:
+    """Return the stamp a current build must carry.
+
+    It reads the torch version from the package metadata, so it imports no
+    torch. A torch pin bump changes the version and so refuses the old build.
+    """
+    return {
+        "module": WGRAD_MODULE,
+        "torch_version": importlib.metadata.version("torch"),
+        "source_sha256": wgrad_source_digest(source_dir),
+    }
+
+
+def add_wgrad_extension_to_path(
+    build_dir: Path = WGRAD_BUILD_DIR,
+    source_dir: Path = WGRAD_SOURCE_DIR,
+) -> Path:
+    """Put the built apex wgrad module on ``sys.path``, or refuse the run.
+
+    Stock Megatron enables ``gradient_accumulation_fusion`` by default, and
+    its ``ColumnParallelLinear`` output layer then needs ``WGRAD_MODULE``.
+    Megatron raises at model build without it, after the arm has spent its
+    startup. This check fails first, and it names the repair.
+
+    A build for another torch version, or from other sources, is refused
+    too. Its ABI or its kernels would not match the run.
+    """
+    repair = (
+        "build it with: source /opt/rh/gcc-toolset-13/enable && "
+        ".venv/bin/python tools/build_wgrad_ext.py (sync.sh runs it)"
+    )
+    stamp = build_dir / WGRAD_STAMP.name
+    if not stamp.is_file():
+        raise RuntimeError(f"{WGRAD_MODULE} is not built under {build_dir}; {repair}")
+    recorded = json.loads(stamp.read_text())
+    expected = wgrad_expected_stamp(source_dir)
+    stale = {
+        key: (recorded.get(key), value)
+        for key, value in expected.items()
+        if recorded.get(key) != value
+    }
+    if stale:
+        raise RuntimeError(
+            f"{WGRAD_MODULE} under {build_dir} is stale "
+            f"(recorded, current: {stale}); {repair}"
+        )
+    if not any(build_dir.glob(f"{WGRAD_MODULE}*.so")):
+        raise RuntimeError(
+            f"{build_dir} has a stamp but no {WGRAD_MODULE} library; {repair}"
+        )
+    if str(build_dir) not in sys.path:
+        sys.path.insert(0, str(build_dir))
+    return build_dir
+
+
 def install_allocator_defaults(
     environ: "MutableMapping[str, str]" = os.environ,
 ) -> None:
@@ -255,6 +348,7 @@ def prepare() -> Path:
     """
     install_typing_override()
     configure_te_environment()
+    add_wgrad_extension_to_path()
     megatron_dir = add_megatron_to_path()
     ensure_dataset_helpers(megatron_dir)
     return megatron_dir
