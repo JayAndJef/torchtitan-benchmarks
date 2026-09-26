@@ -50,12 +50,12 @@ from benchmarks.e2e.parallelism import (
 )
 from benchmarks.e2e.registry import (
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
     EXECUTION_MODEL,
     scenario_by_name,
 )
+from tests.engine_helpers import run_spec
 from benchmarks.e2e.runner import (
+    MEGATRON_DEFAULTS,
     _resolve_run,
     execute_run,
 )
@@ -65,6 +65,10 @@ from benchmarks.execution.devices import parse_devices
 from benchmarks.execution.environment import runtime_environment
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
+
+
+_RUN = run_spec(profile=False)
+"""The run that the manifest tests record: one GPU, the 1b shape, the scenario data."""
 
 
 _METADATA = {
@@ -148,8 +152,8 @@ class ExecutionOptionTests(unittest.TestCase):
         parameters = self._parameters()
         for option, constant in (
             ("--ac", DEFAULT_AC_MODE),
-            ("--megatron-p2p-sync", DEFAULT_MEGATRON_P2P_SYNC),
-            ("--megatron-nan-guard", DEFAULT_MEGATRON_NAN_GUARD),
+            ("--megatron-p2p-sync", MEGATRON_DEFAULTS.p2p_sync),
+            ("--megatron-nan-guard", MEGATRON_DEFAULTS.nan_guard),
         ):
             with self.subTest(option=option):
                 # Click leaves an unset default unset, so the option
@@ -157,8 +161,8 @@ class ExecutionOptionTests(unittest.TestCase):
                 self.assertFalse(parameters[option].required)
                 self.assertIn(f"[default: {constant}]", parameters[option].help)
         self.assertEqual(DEFAULT_AC_MODE, "none")
-        self.assertEqual(DEFAULT_MEGATRON_P2P_SYNC, "off")
-        self.assertEqual(DEFAULT_MEGATRON_NAN_GUARD, "off")
+        self.assertEqual(MEGATRON_DEFAULTS.p2p_sync, "off")
+        self.assertEqual(MEGATRON_DEFAULTS.nan_guard, "off")
 
     def test_the_megatron_flag_gates_read_the_literal_value(self) -> None:
         """The token follows the treatment, never the default of the day.
@@ -539,6 +543,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
         scenario = scenario_by_name("engines")
         return manifest_data(
             scenario,
+            _RUN,
             (scenario.arm("megatron_stock"),),
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -651,6 +656,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
+                _RUN,
                 (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
@@ -698,6 +704,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
+                _RUN,
                 (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
@@ -768,6 +775,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
+                _RUN,
                 (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
@@ -791,6 +799,7 @@ class ManifestSchemaEighteenTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             manifest_data(
                 scenario,
+                _RUN,
                 (scenario.arm("megatron_stock"),),
                 {"baseline": ["cmd"]},
                 "test-gpu",
@@ -822,6 +831,7 @@ class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
         scenario = scenario_by_name("engines")
         return manifest_data(
             scenario,
+            _RUN,
             (scenario.arm("megatron_stock"),),
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -884,6 +894,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
     ) -> None:
         manifest = manifest_data(
             self.scenario,
+            _RUN,
             self.arms,
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -906,6 +917,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             _resume_mismatches(
                 manifest,
                 self.scenario,
+                _RUN,
                 self.arms,
                 "test-gpu",
                 _METADATA,
@@ -928,6 +940,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
     def test_the_spec_it_derives_from_is_gated(self) -> None:
         manifest = manifest_data(
             self.scenario,
+            _RUN,
             self.arms,
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -950,6 +963,7 @@ class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
             _resume_mismatches(
                 manifest,
                 self.scenario,
+                _RUN,
                 self.arms,
                 "test-gpu",
                 _METADATA,
@@ -977,6 +991,7 @@ class ResumeParallelismTests(unittest.TestCase):
     def _manifest(self, parallelism: ParallelismSpec) -> dict:
         return manifest_data(
             self.scenario,
+            _RUN,
             self.arms,
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -999,6 +1014,7 @@ class ResumeParallelismTests(unittest.TestCase):
         return _resume_mismatches(
             manifest,
             self.scenario,
+            _RUN,
             self.arms,
             "test-gpu",
             _METADATA,
@@ -1082,6 +1098,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
     def _manifest(self, megatron_p2p_sync: str) -> dict:
         return manifest_data(
             self.scenario,
+            _RUN,
             self.arms,
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -1104,6 +1121,7 @@ class ResumeMegatronP2pSyncTests(unittest.TestCase):
         return _resume_mismatches(
             manifest,
             self.scenario,
+            _RUN,
             self.arms,
             "test-gpu",
             _METADATA,
@@ -1157,6 +1175,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
     ) -> dict:
         return manifest_data(
             self.scenario,
+            _RUN,
             self.arms,
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -1184,6 +1203,7 @@ class ResumeMegatronNanGuardTests(unittest.TestCase):
         return _resume_mismatches(
             manifest,
             self.scenario,
+            _RUN,
             self.arms,
             "test-gpu",
             _METADATA,
@@ -1237,6 +1257,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
     ) -> dict:
         return manifest_data(
             self.scenario,
+            _RUN,
             self.arms,
             {"baseline": ["cmd"]},
             "test-gpu",
@@ -1264,6 +1285,7 @@ class ResumeMegatronPrecisionTests(unittest.TestCase):
         return _resume_mismatches(
             manifest,
             self.scenario,
+            _RUN,
             self.arms,
             "test-gpu",
             _METADATA,

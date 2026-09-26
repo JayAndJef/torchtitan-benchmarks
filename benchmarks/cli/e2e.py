@@ -57,34 +57,34 @@ from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
+from benchmarks.e2e.megatron_stock.flags import (
+    MEGATRON_NAN_GUARD_MODES,
+    MEGATRON_PRECISION_MODES,
+    MEGATRON_P2P_SYNC_MODES,
+)
 from benchmarks.e2e.parallelism import (
     DEFAULT_ZERO,
-    MEGATRON_ENGINES,
     PP_SCHEDULE_CHOICES,
     ParallelismSpec,
     ZERO_MODES,
 )
-from benchmarks.e2e.passthrough import reach_refusal
 from benchmarks.e2e.registry import (
     AC_MODES,
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_PRECISION,
-    DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MODEL_SIZE,
     DEFAULT_PROFILE,
     DEFAULT_WARMUP_STEPS,
-    MEGATRON_NAN_GUARD_MODES,
-    MEGATRON_PRECISION_MODES,
-    MEGATRON_P2P_SYNC_MODES,
     SCENARIOS,
 )
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
 from benchmarks.e2e.runner import (
+    MEGATRON_DEFAULTS,
     RunResult,
     execute_run,
+    holds_megatron,
     megatron_nan_guard_refusal,
     megatron_precision_refusal,
+    reach_refusal,
 )
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
@@ -271,7 +271,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.Choice(MEGATRON_P2P_SYNC_MODES),
             help=(
                 "Whether Megatron synchronizes the device after every "
-                f"pipeline message [default: {DEFAULT_MEGATRON_P2P_SYNC}]. "
+                f"pipeline message [default: {MEGATRON_DEFAULTS.p2p_sync}]. "
                 "on is stock Megatron, and it needs --pp above 1 and a "
                 "megatron arm; TorchTitan arms receive nothing. Results "
                 "are only comparable within one value."
@@ -283,7 +283,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.Choice(MEGATRON_NAN_GUARD_MODES),
             help=(
                 "Whether stock Megatron checks every loss and gradient for "
-                f"NaN and Inf [default: {DEFAULT_MEGATRON_NAN_GUARD}]. on "
+                f"NaN and Inf [default: {MEGATRON_DEFAULTS.nan_guard}]. on "
                 "is stock Megatron. off sends Megatron's own "
                 "--no-check-for-nan-in-loss-and-grad to the stock megatron "
                 "arm, and it needs one; TorchTitan arms receive nothing. "
@@ -296,7 +296,7 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
             type=click.Choice(MEGATRON_PRECISION_MODES),
             help=(
                 "How stock Megatron holds the optimizer state [default: "
-                f"{DEFAULT_MEGATRON_PRECISION}]. stock is --bf16 alone, "
+                f"{MEGATRON_DEFAULTS.precision}]. stock is --bf16 alone, "
                 "which is 18 bytes per parameter. lean adds the "
                 "precision-aware optimizer with bf16 gradients and bf16 "
                 "Adam moments, which is 10. lean needs --zero 1, because "
@@ -661,13 +661,13 @@ def _skip_reason(
     scenario = SCENARIOS[name]
     ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
     megatron_p2p_sync = (
-        options.get("megatron_p2p_sync") or DEFAULT_MEGATRON_P2P_SYNC
+        options.get("megatron_p2p_sync") or MEGATRON_DEFAULTS.p2p_sync
     )
     megatron_nan_guard = (
-        options.get("megatron_nan_guard") or DEFAULT_MEGATRON_NAN_GUARD
+        options.get("megatron_nan_guard") or MEGATRON_DEFAULTS.nan_guard
     )
     megatron_precision = (
-        options.get("megatron_precision") or DEFAULT_MEGATRON_PRECISION
+        options.get("megatron_precision") or MEGATRON_DEFAULTS.precision
     )
     # Read, not popped: _axes pops it from the per-scenario copy.
     zero = options.get("zero")
@@ -679,9 +679,7 @@ def _skip_reason(
             f"does not support ac mode {ac_mode!r} "
             f"(supported: {', '.join(scenario.supported_ac_modes)})"
         )
-    elif megatron_p2p_sync == "on" and not any(
-        arm.engine in MEGATRON_ENGINES for arm in scenario.arms
-    ):
+    elif megatron_p2p_sync == "on" and not holds_megatron(scenario.arms):
         reason = (
             f"--megatron-p2p-sync {megatron_p2p_sync!r} reaches no arm of "
             "this scenario (every arm runs on TorchTitan)"

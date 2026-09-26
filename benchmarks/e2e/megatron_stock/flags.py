@@ -1,9 +1,9 @@
 """The Megatron-LM command line for the stock scenario, as data.
 
 ``benchmarks/e2e/launch.py`` calls ``stock_megatron_flags`` in the parent
-process, so this module must stay torch-free. It imports ``dataclasses``,
-``PiperShape``, ``ParallelismSpec`` and ``Workload``, and nothing else. A
-test can therefore read the whole command line on a host with no GPU.
+process, so this module must stay torch-free. It imports the engine records,
+``PiperShape`` and ``ParallelismSpec``, and nothing else first-party. A test
+can therefore read the whole command line on a host with no GPU.
 
 **Every geometry value comes from ``PiperShape``.** No shape number is
 written here. A hardcoded width would build one model and publish it under
@@ -21,16 +21,24 @@ after a submodule bump, from the repository root::
     if not hasattr(typing, "override"):
         typing.override = typing_extensions.override
     from megatron.training.arguments import add_megatron_arguments
+    from benchmarks.e2e.engines.api import RunSpec
+    from benchmarks.e2e.engines.megatron_stock.config import (
+        MegatronStockConfig,
+    )
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
     from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-    from benchmarks.e2e.registry import C4_REPLAY_WORKLOAD
+    from benchmarks.e2e.registry import ENGINES, SEED
     from benchmarks.models.piper_qwen3.shape import PIPER_1B
     parser = argparse.ArgumentParser(allow_abbrev=False)
     add_megatron_arguments(parser)
     known = {s for a in parser._actions for s in a.option_strings}
+    run = RunSpec(
+        shape=PIPER_1B, data=ENGINES.data, parallelism=TRIVIAL_SPEC,
+        ac_mode="none", profile=True, window=ENGINES.window,
+        warmup_steps=None, seed=SEED,
+    )
     emitted = stock_megatron_flags(
-        PIPER_1B, C4_REPLAY_WORKLOAD, TRIVIAL_SPEC,
-        arm_dir="/tmp/x", model_size="1b",
+        run, MegatronStockConfig(), arm_dir="/tmp/x"
     )
     unknown = [
         t for t in emitted
@@ -78,17 +86,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from benchmarks.e2e.engines.api import DataSpec, RunSpec
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.schema import Workload
-from benchmarks.e2e.registry import (
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
-    DEFAULT_MEGATRON_PRECISION,
-    MEGATRON_NAN_GUARD_MODES,
-    MEGATRON_P2P_SYNC_MODES,
-    MEGATRON_PRECISION_MODES,
-)
 from benchmarks.models.piper_qwen3.shape import PiperShape
+
+
+MEGATRON_P2P_SYNC_MODES = ("on", "off")
+"""The p2p sync values; ``on`` keeps Megatron's synchronize after each batched pipeline message."""
+
+MEGATRON_NAN_GUARD_MODES = ("on", "off")
+"""The NaN-guard values; ``off`` sends ``NO_CHECK_FOR_NAN_FLAG``."""
+
+MEGATRON_PRECISION_MODES = ("stock", "lean")
+"""The precision values; ``stock`` holds 18 bytes of state per parameter, and ``lean`` holds 10.
+
+``lean`` sends ``LEAN_PRECISION_FLAGS`` and needs ``--zero 1``. It never
+sends ``--grad-reduce-in-bf16``, because ``--main-grads-dtype bf16`` already
+turns off the fp32 accumulation.
+"""
 
 SUPPORTED_PP_SCHEDULE = "1F1B"
 """The one pipeline schedule the stock driver runs.
@@ -410,9 +426,7 @@ def _precision_flags(
     cell of this scenario ran, so the default argv does not move.
 
     Under ``lean`` it is the four flags of ``LEAN_PRECISION_FLAGS`` and
-    their three dtype tokens, which reach 10 bytes. The recipe, the byte
-    table and the two flags this axis must never send are stated once,
-    above ``MEGATRON_PRECISION_MODES`` in ``benchmarks/e2e/registry.py``.
+    their three dtype tokens, which reach 10 bytes.
 
     **``lean`` needs a sharded dense value, and this refuses the rest.**
     ``optimizer_config.py`` asserts ``use_distributed_optimizer`` under
@@ -424,7 +438,7 @@ def _precision_flags(
     without one.
     """
     refuse_unknown_megatron_precision(megatron_precision)
-    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+    if megatron_precision == "stock":
         return []
     if zero == 0:
         raise ValueError(
@@ -451,7 +465,7 @@ def main_grads_dtype(megatron_precision: str) -> str:
     ``lean`` sends ``LEAN_PRECISION_DTYPE``.
     """
     refuse_unknown_megatron_precision(megatron_precision)
-    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+    if megatron_precision == "stock":
         return MEGATRON_MAIN_GRADS_DTYPE_DEFAULT
     return LEAN_PRECISION_DTYPE
 
@@ -496,7 +510,7 @@ def omitted_flags(zero: int) -> tuple[str, ...]:
 
 
 def microbatch_geometry(
-    workload: Workload, spec: ParallelismSpec
+    data: DataSpec, spec: ParallelismSpec
 ) -> tuple[int, int, int]:
     """``(rows per sample, microbatches per step, megatron seq_length)``.
 
@@ -523,15 +537,15 @@ def microbatch_geometry(
     if spec.pp > 1:
         rows_per_sample = spec.pp_microbatch_size
     else:
-        rows_per_sample = workload.local_batch_size
-    if workload.local_batch_size % rows_per_sample:
+        rows_per_sample = data.local_batch_size
+    if data.local_batch_size % rows_per_sample:
         raise ValueError(
-            f"local batch size {workload.local_batch_size} does not divide "
+            f"local batch size {data.local_batch_size} does not divide "
             f"into microbatches of {rows_per_sample} row(s): Megatron needs "
             "an exact global-batch-size to micro-batch-size ratio"
         )
-    microbatches = workload.local_batch_size // rows_per_sample
-    return rows_per_sample, microbatches, rows_per_sample * workload.seq_len
+    microbatches = data.local_batch_size // rows_per_sample
+    return rows_per_sample, microbatches, rows_per_sample * data.seq_len
 
 
 def _geometry_flags(
@@ -650,7 +664,7 @@ def _moe_flags() -> list[str]:
 
 
 def _optimizer_flags(
-    workload: Workload, *, global_batch_size: int
+    steps: int, *, global_batch_size: int
 ) -> list[str]:
     """The optimizer and the schedule, matched to TorchTitan.
 
@@ -672,13 +686,13 @@ def _optimizer_flags(
         "--global-batch-size",
         str(global_batch_size),
         "--train-iters",
-        str(workload.steps),
+        str(steps),
         "--lr",
         LEARNING_RATE,
         "--lr-decay-style",
         "linear",
         "--lr-decay-iters",
-        str(workload.steps),
+        str(steps),
         "--lr-warmup-iters",
         LR_WARMUP_ITERS,
         "--min-lr",
@@ -757,7 +771,7 @@ def _sharding_flags(zero: int) -> list[str]:
 
 def _data_flags(
     shape: PiperShape,
-    workload: Workload,
+    seed: int,
     *,
     profile_step_end: int | None,
 ) -> list[str]:
@@ -821,7 +835,7 @@ def _data_flags(
         "--eval-interval",
         "1000000",
         "--seed",
-        str(workload.seed),
+        str(seed),
         "--rerun-mode",
         "disabled",
         "--log-interval",
@@ -832,14 +846,11 @@ def _data_flags(
 
 
 def _bench_flags(
-    workload: Workload,
-    spec: ParallelismSpec,
+    run: RunSpec,
     *,
     arm_dir: str,
-    model_size: str,
     rows_per_sample: int,
     megatron_p2p_sync: str,
-    profile: bool,
 ) -> list[str]:
     """The harness group, which ``train.py`` adds to Megatron's own parser.
 
@@ -868,31 +879,32 @@ def _bench_flags(
     driver refuses a schedule flag without the token, so a partial group
     cannot install a profiler the run does not declare.
     """
+    spec = run.parallelism
     schedule = (
         [
             BENCH_PROFILE,
             BENCH_PROFILE_FREQ,
-            str(workload.profile_freq),
+            str(run.window.freq),
             BENCH_PROFILER_WARMUP,
-            str(workload.profiler_warmup),
+            str(run.window.warmup),
             BENCH_PROFILER_ACTIVE,
-            str(workload.profiler_active),
+            str(run.window.active),
             BENCH_MIN_TRACE_WINDOWS,
-            str(workload.min_trace_windows),
+            str(run.window.min_windows),
         ]
-        if profile
+        if run.profile
         else []
     )
     flags = [
         BENCH_ARM_DIR,
         str(arm_dir),
         BENCH_MODEL_SIZE,
-        model_size,
+        run.shape.name,
         BENCH_LOCAL_BATCH_SIZE,
-        str(workload.local_batch_size),
+        str(run.data.local_batch_size),
         *schedule,
         BENCH_SEQ_LEN,
-        str(workload.seq_len),
+        str(run.data.seq_len),
         BENCH_ROWS_PER_SAMPLE,
         str(rows_per_sample),
     ]
@@ -906,63 +918,24 @@ def _bench_flags(
 
 
 def stock_megatron_flags(
-    shape: PiperShape,
-    workload: Workload,
-    spec: ParallelismSpec,
-    *,
-    arm_dir: str,
-    model_size: str,
-    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
-    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
-    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
-    profile: bool = True,
+    run: RunSpec, config: MegatronStockConfig, *, arm_dir: str
 ) -> list[str]:
-    """The whole argument list for one stock Megatron-LM arm.
+    """The Megatron flags and then the harness group of one stock Megatron-LM arm.
 
-    The result holds the Megatron flags and then the harness group. It holds
-    neither the launcher nor the module name: ``benchmarks/e2e/launch.py``
-    puts ``_megatron_launcher(spec)`` and
-    ``benchmarks.e2e.megatron_stock.train`` in front of it.
-
-    ``arm_dir`` accepts a string or a ``pathlib.Path``; the function renders
-    it with ``str``. This module imports no ``pathlib``, so a caller in a
-    torch-free process pays for nothing it does not use.
-
-    ``megatron_p2p_sync`` defaults to ``off``, which adds the harness
-    token. ``on`` is refused at ``pp`` 1: the field is inert without a
-    pipeline message, and the argv would carry a treatment the run did not
-    have.
-
-    ``megatron_nan_guard`` defaults to ``off``, which adds Megatron's own
-    ``--no-check-for-nan-in-loss-and-grad`` ahead of the harness group. It
-    is legal at every mesh under either value.
-
-    ``megatron_precision`` defaults to ``stock``, which sends nothing and
-    is 18 bytes of optimizer state per parameter. ``lean`` adds the four
-    flags of ``LEAN_PRECISION_FLAGS`` and reaches 10 bytes. It is refused
-    under ``--zero 0``, because Megatron asserts
-    ``use_distributed_optimizer`` under the precision-aware optimizer.
-
-    ``profile`` defaults to ``True``, which is the argv this arm has always
-    built. Under ``False`` Megatron's own profiler flags and the harness
-    schedule group both leave, the run writes no trace, and the whole-cycle
-    refusal below does not apply: it exists to keep a profiler window
-    whole, and there is no window.
-
-    Raises ``ValueError`` on a request this arm cannot honour. Each refusal
-    names the reason, because a caller may build a command line without a
-    run and a bare failure names nothing.
+    Raises ``ValueError`` on a request that this arm cannot run, and the
+    message names the reason.
     """
-    refuse_unknown_p2p_sync(megatron_p2p_sync)
-    refuse_unknown_nan_guard(megatron_nan_guard)
-    refuse_unknown_megatron_precision(megatron_precision)
-    if spec.pp == 1 and megatron_p2p_sync == "on":
+    spec = run.parallelism
+    refuse_unknown_p2p_sync(config.p2p_sync)
+    refuse_unknown_nan_guard(config.nan_guard)
+    refuse_unknown_megatron_precision(config.precision)
+    if spec.pp == 1 and config.p2p_sync == "on":
         raise ValueError(
-            f"megatron p2p sync {megatron_p2p_sync!r} was requested at pp 1, "
+            f"megatron p2p sync {config.p2p_sync!r} was requested at pp 1, "
             "where there is no pipeline message to synchronize; the argv "
             "would carry a treatment the run did not have"
         )
-    if workload.seed is None:
+    if run.seed is None:
         raise ValueError(
             "the stock megatron arm needs a seeded workload: both engines "
             "must draw the same initial parameters"
@@ -979,48 +952,36 @@ def stock_megatron_flags(
             f"pipeline schedule {spec.pp_schedule!r} is not implemented by "
             f"the stock driver; it runs {SUPPORTED_PP_SCHEDULE!r} alone"
         )
-    if profile and workload.steps % workload.profile_freq:
-        # Megatron's loop keeps stepping the profiler after it stops it,
-        # so only a whole number of cycles avoids a dead session.
+    steps = run.data.steps
+    freq = run.window.freq
+    if run.profile and steps % freq:
+        # Megatron steps the profiler after it stops it.
         raise ValueError(
-            f"steps ({workload.steps}) must be a whole number of profiler "
-            f"cycles of {workload.profile_freq} for the stock megatron arm: "
+            f"steps ({steps}) must be a whole number of profiler "
+            f"cycles of {freq} for the stock megatron arm: "
             "megatron steps the profiler after it stops it, so a partial "
             "cycle either transits a dead session or writes a short "
             "profiler window that the per-step metrics would pool"
         )
     rows_per_sample, microbatches, megatron_seq_length = (
-        microbatch_geometry(workload, spec)
+        microbatch_geometry(run.data, spec)
     )
-    # A whole number of cycles, so this is workload.steps; None under no
-    # profile, which drops the profiler tokens.
-    profile_step_end = (
-        (workload.steps // workload.profile_freq) * workload.profile_freq
-        if profile
-        else None
-    )
+    profile_step_end = (steps // freq) * freq if run.profile else None
     return [
-        *_geometry_flags(shape, megatron_seq_length=megatron_seq_length),
+        *_geometry_flags(run.shape, megatron_seq_length=megatron_seq_length),
         *_engine_flags(),
         *_moe_flags(),
-        *_optimizer_flags(
-            workload, global_batch_size=microbatches * spec.dp
-        ),
+        *_optimizer_flags(steps, global_batch_size=microbatches * spec.dp),
         *_mesh_flags(spec),
         *_sharding_flags(spec.zero),
-        *_precision_flags(megatron_precision, spec.zero),
-        *_data_flags(
-            shape, workload, profile_step_end=profile_step_end
-        ),
-        *_nan_guard_flags(megatron_nan_guard),
+        *_precision_flags(config.precision, spec.zero),
+        *_data_flags(run.shape, run.seed, profile_step_end=profile_step_end),
+        *_nan_guard_flags(config.nan_guard),
         *_bench_flags(
-            workload,
-            spec,
+            run,
             arm_dir=arm_dir,
-            model_size=model_size,
             rows_per_sample=rows_per_sample,
-            megatron_p2p_sync=megatron_p2p_sync,
-            profile=profile,
+            megatron_p2p_sync=config.p2p_sync,
         ),
     ]
 

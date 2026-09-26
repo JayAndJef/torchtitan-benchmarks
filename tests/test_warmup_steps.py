@@ -27,13 +27,30 @@ from benchmarks.artifacts.manifests import (
 from benchmarks.cli.main import cli
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.axes import RunAxes
+from benchmarks.e2e.engines.api import RunSpec
 from benchmarks.e2e.registry import (
     DEFAULT_WARMUP_STEPS,
     ENGINES,
+    SEED,
     scenario_by_name,
 )
 from benchmarks.e2e.results import evaluate_run, measured_tps, stable_tps
-from benchmarks.e2e.runner import workload_with_overrides
+from benchmarks.e2e.runner import data_with_overrides
+from benchmarks.models.piper_qwen3.shape import PIPER_1B
+
+
+def _run(profile: bool, warmup_steps: int | None) -> RunSpec:
+    """The run of these tests: the scenario data, one GPU, the 1b shape."""
+    return RunSpec(
+        shape=PIPER_1B,
+        data=ENGINES.data,
+        parallelism=TRIVIAL_SPEC,
+        ac_mode="none",
+        profile=profile,
+        window=ENGINES.window,
+        warmup_steps=warmup_steps,
+        seed=SEED,
+    )
 
 
 _METADATA = {
@@ -87,21 +104,22 @@ class MeasuredTpsTests(unittest.TestCase):
 class StepFloorTests(unittest.TestCase):
     def test_a_run_must_take_a_step_after_its_warmup(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be more than the 12"):
-            workload_with_overrides(
+            data_with_overrides(
                 ENGINES, steps=12, profile=False, warmup_steps=12
             )
 
     def test_one_measured_step_is_enough(self) -> None:
-        workload = workload_with_overrides(
+        data = data_with_overrides(
             ENGINES, steps=13, profile=False, warmup_steps=12
         )
-        self.assertEqual(workload.steps, 13)
+        self.assertEqual(data.steps, 13)
 
 
 def _manifest(profile: bool, warmup_steps: int | None) -> dict:
     scenario = scenario_by_name("engines")
     return manifest_data(
         scenario,
+        _run(profile, warmup_steps),
         (scenario.arm("titan_eager"),),
         {"titan_eager": ["cmd"]},
         "test-gpu",
@@ -146,6 +164,7 @@ class ResumeTests(unittest.TestCase):
                 _resume_mismatches(
                     manifest,
                     scenario,
+                    _run(False, requested),
                     arms,
                     "test-gpu",
                     _METADATA,

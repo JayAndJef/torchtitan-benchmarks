@@ -24,7 +24,7 @@ from benchmarks.artifacts.manifests import (
     _resume_mismatches,
     manifest_data,
 )
-from benchmarks.e2e.engines import command_for_arm
+from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
@@ -32,8 +32,8 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
 from benchmarks.e2e.runner import execute_run
-from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning
+from tests.engine_helpers import command, run_spec, validate
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
     GIANT,
@@ -899,6 +899,7 @@ class ModelSizeAliasTests(unittest.TestCase):
         selected = (scenario.arm("titan_compiled"),)
         recorded = manifest_data(
             scenario,
+            run_spec(profile=False),
             selected,
             {"titan_compiled": ["cmd"]},
             "test-gpu",
@@ -939,6 +940,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             with self.subTest(recorded=recorded_name, requested=requested):
                 manifest = manifest_data(
                     scenario,
+                    run_spec(profile=False),
                     selected,
                     {"titan_compiled": ["cmd"]},
                     "test-gpu",
@@ -963,6 +965,7 @@ class ModelSizeAliasTests(unittest.TestCase):
                     _resume_mismatches(
                         manifest,
                         scenario,
+                        run_spec(profile=False),
                         selected,
                         "test-gpu",
                         _METADATA,
@@ -984,6 +987,7 @@ class ModelSizeAliasTests(unittest.TestCase):
         # A genuinely different size is still refused.
         manifest = manifest_data(
             scenario,
+            run_spec(profile=False),
             selected,
             {"titan_compiled": ["cmd"]},
             "test-gpu",
@@ -1005,6 +1009,7 @@ class ModelSizeAliasTests(unittest.TestCase):
             _resume_mismatches(
                 manifest,
                 scenario,
+                run_spec(profile=False),
                 selected,
                 "test-gpu",
                 _METADATA,
@@ -1040,9 +1045,9 @@ class ConfigSizeClosureTests(unittest.TestCase):
 
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
-                if arm.engine != "torchtitan":
+                if engine_for(arm).name != "torchtitan":
                     continue
-                name = arm.config or scenario.workload.config
+                name = arm.config.config
                 with self.subTest(scenario=scenario.name, arm=arm.name):
                     factory = getattr(registry, name, None)
                     self.assertTrue(
@@ -1181,59 +1186,47 @@ class CommandTests(unittest.TestCase):
     def test_titan_command_delivers_the_size_as_a_config_argument(self) -> None:
         scenario = scenario_by_name("engines")
         arm = scenario.arm("titan_compiled")
-        command = command_for_arm(
-            scenario.workload, arm, Path("/tmp/arm"), (), model_size="huge"
-        )
+        argv = command(run_spec("huge"), arm, "/tmp/arm")
         # The config name is the arm's, unmangled: the shape rides alongside.
         self.assertEqual(
-            command[command.index("--config") + 1],
+            argv[argv.index("--config") + 1],
             "qwen3_piper_1b_pretokenized",
         )
-        self.assertEqual(
-            command[command.index("--config-arg") + 1], "size=huge"
-        )
-        self.assertFalse([token for token in command if token.endswith("_huge")])
+        self.assertEqual(argv[argv.index("--config-arg") + 1], "size=huge")
+        self.assertFalse([token for token in argv if token.endswith("_huge")])
         # replay_steps must track --training.steps or the loader hard-fails.
         self.assertEqual(
-            command[command.index("--dataloader.replay-steps") + 1],
-            command[command.index("--training.steps") + 1],
+            argv[argv.index("--dataloader.replay-steps") + 1],
+            argv[argv.index("--training.steps") + 1],
         )
 
     def test_the_default_size_is_delivered_explicitly_too(self) -> None:
         scenario = scenario_by_name("engines")
-        command = command_for_arm(
-            scenario.workload, scenario.arm("titan_compiled"), Path("/tmp/arm"), ()
-        )
+        argv = command(run_spec(), scenario.arm("titan_compiled"), "/tmp/arm")
         self.assertEqual(
-            command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
+            argv[argv.index("--config") + 1], "qwen3_piper_1b_pretokenized"
         )
-        self.assertEqual(
-            command[command.index("--config-arg") + 1], "size=1b"
-        )
+        self.assertEqual(argv[argv.index("--config-arg") + 1], "size=1b")
 
-    def test_a_non_replay_workload_does_not_get_the_replay_flag(self) -> None:
-        from dataclasses import replace as replace_field
-
+    def test_every_titan_arm_gets_the_replay_flag(self) -> None:
         scenario = scenario_by_name("engines")
-        workload = replace_field(scenario.workload, replay_dataloader=False)
-        command = command_for_arm(
-            workload, scenario.arm("titan_compiled"), Path("/tmp/arm"), ()
-        )
-        self.assertNotIn("--dataloader.replay-steps", command)
+        for arm in scenario.arms:
+            if engine_for(arm).name != "torchtitan":
+                continue
+            with self.subTest(arm=arm.name):
+                argv = command(run_spec(steps=12, profile=False), arm, "/tmp/arm")
+                self.assertEqual(
+                    argv[argv.index("--dataloader.replay-steps") + 1], "12"
+                )
 
     def test_megatron_command_carries_the_model_size(self) -> None:
         scenario = scenario_by_name("engines")
-        command = command_for_arm(
-            scenario.workload,
+        argv = command(
+            run_spec("huge", ac_mode="none"),
             scenario.arm("megatron_stock"),
-            Path("/tmp/arm"),
-            (),
-            "none",
-            model_size="huge",
+            "/tmp/arm",
         )
-        self.assertEqual(
-            command[command.index("--bench-model-size") + 1], "huge"
-        )
+        self.assertEqual(argv[argv.index("--bench-model-size") + 1], "huge")
 
 
 def _size_line(shape) -> str:
@@ -1262,19 +1255,17 @@ class ValidationRuleElevenTests(unittest.TestCase):
 
             log.write_text(head + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(arm, root, log, scenario.workload)
+                validate(run_spec(), arm, root, log)
 
             log.write_text(head + _size_line(PIPER_1B) + "Training completed\n")
-            validate_arm(arm, root, log, scenario.workload)
+            validate(run_spec(), arm, root, log)
 
             # The normal-size marker must not satisfy a huge-size run.
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(
-                    arm, root, log, scenario.workload, model_size="huge"
-                )
+                validate(run_spec("huge"), arm, root, log)
 
             log.write_text(head + _size_line(HUGE) + "Training completed\n")
-            validate_arm(arm, root, log, scenario.workload, model_size="huge")
+            validate(run_spec("huge"), arm, root, log)
 
     def test_override_count_scales_with_the_layer_count(self) -> None:
         from tests.test_runner import OVERRIDE_ARM
@@ -1282,7 +1273,7 @@ class ValidationRuleElevenTests(unittest.TestCase):
         scenario = scenario_by_name("engines")
         arm = OVERRIDE_ARM
         applied = (
-            f"[Override] {arm.override_imports[0]}: "
+            f"[Override] {arm.config.override_imports[0]}: "
             "model_spec.model.layers.0.moe ...\n"
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -1299,22 +1290,18 @@ class ValidationRuleElevenTests(unittest.TestCase):
             head = _compiled_line("default") + _SAC_LINE
 
             log.write_text(head + _size_line(HUGE) + "Training completed\n" + applied)
-            validate_arm(
-                arm, root, log, scenario.workload, model_size="huge"
-            )
+            validate(run_spec("huge"), arm, root, log)
 
             log.write_text(
                 head + _size_line(HUGE) + "Training completed\n" + applied * 16
             )
             with self.assertRaisesRegex(RuntimeError, "expected 1 override"):
-                validate_arm(
-                    arm, root, log, scenario.workload, model_size="huge"
-                )
+                validate(run_spec("huge"), arm, root, log)
 
             log.write_text(
                 head + _size_line(PIPER_1B) + "Training completed\n" + applied * 16
             )
-            validate_arm(arm, root, log, scenario.workload)
+            validate(run_spec(), arm, root, log)
 
 
 _METADATA = {

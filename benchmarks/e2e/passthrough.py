@@ -10,15 +10,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
 
 from benchmarks.e2e.megatron_stock.flags import (
     LEAN_PRECISION_FLAGS,
     NO_CHECK_FOR_NAN_FLAG,
     ZERO1_FLAGS,
 )
-from benchmarks.e2e.parallelism import MEGATRON_ENGINES
-from benchmarks.e2e.schema import Arm
 
 
 @dataclass(frozen=True)
@@ -268,11 +265,6 @@ whole, so a field that a bump adds fails loudly.
 _SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)*:[A-Za-z0-9_-]+")
 
 
-def engine_side(engine: str) -> str:
-    """The ``EngineFlags`` field that holds ``engine``'s patterns."""
-    return "megatron" if engine in MEGATRON_ENGINES else "torchtitan"
-
-
 def flag_name(side: str, token: str) -> str | None:
     """The canonical flag name in ``token``, or ``None`` for a value.
 
@@ -324,10 +316,9 @@ def refusal(side: str, token: str) -> str | None:
 
 
 def refuse_passthrough(
-    arm: Arm, tokens: tuple[str, ...] | list[str], zero: int
+    side: str, arm_name: str, tokens: tuple[str, ...], zero: int
 ) -> None:
-    """Raise when a passthrough token for ``arm`` is not a perf flag."""
-    side = engine_side(arm.engine)
+    """Raise when a passthrough token for ``side`` is not a perf flag."""
     option = f"--{side}-arg"
     offenders = [
         f"{token} ({reason})"
@@ -336,34 +327,12 @@ def refuse_passthrough(
     ]
     if offenders:
         raise ValueError(
-            f"{arm.name}: {', '.join(offenders)} cannot pass through "
+            f"{arm_name}: {', '.join(offenders)} cannot pass through "
             f"{option}; set the owning harness option instead"
         )
     names = {flag_name(side, token) for token in tokens}
     if side == "megatron" and "--overlap-param-gather" in names and zero == 0:
         raise ValueError(
-            f"{arm.name}: --overlap-param-gather needs --zero 1, because "
+            f"{arm_name}: --overlap-param-gather needs --zero 1, because "
             "Megatron asserts a distributed optimizer for it"
         )
-
-
-def reach_refusal(
-    arms: Iterable[Arm],
-    torchtitan_args: tuple[str, ...],
-    megatron_args: tuple[str, ...],
-) -> str | None:
-    """Why a passthrough list reaches no arm of ``arms``, or ``None``."""
-    arms = tuple(arms)
-    names = ", ".join(arm.name for arm in arms)
-    sides = {engine_side(arm.engine) for arm in arms}
-    if torchtitan_args and "torchtitan" not in sides:
-        return (
-            f"--torchtitan-arg reaches no arm of this run: {names} run on "
-            "Megatron; select a TorchTitan arm, or omit the option"
-        )
-    if megatron_args and "megatron" not in sides:
-        return (
-            f"--megatron-arg reaches no arm of this run: {names} run on "
-            "TorchTitan; select the stock megatron arm, or omit the option"
-        )
-    return None

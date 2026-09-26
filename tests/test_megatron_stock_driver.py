@@ -77,7 +77,8 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
 )
 from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.registry import C4_REPLAY_WORKLOAD  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig  # noqa: E402
+from benchmarks.e2e.registry import C4_REPLAY_DATA, ENGINES, SEED  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     GRAD_NORM_METRIC,
     LOSS_METRIC,
@@ -87,6 +88,7 @@ from benchmarks.models.piper_qwen3.shape import (  # noqa: E402
     PIPER_SHAPES,
     shape_by_name,
 )
+from tests.engine_helpers import run_spec  # noqa: E402
 
 # The mesh cell 1 and cell 3 of the run matrix use.
 PP4_SPEC = ParallelismSpec(
@@ -97,7 +99,7 @@ PP4_SPEC = ParallelismSpec(
 # two run matrices use overlapping cell numbers for different cells.
 SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, zero=1)
 EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
-BATCH_32 = dataclasses.replace(C4_REPLAY_WORKLOAD, local_batch_size=32)
+BATCH_32 = dataclasses.replace(C4_REPLAY_DATA, local_batch_size=32)
 # Read as text rather than imported, so the check needs no megatron import
 # and no GPU. DATA_PARALLEL_OPTIMIZERS is a claim about this file.
 MEGATRON_OPTIMIZER_SOURCE = (
@@ -111,14 +113,27 @@ MEGATRON_OPTIMIZER_SOURCE = (
 )
 
 
-def flags_for(shape_name, spec, workload=BATCH_32, **keywords):
+def flags_for(
+    shape_name,
+    spec,
+    replay=BATCH_32,
+    *,
+    seed=SEED,
+    megatron_p2p_sync="off",
+    megatron_nan_guard="off",
+    megatron_precision="stock",
+):
+    """The stock flags of one profiled run of the ``engines`` scenario."""
     return stock_megatron_flags(
-        shape_by_name(shape_name),
-        workload,
-        spec,
+        run_spec(
+            shape_name, data=replay, parallelism=spec, ac_mode="none", seed=seed
+        ),
+        MegatronStockConfig(
+            p2p_sync=megatron_p2p_sync,
+            nan_guard=megatron_nan_guard,
+            precision=megatron_precision,
+        ),
         arm_dir="/tmp/arm",
-        model_size=shape_name,
-        **keywords,
     )
 
 
@@ -731,12 +746,12 @@ class FlagListTest(unittest.TestCase):
         """
         for steps in (40, 60, 80):
             with self.subTest(steps=steps):
-                workload = dataclasses.replace(
+                replay = dataclasses.replace(
                     BATCH_32, steps=steps, local_batch_size=32
                 )
-                emitted = flags_for("1b", PP4_SPEC, workload)
+                emitted = flags_for("1b", PP4_SPEC, replay)
                 end = int(value_after(emitted, "--profile-step-end"))
-                self.assertEqual(end % workload.profile_freq, 0)
+                self.assertEqual(end % ENGINES.window.freq, 0)
                 self.assertEqual(end, steps)
                 self.assertEqual(
                     end, int(value_after(emitted, "--train-iters"))
@@ -753,13 +768,13 @@ class FlagListTest(unittest.TestCase):
         """
         for steps in (41, 45, 50, 55, 59, 99):
             with self.subTest(steps=steps):
-                workload = dataclasses.replace(
+                replay = dataclasses.replace(
                     BATCH_32, steps=steps, local_batch_size=32
                 )
                 with self.assertRaisesRegex(
                     ValueError, r"whole number of profiler cycles"
                 ):
-                    flags_for("1b", PP4_SPEC, workload)
+                    flags_for("1b", PP4_SPEC, replay)
 
     def test_the_workload_supplies_the_run_lengths(self) -> None:
         emitted = flags_for("1b", TRIVIAL_SPEC)
@@ -775,9 +790,9 @@ class FlagListTest(unittest.TestCase):
         self.assertEqual(value_after(emitted, "--profile-step-start"), "1")
         self.assertEqual(
             value_after(emitted, "--bench-min-trace-windows"),
-            str(BATCH_32.min_trace_windows),
+            str(ENGINES.window.min_windows),
         )
-        self.assertEqual(value_after(emitted, "--seed"), str(BATCH_32.seed))
+        self.assertEqual(value_after(emitted, "--seed"), str(SEED))
         # --seq-length is the packed sample, and --bench-seq-len is the
         # titan row the workload declares.
         self.assertEqual(
@@ -785,13 +800,7 @@ class FlagListTest(unittest.TestCase):
         )
 
     def test_a_refused_request_names_its_reason(self) -> None:
-        shape = shape_by_name("1b")
         cases = {
-            "seeded": (
-                dataclasses.replace(BATCH_32, seed=None),
-                TRIVIAL_SPEC,
-                "seeded",
-            ),
             "expert": (
                 BATCH_32,
                 ParallelismSpec(dp=2, ep=2),
@@ -815,17 +824,13 @@ class FlagListTest(unittest.TestCase):
                 "does not divide",
             ),
         }
-        for label, (workload, spec, phrase) in cases.items():
+        for label, (replay, spec, phrase) in cases.items():
             with self.subTest(case=label):
                 with self.assertRaises(ValueError) as caught:
-                    stock_megatron_flags(
-                        shape,
-                        workload,
-                        spec,
-                        arm_dir="/tmp/arm",
-                        model_size="1b",
-                    )
+                    flags_for("1b", spec, replay)
                 self.assertIn(phrase, str(caught.exception))
+        with self.assertRaisesRegex(ValueError, "seeded"):
+            flags_for("1b", TRIVIAL_SPEC, seed=None)
 
 
 # --------------------------------------------------------------------------
@@ -2714,7 +2719,7 @@ class HarnessArgumentTest(unittest.TestCase):
         self.assertEqual(parsed.bench_seq_len, BATCH_32.seq_len)
         self.assertEqual(parsed.bench_rows_per_sample, 4)
         self.assertEqual(
-            parsed.bench_min_trace_windows, BATCH_32.min_trace_windows
+            parsed.bench_min_trace_windows, ENGINES.window.min_windows
         )
         # The default argv carries the p2p flag above pp 1, and the
         # parser reads the value the flag list emitted.

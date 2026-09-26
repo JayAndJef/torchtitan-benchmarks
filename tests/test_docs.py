@@ -39,15 +39,13 @@ from benchmarks.cli.e2e import run_command
 from benchmarks.cli.kernel import kernel_bench_command
 from benchmarks.e2e.registry import (
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
-    DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
     DEFAULT_PROFILE,
     DEFAULT_WARMUP_STEPS,
     ENGINES,
 )
 from benchmarks.e2e.parallelism import DEFAULT_ZERO, ParallelismSpec
+from benchmarks.e2e.runner import MEGATRON_DEFAULTS
 
 DOCS = ("AGENTS.md", "README.md")
 
@@ -216,12 +214,12 @@ def _documented_defaults() -> dict[str, str]:
 
 def _expected_defaults() -> dict[str, str]:
     """The default of every ``run`` option, read from the code."""
-    workload = ENGINES.workload
+    data = ENGINES.data
     trivial = ParallelismSpec()
     resolved = {
-        "--seq-len": str(workload.seq_len),
-        "--steps": str(workload.steps),
-        "--batch": str(workload.local_batch_size),
+        "--seq-len": str(data.seq_len),
+        "--steps": str(data.steps),
+        "--batch": str(data.local_batch_size),
         "--ac": DEFAULT_AC_MODE,
         "--model-size": DEFAULT_MODEL_SIZE,
         "--dp": str(trivial.dp),
@@ -230,9 +228,9 @@ def _expected_defaults() -> dict[str, str]:
         "--pp-schedule": "--" if trivial.pp_schedule is None else trivial.pp_schedule,
         "--pp-microbatch-size": str(trivial.pp_microbatch_size),
         "--zero": str(DEFAULT_ZERO),
-        "--megatron-p2p-sync": DEFAULT_MEGATRON_P2P_SYNC,
-        "--megatron-nan-guard": DEFAULT_MEGATRON_NAN_GUARD,
-        "--megatron-precision": DEFAULT_MEGATRON_PRECISION,
+        "--megatron-p2p-sync": MEGATRON_DEFAULTS.p2p_sync,
+        "--megatron-nan-guard": MEGATRON_DEFAULTS.nan_guard,
+        "--megatron-precision": MEGATRON_DEFAULTS.precision,
         "--profile": "on" if DEFAULT_PROFILE else "off",
         "--warmup-steps": str(DEFAULT_WARMUP_STEPS),
     }

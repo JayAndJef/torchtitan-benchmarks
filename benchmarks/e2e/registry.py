@@ -17,7 +17,10 @@ command construction (``benchmarks.e2e.launch``), validation
 (``benchmarks.artifacts.manifests``).
 """
 
-from benchmarks.e2e.schema import Arm, Scenario, Workload
+from benchmarks.e2e.engines.api import Arm, CompileMode, DataSpec, ProfileWindow
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
+from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
+from benchmarks.e2e.schema import Scenario
 
 
 EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
@@ -76,92 +79,16 @@ figure is the other's: results are only comparable within one value of this
 axis.
 """
 
-MEGATRON_P2P_SYNC_MODES = ("on", "off")
-"""The Megatron pipeline point-to-point sync treatment, per run.
+SEED = 42
+"""The seed of every run; both engines draw the same initial parameters from it."""
 
-Stock Megatron calls ``torch.cuda.synchronize()`` once per batched pipeline
-message, guarded by ``config.batch_p2p_comm and config.batch_p2p_sync``.
-``on`` keeps that call, and it is what every number published before this
-default flipped was measured under. ``off`` sets ``batch_p2p_sync`` False
-on the megatron driver, which removes the call, and it is the default here.
-TorchTitan arms receive nothing.
-
-It is a run axis and not a ``ParallelismSpec`` field, because the value is
-a treatment of the pipeline messages and ``execution_model`` names degrees
-rather than mechanisms. Megatron exposes no CLI flag for the field, so the
-driver takes the value from the harness and prints what its built config
-carries.
-"""
-DEFAULT_MEGATRON_P2P_SYNC = "off"
-
-MEGATRON_NAN_GUARD_MODES = ("on", "off")
-"""Stock Megatron's NaN/Inf guard, selectable per run.
-
-One Megatron argument, ``check_for_nan_in_loss_and_grad``, gates two host
-waits at the pinned revision. The loss function evaluates the loss twice
-per microbatch, and the same field reaches ``check_for_nan_in_grad``, under
-which the gradient buffer evaluates every bucket's norm twice per step.
-Each evaluation reads a device bool and synchronizes the stream.
-``--rerun-mode disabled``, which the stock argv already sends, removes
-neither.
-
-``on`` is stock Megatron, and it is what every number published before this
-default flipped was measured under. ``off`` sends Megatron's own
-``--no-check-for-nan-in-loss-and-grad``, so a stock user can reproduce the
-argv, and it is the default here. TorchTitan arms receive nothing.
-Evaluation refuses a non-finite loss or grad norm on every arm under either
-value, which is the guard that has to exist before this one can be turned
-off.
-"""
-DEFAULT_MEGATRON_NAN_GUARD = "off"
-
-MEGATRON_PRECISION_MODES = ("stock", "lean")
-"""Stock Megatron's optimizer precision, selectable per run.
-
-``stock`` is ``--bf16`` alone, and it holds 18 bytes of state per
-parameter: the bf16 parameter 2, an fp32 master 4, fp32 gradients 4, and
-two fp32 Adam moments 8. That is what every published cell ran, and it is
-the first of the four deliberate differences the stock arm carries against
-TorchTitan's 8.
-
-``lean`` sends ``--use-precision-aware-optimizer`` and three bf16 dtype
-flags, and reaches 10 bytes: master 2, gradients 2, Adam moments 4. The
-master stays fp32 and is never fp16, because ``store_param_remainders``
-holds the low 16 bits beside the bf16 parameter.
-``--grad-reduce-in-bf16`` is never sent, because ``--main-grads-dtype
-bf16`` already leaves fp32 accumulation off.
-
-``lean`` needs a sharded dense value: Megatron asserts
-``use_distributed_optimizer`` under the precision-aware optimizer, and the
-zero axis is the one owner of that flag. The value reaches the stock
-megatron command alone.
-
-Warning: ``lean`` changes the numerics. bf16 Adam moments and bf16 gradient
-accumulation are a real change, and at pp 8 the accumulation is 16-way in
-bf16. Read the loss trajectories beside any lean number. At dp 1 the
-distributed optimizer also runs its bucket bookkeeping for no saving. Both
-effects are unmeasured.
-"""
-DEFAULT_MEGATRON_PRECISION = "stock"
-
-
-C4_REPLAY_WORKLOAD = Workload(
-    module="benchmarks.models.piper_qwen3",
-    config="qwen3_piper_1b_pretokenized",
+C4_REPLAY_DATA = DataSpec(
+    dataset="c4_test",
     seq_len=4096,
-    steps=40,
     local_batch_size=4,
-    seed=42,
-    replay_dataloader=True,
+    steps=40,
 )
-"""The one workload every arm of every scenario runs.
-
-The shape is not here. ``--model-size`` picks it at run time, and the
-config name is a fixed token of the fork's config manager rather than a
-shape. ``seed`` and ``replay_dataloader`` serve both engines: the launcher
-reads them for the TorchTitan arms and the flag list reads the seed for the
-Megatron arm.
-"""
+"""The pre-tokenized c4_test stream that every arm trains on."""
 
 ENGINES = Scenario(
     name="engines",
@@ -177,7 +104,8 @@ ENGINES = Scenario(
         "composed from the parallelism spec; it describes the TorchTitan "
         "arms and not the Megatron one."
     ),
-    workload=C4_REPLAY_WORKLOAD,
+    data=C4_REPLAY_DATA,
+    window=ProfileWindow(),
     supported_ac_modes=("none",),
     arms=(
         Arm(
@@ -186,7 +114,7 @@ ENGINES = Scenario(
                 "TorchTitan on the pre-tokenized replay stream, with "
                 "whole-block torch.compile"
             ),
-            compile="torch",
+            config=TorchTitanConfig(compile=CompileMode.TORCH),
         ),
         Arm(
             name="titan_eager",
@@ -194,7 +122,7 @@ ENGINES = Scenario(
                 "the same model and the same stream, and it runs the blocks "
                 "eager"
             ),
-            compile="none",
+            config=TorchTitanConfig(compile=CompileMode.NONE),
         ),
         Arm(
             name="megatron_stock",
@@ -209,14 +137,12 @@ ENGINES = Scenario(
                 "8. The manifest's execution_model says plain-bf16 and "
                 "describes the other arms"
             ),
-            # The stock driver compiles no whole transformer layer.
-            compile="none",
-            engine="megatron_stock",
-            # Measured on all eight ranks of one dp 2 x pp 4 cell; re-read
-            # every rank at pp 8 before citing a marker there.
-            trace_kernel_markers=(
-                "cudnn_generated_fort_native_sdpa",
-                "_mul_silu_split",
+            config=MegatronStockConfig(
+                # Measured on all eight ranks of one dp 2 x pp 4 cell.
+                trace_kernel_markers=(
+                    "cudnn_generated_fort_native_sdpa",
+                    "_mul_silu_split",
+                ),
             ),
         ),
     ),

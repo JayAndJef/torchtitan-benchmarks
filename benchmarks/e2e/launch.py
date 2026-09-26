@@ -1,11 +1,8 @@
 """Build the training launch command for one end-to-end benchmark arm.
 
-Command construction is the seam between a declarative arm and the engine
-that actually trains it. This module holds one builder per engine, and each
-delivers the scenario workload, the global run axes, and the arm's own
-overrides in that engine's own spelling. Every builder takes the same
-parameters; ``benchmarks.e2e.engines`` holds the records that pair a builder
-with a validation profile, and it owns the dispatch.
+This module holds one builder per engine. Each builder reads the run and
+the arm's config, and each engine in ``benchmarks.e2e.engines`` calls its
+own builder.
 
 **At the trivial parallelism spec the argv is the argv this repo has always
 built.** ``_titan_parallelism_flags`` returns an empty tuple there, so no
@@ -20,21 +17,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.passthrough import refuse_passthrough
-from benchmarks.e2e.schema import Arm, Workload
+from benchmarks.e2e.engines.api import Arm, CompileMode, RunSpec
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
-    TRIVIAL_SPEC,
+    ParallelismSpec,
     titan_mesh,
     titan_reshard_after_forward,
 )
-from benchmarks.e2e.registry import (
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_PRECISION,
-    DEFAULT_MEGATRON_P2P_SYNC,
-)
-from benchmarks.models.piper_qwen3.shape import shape_by_name
+from benchmarks.e2e.passthrough import refuse_passthrough
 
 
 STOCK_MEGATRON_DRIVER_MODULE = "benchmarks.e2e.megatron_stock.train"
@@ -156,73 +146,58 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     return tuple(flags)
 
 
-def titan_command(
-    workload: Workload,
-    arm: Arm,
-    arm_dir: Path,
-    extra_args: list[str] | tuple[str, ...],
-    ac_mode: str,
-    model_size: str = "1b",
-    parallelism: ParallelismSpec = TRIVIAL_SPEC,
-    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
-    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
-    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
-    profile: bool = True,
-) -> list[str]:
-    """Launch command for one TorchTitan arm.
-
-    ``parallelism`` defaults to the identity spec, which adds no flag. The
-    three megatron values are accepted and ignored, because every engine
-    builder takes the same parameters. ``profile`` decides the profiler
-    block alone.
-    """
-    refuse_passthrough(arm, extra_args, parallelism.zero)
+def titan_command(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
+    """The ``run_train.sh`` command line of one TorchTitan arm."""
+    config = arm.config
+    refuse_passthrough(
+        "torchtitan", arm.name, config.extra_flags, run.parallelism.zero
+    )
     # The fork defaults it off, so an eager arm passes no negation.
-    compile_flags = ("--compile.enable",) if arm.compile == "torch" else ()
+    compile_flags = (
+        ("--compile.enable",) if config.compile is CompileMode.TORCH else ()
+    )
     # Off unless these tokens ask for it, so an unprofiled run drops them.
     profiler_flags = (
         (
             "--profiler.enable_profiling",
             "--profiler.profile_freq",
-            str(workload.profile_freq),
+            str(run.window.freq),
             "--profiler.profiler_active",
-            str(workload.profiler_active),
+            str(run.window.active),
             "--profiler.profiler_warmup",
-            str(workload.profiler_warmup),
+            str(run.window.warmup),
         )
-        if profile
+        if run.profile
         else ()
     )
     args = [
         "./run_train.sh",
         "--module",
-        workload.module,
+        config.module,
         "--config",
-        arm.config or workload.config,
+        config.config,
         # The fork forwards a --config-arg pair as a config keyword.
         "--config-arg",
-        f"size={model_size}",
+        f"size={run.shape.name}",
         "--training.seq-len",
-        str(workload.seq_len),
+        str(run.data.seq_len),
         "--training.steps",
-        str(workload.steps),
+        str(run.data.steps),
         "--training.local-batch-size",
-        str(workload.local_batch_size),
+        str(run.data.local_batch_size),
         *compile_flags,
         *profiler_flags,
-        # Empty at the trivial spec, so the argv below it is unchanged.
-        *_titan_parallelism_flags(parallelism),
+        *_titan_parallelism_flags(run.parallelism),
+        # The replay loader refuses a run longer than the steps it holds.
+        "--dataloader.replay-steps",
+        str(run.data.steps),
     ]
-    if workload.replay_dataloader:
-        # The replay loader materializes exactly this many steps of samples
-        # and hard-fails when the run asks for more, so it must track --steps.
-        args.extend(("--dataloader.replay-steps", str(workload.steps)))
-    if workload.seed is not None:
-        args.extend(("--debug.seed", str(workload.seed)))
-    if arm.override_imports:
-        args.extend(("--override.imports", ",".join(arm.override_imports)))
-    args = args + list(extra_args) + ["--dump-folder", str(arm_dir)]
-    if ac_mode == "none":
+    if run.seed is not None:
+        args.extend(("--debug.seed", str(run.seed)))
+    if config.override_imports:
+        args.extend(("--override.imports", ",".join(config.override_imports)))
+    args = args + list(config.extra_flags) + ["--dump-folder", str(arm_dir)]
+    if run.ac_mode == "none":
         # A tyro subcommand token, which has to come last.
         args.append("activation-checkpoint:none")
     return args
@@ -281,89 +256,39 @@ def _megatron_launcher(spec: ParallelismSpec) -> list[str]:
     ]
 
 
-def megatron_stock_command(
-    workload: Workload,
-    arm: Arm,
-    arm_dir: Path,
-    extra_args: list[str] | tuple[str, ...],
-    ac_mode: str,
-    model_size: str = "1b",
-    parallelism: ParallelismSpec = TRIVIAL_SPEC,
-    megatron_p2p_sync: str = DEFAULT_MEGATRON_P2P_SYNC,
-    megatron_nan_guard: str = DEFAULT_MEGATRON_NAN_GUARD,
-    megatron_precision: str = DEFAULT_MEGATRON_PRECISION,
-    profile: bool = True,
-) -> list[str]:
-    """Launch command for the stock Megatron-LM driver.
+def megatron_stock_command(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
+    """The command line of one stock Megatron-LM arm.
 
-    This function owns three things and no more: the launcher, the ``python
-    -m`` target, and the six values ``stock_megatron_flags`` cannot read
-    off a workload. ``benchmarks/e2e/megatron_stock/flags.py`` builds every
-    flag, both the Megatron group Megatron's own parser reads and the
-    ``--bench-*`` group the driver adds through Megatron's
-    ``extra_args_provider`` hook. ``tests/test_megatron_stock_launch.py``
-    refuses a repeated flag name in the result: Megatron's parser is
-    last-wins, so a duplicate would change a value with nothing to see it.
-
-    **At the trivial spec the launcher is the plain interpreter.**
-    ``_megatron_launcher`` starts torchrun only above one rank.
-
-    The four refusals below restate what a run already refuses, and
-    ``flags.py`` restates two of them again for a caller that reaches it
-    directly. A caller may build a command line without a run, and a bare
-    Megatron failure minutes into a subprocess names neither the flag nor
-    the reason.
-
-    **The schedule refusal has a second cause, and it is not a
-    restatement.** Parallelism rule 5 asks what Megatron-LM implements, so
-    a schedule the library implements and this driver does not passes every
-    parallelism rule. The refusal lands here instead, and ``flags.py``
-    repeats it.
+    ``benchmarks/e2e/megatron_stock/flags.py`` builds every flag, and this
+    function adds the launcher, the driver module and the passthrough
+    tokens. The refusals repeat the run checks, so a caller that builds a
+    command line without a run gets a message that names the arm.
     """
-    if ac_mode != "none":
+    config = arm.config
+    spec = run.parallelism
+    if run.ac_mode != "none":
         raise ValueError(
             f"{arm.name}: the stock megatron arm runs without recompute; "
-            f"ac mode {ac_mode!r} has no Megatron parity (use --ac none)"
+            f"ac mode {run.ac_mode!r} has no Megatron parity (use --ac none)"
         )
-    # Refused here too, so the message names the arm.
-    if workload.seed is None:
+    if run.seed is None:
         raise ValueError(
             f"{arm.name}: megatron arms require a seeded workload"
         )
-    # Refused here too; the docstring says why the harness keeps a copy.
-    if (
-        parallelism.pp > 1
-        and parallelism.pp_schedule != STOCK_MEGATRON_PP_SCHEDULE
-    ):
+    if spec.pp > 1 and spec.pp_schedule != STOCK_MEGATRON_PP_SCHEDULE:
         raise ValueError(
             f"{arm.name}: the stock megatron driver implements "
             f"{STOCK_MEGATRON_PP_SCHEDULE!r} alone, and this run asks for "
-            f"{parallelism.pp_schedule!r}"
+            f"{spec.pp_schedule!r}"
         )
     # Below the refusals, so a refused request fails with its own message.
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
-    refuse_passthrough(arm, extra_args, parallelism.zero)
-
-    # Passed on as typed; shape_by_name resolves an alias either way.
+    refuse_passthrough("megatron", arm.name, config.extra_flags, spec.zero)
     return [
-        *_megatron_launcher(parallelism),
+        *_megatron_launcher(spec),
         STOCK_MEGATRON_DRIVER_MODULE,
-        *stock_megatron_flags(
-            shape_by_name(model_size),
-            workload,
-            parallelism,
-            arm_dir=str(arm_dir),
-            model_size=model_size,
-            # flags.py refuses the illegal values; a run never reaches them.
-            megatron_p2p_sync=megatron_p2p_sync,
-            # Megatron's own token under off, and nothing under on.
-            megatron_nan_guard=megatron_nan_guard,
-            # Four flags under lean, and nothing under stock.
-            megatron_precision=megatron_precision,
-            # Megatron's profiler flags and the schedule group, or nothing.
-            profile=profile,
-        ),
+        *stock_megatron_flags(run, config, arm_dir=str(arm_dir)),
         # Last, because Megatron's parser is last-wins.
-        *extra_args,
+        *config.extra_flags,
     ]
