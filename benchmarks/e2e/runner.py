@@ -366,6 +366,17 @@ def _resolve_run(
         local_batch_size=data.local_batch_size,
         device_count=len(devices),
     )
+    if existing_manifest is not None and (warmup_steps is None) != profile:
+        # Refused here, because a run spec cannot hold the pair.
+        changed = [
+            key
+            for key, value in (("profile", profile), ("warmup_steps", warmup_steps))
+            if value != existing_manifest[key]
+        ]
+        raise ValueError(
+            "resume request does not match the existing manifest: "
+            + ", ".join(changed)
+        )
     run = RunSpec(
         shape=shape,
         data=data,

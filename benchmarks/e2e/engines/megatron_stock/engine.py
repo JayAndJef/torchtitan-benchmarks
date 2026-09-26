@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, Engine, RunSpec
+from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, RunSpec
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.launch import (
     STOCK_MEGATRON_PP_SCHEDULE,
@@ -31,13 +31,15 @@ class MegatronStockEngine(Engine):
             return [
                 f"pipeline schedule {schedule.name!r} is not implemented by "
                 "Megatron-LM, and this run holds a megatron arm; there would be "
-                "no cross-engine comparison"
+                "no cross-engine comparison; choose --pp-schedule "
+                f"{STOCK_MEGATRON_PP_SCHEDULE}, or select the TorchTitan arms alone"
             ]
         if schedule.name != STOCK_MEGATRON_PP_SCHEDULE:
             return [
                 f"{arm.name}: the stock megatron driver implements "
                 f"{STOCK_MEGATRON_PP_SCHEDULE!r} alone, and this run asks for "
-                f"{schedule.name!r}"
+                f"{schedule.name!r}; choose --pp-schedule "
+                f"{STOCK_MEGATRON_PP_SCHEDULE}, or select the TorchTitan arms alone"
             ]
         return []
 
@@ -54,6 +56,7 @@ class MegatronStockEngine(Engine):
             arm_dir,
             log_path,
             engine_profile=MEGATRON_STOCK_PROFILE,
+            compile=CompileMode.NONE,
             trace_kernel_markers=config.trace_kernel_markers,
             extra_flags=config.extra_flags,
             megatron_p2p_sync=config.p2p_sync,

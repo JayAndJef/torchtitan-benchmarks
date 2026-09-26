@@ -25,7 +25,7 @@ class EngineConfig:
     """The base of every engine's arm config; the config type selects the engine."""
 
     extra_flags: tuple[str, ...] = ()
-    """Engine flags that the engine's check classifies before they pass through."""
+    """Engine flags that pass through after the engine classifies them."""
 
 
 @dataclass(frozen=True)

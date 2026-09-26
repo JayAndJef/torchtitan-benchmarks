@@ -26,7 +26,7 @@ from benchmarks.e2e.engines.registry import (
 )
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.engine import TorchTitanEngine
-from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.parallelism import PP_SCHEDULES, ParallelismSpec
 from benchmarks.e2e.registry import SCENARIOS
 from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE, TORCHTITAN_PROFILE
 from tests.engine_helpers import run_spec
@@ -226,15 +226,20 @@ class EngineCheckTests(unittest.TestCase):
         return engine_for(arm).check(run, arm)
 
     def test_megatron_refuses_a_schedule_megatron_lm_does_not_implement(self):
-        self.assertRegex(
-            " ".join(self._refusals("megatron_stock", "ZBVZeroBubble")),
-            "'ZBVZeroBubble' is not implemented by Megatron-LM",
-        )
+        for name in ("InterleavedZeroBubble", "ZBVZeroBubble", "DualPipeV"):
+            with self.subTest(schedule=name):
+                self.assertRegex(
+                    " ".join(self._refusals("megatron_stock", name)),
+                    f"'{name}' is not implemented by Megatron-LM.*"
+                    "choose --pp-schedule 1F1B",
+                )
 
     def test_megatron_refuses_a_schedule_its_driver_does_not_run(self):
+        """Megatron-LM implements Interleaved1F1B, and the stock driver runs 1F1B alone."""
+        self.assertTrue(PP_SCHEDULES["Interleaved1F1B"].megatron_supported)
         self.assertRegex(
             " ".join(self._refusals("megatron_stock", "Interleaved1F1B")),
-            "implements '1F1B' alone",
+            "implements '1F1B' alone.*choose --pp-schedule 1F1B",
         )
 
     def test_megatron_accepts_1f1b(self):

@@ -385,9 +385,8 @@ run writes.
 `benchmarks.e2e.results:loss_visible_rank` returns
 `(world_size // pp) * (pp - 1)`. That is right for `1F1B` and
 `Interleaved1F1B`. It is wrong for `ZBVZeroBubble` and `DualPipeV`, where
-rank 0 holds the last stage and the loss. Parallelism rule 5 refuses a
-V-shaped schedule only beside a Megatron arm, so a TorchTitan-only run may
-ask for one. No run has ever used one. Repair `loss_visible_rank` before you
+rank 0 holds the last stage and the loss. The Megatron engine's check
+refuses a V-shaped schedule, so a TorchTitan-only run may ask for one. No run has ever used one. Repair `loss_visible_rank` before you
 run one. Do not lift `MAX_PP` instead.
 
 ## 7. The stock Megatron arm
@@ -470,7 +469,7 @@ context parallelism are deliberately absent.
 width as its shard degree plus `fsdp-reshard-after-forward never`.
 
 `validate_parallelism` refuses a spec before any host probe. The numbering
-below is the code's own, and rules 6, 13, 15, 16 and 17 are deleted.
+below is the code's own, and rules 5, 6, 13, 15, 16 and 17 are deleted.
 
 | rule | refuses |
 |---|---|
@@ -478,7 +477,6 @@ below is the code's own, and rules 6, 13, 15, 16 and 17 are deleted.
 | 2 | a pipeline degree above 8, then a world size above 8 |
 | 3 | a schedule or a microbatch size at one pipeline rank, and a missing schedule above it |
 | 4 | a schedule name the registry does not declare |
-| 5 | a schedule Megatron-LM does not implement, beside a Megatron arm |
 | 7 | a layer count that does not divide the total stage count |
 | 8 | an expert degree above the shape's expert count, or one that does not divide it |
 | 9 | an expert degree that does not divide the data-parallel degree |
@@ -487,11 +485,12 @@ below is the code's own, and rules 6, 13, 15, 16 and 17 are deleted.
 | 12 | fewer microbatches than twice the total stage count, above one pipeline rank |
 | 14 | an expert degree above 1 under `--zero 0` |
 
-Rule 6 left this function, because compile is an arm property and a spec
-alone cannot answer it. `benchmarks.e2e.runner:_resolve_run` now refuses a
-schedule whose `requires_uncompiled` is true when a selected arm declares
-`compile="torch"`, and the message names the arm. Three of the five
-registered schedules raise on a compiled stage module.
+Each engine's `check` refuses the schedules that engine cannot run, and
+`benchmarks.e2e.runner:_resolve_run` calls it before any host probe. The
+Megatron engine refuses a schedule that Megatron-LM or its driver does not
+implement. The TorchTitan engine refuses a schedule whose
+`requires_uncompiled` is true for an arm that asks for `torch.compile`.
+Three of the five registered schedules raise on a compiled stage module.
 
 Two legal meshes warn rather than refuse.
 `benchmarks.e2e.parallelism:zero_warnings` states both, the runner prints

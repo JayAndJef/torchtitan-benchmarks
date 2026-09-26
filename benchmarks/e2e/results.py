@@ -210,9 +210,8 @@ def loss_visible_rank(*, world_size: int, pp: int) -> int:
 
     **It is right for the two schedules this repo runs and not for every
     schedule.** ``ZBVZeroBubble`` returns the loss on rank 0, and TorchTitan
-    special-cases it; parallelism rule 5 refuses that schedule for any run
-    holding a megatron arm and this repo has never run one, so the case is
-    recorded rather than handled.
+    special-cases it. The Megatron engine's check refuses that schedule,
+    and no run has used it, so the case is recorded and not handled.
     """
     return (world_size // pp) * (pp - 1)
 
