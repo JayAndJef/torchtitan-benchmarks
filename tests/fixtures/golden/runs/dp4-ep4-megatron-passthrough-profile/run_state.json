@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "status": "completed",
+  "arms": {
+    "megatron_stock": {
+      "status": "completed",
+      "attempts": 2,
+      "running_at": "2026-09-23T11:23:57Z",
+      "failed_at": "2026-09-23T11:23:06Z",
+      "completed_at": "2026-09-23T11:27:23Z"
+    }
+  },
+  "running_at": "2026-09-23T11:23:57Z",
+  "failed_at": "2026-09-23T11:23:06Z",
+  "arms_completed_at": "2026-09-23T11:27:23Z",
+  "evaluation": {
+    "status": "completed",
+    "completed_at": "2026-09-23T11:27:23Z"
+  }
+}
