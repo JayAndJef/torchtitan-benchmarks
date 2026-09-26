@@ -1,0 +1,24 @@
+# scenario=engines arm=megatron_stock gpu_pci_index=0 2026-09-26T18:43:44Z
+0, NVIDIA H200, GPU-golden, 570.211.01
+Megatron-LM stock model: size: 1,066,241,024 total parameters
+step:  1  loss: 11.88300  grad_norm:  3.7500  memory: 41.51GiB(29.69%)  tps: 3,233  tflops: 41.06  mfu: 4.14%
+step:  2  loss: 11.76600  grad_norm:  3.6250  memory: 41.52GiB(29.70%)  tps: 9,694  tflops: 123.11  mfu: 12.41%
+step:  3  loss: 11.59900  grad_norm:  3.5000  memory: 41.50GiB(29.68%)  tps: 9,708  tflops: 123.29  mfu: 12.43%
+step:  4  loss: 11.48200  grad_norm:  3.3750  memory: 41.51GiB(29.69%)  tps: 9,699  tflops: 123.18  mfu: 12.41%
+step:  5  loss: 11.31500  grad_norm:  3.2500  memory: 41.52GiB(29.70%)  tps: 9,690  tflops: 123.06  mfu: 12.40%
+step:  6  loss: 11.19800  grad_norm:  3.1250  memory: 41.50GiB(29.68%)  tps: 9,704  tflops: 123.24  mfu: 12.42%
+step:  7  loss: 11.08100  grad_norm:  3.0000  memory: 41.51GiB(29.69%)  tps: 9,695  tflops: 123.13  mfu: 12.41%
+step:  8  loss: 10.91400  grad_norm:  3.7500  memory: 41.52GiB(29.70%)  tps: 9,709  tflops: 123.30  mfu: 12.43%
+step:  9  loss: 10.79700  grad_norm:  3.6250  memory: 41.50GiB(29.68%)  tps: 9,700  tflops: 123.19  mfu: 12.42%
+step: 10  loss: 10.63000  grad_norm:  3.5000  memory: 41.51GiB(29.69%)  tps: 9,691  tflops: 123.08  mfu: 12.40%
+step: 11  loss: 10.51300  grad_norm:  3.3750  memory: 41.52GiB(29.70%)  tps: 9,705  tflops: 123.25  mfu: 12.42%
+step: 12  loss: 10.39600  grad_norm:  3.2500  memory: 41.50GiB(29.68%)  tps: 9,696  tflops: 123.14  mfu: 12.41%
+step: 13  loss: 10.22900  grad_norm:  3.1250  memory: 41.51GiB(29.69%)  tps: 9,710  tflops: 123.32  mfu: 12.43%
+step: 14  loss: 10.11200  grad_norm:  3.0000  memory: 41.52GiB(29.70%)  tps: 9,701  tflops: 123.20  mfu: 12.42%
+step: 15  loss:  9.94500  grad_norm:  3.7500  memory: 41.50GiB(29.68%)  tps: 9,692  tflops: 123.09  mfu: 12.41%
+step: 16  loss:  9.82800  grad_norm:  3.6250  memory: 41.51GiB(29.69%)  tps: 9,706  tflops: 123.27  mfu: 12.42%
+step: 17  loss:  9.71100  grad_norm:  3.5000  memory: 41.52GiB(29.70%)  tps: 9,697  tflops: 123.15  mfu: 12.41%
+step: 18  loss:  9.54400  grad_norm:  3.3750  memory: 41.50GiB(29.68%)  tps: 9,711  tflops: 123.33  mfu: 12.43%
+step: 19  loss:  9.42700  grad_norm:  3.2500  memory: 41.51GiB(29.69%)  tps: 9,702  tflops: 123.22  mfu: 12.42%
+step: 20  loss:  9.26000  grad_norm:  3.1250  memory: 41.52GiB(29.70%)  tps: 9,693  tflops: 123.10  mfu: 12.41%
+Training completed
