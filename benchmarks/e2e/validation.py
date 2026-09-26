@@ -684,7 +684,7 @@ def validate_against_profile(
     log_path: Path,
     *,
     engine_profile: ValidationProfile,
-    compile: CompileMode = CompileMode.NONE,
+    compile: CompileMode,
     overrides_per_block: int = 0,
     override_imports: tuple[str, ...] = (),
     trace_kernel_markers: tuple[str, ...] = (),

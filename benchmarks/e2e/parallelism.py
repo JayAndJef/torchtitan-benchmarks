@@ -79,7 +79,7 @@ host and nobody repeated them on an idle one.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from benchmarks.models.piper_qwen3.shape import PiperShape
@@ -412,7 +412,7 @@ def titan_reshard_after_forward(spec: ParallelismSpec) -> str | None:
 
 
 def zero_warnings(
-    spec: ParallelismSpec, *, engines: Iterable[str] = ()
+    spec: ParallelismSpec, *, engines: Collection[str] = ()
 ) -> tuple[str, ...]:
     """What a reader must not conclude from this spec's own mesh.
 
@@ -429,12 +429,11 @@ def zero_warnings(
             "the dense parameters exactly as a replicated run holds them. "
             "Do not read this cell as a measurement of the sharded parity"
         )
-    titan = sorted({engine for engine in engines if engine == "torchtitan"})
-    if spec.zero == 1 and spec.pp == 1 and titan:
+    if spec.zero == 1 and spec.pp == 1 and "torchtitan" in engines:
         warnings.append(
             "--zero 1 was requested at pp 1. One microbatch puts the "
             "gradient reduce-scatter inside the only backward pass, so the "
-            f"TorchTitan arms ({', '.join(titan)}) hold ZeRO-2 "
+            "TorchTitan arms (torchtitan) hold ZeRO-2 "
             "rather than the ZeRO-1 shape the level names. Megatron holds "
             "ZeRO-1 at every mesh. Do not read the two engines of this cell "
             "as one ZeRO level"

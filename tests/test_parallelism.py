@@ -28,7 +28,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.parallelism import (
     DEFAULT_ZERO,
     ParallelismSpec,
@@ -48,16 +47,12 @@ from benchmarks.e2e.parallelism import (
     titan_mesh,
     validate_parallelism,
 )
-from benchmarks.e2e.registry import (
-    EXECUTION_MODEL,
-    SCENARIOS,
-)
+from benchmarks.e2e.registry import EXECUTION_MODEL
 from benchmarks.models.piper_qwen3.shape import (
     PIPER_SHAPES,
     PiperShape,
     shape_by_name,
 )
-from tests.engine_helpers import run_spec
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -984,50 +979,13 @@ class Rule04ScheduleIsRegisteredTest(unittest.TestCase):
             check(ParallelismSpec(pp=2, pp_schedule="1f1b"))
 
 
-class Rule05EachEngineRefusesItsOwnSchedulesTest(unittest.TestCase):
-    """Rule 5 left the shared rules; each engine's check refuses a schedule it does not run."""
-
-    def _refusals(self, arm_name: str, schedule: str) -> list[str]:
-        arm = SCENARIOS["engines"].arm(arm_name)
-        run = run_spec(
-            ac_mode="none",
-            parallelism=ParallelismSpec(pp=2, pp_schedule=schedule),
-            local_batch_size=8,
-        )
-        return engine_for(arm).check(run, arm)
+class Rule05LeftTheSharedRulesTest(unittest.TestCase):
+    """Each engine's check refuses the schedules that engine cannot run; ``tests/test_engines.py`` holds those tests."""
 
     def test_the_shared_rules_admit_every_registered_schedule(self):
         for name in PP_SCHEDULES:
             with self.subTest(schedule=name):
                 check(ParallelismSpec(pp=2, pp_schedule=name), batch=8)
-
-    def test_a_supported_schedule_reaches_a_megatron_arm(self):
-        self.assertEqual(self._refusals("megatron_stock", "1F1B"), [])
-
-    def test_a_pytorch_only_schedule_reaches_a_titan_arm(self):
-        self.assertEqual(self._refusals("titan_eager", "ZBVZeroBubble"), [])
-
-    def test_the_megatron_arm_refuses_interleaved_because_its_driver_does(self):
-        """Megatron-LM implements Interleaved1F1B, and the stock driver runs 1F1B alone."""
-        self.assertTrue(PP_SCHEDULES["Interleaved1F1B"].megatron_supported)
-        self.assertRegex(
-            " ".join(self._refusals("megatron_stock", "Interleaved1F1B")),
-            "implements '1F1B' alone",
-        )
-
-    def test_a_pytorch_only_schedule_is_refused_on_a_megatron_arm(self):
-        for name in ("InterleavedZeroBubble", "ZBVZeroBubble", "DualPipeV"):
-            with self.subTest(schedule=name):
-                self.assertRegex(
-                    " ".join(self._refusals("megatron_stock", name)),
-                    "not implemented by Megatron-LM",
-                )
-
-
-# Rule 6 is DELETED from this module. It refused a schedule that raises on
-# a compiled stage module, and compile is a property of each arm rather
-# than of a spec. ``_resolve_run`` holds the refusal now, and
-# ``tests/test_runner.py`` tests it there.
 
 
 class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
