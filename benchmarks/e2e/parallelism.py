@@ -18,11 +18,9 @@ and the TorchTitan training subprocess never needs it either, because
 ``parallelize_piper1b`` reads the ``ParallelDims`` TorchTitan builds from the
 command line.
 
-``ParallelismSpec`` and ``PipelineSchedule`` are declared in
-``benchmarks.e2e.schema``, with ``Workload``. This module holds the
-schedule table, the derived values and the rules, and it imports no
-scenario declaration: ``benchmarks/e2e/registry.py`` reads this module and
-not the other way round.
+This module declares ``ParallelismSpec`` and ``PipelineSchedule``, the
+schedule table, the derived values and the rules. It imports no scenario
+declaration and no engine.
 
 Terms, used here with these meanings only:
 
@@ -61,9 +59,9 @@ supported. Adding one means adding it to ``world_size``, to
 ``execution_model`` and to the throughput divisor at the same time.
 
 **What this module refuses today.** Rule 14 refuses ``ep > 1`` at ZeRO
-level 0, and rules 5 and 6 refuse three of the five registered schedules
-for every cross-engine run. **The numbering keeps a gap at 13, at 15, at
-16 and at 17.** Rule 15 refused a sharded level at ``dp`` 1. It now warns
+level 0. Each engine refuses the schedules it does not run, in its own
+check. **The numbering keeps a gap at 5, at 6, at 13, at 15, at 16 and at
+17.** Rule 15 refused a sharded level at ``dp`` 1. It now warns
 instead, because it blocked ``dp 1 x pp 8``, which is the agreed 30B-A3B
 matrix, and because no engine refuses that mesh. ``zero_warnings`` carries
 the warning. The numbers of the deleted rules stay empty: messages, tests
@@ -84,7 +82,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from benchmarks.e2e.schema import Workload
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
@@ -108,22 +105,9 @@ class PipelineSchedule:
     warmup depth -- and therefore its peak activation memory -- grows with
     it.
 
-    ``megatron_supported`` says whether **Megatron-LM** implements this
-    schedule at all. Three of the five are PyTorch-only, so a run holding a
-    megatron arm has no opponent for them and rule 5 refuses the
-    combination.
-
-    **It is not the same question as "can this repo's megatron driver run
-    it", and rule 5 deliberately asks the library's question.**
-    ``Interleaved1F1B`` is the case where the two answers differ: Megatron-LM
-    implements it, so a cross-engine row is possible in principle, but
-    our stock driver refuses a virtual pipeline degree.
-    Rule 5 therefore lets that spec through and the driver fails it -- the
-    declaration-without-a-builder pattern the kernel spans already use, where
-    the failure lands at the place that owns the missing work rather than at
-    a validator claiming the library cannot do it. A test pins that this
-    combination passes, so nobody "fixes" it by writing a false ``False``
-    here.
+    ``megatron_supported`` says whether Megatron-LM implements the
+    schedule. The stock Megatron engine refuses a schedule without it, and
+    it refuses every schedule its driver does not run.
 
     ``requires_uncompiled`` records that the schedule raises on a compiled
     stage module. Only three of PyTorch's schedule classes call
@@ -262,19 +246,6 @@ schedules ask for two stages per rank. Rule 7 reads ``pp *
 stages_per_rank`` for that reason.
 """
 
-
-
-MEGATRON_ENGINES = frozenset({"megatron_stock"})
-"""The ``Arm.engine`` names that drive Megatron-LM.
-
-Rules 5 and 12 and the three megatron run axes read this set. It is
-declared one by one, because a name prefix fails open and the complement of
-``torchtitan`` fails the other way; a new engine is an edit here rather
-than a silent classification. It is stated rather than derived from
-``ENGINES``, because that module sits above this one;
-``tests/test_engines.py`` pins the set equal to the engines whose
-``is_megatron`` is true.
-"""
 
 
 PP_SCHEDULES: dict[str, PipelineSchedule] = {
@@ -445,10 +416,8 @@ def zero_warnings(
 ) -> tuple[str, ...]:
     """What a reader must not conclude from this spec's own mesh.
 
-    Two legal cells whose recorded ``zero`` level names a mechanism the run
-    does not have. ``engines`` is the set of arm engines the run holds,
-    because the second warning is about TorchTitan's FSDP2 alone. Nothing
-    is emitted above ``dp`` 1 and ``pp`` 1, which is the intended cell.
+    ``engines`` holds the engine names of the run's arms, because the
+    second warning is about TorchTitan's FSDP2 alone.
     """
     warnings: list[str] = []
     if spec.zero != 0 and spec.dp == 1:
@@ -460,12 +429,12 @@ def zero_warnings(
             "the dense parameters exactly as a replicated run holds them. "
             "Do not read this cell as a measurement of the sharded parity"
         )
-    titan = frozenset(engines) - MEGATRON_ENGINES
+    titan = sorted({engine for engine in engines if engine == "torchtitan"})
     if spec.zero == 1 and spec.pp == 1 and titan:
         warnings.append(
             "--zero 1 was requested at pp 1. One microbatch puts the "
             "gradient reduce-scatter inside the only backward pass, so the "
-            f"TorchTitan arms ({', '.join(sorted(titan))}) hold ZeRO-2 "
+            f"TorchTitan arms ({', '.join(titan)}) hold ZeRO-2 "
             "rather than the ZeRO-1 shape the level names. Megatron holds "
             "ZeRO-1 at every mesh. Do not read the two engines of this cell "
             "as one ZeRO level"
@@ -620,15 +589,12 @@ def validate_parallelism(
     spec: ParallelismSpec,
     *,
     shape: PiperShape,
-    workload: Workload,
-    engines: Iterable[str],
+    local_batch_size: int,
     device_count: int,
 ) -> None:
     """Refuse a spec this run cannot honor. Each message names one cause.
 
-    ``engines`` is the set of ``Arm.engine`` names the run will start, so
-    the megatron restriction follows the arm roster rather than a scenario
-    name. ``device_count`` is how many devices the operator asked for.
+    ``device_count`` is how many devices the operator asked for.
 
     Rules 8 and 9 were dead behind rule 14 while it refused every
     ``ep > 1``. Rule 14 now refuses an expert degree only under the
@@ -641,9 +607,6 @@ def validate_parallelism(
     ``ParallelismSpec.__post_init__`` has already refused a degree below 1,
     so every rule below may assume positive counts.
     """
-    engines = frozenset(engines)
-    local_batch_size = workload.local_batch_size
-
     # A precondition, checked first so the numbered rules may assume it.
     if local_batch_size < 1:
         raise ValueError(
@@ -705,18 +668,7 @@ def validate_parallelism(
                 + ", ".join(PP_SCHEDULE_CHOICES)
             ) from error
 
-    # 5. A schedule Megatron does not implement has no cross-engine
-    #    opponent, so it reads the engines and not the scenario name.
-    if (
-        schedule is not None
-        and engines & MEGATRON_ENGINES
-        and not schedule.megatron_supported
-    ):
-        raise ValueError(
-            f"pipeline schedule {schedule.name!r} is not implemented by "
-            "Megatron-LM, and this run holds a megatron arm; there would be "
-            "no cross-engine comparison"
-        )
+    # 5. DELETED. Each engine refuses the schedules it does not run.
 
     # 6. DELETED. Compile is an arm property, so _resolve_run asks it.
 

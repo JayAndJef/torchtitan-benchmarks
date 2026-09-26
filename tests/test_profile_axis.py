@@ -23,7 +23,6 @@ from benchmarks.artifacts.manifests import (
     _resume_mismatches,
     manifest_data,
 )
-from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.megatron_stock import profiling
 from benchmarks.e2e.megatron_stock.flags import (
     BENCH_PROFILE,
@@ -32,10 +31,10 @@ from benchmarks.e2e.megatron_stock.flags import (
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.axes import RunAxes
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.registry import DEFAULT_PROFILE, ENGINES, scenario_by_name
-from benchmarks.e2e.runner import workload_with_overrides
-from benchmarks.e2e.validation import validate_arm
-from benchmarks.models.piper_qwen3.shape import shape_by_name
+from benchmarks.e2e.runner import data_with_overrides
+from tests.engine_helpers import command, run_spec, validate
 from tests.test_runner import _SAC_LINE, _SIZE_LINE, _compiled_line
 
 
@@ -103,26 +102,23 @@ class StepFloorTests(unittest.TestCase):
 
     def test_a_profiled_run_keeps_the_forty_step_floor(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 40"):
-            workload_with_overrides(
+            data_with_overrides(
                 ENGINES, steps=12, profile=True, warmup_steps=None
             )
 
     def test_an_unprofiled_run_accepts_a_short_run(self) -> None:
-        workload = workload_with_overrides(
+        data = data_with_overrides(
             ENGINES, steps=12, profile=False, warmup_steps=2
         )
-        self.assertEqual(workload.steps, 12)
+        self.assertEqual(data.steps, 12)
 
 
 class TitanArgvTests(unittest.TestCase):
     def _command(self, profile: bool) -> list[str]:
-        return command_for_arm(
-            ENGINES.workload,
+        return command(
+            run_spec(ac_mode="none", profile=profile),
             ENGINES.arm("titan_eager"),
-            Path("/tmp/arm"),
-            (),
-            "none",
-            profile=profile,
+            "/tmp/arm",
         )
 
     def test_the_profiler_flags_appear_only_under_profile(self) -> None:
@@ -140,12 +136,8 @@ class TitanArgvTests(unittest.TestCase):
             for token in self._command(True)
             if token not in _TITAN_PROFILER_FLAGS
         ]
-        workload = ENGINES.workload
-        values = {
-            str(workload.profile_freq),
-            str(workload.profiler_active),
-            str(workload.profiler_warmup),
-        }
+        window = ENGINES.window
+        values = {str(window.freq), str(window.active), str(window.warmup)}
         self.assertEqual(
             [token for token in profiled if token not in values],
             self._command(False),
@@ -155,12 +147,7 @@ class TitanArgvTests(unittest.TestCase):
 class StockArgvTests(unittest.TestCase):
     def _flags(self, profile: bool) -> list[str]:
         return stock_megatron_flags(
-            shape_by_name("1b"),
-            ENGINES.workload,
-            TRIVIAL_SPEC,
-            arm_dir="/tmp/arm",
-            model_size="1b",
-            profile=profile,
+            run_spec(profile=profile), MegatronStockConfig(), arm_dir="/tmp/arm"
         )
 
     def test_megatron_and_harness_profiler_flags_appear_only_under_profile(
@@ -178,23 +165,16 @@ class StockArgvTests(unittest.TestCase):
 
     def test_an_unprofiled_run_accepts_a_partial_profiler_cycle(self) -> None:
         """The refusal guards a window, and there is no window."""
-        short = replace(ENGINES.workload, steps=12)
         with self.assertRaisesRegex(ValueError, "whole number of profiler"):
             stock_megatron_flags(
-                shape_by_name("1b"),
-                short,
-                TRIVIAL_SPEC,
+                run_spec(profile=True, steps=12),
+                MegatronStockConfig(),
                 arm_dir="/tmp/arm",
-                model_size="1b",
-                profile=True,
             )
         flags = stock_megatron_flags(
-            shape_by_name("1b"),
-            short,
-            TRIVIAL_SPEC,
+            run_spec(profile=False, steps=12),
+            MegatronStockConfig(),
             arm_dir="/tmp/arm",
-            model_size="1b",
-            profile=False,
         )
         self.assertIn("--train-iters", flags)
 
@@ -214,9 +194,9 @@ class ValidationSkipsTheTraceRulesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             log = self._log(root)
-            validate_arm(arm, root, log, ENGINES.workload, profile=False)
+            validate(run_spec(profile=False), arm, root, log)
             with self.assertRaisesRegex(RuntimeError, "profiler windows"):
-                validate_arm(arm, root, log, ENGINES.workload, profile=True)
+                validate(run_spec(profile=True), arm, root, log)
 
     def test_the_log_rules_still_run(self) -> None:
         """Rule 8 inverts on an eager arm, with or without a trace."""
@@ -231,7 +211,7 @@ class ValidationSkipsTheTraceRulesTests(unittest.TestCase):
                 + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "compiled the model"):
-                validate_arm(arm, root, log, ENGINES.workload, profile=False)
+                validate(run_spec(profile=False), arm, root, log)
 
 
 class ManifestTests(unittest.TestCase):
@@ -239,6 +219,7 @@ class ManifestTests(unittest.TestCase):
         scenario = scenario_by_name("engines")
         return manifest_data(
             scenario,
+            run_spec(ac_mode="none", profile=profile),
             (scenario.arm("titan_eager"),),
             {"titan_eager": ["cmd"]},
             "test-gpu",
@@ -277,6 +258,7 @@ class ManifestTests(unittest.TestCase):
                 mismatches = _resume_mismatches(
                     manifest,
                     scenario,
+                    run_spec(ac_mode="none", profile=requested),
                     arms,
                     "test-gpu",
                     _METADATA,

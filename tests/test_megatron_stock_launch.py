@@ -2,7 +2,7 @@
 
 Three things join here, and each can fail silently:
 
-1. ``command_for_arm`` must build the stock argv and must leave every other
+1. The engine command must build the stock argv and must leave every other
    arm's argv alone. A stray token at the trivial spec changes what every
    existing scenario measures, and no rule reads a command line back.
 2. The ``megatron_stock`` validation profile must prove the mesh. A profile
@@ -32,14 +32,17 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.e2e.engines import ENGINES as ENGINE_RECORDS, command_for_arm
+from benchmarks.e2e.engines.api import Arm
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
+from benchmarks.e2e.engines.megatron_stock.engine import MegatronStockEngine
+from benchmarks.e2e.engines.registry import ENGINES as ENGINE_RECORDS, engine_for
+from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.launch import (
     STOCK_MEGATRON_DRIVER_MODULE,
     STOCK_MEGATRON_PP_SCHEDULE,
 )
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
@@ -53,6 +56,7 @@ from benchmarks.e2e.validation import (
 )
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import shape_by_name
+from tests.engine_helpers import command, configured, run_spec
 
 SCENARIO_NAME = "engines"
 STOCK_PACKAGE = "benchmarks.e2e.megatron_stock"
@@ -81,7 +85,7 @@ SHARDED_MESH = ParallelismSpec(
 #
 # ``MESH`` needs the lifted caps, and it has them: ``MAX_WORLD_SIZE`` and
 # ``MAX_PP`` are both 8, and ``tests/test_parallelism.py`` validates this
-# exact mesh. ``command_for_arm`` calls no validator either way, so the argv
+# exact mesh. The engine command calls no validator either way, so the argv
 # is buildable whatever the caps say -- which is why the sweep freezes the
 # three smaller meshes beside it rather than resting on one spec.
 SPECS = (
@@ -244,22 +248,18 @@ def _command(
     megatron_nan_guard: str = "off",
     megatron_precision: str = "stock",
 ) -> list[str]:
-    scenario = scenario_by_name(SCENARIO_NAME)
-    workload = scenario.workload
+    data = scenario_by_name(SCENARIO_NAME).data
     if local_batch_size is not None:
-        workload = replace(workload, local_batch_size=local_batch_size)
-    return command_for_arm(
-        workload,
-        arm,
-        Path("/tmp/arm-dir"),
-        (),
-        ac_mode,
-        model_size=model_size,
-        parallelism=parallelism,
-        megatron_p2p_sync=megatron_p2p_sync,
-        megatron_nan_guard=megatron_nan_guard,
-        megatron_precision=megatron_precision,
-    )
+        data = replace(data, local_batch_size=local_batch_size)
+    if isinstance(arm.config, MegatronStockConfig):
+        arm = configured(
+            arm,
+            p2p_sync=megatron_p2p_sync,
+            nan_guard=megatron_nan_guard,
+            precision=megatron_precision,
+        )
+    run = run_spec(model_size, data=data, parallelism=parallelism, ac_mode=ac_mode)
+    return command(run, arm, "/tmp/arm-dir")
 
 
 def _flag_names(command: list[str]) -> list[str]:
@@ -279,14 +279,13 @@ class StockScenarioDeclarationTests(unittest.TestCase):
         )
 
     def test_the_stock_arm_names_the_stock_engine(self) -> None:
-        arm = _stock_arm()
-        self.assertEqual(arm.engine, "megatron_stock")
+        self.assertIsInstance(engine_for(_stock_arm()), MegatronStockEngine)
 
     def test_the_titan_arm_is_a_plain_torchtitan_arm(self) -> None:
-        arm = _titan_arm()
-        self.assertEqual(arm.engine, "torchtitan")
-        # It reuses the scenario workload's pre-tokenized config.
-        self.assertIsNone(arm.config)
+        self.assertEqual(
+            _titan_arm().config,
+            TorchTitanConfig(compile=_titan_arm().config.compile),
+        )
 
     def test_the_axis_the_megatron_arm_cannot_honor_is_declined(self) -> None:
         scenario = scenario_by_name(SCENARIO_NAME)
@@ -299,7 +298,7 @@ class StockScenarioDeclarationTests(unittest.TestCase):
         Megatron defaults it off, so the same marker here would fail an
         honest run.
         """
-        markers = _stock_arm().trace_kernel_markers
+        markers = _stock_arm().config.trace_kernel_markers
         self.assertNotIn("_permute_kernel", markers)
         self.assertEqual(
             markers, ("cudnn_generated_fort_native_sdpa", "_mul_silu_split")
@@ -380,25 +379,14 @@ class TrivialSpecArgvTests(unittest.TestCase):
         """
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
-                if arm.engine != "torchtitan":
+                if not isinstance(arm.config, TorchTitanConfig):
                     continue
                 with self.subTest(scenario=scenario.name, arm=arm.name):
-                    omitted = command_for_arm(
-                        scenario.workload,
+                    omitted = command(
+                        run_spec(data=scenario.data, ac_mode="none"),
                         arm,
-                        Path("/tmp/arm-dir"),
-                        (),
-                        "none",
+                        "/tmp/arm-dir",
                     )
-                    named = command_for_arm(
-                        scenario.workload,
-                        arm,
-                        Path("/tmp/arm-dir"),
-                        (),
-                        "none",
-                        parallelism=TRIVIAL_SPEC,
-                    )
-                    self.assertEqual(omitted, named)
                     self.assertEqual(
                         [
                             token
@@ -444,19 +432,20 @@ class StockArgvTests(unittest.TestCase):
     ):
         from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
-        workload = scenario_by_name(SCENARIO_NAME).workload
+        data = scenario_by_name(SCENARIO_NAME).data
         if local_batch_size is not None:
-            workload = replace(workload, local_batch_size=local_batch_size)
+            data = replace(data, local_batch_size=local_batch_size)
         return list(
             stock_megatron_flags(
-                shape_by_name(model_size),
-                workload,
-                parallelism,
+                run_spec(
+                    model_size, data=data, parallelism=parallelism, ac_mode="none"
+                ),
+                MegatronStockConfig(
+                    p2p_sync=megatron_p2p_sync,
+                    nan_guard=megatron_nan_guard,
+                    precision=megatron_precision,
+                ),
                 arm_dir="/tmp/arm-dir",
-                model_size=model_size,
-                megatron_p2p_sync=megatron_p2p_sync,
-                megatron_nan_guard=megatron_nan_guard,
-                megatron_precision=megatron_precision,
             )
         )
 
@@ -670,12 +659,10 @@ class StockArgvTests(unittest.TestCase):
                 total = int(command[command.index("--global-batch-size") + 1])
                 # ConstantNumMicroBatchesCalculator, megatron/core.
                 megatron = total // (micro * spec.dp)
-                workload = scenario.workload
+                data = scenario.data
                 if batch is not None:
-                    workload = replace(workload, local_batch_size=batch)
-                marker = profile.parallelism_markers(
-                    spec, workload, "stock"
-                )[0]
+                    data = replace(data, local_batch_size=batch)
+                marker = profile.parallelism_markers(spec, data, "stock")[0]
                 self.assertIn(f"microbatches={megatron} ", marker)
 
     def test_the_argv_carries_no_torchtitan_parallelism_token(self) -> None:
@@ -717,27 +704,20 @@ class StockArgvRefusalTests(unittest.TestCase):
 
     def test_an_owned_passthrough_flag_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "owned by --model-size"):
-            command_for_arm(
-                scenario_by_name(SCENARIO_NAME).workload,
-                _stock_arm(),
-                Path("/tmp/arm-dir"),
-                ("--num-layers=4",),
-                "none",
+            command(
+                run_spec(ac_mode="none"),
+                configured(_stock_arm(), extra_flags=("--num-layers=4",)),
+                "/tmp/arm-dir",
             )
 
     def test_sac_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "no Megatron parity"):
             _command(_stock_arm(), ac_mode="sac")
 
-    def test_an_unseeded_workload_is_refused(self) -> None:
-        scenario = scenario_by_name(SCENARIO_NAME)
+    def test_an_unseeded_run_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "seeded workload"):
-            command_for_arm(
-                replace(scenario.workload, seed=None),
-                _stock_arm(),
-                Path("/tmp/arm-dir"),
-                (),
-                "none",
+            command(
+                run_spec(ac_mode="none", seed=None), _stock_arm(), "/tmp/arm-dir"
             )
 
     def test_a_schedule_this_driver_does_not_implement_is_refused(
@@ -762,15 +742,19 @@ class StockArgvRefusalTests(unittest.TestCase):
 class StockValidationProfileTests(unittest.TestCase):
     def setUp(self) -> None:
         self.profile = MEGATRON_STOCK_PROFILE
-        self.workload = replace(
-            scenario_by_name(SCENARIO_NAME).workload, local_batch_size=32
+        self.data = replace(
+            scenario_by_name(SCENARIO_NAME).data, local_batch_size=32
         )
 
     def test_the_profile_is_registered_and_selected_by_the_arm(self) -> None:
-        self.assertIn("megatron_stock", ENGINE_RECORDS)
-        self.assertIs(
-            ENGINE_RECORDS[_stock_arm().engine].validation, self.profile
-        )
+        self.assertIn(MegatronStockConfig, ENGINE_RECORDS)
+        with mock.patch(
+            "benchmarks.e2e.engines.megatron_stock.engine.validate_against_profile"
+        ) as checked:
+            engine_for(_stock_arm()).validate(
+                run_spec(ac_mode="none"), _stock_arm(), Path("/a"), Path("/a.log")
+            )
+        self.assertIs(checked.call_args.kwargs["engine_profile"], self.profile)
 
     def test_the_driver_line_is_the_first_precision_marker(self) -> None:
         """Rule 8 no longer holds this line, and it is still matched: the
@@ -787,18 +771,16 @@ class StockValidationProfileTests(unittest.TestCase):
         """``compile_marker`` is None, so rule 8 asks this engine nothing.
 
         megatron-core compiles no whole layer, so no log line proves the
-        treatment either way. No arm of this engine may therefore declare
-        ``compile="torch"``, and ``tests/test_engines.py`` pins that over
-        every registered arm.
+        treatment either way. The Megatron config has no compile field.
         """
         self.assertIsNone(self.profile.compile_marker)
-        self.assertEqual(_stock_arm().compile, "none")
+        self.assertFalse(hasattr(_stock_arm().config, "compile"))
 
     # -- arm rule 12 ----------------------------------------------------
 
     def test_the_markers_interpolate_the_spec(self) -> None:
         markers = _megatron_stock_parallelism_markers(
-            MESH, self.workload, "stock"
+            MESH, self.data, "stock"
         )
         self.assertEqual(
             markers[0],
@@ -820,7 +802,7 @@ class StockValidationProfileTests(unittest.TestCase):
         replicated line and fails arm rule 12, which is the point.
         """
         markers = _megatron_stock_parallelism_markers(
-            SHARDED_MESH, self.workload, "stock"
+            SHARDED_MESH, self.data, "stock"
         )
         self.assertEqual(
             markers[0],
@@ -844,10 +826,10 @@ class StockValidationProfileTests(unittest.TestCase):
         publish under the sharded label.
         """
         replicated = _megatron_stock_parallelism_markers(
-            MESH, self.workload, "stock"
+            MESH, self.data, "stock"
         )[1]
         sharded = _megatron_stock_parallelism_markers(
-            SHARDED_MESH, self.workload, "stock"
+            SHARDED_MESH, self.data, "stock"
         )[1]
         self.assertNotEqual(replicated, sharded)
         self.assertNotIn(replicated, sharded)
@@ -863,7 +845,7 @@ class StockValidationProfileTests(unittest.TestCase):
         it.
         """
         line = _megatron_stock_parallelism_markers(
-            replace(MESH, zero=1), self.workload, "stock"
+            replace(MESH, zero=1), self.data, "stock"
         )[1]
         self.assertIn(
             "optimizer=ChainedOptimizer[DistributedOptimizer])", line
@@ -879,11 +861,11 @@ class StockValidationProfileTests(unittest.TestCase):
         """
         zero1 = _megatron_stock_parallelism_markers(
             replace(MESH, zero=1),
-            self.workload,
+            self.data,
             "stock",
         )[1]
         replicated = _megatron_stock_parallelism_markers(
-            MESH, self.workload, "stock"
+            MESH, self.data, "stock"
         )[1]
         self.assertIn(
             "optimizer=ChainedOptimizer[DistributedOptimizer])", zero1
@@ -904,10 +886,10 @@ class StockValidationProfileTests(unittest.TestCase):
         """
         sharded = replace(MESH, zero=1)
         stock = _megatron_stock_parallelism_markers(
-            sharded, self.workload, "stock"
+            sharded, self.data, "stock"
         )[1]
         lean = _megatron_stock_parallelism_markers(
-            sharded, self.workload, "lean"
+            sharded, self.data, "lean"
         )[1]
         self.assertIn("grad_reduce_in_fp32=True", stock)
         self.assertIn("grad_reduce_in_fp32=False", lean)
@@ -928,7 +910,7 @@ class StockValidationProfileTests(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 markers = self.profile.parallelism_markers(
-                    spec, self.workload, "stock"
+                    spec, self.data, "stock"
                 )
                 self.assertTrue(markers)
                 self.assertIn(
@@ -938,12 +920,12 @@ class StockValidationProfileTests(unittest.TestCase):
     def test_the_data_parallel_line_appears_only_above_dp_one(self) -> None:
         pipeline_only = self.profile.parallelism_markers(
             ParallelismSpec(pp=4, pp_schedule="1F1B", pp_microbatch_size=4),
-            self.workload,
+            self.data,
             "stock",
         )
         self.assertEqual(len(pipeline_only), 1)
         with_dp = self.profile.parallelism_markers(
-            MESH, self.workload, "stock"
+            MESH, self.data, "stock"
         )
         self.assertEqual(len(with_dp), 2)
 
@@ -976,11 +958,11 @@ class StockValidationProfileTests(unittest.TestCase):
                 total = int(command[command.index("--global-batch-size") + 1])
                 # ConstantNumMicroBatchesCalculator, megatron/core.
                 megatron = total // (micro * spec.dp)
-                workload = replace(
-                    self.workload, local_batch_size=local_batch_size
+                data = replace(
+                    self.data, local_batch_size=local_batch_size
                 )
                 marker = self.profile.parallelism_markers(
-                    spec, workload, "stock"
+                    spec, data, "stock"
                 )[0]
                 self.assertIn(f"microbatches={megatron} ", marker)
                 if spec.pp == 1:
@@ -992,7 +974,7 @@ class StockValidationProfileTests(unittest.TestCase):
         self,
     ) -> None:
         line = self.profile.parallelism_markers(
-            ParallelismSpec(dp=2), self.workload, "stock"
+            ParallelismSpec(dp=2), self.data, "stock"
         )[0]
         self.assertIn("pp=1", line)
         self.assertIsNone(self.profile.pipelined_pattern.search(line))
@@ -1005,7 +987,7 @@ class StockValidationProfileTests(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 line = self.profile.parallelism_markers(
-                    spec, self.workload, "stock"
+                    spec, self.data, "stock"
                 )[0]
                 self.assertIsNotNone(
                     self.profile.pipelined_pattern.search(line)
@@ -1025,7 +1007,7 @@ class StockValidationProfileTests(unittest.TestCase):
         ):
             with self.subTest(spec=spec):
                 for line in self.profile.parallelism_markers(
-                    spec, self.workload, "stock"
+                    spec, self.data, "stock"
                 ):
                     self.assertIsNone(
                         self.profile.data_parallel_pattern.search(line),
@@ -1050,7 +1032,7 @@ class StockValidationProfileTests(unittest.TestCase):
         for spec in (MESH, SHARDED_MESH):
             with self.subTest(zero=spec.zero):
                 line = self.profile.parallelism_markers(
-                    spec, self.workload, "stock"
+                    spec, self.data, "stock"
                 )[1]
                 self.assertIsNotNone(
                     self.profile.data_parallel_pattern.search(line)
@@ -1067,7 +1049,7 @@ class StockValidationProfileTests(unittest.TestCase):
         for spec in (MESH, SHARDED_MESH):
             with self.subTest(zero=spec.zero):
                 line = self.profile.parallelism_markers(
-                    spec, self.workload, "stock"
+                    spec, self.data, "stock"
                 )[1]
                 for roster in (
                     STOCK_WRAPPER_FRAGMENTS, STOCK_OVERLAP_FRAGMENTS
@@ -1124,10 +1106,10 @@ STOCK_MESH_CASES = (
 )
 
 
-def _geometry(workload, spec):
+def _geometry(data, spec):
     from benchmarks.e2e.megatron_stock.flags import microbatch_geometry
 
-    return microbatch_geometry(workload, spec)
+    return microbatch_geometry(data, spec)
 
 
 def _driver_data_parallel_line(
@@ -1210,8 +1192,8 @@ class StockMarkerContractTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.profile = MEGATRON_STOCK_PROFILE
-        self.workload = replace(
-            scenario_by_name(SCENARIO_NAME).workload, local_batch_size=32
+        self.data = replace(
+            scenario_by_name(SCENARIO_NAME).data, local_batch_size=32
         )
 
     def test_every_fragment_belongs_to_a_marker_this_profile_builds(
@@ -1222,7 +1204,7 @@ class StockMarkerContractTests(unittest.TestCase):
             self.profile.completion_marker,
             *self.profile.precision_markers("stock"),
             *self.profile.parallelism_markers(
-                MESH, self.workload, "stock"
+                MESH, self.data, "stock"
             ),
             *self.profile.p2p_markers(MESH, "on"),
             *self.profile.nan_guard_markers("on"),
@@ -1274,16 +1256,16 @@ class StockMarkerContractTests(unittest.TestCase):
         profile = self.profile
         for spec, batch in STOCK_MESH_CASES:
             with self.subTest(spec=spec, batch=batch):
-                workload = replace(
-                    scenario_by_name(SCENARIO_NAME).workload,
+                data = replace(
+                    scenario_by_name(SCENARIO_NAME).data,
                     local_batch_size=batch,
                 )
-                _, microbatches, _ = _geometry(workload, spec)
+                _, microbatches, _ = _geometry(data, spec)
                 printed = markers.parallelism_lines(
                     _StockArgs(spec), microbatches=microbatches
                 )
                 expected = profile.parallelism_markers(
-                    spec, workload, "stock"
+                    spec, data, "stock"
                 )
                 self.assertEqual(printed[0], expected[0])
 
@@ -1316,15 +1298,15 @@ class StockMarkerContractTests(unittest.TestCase):
             if spec.dp == 1:
                 continue
             with self.subTest(spec=spec, batch=batch):
-                workload = replace(
-                    scenario_by_name(SCENARIO_NAME).workload,
+                data = replace(
+                    scenario_by_name(SCENARIO_NAME).data,
                     local_batch_size=batch,
                 )
                 printed = _driver_data_parallel_line(
                     spec.zero, dp=spec.dp, ep=spec.ep
                 )
                 markers = self.profile.parallelism_markers(
-                    spec, workload, "stock"
+                    spec, data, "stock"
                 )
                 self.assertEqual(printed, markers[1])
 

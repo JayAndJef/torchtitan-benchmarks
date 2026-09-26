@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files, trace_files_by_rank
 from benchmarks.e2e.registry import scenario_by_name
-from benchmarks.e2e.validation import validate_arm
+from tests.engine_helpers import run_spec, validate
 from benchmarks.traces.extraction import (
     busy_union,
     per_rank_pooled_metrics,
@@ -519,7 +519,6 @@ class ValidationRulesGotStricterTests(unittest.TestCase):
         )
         scenario = scenario_by_name("engines")
         self.arm = next(arm for arm in scenario.arms if arm.name == "titan_compiled")
-        self.workload = scenario.workload
 
     def _window(self, rank: int, iteration: int, invocations: int = 80) -> None:
         write_trace(
@@ -531,12 +530,7 @@ class ValidationRulesGotStricterTests(unittest.TestCase):
         )
 
     def _validate(self) -> None:
-        validate_arm(
-            self.arm,
-            self.arm_dir,
-            self.log_path,
-            self.workload,
-        )
+        validate(run_spec(), self.arm, self.arm_dir, self.log_path)
 
     def test_rule_five_fires_on_the_rank_that_is_short(self) -> None:
         for iteration in (20, 40):

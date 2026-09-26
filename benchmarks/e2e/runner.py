@@ -23,11 +23,15 @@ from benchmarks.artifacts.run_state import (
     update_run_state,
 )
 from benchmarks.e2e.axes import RunAxes, RunRequest
-from benchmarks.e2e.engines import command_for_arm
-from benchmarks.e2e.passthrough import reach_refusal
+from benchmarks.e2e.engines.registry import engine_for, engine_named
+from benchmarks.e2e.engines.api import Arm, DataSpec, RunSpec
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
+from benchmarks.e2e.megatron_stock.flags import (
+    MEGATRON_NAN_GUARD_MODES,
+    MEGATRON_P2P_SYNC_MODES,
+    MEGATRON_PRECISION_MODES,
+)
 from benchmarks.e2e.parallelism import (
-    MEGATRON_ENGINES,
-    PP_SCHEDULES,
     TRIVIAL_SPEC,
     zero_warnings,
     validate_parallelism,
@@ -35,19 +39,14 @@ from benchmarks.e2e.parallelism import (
 from benchmarks.e2e.registry import (
     AC_MODES,
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
-    DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
     DEFAULT_PROFILE,
     DEFAULT_WARMUP_STEPS,
-    MEGATRON_NAN_GUARD_MODES,
-    MEGATRON_P2P_SYNC_MODES,
-    MEGATRON_PRECISION_MODES,
     SCENARIOS,
+    SEED,
     scenario_by_name,
 )
-from benchmarks.e2e.schema import Arm, Scenario, Workload
+from benchmarks.e2e.schema import Scenario
 from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
@@ -63,6 +62,10 @@ from benchmarks.models.piper_qwen3.shape import (
     MODEL_SIZE_CHOICES,
     PIPER_SHAPES,
 )
+
+
+MEGATRON_DEFAULTS = MegatronStockConfig()
+"""The values of the three Megatron options when the operator gives none."""
 
 
 @dataclass(frozen=True)
@@ -98,7 +101,7 @@ def select_arms(scenario: Scenario, names: tuple[str, ...]) -> tuple[Arm, ...]:
     return tuple(available[name] for name in names)
 
 
-def workload_with_overrides(
+def data_with_overrides(
     scenario: Scenario,
     *,
     seq_len: int | None = None,
@@ -107,38 +110,38 @@ def workload_with_overrides(
     environment: Mapping[str, str] | None = None,
     profile: bool,
     warmup_steps: int | None,
-) -> Workload:
-    """Apply portable size overrides without changing scenario arms.
+) -> DataSpec:
+    """The scenario data with the size overrides; refuse a run below its step floor.
 
-    ``profile`` decides which step floor applies: a profiled run needs
-    ``profile_freq * min_trace_windows`` steps, and an unprofiled one needs
-    more than ``warmup_steps``.
+    A profiled run needs whole profiler windows, and an unprofiled run
+    needs more steps than ``warmup_steps``.
     """
     environment = environment or os.environ
-    workload = scenario.workload
+    data = scenario.data
+    window = scenario.window
     resolved_seq_len = seq_len if seq_len is not None else environment.get("SEQ")
     resolved_steps = steps if steps is not None else environment.get("STEPS")
     resolved_batch = batch if batch is not None else environment.get("BATCH")
     if resolved_seq_len is not None:
-        workload = replace(workload, seq_len=int(resolved_seq_len))
+        data = replace(data, seq_len=int(resolved_seq_len))
     if resolved_steps is not None:
-        workload = replace(workload, steps=int(resolved_steps))
+        data = replace(data, steps=int(resolved_steps))
     if resolved_batch is not None:
-        workload = replace(workload, local_batch_size=int(resolved_batch))
+        data = replace(data, local_batch_size=int(resolved_batch))
     if profile:
-        minimum_steps = workload.profile_freq * workload.min_trace_windows
-        if workload.steps < minimum_steps:
+        minimum_steps = window.freq * window.min_windows
+        if data.steps < minimum_steps:
             raise ValueError(
-                f"steps ({workload.steps}) must be at least {minimum_steps} to collect "
-                f"{workload.min_trace_windows} profiler windows"
+                f"steps ({data.steps}) must be at least {minimum_steps} to collect "
+                f"{window.min_windows} profiler windows"
             )
-    elif warmup_steps is not None and workload.steps <= warmup_steps:
+    elif warmup_steps is not None and data.steps <= warmup_steps:
         raise ValueError(
-            f"steps ({workload.steps}) must be more than the "
+            f"steps ({data.steps}) must be more than the "
             f"{warmup_steps} warmup step(s); a run that measures no step "
             "publishes no throughput"
         )
-    return workload
+    return data
 
 
 @dataclass(frozen=True)
@@ -152,10 +155,10 @@ class ResolvedRun:
 
     Attributes:
         paths: The resolved repository, cache and compiler-env locations.
-        scenario: The scenario, with the size overrides already applied to
-            its workload.
+        scenario: The scenario as the registry declares it.
+        run: The facts every arm shares.
         arms: The arms this run starts, in the order the operator asked
-            for.
+            for, with the run options in their configs.
         hardware: The provenance label of the output directory.
         metadata: The provenance block, including the CPU pinning.
         out_dir: Where the run writes.
@@ -168,6 +171,7 @@ class ResolvedRun:
 
     paths: RuntimePaths
     scenario: Scenario
+    run: RunSpec
     arms: tuple[Arm, ...]
     hardware: str
     metadata: dict[str, str]
@@ -223,7 +227,9 @@ def _resolve_run(
 
     scenario = scenario_by_name(str(scenario_name))
     if existing_manifest is not None:
-        workload = _resume_workload(existing_manifest, request, environment)
+        data, window, seed = _resume_workload(
+            existing_manifest, scenario, request, environment
+        )
         torchtitan_args = (
             tuple(existing_manifest["extra_torchtitan_args"])
             if request.torchtitan_args is None
@@ -285,7 +291,7 @@ def _resolve_run(
                 else requested.warmup_steps
             )
         )
-        workload = workload_with_overrides(
+        data = data_with_overrides(
             scenario,
             seq_len=request.seq_len,
             steps=request.steps,
@@ -298,14 +304,16 @@ def _resolve_run(
         megatron_args = request.megatron_args or ()
         ac_mode = requested.ac_mode or DEFAULT_AC_MODE
         model_size = requested.model_size or DEFAULT_MODEL_SIZE
+        window = scenario.window
+        seed = SEED
         megatron_p2p_sync = (
-            requested.megatron_p2p_sync or DEFAULT_MEGATRON_P2P_SYNC
+            requested.megatron_p2p_sync or MEGATRON_DEFAULTS.p2p_sync
         )
         megatron_nan_guard = (
-            requested.megatron_nan_guard or DEFAULT_MEGATRON_NAN_GUARD
+            requested.megatron_nan_guard or MEGATRON_DEFAULTS.nan_guard
         )
         megatron_precision = (
-            requested.megatron_precision or DEFAULT_MEGATRON_PRECISION
+            requested.megatron_precision or MEGATRON_DEFAULTS.precision
         )
     if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
         raise ValueError(
@@ -334,13 +342,20 @@ def _resolve_run(
             f"Available: {', '.join(MODEL_SIZE_CHOICES)}"
         )
     shape = PIPER_SHAPES[model_size]
-    scenario = replace(scenario, workload=workload)
     arms = select_arms(scenario, request.arm_names)
     if ac_mode not in scenario.supported_ac_modes:
         raise ValueError(
             f"scenario {scenario.name!r} does not support ac mode {ac_mode!r} "
             f"(supported: {', '.join(scenario.supported_ac_modes)})"
         )
+    arms = _with_run_options(
+        arms,
+        torchtitan_args=torchtitan_args,
+        megatron_args=megatron_args,
+        megatron_p2p_sync=megatron_p2p_sync,
+        megatron_nan_guard=megatron_nan_guard,
+        megatron_precision=megatron_precision,
+    )
 
     # Checked before any host probe, against the arms this run really starts.
     parallelism = requested.parallelism or TRIVIAL_SPEC
@@ -348,30 +363,28 @@ def _resolve_run(
     validate_parallelism(
         parallelism,
         shape=shape,
-        workload=workload,
-        engines={arm.engine for arm in arms},
+        local_batch_size=data.local_batch_size,
         device_count=len(devices),
     )
-    # Three schedules raise on a compiled stage module, and compile is an
-    # arm property, so the spec alone cannot answer this.
-    schedule = (
-        PP_SCHEDULES.get(parallelism.pp_schedule)
-        if parallelism.pp_schedule is not None
-        else None
+    run = RunSpec(
+        shape=shape,
+        data=data,
+        parallelism=parallelism,
+        ac_mode=ac_mode,
+        profile=profile,
+        window=window,
+        warmup_steps=warmup_steps,
+        seed=seed,
     )
-    if schedule is not None and schedule.requires_uncompiled:
-        compiled_arms = [arm.name for arm in arms if arm.compile == "torch"]
-        if compiled_arms:
-            raise ValueError(
-                f"pipeline schedule {schedule.name!r} raises on a compiled "
-                f"stage module, and {', '.join(compiled_arms)} asks for "
-                "torch.compile; select the eager arms alone, or choose "
-                "another --pp-schedule"
-            )
-    # Two legal meshes a reader can misread. Printed before the host probe,
-    # so the operator reads them before the run claims a GPU.
+    refusals = [
+        refusal for arm in arms for refusal in engine_for(arm).check(run, arm)
+    ]
+    if refusals:
+        raise ValueError("; ".join(refusals))
+    # Printed before the host probe, so the operator reads them before the
+    # run claims a GPU.
     for warning in zero_warnings(
-        parallelism, engines=[arm.engine for arm in arms]
+        parallelism, engines=[engine_for(arm).name for arm in arms]
     ):
         _emit(event_handler, "summary", f"WARNING: {warning}")
 
@@ -384,13 +397,13 @@ def _resolve_run(
                 "pp 1, where there is no pipeline message to synchronize; "
                 "the manifest would record a treatment the run did not have"
             )
-        if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
+        if not holds_megatron(arms):
             raise ValueError(
                 f"--megatron-p2p-sync {megatron_p2p_sync!r} reaches no arm "
                 f"of this run: {', '.join(arm.name for arm in arms)} run on "
                 "TorchTitan, which sends no pipeline message through "
                 "Megatron; select a megatron arm, or leave the option at "
-                f"{DEFAULT_MEGATRON_P2P_SYNC!r}"
+                f"{MEGATRON_DEFAULTS.p2p_sync!r}"
             )
 
     # Through the same helper the skip pre-pass reads, so both state one reason.
@@ -437,19 +450,7 @@ def _resolve_run(
     )
     commands = {
         arm.name: list(pinning.prefix)
-        + command_for_arm(
-            scenario.workload,
-            arm,
-            out_dir / arm.name,
-            megatron_args if arm.engine in MEGATRON_ENGINES else torchtitan_args,
-            axes.ac_mode,
-            model_size=axes.model_size,
-            parallelism=axes.parallelism,
-            megatron_p2p_sync=axes.megatron_p2p_sync,
-            megatron_nan_guard=axes.megatron_nan_guard,
-            megatron_precision=axes.megatron_precision,
-            profile=axes.profile,
-        )
+        + engine_for(arm).command(run, arm, out_dir / arm.name)
         for arm in arms
     }
 
@@ -457,6 +458,7 @@ def _resolve_run(
         mismatches = _resume_mismatches(
             existing_manifest,
             scenario,
+            run,
             arms,
             hardware,
             metadata,
@@ -472,6 +474,7 @@ def _resolve_run(
     return ResolvedRun(
         paths=paths,
         scenario=scenario,
+        run=run,
         arms=arms,
         hardware=hardware,
         metadata=metadata,
@@ -484,27 +487,82 @@ def _resolve_run(
     )
 
 
+def _with_run_options(
+    arms: tuple[Arm, ...],
+    *,
+    torchtitan_args: tuple[str, ...],
+    megatron_args: tuple[str, ...],
+    megatron_p2p_sync: str,
+    megatron_nan_guard: str,
+    megatron_precision: str,
+) -> tuple[Arm, ...]:
+    """The arms, with each passthrough list and the Megatron values in the config they reach."""
+    torchtitan = engine_named("torchtitan")
+    megatron = engine_named("megatron_stock")
+    result = []
+    for arm in arms:
+        engine = engine_for(arm)
+        if engine is torchtitan:
+            config = replace(arm.config, extra_flags=torchtitan_args)
+        elif engine is megatron:
+            config = replace(
+                arm.config,
+                extra_flags=megatron_args,
+                p2p_sync=megatron_p2p_sync,
+                nan_guard=megatron_nan_guard,
+                precision=megatron_precision,
+            )
+        else:
+            raise ValueError(
+                f"{arm.name}: the runner maps no run option onto engine "
+                f"{engine.name!r}; add the engine to _with_run_options"
+            )
+        result.append(replace(arm, config=config))
+    return tuple(result)
+
+
+def holds_megatron(arms: Iterable[Arm]) -> bool:
+    """Whether one of ``arms`` runs on the stock Megatron engine."""
+    megatron = engine_named("megatron_stock")
+    return any(engine_for(arm) is megatron for arm in arms)
+
+
+def reach_refusal(
+    arms: Iterable[Arm],
+    torchtitan_args: tuple[str, ...],
+    megatron_args: tuple[str, ...],
+) -> str | None:
+    """Why a passthrough list reaches no arm of ``arms``, or ``None``."""
+    arms = tuple(arms)
+    names = ", ".join(arm.name for arm in arms)
+    torchtitan = engine_named("torchtitan")
+    if torchtitan_args and not any(engine_for(arm) is torchtitan for arm in arms):
+        return (
+            f"--torchtitan-arg reaches no arm of this run: {names} run on "
+            "Megatron; select a TorchTitan arm, or omit the option"
+        )
+    if megatron_args and not holds_megatron(arms):
+        return (
+            f"--megatron-arg reaches no arm of this run: {names} run on "
+            "TorchTitan; select the stock megatron arm, or omit the option"
+        )
+    return None
+
+
 def megatron_precision_refusal(
     arms: Iterable[Arm], megatron_precision: str, zero: int
 ) -> str | None:
-    """Why ``--megatron-precision lean`` cannot reach ``arms``, or ``None``.
-
-    Two refusals, each naming its repair. A run with no stock megatron arm
-    gives the value nothing to reach, and ``lean`` under ``zero 0`` asks
-    Megatron for a precision-aware optimizer without the distributed
-    optimizer it asserts. Refused here, the operator reads the repair
-    parent-side rather than minutes into a subprocess.
-    """
-    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
+    """Why ``--megatron-precision lean`` cannot reach ``arms``, or ``None``."""
+    if megatron_precision == MEGATRON_DEFAULTS.precision:
         return None
     arms = tuple(arms)
-    if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
+    if not holds_megatron(arms):
         return (
             f"--megatron-precision {megatron_precision!r} reaches no arm of "
             f"this run: {', '.join(arm.name for arm in arms)} run on "
             "TorchTitan, which holds its own bf16 optimizer states; select "
             "the stock megatron arm, or leave the option at "
-            f"{DEFAULT_MEGATRON_PRECISION!r}"
+            f"{MEGATRON_DEFAULTS.precision!r}"
         )
     if zero == 0:
         return (
@@ -519,29 +577,16 @@ def megatron_precision_refusal(
 def megatron_nan_guard_refusal(
     arms: Iterable[Arm], megatron_nan_guard: str
 ) -> str | None:
-    """Why ``--megatron-nan-guard on`` cannot reach ``arms``, or ``None``.
-
-    One refusal, naming its repair. A run with no stock megatron arm
-    gives the value nothing to reach, which is the ``--megatron-p2p-sync``
-    refusal with a smaller engine set. ``_resolve_run`` raises the
-    string, and the skip pre-pass prints it and skips the
-    scenario.
-
-    The gate reads the literal ``on`` and never the axis default. ``on``
-    asks stock Megatron to keep its own check, so a run with no stock
-    megatron arm has nothing to ask. ``off`` is refused nowhere: it is the
-    default here, and a TorchTitan arm's argv is untouched under either
-    value.
-    """
+    """Why ``--megatron-nan-guard on`` cannot reach ``arms``, or ``None``."""
     if megatron_nan_guard != "on":
         return None
     arms = tuple(arms)
-    if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
+    if not holds_megatron(arms):
         return (
             f"--megatron-nan-guard {megatron_nan_guard!r} reaches no arm of "
             f"this run: {', '.join(arm.name for arm in arms)} run on "
             "TorchTitan, which has no Megatron NaN guard; select the stock "
-            f"megatron arm, or leave the option at {DEFAULT_MEGATRON_NAN_GUARD!r}"
+            f"megatron arm, or leave the option at {MEGATRON_DEFAULTS.nan_guard!r}"
         )
     return None
 
@@ -571,6 +616,7 @@ def execute_run(
         write_manifest(
             out_dir,
             resolved.scenario,
+            resolved.run,
             arms,
             resolved.commands,
             resolved.hardware,
@@ -640,18 +686,7 @@ def execute_run(
         if resolved.resumed:
             try:
                 validate_arm(
-                    arm,
-                    arm_dir,
-                    log_path,
-                    resolved.scenario.workload,
-                    ac_mode=axes.ac_mode,
-                    model_size=axes.model_size,
-                    parallelism=axes.parallelism,
-                    megatron_p2p_sync=axes.megatron_p2p_sync,
-                    megatron_nan_guard=axes.megatron_nan_guard,
-                    megatron_precision=axes.megatron_precision,
-                    profile=axes.profile,
-                    megatron_args=resolved.megatron_args,
+                    resolved.run, arm, engine_for(arm), arm_dir, log_path
                 )
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
@@ -680,7 +715,7 @@ def execute_run(
         update_run_state(out_dir, state, arm_name=arm.name, status="running")
         try:
             arm_environment = base_environment
-            if arm.requires_gcc_toolset:
+            if getattr(arm.config, "requires_gcc_toolset", False):
                 arm_environment = add_compiler_environment(
                     base_environment, resolved.paths.compiler_env
                 )
@@ -706,18 +741,7 @@ def execute_run(
                     f"see {log_path}"
                 )
             validate_arm(
-                arm,
-                arm_dir,
-                log_path,
-                resolved.scenario.workload,
-                ac_mode=axes.ac_mode,
-                model_size=axes.model_size,
-                parallelism=axes.parallelism,
-                megatron_p2p_sync=axes.megatron_p2p_sync,
-                megatron_nan_guard=axes.megatron_nan_guard,
-                megatron_precision=axes.megatron_precision,
-                profile=axes.profile,
-                megatron_args=resolved.megatron_args,
+                resolved.run, arm, engine_for(arm), arm_dir, log_path
             )
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(

@@ -19,17 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts.layout import _default_output_dir
 from benchmarks.cli.e2e import run_command
 from benchmarks.cli.main import cli
-from benchmarks.e2e.parallelism import (
-    MEGATRON_ENGINES,
-)
 from benchmarks.e2e.registry import (
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
     ENGINES,
     SCENARIOS,
 )
-from benchmarks.e2e.runner import execute_run
+from benchmarks.e2e.runner import MEGATRON_DEFAULTS, execute_run, holds_megatron
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import HUGE
 
@@ -752,12 +747,12 @@ class CliTests(unittest.TestCase):
         titan-only entry. The sweep skips it with a message instead, as it
         skips a scenario that declines a mode.
         """
-        holds_megatron = [
+        megatron_scenarios = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
+            if holds_megatron(scenario.arms)
         ]
-        self.assertTrue(holds_megatron)
+        self.assertTrue(megatron_scenarios)
         with tempfile.TemporaryDirectory() as temporary:
             completed = SimpleNamespace(out_dir=Path(temporary))
             with mock.patch(
@@ -781,7 +776,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         requests = [call.args[0] for call in execute.call_args_list]
         self.assertEqual(
-            [request.scenario_name for request in requests], holds_megatron
+            [request.scenario_name for request in requests], megatron_scenarios
         )
         self.assertEqual(
             {request.axes.megatron_p2p_sync for request in requests}, {"off"}
@@ -849,7 +844,7 @@ class CliTests(unittest.TestCase):
         holds_stock = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
+            if holds_megatron(scenario.arms)
         ]
         self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:
@@ -948,7 +943,7 @@ class CliTests(unittest.TestCase):
         holds_stock = [
             name
             for name, scenario in SCENARIOS.items()
-            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
+            if holds_megatron(scenario.arms)
         ]
         self.assertEqual(holds_stock, ["engines"])
         with tempfile.TemporaryDirectory() as temporary:

@@ -31,7 +31,9 @@ from benchmarks.e2e.megatron_stock.step_log import (  # noqa: E402
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC  # noqa: E402
 from benchmarks.e2e.axes import RunAxes  # noqa: E402
-from benchmarks.e2e.registry import SCENARIOS  # noqa: E402
+from benchmarks.e2e.engines.api import RunSpec  # noqa: E402
+from benchmarks.e2e.registry import SCENARIOS, SEED  # noqa: E402
+from benchmarks.models.piper_qwen3.shape import PIPER_1B  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     evaluate_run,
     loss_visible_rank,
@@ -92,8 +94,19 @@ class DriverArithmeticTests(unittest.TestCase):
 class ManifestRecordsTheDefinitionTests(unittest.TestCase):
     def _manifest(self) -> dict:
         scenario = SCENARIOS["engines"]
+        run = RunSpec(
+            shape=PIPER_1B,
+            data=scenario.data,
+            parallelism=TRIVIAL_SPEC,
+            ac_mode="none",
+            profile=False,
+            window=scenario.window,
+            warmup_steps=10,
+            seed=SEED,
+        )
         return manifest_data(
             scenario,
+            run,
             [scenario.arms[0]],
             {scenario.arms[0].name: ["python", "-m", "x"]},
             "test-gpu",

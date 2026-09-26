@@ -14,24 +14,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files
 from benchmarks.artifacts.manifests import write_manifest
-from benchmarks.e2e.engines import command_for_arm
 from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
+from benchmarks.e2e.engines.api import Arm, CompileMode
+from benchmarks.e2e.engines.registry import engine_for
+from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
+    C4_REPLAY_DATA,
     ENGINES,
-    C4_REPLAY_WORKLOAD,
+    SEED,
     scenario_by_name,
 )
+from tests.engine_helpers import command, configured, run_spec, validate
 from benchmarks.e2e.results import stable_tps, training_metrics
 from benchmarks.e2e.runner import (
     _resolve_run,
     execute_run,
     select_arms,
 )
-from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from dataclasses import fields, replace
 from benchmarks.models.piper_qwen3.components.lm_head.losses import (
@@ -68,10 +70,12 @@ PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
 OVERRIDE_ARM = Arm(
     name="override_arm",
     description="a synthetic arm that swaps one config node per block",
-    compile="torch",
-    override_imports=(PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
-    overrides_per_block=1,
-    requires_gcc_toolset=True,
+    config=TorchTitanConfig(
+        compile=CompileMode.TORCH,
+        override_imports=(PIPER_OPTIMIZED_SWIGLU_OVERRIDE,),
+        overrides_per_block=1,
+        requires_gcc_toolset=True,
+    ),
 )
 
 # The eight names ``RequestedAxes`` owns. The refusal helpers below take one
@@ -141,16 +145,18 @@ class ScenarioTests(unittest.TestCase):
 
     def test_every_scenario_uses_the_fixed_piper_workload(self) -> None:
         for scenario in SCENARIOS.values():
-            self.assertIs(scenario.workload, C4_REPLAY_WORKLOAD)
-        self.assertEqual(
-            C4_REPLAY_WORKLOAD.module, "benchmarks.models.piper_qwen3"
-        )
-        self.assertEqual(
-            C4_REPLAY_WORKLOAD.config, "qwen3_piper_1b_pretokenized"
-        )
-        self.assertEqual(C4_REPLAY_WORKLOAD.local_batch_size, 4)
-        self.assertEqual(C4_REPLAY_WORKLOAD.seq_len, 4096)
-        self.assertEqual(C4_REPLAY_WORKLOAD.steps, 40)
+            self.assertIs(scenario.data, C4_REPLAY_DATA)
+            for arm in scenario.arms:
+                if engine_for(arm).name == "torchtitan":
+                    self.assertEqual(
+                        arm.config.module, "benchmarks.models.piper_qwen3"
+                    )
+                    self.assertEqual(
+                        arm.config.config, "qwen3_piper_1b_pretokenized"
+                    )
+        self.assertEqual(C4_REPLAY_DATA.local_batch_size, 4)
+        self.assertEqual(C4_REPLAY_DATA.seq_len, 4096)
+        self.assertEqual(C4_REPLAY_DATA.steps, 40)
 
 
 class UncompiledScheduleRefusalTests(unittest.TestCase):
@@ -510,6 +516,7 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
         write_manifest(
             out_dir,
             scenario,
+            run_spec(ac_mode="none", profile=False, parallelism=self.PP2),
             (scenario.arm("megatron_stock"),),
             {"megatron_stock": ["cmd"]},
             "test-gpu",
@@ -600,8 +607,9 @@ class MegatronP2pSyncResolutionTests(unittest.TestCase):
                 environment={"PATH": os.environ["PATH"]},
             )
         self.assertEqual(validate.call_count, 1)
-        self.assertEqual(validate.call_args.kwargs["megatron_p2p_sync"], "off")
-        self.assertEqual(validate.call_args.kwargs["parallelism"], self.PP2)
+        run, arm = validate.call_args.args[:2]
+        self.assertEqual(arm.config.p2p_sync, "off")
+        self.assertEqual(run.parallelism, self.PP2)
 
     def test_the_banner_names_the_value(self) -> None:
         """The banner names every comparability boundary the manifest
@@ -834,14 +842,16 @@ class MegatronNanGuardResolutionTests(unittest.TestCase):
                 environment={"PATH": os.environ["PATH"]},
             )
         self.assertEqual(validate.call_count, 1)
-        self.assertEqual(validate.call_args.kwargs["megatron_nan_guard"], "off")
-        self.assertEqual(validate.call_args.kwargs["megatron_p2p_sync"], "off")
+        arm = validate.call_args.args[1]
+        self.assertEqual(arm.config.nan_guard, "off")
+        self.assertEqual(arm.config.p2p_sync, "off")
 
     def _write_manifest(self, out_dir: Path, megatron_nan_guard: str) -> None:
         scenario = scenario_by_name("engines")
         write_manifest(
             out_dir,
             scenario,
+            run_spec(ac_mode="none", profile=False, parallelism=TRIVIAL_SPEC),
             (scenario.arm("megatron_stock"),),
             {"megatron_stock": ["cmd"]},
             "test-gpu",
@@ -1034,6 +1044,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
         write_manifest(
             out_dir,
             scenario,
+            run_spec(ac_mode="none", profile=False, parallelism=parallelism),
             (scenario.arm("megatron_stock"),),
             {"megatron_stock": ["cmd"]},
             "test-gpu",
@@ -1334,11 +1345,8 @@ class ParallelizeTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_the_workload_config_reaches_a_titan_arm(self) -> None:
-        stock = command_for_arm(
-            ENGINES.workload,
-            ENGINES.arm("titan_compiled"),
-            Path("/out/titan_compiled"),
-            [],
+        stock = command(
+            run_spec(), ENGINES.arm("titan_compiled"), "/out/titan_compiled"
         )
         self.assertEqual(
             stock[stock.index("--config") + 1],
@@ -1351,52 +1359,43 @@ class CommandTests(unittest.TestCase):
         # argument to the config function via the fork's --config-arg.
         for size in PIPER_SHAPES:
             with self.subTest(size=size):
-                command = command_for_arm(
-                    ENGINES.workload,
+                argv = command(
+                    run_spec(size),
                     ENGINES.arm("titan_compiled"),
-                    Path("/out/titan_stock"),
-                    [],
-                    model_size=size,
+                    "/out/titan_stock",
                 )
                 self.assertEqual(
-                    command[command.index("--config") + 1],
+                    argv[argv.index("--config") + 1],
                     "qwen3_piper_1b_pretokenized",
                 )
                 self.assertEqual(
-                    command[command.index("--config-arg") + 1], f"size={size}"
+                    argv[argv.index("--config-arg") + 1], f"size={size}"
                 )
-                # The retired scheme spelled the size into the config
-                # name. Checked as the mangled name itself rather than as
-                # "no token ends in the size": the config family is called
-                # qwen3_piper_1b, so at size "1b" the plain name ends in it.
-                self.assertNotIn(f"qwen3_piper_1b_pretokenized_{size}", command)
+                # The config family is qwen3_piper_1b, so check the whole name.
+                self.assertNotIn(f"qwen3_piper_1b_pretokenized_{size}", argv)
 
     def test_command_adds_only_the_arm_override_and_dump_folder(self) -> None:
-        command = command_for_arm(
-            ENGINES.workload,
-            OVERRIDE_ARM,
-            Path("/out/fused"),
-            ["--training.gc-freq", "7"],
+        argv = command(
+            run_spec(),
+            configured(OVERRIDE_ARM, extra_flags=("--training.gc-freq", "7")),
+            "/out/fused",
         )
-        override_index = command.index("--override.imports")
+        override_index = argv.index("--override.imports")
         self.assertEqual(
-            command[override_index + 1],
+            argv[override_index + 1],
             PIPER_OPTIMIZED_SWIGLU_OVERRIDE,
         )
-        self.assertNotIn("torchtitan.overrides.fused_swiglu.fused_swiglu", command)
-        self.assertEqual(command[-2:], ["--dump-folder", "/out/fused"])
-        self.assertIn("--training.gc-freq", command)
+        self.assertNotIn("torchtitan.overrides.fused_swiglu.fused_swiglu", argv)
+        self.assertEqual(argv[-2:], ["--dump-folder", "/out/fused"])
+        self.assertIn("--training.gc-freq", argv)
 
     def test_a_stock_command_has_no_override(self) -> None:
-        command = command_for_arm(
-            ENGINES.workload,
-            ENGINES.arm("titan_compiled"),
-            Path("/out/titan_stock"),
-            [],
+        argv = command(
+            run_spec(), ENGINES.arm("titan_compiled"), "/out/titan_stock"
         )
-        self.assertNotIn("--override.imports", command)
+        self.assertNotIn("--override.imports", argv)
         self.assertEqual(
-            command[:5],
+            argv[:5],
             [
                 "./run_train.sh",
                 "--module",
@@ -1405,8 +1404,8 @@ class CommandTests(unittest.TestCase):
                 "qwen3_piper_1b_pretokenized",
             ],
         )
-        self.assertIn("--compile.enable", command)
-        self.assertIn("--profiler.enable_profiling", command)
+        self.assertIn("--compile.enable", argv)
+        self.assertIn("--profiler.enable_profiling", argv)
 
     def test_an_eager_arm_drops_only_the_compile_flag(self) -> None:
         # CompileConfig.enable is False in the fork, so an eager arm omits
@@ -1414,65 +1413,52 @@ class CommandTests(unittest.TestCase):
         # command the compiled arm builds, token for token: this is the
         # assertion that keeps the arm property from moving an existing
         # default.
-        compiled = command_for_arm(
-            ENGINES.workload,
-            ENGINES.arm("titan_compiled"),
-            Path("/out/baseline"),
-            [],
+        compiled = command(
+            run_spec(), ENGINES.arm("titan_compiled"), "/out/baseline"
         )
-        eager = command_for_arm(
-            ENGINES.workload,
-            ENGINES.arm("titan_eager"),
-            Path("/out/baseline"),
-            [],
-        )
+        eager = command(run_spec(), ENGINES.arm("titan_eager"), "/out/baseline")
         self.assertNotIn("--compile.enable", eager)
         self.assertEqual(
             eager, [token for token in compiled if token != "--compile.enable"]
         )
 
-    def test_every_arm_declares_one_of_the_two_compile_values(self) -> None:
+    def test_every_titan_arm_declares_one_of_the_two_compile_values(self) -> None:
         """The field is required, and only two values exist."""
         for name, scenario in SCENARIOS.items():
             for arm in scenario.arms:
+                if engine_for(arm).name != "torchtitan":
+                    continue
                 with self.subTest(scenario=name, arm=arm.name):
-                    self.assertIn(arm.compile, ("torch", "none"))
+                    self.assertIsInstance(arm.config.compile, CompileMode)
 
     def test_only_the_compiled_arm_asks_for_torch_compile(self) -> None:
         scenario = scenario_by_name("engines")
-        self.assertEqual(scenario.arm("titan_compiled").compile, "torch")
-        self.assertEqual(scenario.arm("titan_eager").compile, "none")
-        self.assertEqual(scenario.arm("megatron_stock").compile, "none")
+        self.assertIs(scenario.arm("titan_compiled").config.compile, CompileMode.TORCH)
+        self.assertIs(scenario.arm("titan_eager").config.compile, CompileMode.NONE)
+        self.assertFalse(hasattr(scenario.arm("megatron_stock").config, "compile"))
 
     def test_ac_none_adds_the_subcommand_token_last(self) -> None:
-        command = command_for_arm(
-            ENGINES.workload,
+        argv = command(
+            run_spec(ac_mode="none"),
             ENGINES.arm("titan_compiled"),
-            Path("/out/baseline"),
-            [],
-            "none",
+            "/out/baseline",
         )
         # tyro attributes flags after a subcommand token to that subcommand,
         # so the token must trail everything, including --dump-folder.
-        self.assertEqual(command[-1], "activation-checkpoint:none")
-        self.assertEqual(command[-3:-1], ["--dump-folder", "/out/baseline"])
+        self.assertEqual(argv[-1], "activation-checkpoint:none")
+        self.assertEqual(argv[-3:-1], ["--dump-folder", "/out/baseline"])
 
     def test_ac_sac_leaves_the_command_untouched(self) -> None:
-        command = command_for_arm(
-            ENGINES.workload,
-            ENGINES.arm("titan_compiled"),
-            Path("/out/baseline"),
-            [],
-        )
-        self.assertNotIn("activation-checkpoint:none", command)
+        argv = command(run_spec(), ENGINES.arm("titan_compiled"), "/out/baseline")
+        self.assertNotIn("activation-checkpoint:none", argv)
 
     def test_each_arm_gets_its_own_dump_folder(self) -> None:
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
-                command = command_for_arm(
-                    scenario.workload, arm, Path("/out") / arm.name, [], "none"
+                argv = command(
+                    run_spec(ac_mode="none"), arm, Path("/out") / arm.name
                 )
-                self.assertIn(f"/out/{arm.name}", command)
+                self.assertIn(f"/out/{arm.name}", argv)
 
 
 class EnginesScenarioTests(unittest.TestCase):
@@ -1483,16 +1469,16 @@ class EnginesScenarioTests(unittest.TestCase):
             ["titan_compiled", "titan_eager", "megatron_stock"],
         )
         stock = scenario.arm("megatron_stock")
-        self.assertEqual(stock.engine, "megatron_stock")
+        self.assertEqual(engine_for(stock).name, "megatron_stock")
         self.assertIn("NOT PLAIN BF16", stock.description)
         self.assertEqual(
-            stock.trace_kernel_markers,
+            stock.config.trace_kernel_markers,
             ("cudnn_generated_fort_native_sdpa", "_mul_silu_split"),
         )
         self.assertEqual(scenario.supported_ac_modes, ("none",))
-        self.assertEqual(scenario.workload.seed, 42)
+        self.assertEqual(SEED, 42)
         for arm in scenario.arms[:2]:
-            self.assertEqual(arm.engine, "torchtitan")
+            self.assertEqual(engine_for(arm).name, "torchtitan")
 
     def test_every_titan_arm_reads_the_replay_stream(self) -> None:
         import benchmarks.models.piper_qwen3.config_registry as registry
@@ -1500,9 +1486,9 @@ class EnginesScenarioTests(unittest.TestCase):
 
         scenario = scenario_by_name("engines")
         config_names = {
-            arm.config or scenario.workload.config
+            arm.config.config
             for arm in scenario.arms
-            if arm.engine == "torchtitan"
+            if engine_for(arm).name == "torchtitan"
         }
         for name in sorted(config_names):
             config = getattr(registry, name)()
@@ -1514,14 +1500,8 @@ class EnginesScenarioTests(unittest.TestCase):
     def test_every_arm_command_builds_at_ac_none(self) -> None:
         scenario = scenario_by_name("engines")
         for arm in scenario.arms:
-            command = command_for_arm(
-                scenario.workload,
-                arm,
-                Path("/out") / arm.name,
-                [],
-                "none",
-            )
-            self.assertTrue(command, arm.name)
+            argv = command(run_spec(ac_mode="none"), arm, Path("/out") / arm.name)
+            self.assertTrue(argv, arm.name)
 
     def test_run_refuses_sac_for_the_megatron_scenario(self) -> None:
         request = RunRequest(
@@ -1601,7 +1581,7 @@ class CompilerEnvironmentTests(unittest.TestCase):
             script = Path(temporary) / "enable"
             script.write_text("export BENCH_TEST_TOOLSET=13\n")
             environment = self._run(
-                replace(OVERRIDE_ARM, requires_gcc_toolset=False), script
+                configured(OVERRIDE_ARM, requires_gcc_toolset=False), script
             )
         self.assertNotIn("BENCH_TEST_TOOLSET", environment)
 
@@ -1676,9 +1656,12 @@ class ManifestTests(unittest.TestCase):
         extra_args = ["--training.gc-freq", "7"]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
+            run = run_spec(profile=False)
             commands = {
-                arm.name: command_for_arm(
-                    scenario.workload, arm, out_dir / arm.name, extra_args
+                arm.name: command(
+                    run,
+                    configured(arm, extra_flags=tuple(extra_args)),
+                    out_dir / arm.name,
                 )
                 for arm in selected
             }
@@ -1686,6 +1669,7 @@ class ManifestTests(unittest.TestCase):
             write_manifest(
                 out_dir,
                 scenario,
+                run,
                 selected,
                 commands,
                 "rtx-a6000",
@@ -1844,18 +1828,18 @@ class ValidationTests(unittest.TestCase):
             completed = _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             log.write_text(completed + applied * 16)
             self.assertEqual(len(trace_files(root)), 2)
-            validate_arm(arm, root, log, ENGINES.workload)
+            validate(run_spec(), arm, root, log)
 
             log.write_text(completed + applied * 15)
             with self.assertRaisesRegex(RuntimeError, "expected 16 override"):
-                validate_arm(arm, root, log, ENGINES.workload)
+                validate(run_spec(), arm, root, log)
 
             log.write_text(
                 completed
                 + "[Override] torchtitan.overrides.other.thing: fqn ...\n" * 16
             )
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(arm, root, log, ENGINES.workload)
+                validate(run_spec(), arm, root, log)
 
     def _rope_baseline_fixture(self, root: Path) -> Path:
         for iteration in ("iteration_20", "iteration_40"):
@@ -1874,11 +1858,11 @@ class ValidationTests(unittest.TestCase):
             log.write_text(
                 _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
-            validate_arm(arm, root, log, ENGINES.workload)
+            validate(run_spec(), arm, root, log)
 
             log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "did not apply it"):
-                validate_arm(arm, root, log, ENGINES.workload)
+                validate(run_spec(), arm, root, log)
 
     def test_an_eager_arm_refuses_the_compile_line(self) -> None:
         """Rule 8 inverts on an eager arm: a run that silently compiled
@@ -1889,13 +1873,13 @@ class ValidationTests(unittest.TestCase):
             log = self._rope_baseline_fixture(root)
 
             log.write_text(_SAC_LINE + _SIZE_LINE + "Training completed\n")
-            validate_arm(arm, root, log, ENGINES.workload)
+            validate(run_spec(), arm, root, log)
 
             log.write_text(
                 _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "compiled the model"):
-                validate_arm(arm, root, log, ENGINES.workload)
+                validate(run_spec(), arm, root, log)
 
     def test_ac_mode_must_match_the_applied_treatment(self) -> None:
         arm = ENGINES.arm("titan_compiled")
@@ -1906,22 +1890,18 @@ class ValidationTests(unittest.TestCase):
             # sac requested, SelectiveAC absent: the run measured no-AC.
             log.write_text(_compiled_line("default") + _SIZE_LINE + "Training completed\n")
             with self.assertRaisesRegex(RuntimeError, "ac mode 'sac'"):
-                validate_arm(arm, root, log, ENGINES.workload)
+                validate(run_spec(), arm, root, log)
 
             # none requested, SelectiveAC applied: the run measured SAC.
             log.write_text(
                 _compiled_line("default") + _SAC_LINE + _SIZE_LINE + "Training completed\n"
             )
             with self.assertRaisesRegex(RuntimeError, "ac mode 'none'"):
-                validate_arm(
-                    arm, root, log, ENGINES.workload, ac_mode="none"
-                )
+                validate(run_spec(ac_mode="none"), arm, root, log)
 
             # none requested, SelectiveAC absent: valid.
             log.write_text(_compiled_line("default") + _SIZE_LINE + "Training completed\n")
-            validate_arm(
-                arm, root, log, ENGINES.workload, ac_mode="none"
-            )
+            validate(run_spec(ac_mode="none"), arm, root, log)
 
 
 class TrainingMetricsTests(unittest.TestCase):

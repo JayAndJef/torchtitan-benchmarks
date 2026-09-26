@@ -82,9 +82,14 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.launch",
     # The passthrough tables. Parent-side: the refusal runs before launch.
     "benchmarks.e2e.passthrough",
-    # The engine records. Parent-side: each pairs a command builder with a
-    # validation profile, and the parent builds and validates.
-    "benchmarks.e2e.engines",
+    # The engines' parent side: the records, the configs, the engines and
+    # the registry. The parent builds the command lines and validates.
+    "benchmarks.e2e.engines.api",
+    "benchmarks.e2e.engines.registry",
+    "benchmarks.e2e.engines.torchtitan.config",
+    "benchmarks.e2e.engines.torchtitan.engine",
+    "benchmarks.e2e.engines.megatron_stock.config",
+    "benchmarks.e2e.engines.megatron_stock.engine",
     # The stock Megatron-LM command line, as data. ``launch.py``
     # imports it to build one arm's argv, so it runs in the parent
     # and must stay as torch-free as the shape registry it reads.

@@ -33,16 +33,16 @@ from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
     describe,
 )
-from benchmarks.e2e.registry import (
-    AC_MODES,
+from benchmarks.e2e.megatron_stock.flags import (
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
-    scenario_by_name,
 )
+from benchmarks.e2e.registry import AC_MODES, scenario_by_name
 from benchmarks.e2e.axes import RequestedAxes, RunAxes
 from benchmarks.e2e.parallelism import ZERO_MODES
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
+from tests.engine_helpers import run_spec
 
 
 # The roster every ``--flag`` with a closed value set takes, keyed by the
@@ -94,6 +94,7 @@ def _manifest() -> dict:
     scenario = scenario_by_name("engines")
     return manifest_data(
         scenario,
+        run_spec(profile=False),
         (scenario.arm("titan_eager"),),
         {"titan_eager": ["cmd"]},
         "test-gpu",

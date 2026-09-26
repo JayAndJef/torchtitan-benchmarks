@@ -146,9 +146,8 @@ def _with_pretokenized_replay(config: Trainer.Config) -> Trainer.Config:
     comparison: same c4_test pipeline, materialized at startup so measured
     steps carry ~zero data-host cost (matching the Megatron driver).
     replay_steps tracks the config's own step count; running with more steps
-    fails loudly instead of silently reusing data, so the runner delivers
-    --dataloader.replay-steps alongside --training.steps (the workload
-    declares the loader via Workload.replay_dataloader)."""
+    fails loudly instead of silently reusing data, so the TorchTitan engine
+    delivers --dataloader.replay-steps alongside --training.steps."""
     config.dataloader = PretokenizedReplayDataLoader.Config(
         dataset="c4_test",
         replay_steps=config.training.steps,

@@ -42,9 +42,9 @@ first-party, and ``RunAxes`` and ``RunRequest`` from
 ``TYPE_CHECKING`` guard kept that pair out of a module-level cycle. It sits
 in ``axes.py`` now, below this module, so the cycle cannot come back.
 
-No name crosses to ``benchmarks.e2e.registry`` any more. ``Workload``,
-which ``_resume_workload`` reconstructs and revalidates from recorded JSON,
-comes from ``schema`` as well.
+Schema 18 records a ``workload`` block and one flat record per arm.
+``_workload_record`` and ``_arm_record`` build both from the run and the
+arm configs, so the file keeps its shape.
 
 At *package* granularity ``artifacts/`` and ``e2e/`` remain mutually
 dependent, because ``e2e/runner.py`` and ``e2e/results.py`` import from this
@@ -64,16 +64,15 @@ from typing import Any, Mapping
 
 from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.e2e.axes import RunAxes, RunRequest
+from benchmarks.e2e.engines.registry import engine_for, engine_named
+from benchmarks.e2e.engines.api import Arm, DataSpec, ProfileWindow, RunSpec
 from benchmarks.e2e.parallelism import (
     ParallelismSpec,
     describe as describe_parallelism,
     execution_model,
 )
-from benchmarks.e2e.schema import Arm, Scenario, Workload
-from benchmarks.models.piper_qwen3.shape import (
-    canonical_size_name,
-    shape_by_name,
-)
+from benchmarks.e2e.schema import Scenario
+from benchmarks.models.piper_qwen3.shape import canonical_size_name
 
 
 MANIFEST_SCHEMA_VERSION = 18
@@ -89,18 +88,63 @@ resume-gated: one revision cannot write two definitions.
 
 
 def _parallelism_record(
-    scenario: Scenario, parallelism: ParallelismSpec
+    run: RunSpec, parallelism: ParallelismSpec
 ) -> dict[str, Any]:
-    """The ``parallelism`` block for one run, written and compared here.
-
-    ``describe`` needs the local batch size, because the microbatch count is
-    arithmetic over the batch and the microbatch size. Taking it from the
-    scenario's own workload keeps the writer and the resume comparison
-    reading one number: one call produces both.
-    """
+    """The ``parallelism`` block for one run, written and compared here."""
     return describe_parallelism(
-        parallelism, local_batch_size=scenario.workload.local_batch_size
+        parallelism, local_batch_size=run.data.local_batch_size
     )
+
+
+def _titan_config(scenario: Scenario) -> Any:
+    """The one TorchTitan config that the ``workload`` block records."""
+    torchtitan = engine_named("torchtitan")
+    configs = {
+        (arm.config.module, arm.config.config)
+        for arm in scenario.arms
+        if engine_for(arm) is torchtitan
+    }
+    if len(configs) != 1:
+        raise ValueError(
+            f"scenario {scenario.name!r} holds TorchTitan module and config "
+            f"pairs {sorted(configs)}; schema {MANIFEST_SCHEMA_VERSION} "
+            "records exactly one"
+        )
+    return next(iter(configs))
+
+
+def _workload_record(scenario: Scenario, run: RunSpec) -> dict[str, Any]:
+    """The schema 18 ``workload`` block of one run."""
+    module, config = _titan_config(scenario)
+    return {
+        "module": module,
+        "config": config,
+        "seq_len": run.data.seq_len,
+        "steps": run.data.steps,
+        "local_batch_size": run.data.local_batch_size,
+        "profile_freq": run.window.freq,
+        "profiler_warmup": run.window.warmup,
+        "profiler_active": run.window.active,
+        "min_trace_windows": run.window.min_windows,
+        "seed": run.seed,
+        "replay_dataloader": True,
+    }
+
+
+def _arm_record(arm: Arm) -> dict[str, Any]:
+    """The schema 18 record of one declared arm; a field its config lacks takes the empty value."""
+    config = arm.config
+    return {
+        "name": arm.name,
+        "description": arm.description,
+        "compile": str(getattr(config, "compile", "none")),
+        "config": None,
+        "override_imports": list(getattr(config, "override_imports", ())),
+        "overrides_per_block": getattr(config, "overrides_per_block", 0),
+        "trace_kernel_markers": list(getattr(config, "trace_kernel_markers", ())),
+        "requires_gcc_toolset": getattr(config, "requires_gcc_toolset", False),
+        "engine": engine_for(arm).name,
+    }
 
 
 AXIS_KEYS = (
@@ -122,7 +166,7 @@ against ``RunAxes``, so a new axis that nothing recorded fails there.
 """
 
 
-def _axis_record(scenario: Scenario, axes: RunAxes) -> dict[str, Any]:
+def _axis_record(run: RunSpec, axes: RunAxes) -> dict[str, Any]:
     """The flat axis keys of one manifest, written and compared here.
 
     Two of the eight are not the field value itself. ``model_size`` is
@@ -132,12 +176,13 @@ def _axis_record(scenario: Scenario, axes: RunAxes) -> dict[str, Any]:
     """
     record = {**asdict(axes)}
     record["model_size"] = canonical_size_name(axes.model_size)
-    record["parallelism"] = _parallelism_record(scenario, axes.parallelism)
+    record["parallelism"] = _parallelism_record(run, axes.parallelism)
     return {key: record[key] for key in AXIS_KEYS}
 
 
 def manifest_data(
     scenario: Scenario,
+    run: RunSpec,
     selected_arms: tuple[Arm, ...],
     commands: dict[str, list[str]],
     hardware: str,
@@ -149,21 +194,20 @@ def manifest_data(
     megatron_args: list[str] | tuple[str, ...],
     axes: RunAxes,
 ) -> dict[str, Any]:
-    shape = shape_by_name(canonical_size_name(axes.model_size))
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "scenario": scenario.name,
         "description": scenario.description,
         "hardware": hardware,
         "hardware_metadata": metadata,
-        "workload": asdict(scenario.workload),
-        "arms": [asdict(arm) for arm in scenario.arms],
+        "workload": _workload_record(scenario, run),
+        "arms": [_arm_record(arm) for arm in scenario.arms],
         "selected_arms": [arm.name for arm in selected_arms],
         "commands": commands,
         "extra_torchtitan_args": list(torchtitan_args),
         "extra_megatron_args": list(megatron_args),
-        **_axis_record(scenario, axes),
-        "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
+        **_axis_record(run, axes),
+        "model_shape": run.shape.describe(seq_len=run.data.seq_len),
         "throughput_definition": THROUGHPUT_DEFINITION,
         "execution_model": execution_model(axes.parallelism),
     }
@@ -172,6 +216,7 @@ def manifest_data(
 def write_manifest(
     out_dir: Path,
     scenario: Scenario,
+    run: RunSpec,
     selected_arms: tuple[Arm, ...],
     commands: dict[str, list[str]],
     hardware: str,
@@ -185,6 +230,7 @@ def write_manifest(
         out_dir / "manifest.json",
         manifest_data(
             scenario,
+            run,
             selected_arms,
             commands,
             hardware,
@@ -217,6 +263,7 @@ def load_manifest(out_dir: Path) -> dict[str, Any]:
 def _resume_mismatches(
     manifest: dict,
     scenario: Scenario,
+    run: RunSpec,
     arms: tuple[Arm, ...],
     hardware: str,
     metadata: dict[str, str],
@@ -225,12 +272,12 @@ def _resume_mismatches(
     megatron_args: tuple[str, ...],
     axes: RunAxes,
 ) -> list[str]:
-    axis_record = _axis_record(scenario, axes)
+    axis_record = _axis_record(run, axes)
     # Compared on its own, because a recorded manifest may carry an alias.
     del axis_record["model_size"]
     expected = {
         "scenario": scenario.name,
-        "workload": asdict(scenario.workload),
+        "workload": _workload_record(scenario, run),
         "selected_arms": [arm.name for arm in arms],
         "hardware": hardware,
         "extra_torchtitan_args": list(torchtitan_args),
@@ -259,13 +306,27 @@ def _resume_mismatches(
 
 def _resume_workload(
     manifest: dict,
+    scenario: Scenario,
     request: RunRequest,
     environment: Mapping[str, str],
-) -> Workload:
-    """Hydrate unspecified settings and reject explicit resume conflicts."""
+) -> tuple[DataSpec, ProfileWindow, int | None]:
+    """The recorded data, profiler window and seed; refuse an explicit conflict."""
     try:
-        workload = Workload(**manifest["workload"])
-    except (KeyError, TypeError) as error:
+        workload = manifest["workload"]
+        data = DataSpec(
+            dataset=scenario.data.dataset,
+            seq_len=int(workload["seq_len"]),
+            local_batch_size=int(workload["local_batch_size"]),
+            steps=int(workload["steps"]),
+        )
+        window = ProfileWindow(
+            freq=int(workload["profile_freq"]),
+            warmup=int(workload["profiler_warmup"]),
+            active=int(workload["profiler_active"]),
+            min_windows=int(workload["min_trace_windows"]),
+        )
+        seed = workload["seed"]
+    except (KeyError, TypeError, ValueError) as error:
         raise ValueError("resume manifest has an invalid workload") from error
 
     requested_values = {
@@ -282,14 +343,14 @@ def _resume_workload(
     conflicts = [
         name
         for name, value in requested_values.items()
-        if value is not None and int(value) != getattr(workload, name)
+        if value is not None and int(value) != getattr(data, name)
     ]
     if conflicts:
         raise ValueError(
             "resume request conflicts with the recorded workload: "
             + ", ".join(conflicts)
         )
-    return workload
+    return data, window, None if seed is None else int(seed)
 
 
 def load_run(

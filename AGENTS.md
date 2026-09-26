@@ -78,7 +78,7 @@ shares one pre-push hook.
 | path | contents |
 |---|---|
 | `benchmarks/cli/` | The Click CLI: `benchmarks/cli/e2e.py`, `benchmarks/cli/kernel.py`, and the group in `benchmarks/cli/main.py`. |
-| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/launch.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines.py`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
+| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/launch.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines/`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
 | `benchmarks/e2e/megatron_stock/` | The stock Megatron-LM driver and its command line. |
 | `benchmarks/e2e/data/piper_qwen3.py` | The pre-tokenized replay dataloader. |
 | `benchmarks/artifacts/` | `manifest.json`, `run_state.json`, the output layout and the atomic JSON writer. |
@@ -329,9 +329,10 @@ necessary and never sufficient: an all-reduce proves a collective ran, never
 which one. Read rule 12 and rule 13 together.
 
 The engine differences live in two profiles, `TORCHTITAN_PROFILE` and
-`MEGATRON_STOCK_PROFILE`. `benchmarks/e2e/engines.py` puts each one on an
-engine record beside that engine's command builder, so an arm cannot take
-one engine's argv and another engine's log rules.
+`MEGATRON_STOCK_PROFILE`. The type of an arm's config selects its engine in
+`benchmarks/e2e/engines/`, and each engine passes its own command builder
+and its own profile. So an arm cannot take one engine's argv and another
+engine's log rules.
 
 ## 6. Evaluation
 
@@ -621,8 +622,9 @@ Four structural tests deserve naming:
   as a submodule is bumped. It also bans a `#` comment above a dataclass
   field and above a module-level constant; both belong in a docstring.
 - `tests/test_schema.py` pins the e2e layering. `benchmarks/e2e/schema.py`
-  holds `Workload`, `Arm` and `Scenario` alone and imports the standard
-  library alone. Every other record belongs to the module that builds it,
+  holds `Scenario` alone, and it imports the standard library and
+  `benchmarks/e2e/engines/api.py` alone. Every other record belongs to the
+  module that builds it,
   and every module may import only modules earlier in the declared order.
 - `tests/test_import_boundaries.py` enumerates every module under
   `benchmarks/`, as parent-side or worker-side. **Every module you add or

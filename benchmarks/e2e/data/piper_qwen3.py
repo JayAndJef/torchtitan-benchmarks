@@ -12,9 +12,8 @@ work.
 Requesting more batches than were materialized is a hard error, not a wrap:
 silently reusing data would change the workload relative to the lazy loader.
 ``replay_steps`` therefore tracks the run's step count: the config registry
-defaults it to the config's own ``training.steps`` and the benchmark runner
-delivers ``--dataloader.replay-steps`` next to ``--training.steps`` for every
-arm of a scenario whose workload sets ``replay_dataloader``.
+defaults it to the config's own ``training.steps``, and the TorchTitan
+engine sends ``--dataloader.replay-steps`` next to ``--training.steps``.
 
 **Under a data-parallel degree each rank replays its own shard.** The
 forwarding was always here: ``dp_rank`` and ``dp_world_size`` have reached
