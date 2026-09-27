@@ -79,9 +79,19 @@ class TorchTitanStepLineTests(unittest.TestCase):
         text = (
             "[titan] 2026-09-26 10:00:00,000 - root - INFO - Training starts at step 1\n"
             "[titan] 2026-09-26 10:00:00,000 - root - INFO - validate step:  1  loss: 1.0\n"
-            "step: 1 loss: 1.0 grad_norm: 2.0 memory: 3.00GiB tps: 1000\n"
         )
         self.assertEqual(titan_steps.read_steps(0, text), [])
+
+    def test_a_step_line_with_a_damaged_header_reads(self) -> None:
+        line = titan_step_line(3).replace("2026-09-26 10:00:00", "2026-0\x04\x00")
+        (sample,) = titan_steps.read_steps(0, line)
+        self.assertEqual(sample.step, 3)
+
+    def test_a_step_line_without_its_fields_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not parse"):
+            titan_steps.read_steps(
+                0, "step: 1 loss: 1.0 grad_norm: 2.0 memory: 3.00GiB tps: 1000\n"
+            )
 
 
 class MegatronStepRecordTests(unittest.TestCase):

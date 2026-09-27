@@ -12,8 +12,8 @@ from benchmarks.execution.launcher import RANK_PREFIX
 COLOR_CODE = re.compile(r"\x1b\[[0-9;]*m")
 """The terminal color codes that the fork puts into its step line."""
 
-STEP_MARKER = re.compile(r"\[titan\] \S+ \S+ - \S+ - \S+ - step:")
-"""The logger header and the first field of the step line."""
+STEP_MARKER = re.compile(r"(?<!validate )step:\s*\d")
+"""The first field of the step line; the validation line starts with ``validate step:``."""
 
 _NUMBER = r"(nan|-?inf|-?[0-9.]+)"
 
@@ -21,12 +21,11 @@ TORN_TAIL = rf"\s*(?:{RANK_PREFIX}.*)?"
 """The text that may follow a step line: another rank's line, which a torn write appended."""
 
 STEP_LINE = re.compile(
-    r"\[titan\] \S+ \S+ - \S+ - \S+ - "
     rf"step:\s*(\d+)\s+loss:\s*{_NUMBER}\s+grad_norm:\s*{_NUMBER}\s+"
     r"memory:\s*([0-9.]+)GiB\([0-9.]+%\)\s+tps:\s*([0-9,]+)\s+"
     rf"tflops:\s*([0-9,.]+)\s+mfu:\s*(?:([0-9.]+)%|N/A){TORN_TAIL}"
 )
-"""The whole step line, from the logger header to the end of the line."""
+"""The fields of the step line, from ``step:`` to the end of the line."""
 
 NO_LOSS = -1.0
 """The loss that the fork logs on a pipeline rank that holds no loss."""
