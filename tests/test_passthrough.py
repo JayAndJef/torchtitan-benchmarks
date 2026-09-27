@@ -18,20 +18,13 @@ from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan import flags as titan_flags
-from benchmarks.e2e.engines.megatron_stock.engine import megatron_stock_launch
+from benchmarks.e2e.engines.megatron_stock import flags as megatron_flags
 from benchmarks.e2e.engines.megatron_stock.flags import (
     ALWAYS_OMITTED_FLAGS,
+    passthrough_refusals,
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
-from benchmarks.e2e.engines.megatron_stock.flags import (
-    MEGATRON_OWNED_FLAGS,
-    MEGATRON_PERF_FLAGS,
-    MEGATRON_PINNED_FLAGS,
-    megatron_flag_name,
-    megatron_refusal,
-    refuse_megatron_passthrough,
-)
 from benchmarks.e2e.passthrough import matches, row_for
 from benchmarks.e2e.registry import scenario_by_name
 from benchmarks.e2e.runner import reach_refusal
@@ -60,7 +53,11 @@ TABLES = {
         titan_flags.PINNED_FLAGS,
         titan_flags.PERF_FLAGS,
     ),
-    "megatron": (MEGATRON_OWNED_FLAGS, MEGATRON_PINNED_FLAGS, MEGATRON_PERF_FLAGS),
+    "megatron": (
+        megatron_flags.OWNED_FLAGS,
+        megatron_flags.PINNED_FLAGS,
+        megatron_flags.PERF_FLAGS,
+    ),
 }
 """The owned, pinned and perf tables of each engine."""
 
@@ -150,7 +147,7 @@ class MegatronTableTests(unittest.TestCase):
     def test_every_emitted_flag_has_exactly_one_class(self) -> None:
         for argv in _megatron_argvs():
             for token in argv:
-                name = megatron_flag_name(token)
+                name = megatron_flags.flag_name(token)
                 if name is None:
                     continue
                 with self.subTest(name=name):
@@ -167,7 +164,7 @@ class MegatronTableTests(unittest.TestCase):
         )
         for flag in perf:
             self.assertIn(flag, ALWAYS_OMITTED_FLAGS)
-        refuse_megatron_passthrough(MEGATRON_ARM.name, perf, zero=1)
+        self.assertEqual(passthrough_refusals(MEGATRON_ARM.name, perf, zero=1), [])
 
     def test_the_other_omitted_members_are_refused(self) -> None:
         for flag in (
@@ -179,10 +176,10 @@ class MegatronTableTests(unittest.TestCase):
         ):
             with self.subTest(flag=flag):
                 self.assertIn(flag, ALWAYS_OMITTED_FLAGS)
-                with self.assertRaisesRegex(ValueError, flag):
-                    refuse_megatron_passthrough(
-                        MEGATRON_ARM.name, (flag,), zero=1
-                    )
+                self.assertIn(
+                    flag,
+                    " ".join(passthrough_refusals(MEGATRON_ARM.name, (flag,), zero=1)),
+                )
 
     def test_the_equals_form_and_a_prefix_are_refused(self) -> None:
         for tokens, reason in (
@@ -192,24 +189,26 @@ class MegatronTableTests(unittest.TestCase):
             (("--recompute-granularity", "full"), "owned by --ac"),
         ):
             with self.subTest(tokens=tokens):
-                with self.assertRaisesRegex(ValueError, reason):
-                    refuse_megatron_passthrough(
-                        MEGATRON_ARM.name, tokens, zero=1
-                    )
+                self.assertIn(
+                    reason,
+                    " ".join(passthrough_refusals(MEGATRON_ARM.name, tokens, zero=1)),
+                )
 
     def test_an_unlisted_flag_passes(self) -> None:
-        self.assertIsNone(megatron_refusal("--attention-backend"))
+        self.assertIsNone(megatron_flags.refusal("--attention-backend"))
 
     def test_param_gather_overlap_needs_zero_1(self) -> None:
-        with self.assertRaisesRegex(ValueError, "needs --zero 1"):
-            refuse_megatron_passthrough(
-                MEGATRON_ARM.name,
-                ("--overlap-param-gather",),
-                zero=0,
-            )
+        self.assertIn(
+            "needs --zero 1",
+            " ".join(
+                passthrough_refusals(
+                    MEGATRON_ARM.name, ("--overlap-param-gather",), zero=0
+                )
+            ),
+        )
 
     def test_the_passthrough_lands_last(self) -> None:
-        command = megatron_stock_launch(
+        command = engine_for(MEGATRON_ARM).launch(
             run_spec(ac_mode="none", profile=False),
             configured(
                 MEGATRON_ARM,
@@ -248,13 +247,44 @@ class MegatronTableTests(unittest.TestCase):
             refused = [
                 name
                 for name in action.option_strings
-                if megatron_refusal(name) is not None
+                if megatron_flags.refusal(name) is not None
             ]
             if refused:
                 missing.extend(
                     name for name in action.option_strings if name not in refused
                 )
         self.assertEqual(missing, [])
+
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("torch"), "reading Megatron's parser needs torch"
+    )
+    def test_every_emitted_megatron_flag_is_in_the_pinned_parser(self) -> None:
+        from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+            add_megatron_to_path,
+        )
+
+        add_megatron_to_path()
+        if not hasattr(typing, "override"):
+            import typing_extensions
+
+            typing.override = typing_extensions.override
+        from megatron.training.arguments import add_megatron_arguments
+
+        parser = argparse.ArgumentParser(allow_abbrev=False)
+        add_megatron_arguments(parser)
+        known = {name for action in parser._actions for name in action.option_strings}
+        unknown = sorted(
+            {
+                name
+                for argv in _megatron_argvs()
+                for token in argv
+                if (name := megatron_flags.flag_name(token)) is not None
+                and not name.startswith("--bench-")
+                and name not in known
+            }
+        )
+        self.assertEqual(unknown, [])
 
 
 class TitanTableTests(unittest.TestCase):

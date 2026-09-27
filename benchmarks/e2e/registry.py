@@ -12,7 +12,7 @@ than a new copy of the training harness.
 
 The activation-checkpointing and execution-model constants live here too:
 they are per-run axes of a scenario execution, consumed by
-command construction (``benchmarks.e2e.launch``), validation
+the engines (``benchmarks.e2e.engines``), validation
 (``benchmarks.e2e.validation``), and the manifest
 (``benchmarks.artifacts.manifests``).
 """

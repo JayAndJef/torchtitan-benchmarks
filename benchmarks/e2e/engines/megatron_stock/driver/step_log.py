@@ -1,13 +1,6 @@
-"""The step line the evaluation parses, and the shim that prints it.
+"""The shim that makes Megatron print the step line that the evaluation parses.
 
-Megatron's own ``training_log`` writes a format ``benchmarks.e2e.results``
-does not read. ``install_step_log_shim`` wraps it, so every rank prints one
-line per step in the grammar both engines share, and Megatron's own output
-is untouched beside it.
-
-Every torch and megatron import sits inside a function. Importing this
-module therefore costs neither, which is what lets the parent read the
-grammar on a host with no Megatron-LM checkout.
+This module imports torch and megatron inside its functions alone.
 """
 
 from __future__ import annotations
@@ -28,34 +21,21 @@ def tokens_per_second(
     elapsed_seconds: float,
     pipeline_degree: int,
 ) -> int:
-    """Tokens per second PER DEVICE, which is the published figure.
-
-    The same definition TorchTitan uses: one rank's own token count
-    divided by ``cp * tp * pp``. The ranks of one
-    pipeline share a batch; each data-parallel rank reads a batch of its
-    own, so the data-parallel degree is absent from the divisor.
-    """
+    """The tokens per second of one device: the tokens of this rank divided by the time and the pipeline degree."""
     if pipeline_degree < 1:
         raise ValueError(f"pipeline degree {pipeline_degree} must be >= 1")
     return round(local_tokens_per_step / (elapsed_seconds * pipeline_degree))
 
 
 def loss_value(loss_dict: dict) -> float | None:
-    """The batch loss this rank holds, or None where it holds none.
-
-    Only the last pipeline stage computes a loss, and this driver
-    broadcasts nothing, so a middle stage returns None and prints no loss
-    field. ``benchmarks/e2e/results.py`` reads the trajectory from one rank
-    and ``loss_visible_rank`` picks a last-stage rank.
-    """
+    """The loss in ``loss_dict``, or ``None`` when this rank holds no loss."""
     for key, value in loss_dict.items():
         if "loss" not in key:
             continue
         try:
             return float(value)
         except Exception:
-            # A value that is not one number is not a loss. Megatron's own
-            # entry is a 0-dim tensor, so this is a guard and not a path.
+            # A value that is not one number is not a loss.
             return None
     return None
 
@@ -71,12 +51,7 @@ def step_log_line(
     tflops: float,
     mfu: float,
 ) -> str:
-    """One step line, in the shape ``STEP_METRICS`` parses.
-
-    A pure function of numbers, so a test reads the format without a GPU.
-    ``grad_norm`` is None on a skipped step, and prints as ``nan`` -- which
-    is what ``GRAD_NORM_METRIC`` already accepts.
-    """
+    """One step line; a ``None`` gradient norm prints as ``nan``."""
     fields = {
         "step": step,
         "grad_norm": float("nan") if grad_norm is None else grad_norm,
@@ -97,35 +72,9 @@ def install_step_log_shim(
     pipeline_degree: int,
     num_flops_per_token: int,
 ) -> Callable[[], None]:
-    """Make Megatron print the step line the harness parses.
+    """Wrap Megatron's ``training_log`` so that each rank prints one step line, and return the function that removes the wrap.
 
-    Megatron's own ``training_log`` prints an ``iteration ... elapsed time
-    per iteration (ms)`` line, on the last rank only, in a format
-    ``benchmarks/e2e/results.py``'s three regexes do not match. Without a
-    step line this arm publishes no throughput, no peak memory and no loss
-    trajectory, so ``evaluate`` has nothing to compare.
-
-    **The plan for this scenario does not name this shim.** It is added
-    because the arm is otherwise unmeasurable. It prints one extra line per
-    rank per step and changes nothing Megatron computes.
-
-    The loss is broadcast from the last pipeline stage, so every rank
-    prints the real number rather than an absent field. ``training_log``
-    runs on every rank once per iteration, so the collective is safe: every
-    member of the pipeline group reaches it the same number of times.
-
-    **Step 1 carries the setup.** The clock starts when this function runs,
-    which is before ``pretrain()`` builds the model, so step 1's rate and
-    its peak memory include the build. ``results.py``'s ``stable_tps``
-    excludes step 1 of every cycle by construction, and peak memory is a
-    maximum over the run, so the published throughput is unaffected and the
-    published memory is the run peak rather than a step peak.
-
-    The device's total memory is read on the first step, not here.
-    ``pretrain()`` binds this rank's device, and reading the property
-    earlier would build a CUDA context on device 0 from every rank.
-
-    Returns a callable that puts Megatron's own ``training_log`` back.
+    The clock starts before ``pretrain`` builds the model, so step 1 holds the build time.
     """
     import inspect
 
@@ -207,23 +156,7 @@ def install_step_log_shim(
 
 
 def broadcast_pipeline_loss(loss: "Any") -> "Any":
-    """The last pipeline stage's loss, on every rank.
-
-    Only the last stage computes one, and stock Megatron leaves the other
-    stages with an empty ``loss_dict``. A rank with no loss would print no
-    loss field, and ``loss_visible_rank`` -- TorchTitan's own arithmetic,
-    ``(world_size // pp) * (pp - 1)`` -- does not always name a last-stage
-    rank of Megatron's own layout. Broadcasting removes the question: every
-    rank prints the same real number.
-
-    The value the last stage holds is already the mean over the
-    data-parallel group, because ``train_step`` all-reduces it there. So
-    this broadcast alone makes the printed loss mean what TorchTitan's
-    ``global_avg_loss`` means.
-
-    Returns ``None`` when no rank held a loss, which is not a state a
-    training step reaches.
-    """
+    """The loss of the last pipeline stage, broadcast to each rank of the pipeline."""
     import torch
 
     if not torch.distributed.is_initialized():
@@ -234,8 +167,6 @@ def broadcast_pipeline_loss(loss: "Any") -> "Any":
     group = mpu.get_pipeline_model_parallel_group()
     if torch.distributed.get_world_size(group=group) == 1:
         return loss
-    # The last stage is the source, and every rank of the group agrees
-    # which rank that is.
     ranks = torch.distributed.get_process_group_ranks(group)
     source = ranks[-1]
     device = torch.cuda.current_device()
