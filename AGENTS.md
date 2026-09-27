@@ -468,7 +468,7 @@ so both engines replicate their parameters there. It keeps the deprecated
 Megatron decays the learning rate over the same steps as TorchTitan.
 Read `OptimizerParamScheduler` before you report a learning rate.
 
-Seven facts explain the driver:
+Eight facts explain the driver:
 
 - **One sample is one packed sequence.** Megatron flattens an `(m, S)`
   microbatch to `(1, m*S)`, but it sizes the pipeline receive buffer as
@@ -477,6 +477,10 @@ Seven facts explain the driver:
   `--micro-batch-size 1`, and the driver packs the rows of one microbatch
   into one sample. `cu_seqlens` marks every document, so the attention
   does not change.
+- **The driver does not restart a rank.** Megatron's GPT entry point wraps
+  `pretrain` in `inprocess_restart.maybe_wrap_for_inprocess_restart`, and
+  the driver omits that wrap. A restarted rank publishes a number that no
+  run asked for, so a failed rank must stop the arm.
 - **The data key is the data-parallel rank.** The stages of one pipeline
   read the same tokens, and every rank builds an iterator, because the
   middle stages read `cu_seqlens` too. An exhausted stream raises.

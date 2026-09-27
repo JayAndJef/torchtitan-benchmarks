@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib.util
-import typing
 import sys
 import unittest
 from pathlib import Path
@@ -129,6 +128,22 @@ def _titan_argvs() -> list[list[str]]:
     return argvs
 
 
+def _megatron_parser() -> argparse.ArgumentParser:
+    """Megatron's own parser, imported through the driver's bootstrap."""
+    from benchmarks.e2e.engines.megatron_stock.driver import bootstrap
+    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+        add_megatron_to_path,
+    )
+
+    bootstrap.install_typing_override()
+    add_megatron_to_path()
+    from megatron.training.arguments import add_megatron_arguments
+
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    add_megatron_arguments(parser)
+    return parser
+
+
 MEGATRON_ARM = ENGINES.arm("megatron_stock")
 TITAN_ARM = ENGINES.arm("titan_eager")
 
@@ -229,19 +244,7 @@ class MegatronTableTests(unittest.TestCase):
         importlib.util.find_spec("torch"), "reading Megatron's parser needs torch"
     )
     def test_every_spelling_of_a_refused_setting_is_refused(self) -> None:
-        from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-            add_megatron_to_path,
-        )
-
-        add_megatron_to_path()
-        if not hasattr(typing, "override"):
-            import typing_extensions
-
-            typing.override = typing_extensions.override
-        from megatron.training.arguments import add_megatron_arguments
-
-        parser = argparse.ArgumentParser(allow_abbrev=False)
-        add_megatron_arguments(parser)
+        parser = _megatron_parser()
         missing = []
         for action in parser._actions:
             refused = [
@@ -255,24 +258,11 @@ class MegatronTableTests(unittest.TestCase):
                 )
         self.assertEqual(missing, [])
 
-
     @unittest.skipUnless(
         importlib.util.find_spec("torch"), "reading Megatron's parser needs torch"
     )
     def test_every_emitted_megatron_flag_is_in_the_pinned_parser(self) -> None:
-        from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-            add_megatron_to_path,
-        )
-
-        add_megatron_to_path()
-        if not hasattr(typing, "override"):
-            import typing_extensions
-
-            typing.override = typing_extensions.override
-        from megatron.training.arguments import add_megatron_arguments
-
-        parser = argparse.ArgumentParser(allow_abbrev=False)
-        add_megatron_arguments(parser)
+        parser = _megatron_parser()
         known = {name for action in parser._actions for name in action.option_strings}
         unknown = sorted(
             {

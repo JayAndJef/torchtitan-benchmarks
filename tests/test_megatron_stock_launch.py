@@ -55,9 +55,6 @@ from tests.engine_helpers import command, configured, run_spec
 
 SCENARIO_NAME = "engines"
 STOCK_PACKAGE = "benchmarks.e2e.engines.megatron_stock"
-STOCK_FLAGS_MODULE = f"{STOCK_PACKAGE}.flags"
-# The driver, which prints the marker strings.
-STOCK_DRIVER_MODULE = f"{STOCK_PACKAGE}.driver.train"
 
 # The mesh of the run matrix: two pipelines of four stages, eight GPUs.
 MESH = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4)
@@ -202,24 +199,6 @@ STOCK_PARAMETER_FRAGMENTS = (
     " stock-megatron size: ",
     " total parameters",
 )
-
-
-def _missing(module: str) -> str | None:
-    """The reason ``module`` cannot be imported, or None when it can."""
-    try:
-        if find_spec(module) is None:
-            return f"{module} does not exist yet"
-    except ModuleNotFoundError as error:
-        return f"{module} does not exist yet ({error})"
-    return None
-
-
-def _skip_without_stock_package(module: str):
-    reason = _missing(module)
-    return unittest.skipIf(
-        reason is not None,
-        f"pending the stock Megatron driver package: {reason}",
-    )
 
 
 def _stock_arm() -> Arm:
@@ -405,7 +384,6 @@ class TrivialSpecArgvTests(unittest.TestCase):
         )
 
 
-@_skip_without_stock_package(STOCK_FLAGS_MODULE)
 class StockArgvTests(unittest.TestCase):
     """The stock argv, frozen as launcher plus module plus the flag list.
 
@@ -1211,7 +1189,6 @@ class StockMarkerContractTests(unittest.TestCase):
                     f"{fragment!r} is in no marker this profile builds",
                 )
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_prints_every_fragment(self) -> None:
         """The driver's own lines must carry each fragment verbatim.
 
@@ -1237,7 +1214,6 @@ class StockMarkerContractTests(unittest.TestCase):
                     f"{fragment!r} is in no line the driver prints",
                 )
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_mesh_line_equals_this_profile_marker(self) -> None:
         """The character-for-character diff, at every mesh this run allows.
 
@@ -1264,7 +1240,6 @@ class StockMarkerContractTests(unittest.TestCase):
                 )
                 self.assertEqual(printed[0], expected[0])
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_data_parallel_line_equals_this_profile_marker(
         self,
     ) -> None:
@@ -1305,7 +1280,6 @@ class StockMarkerContractTests(unittest.TestCase):
                 )
                 self.assertEqual(printed, markers[1])
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_p2p_line_equals_this_profile_marker(self) -> None:
         """The p2p half of arm rule 12, character for character.
 
@@ -1331,7 +1305,6 @@ class StockMarkerContractTests(unittest.TestCase):
                 with self.subTest(spec=spec, value=value):
                     self.assertEqual(p2p_markers(spec, value), ())
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_nan_guard_line_equals_this_profile_marker(
         self,
     ) -> None:
@@ -1355,7 +1328,6 @@ class StockMarkerContractTests(unittest.TestCase):
         (line,) = nan_guard_markers("on")
         self.assertIn("stock", line)
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_mode_line_starts_with_this_profile_marker(
         self,
     ) -> None:
@@ -1377,7 +1349,6 @@ class StockMarkerContractTests(unittest.TestCase):
             printed.startswith(precision_markers("stock")[0])
         )
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_prints_the_data_parallel_line_once(self) -> None:
         """``install_data_parallel_marker`` is its only source.
 
@@ -1392,7 +1363,6 @@ class StockMarkerContractTests(unittest.TestCase):
         self.assertEqual(len(printed), 1)
         self.assertNotIn("stock data parallel", printed[0])
 
-    @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_package_prints_no_tuned_marker(self) -> None:
         """The stock driver must not print an earlier driver's marker lines."""
         source = self._package_source()

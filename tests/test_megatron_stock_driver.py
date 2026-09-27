@@ -2068,6 +2068,12 @@ class StepLineTest(unittest.TestCase):
         )
         self.assertIsNone(step_log.loss_value({"skipped iterations": 0}))
 
+    def test_a_loss_that_is_not_one_number_raises(self) -> None:
+        for value in (torch.tensor([1.0, 2.0]), "nan?", None):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "'lm loss'"):
+                    step_log.loss_value({"lm loss": value})
+
 
 class LossBroadcastTest(unittest.TestCase):
     """The loss every rank prints, and the path it comes through.
