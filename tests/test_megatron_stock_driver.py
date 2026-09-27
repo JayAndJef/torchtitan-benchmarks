@@ -26,7 +26,9 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
+import inspect
 import json
+import math
 import os
 import pathlib
 import sys
@@ -78,11 +80,7 @@ from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, parallelism_refusals
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig  # noqa: E402
 from benchmarks.e2e.registry import C4_REPLAY_DATA, ENGINES, SEED  # noqa: E402
-from benchmarks.e2e.results import (  # noqa: E402
-    GRAD_NORM_METRIC,
-    LOSS_METRIC,
-    STEP_METRICS,
-)
+from benchmarks.e2e.engines.megatron_stock.steps import read_steps  # noqa: E402
 from benchmarks.models.piper_qwen3.shape import (  # noqa: E402
     PIPER_SHAPES,
     shape_by_name,
@@ -2007,52 +2005,39 @@ class DriverOrderTest(unittest.TestCase):
         )
 
 
-class StepLineTest(unittest.TestCase):
-    """The line ``benchmarks/e2e/results.py`` parses."""
+class StepRecordTest(unittest.TestCase):
+    """The step record that the shim prints, and the figures that feed it."""
 
-    def line(self, **overrides):
-        fields = dict(
-            step=7,
-            loss=2.5,
-            grad_norm=0.75,
-            memory_bytes=12 * 2**30,
-            device_total_bytes=140 * 2**30,
-            tps=41234,
-            tflops=123.4,
-            mfu=12.5,
+    def test_the_shim_prints_the_step_record(self) -> None:
+        inner = [
+            const
+            for const in step_log.install_step_log_shim.__code__.co_consts
+            if isinstance(const, types.CodeType)
+            and const.co_name == "replacement"
+        ]
+        self.assertEqual(len(inner), 1)
+        self.assertIn("step_record", inner[0].co_names)
+
+    def test_a_skipped_step_reads_as_a_non_finite_norm(self) -> None:
+        """Megatron states no norm on a skipped step, and the shim prints ``nan`` for it."""
+        source = inspect.getsource(step_log.install_step_log_shim)
+        self.assertIn(
+            'grad_norm=float("nan") if grad_norm is None else float(grad_norm)',
+            source,
         )
-        fields.update(overrides)
-        return step_log.step_log_line(**fields)
-
-    def test_the_three_regexes_read_it(self) -> None:
-        line = self.line()
-        match = STEP_METRICS.search(line)
-        self.assertIsNotNone(match)
-        self.assertEqual(int(match.group(1)), 7)
-        self.assertAlmostEqual(float(match.group(2)), 12.0, places=2)
-        self.assertEqual(int(match.group(3).replace(",", "")), 41234)
-        self.assertAlmostEqual(
-            float(LOSS_METRIC.search(line).group(2)), 2.5, places=4
+        (sample,) = read_steps(
+            0,
+            step_log.step_record(
+                step=1,
+                tokens_per_second=1,
+                peak_memory_gib=1.0,
+                loss=1.0,
+                grad_norm=float("nan"),
+                tflops=1.0,
+                mfu=1.0,
+            ),
         )
-        self.assertAlmostEqual(
-            float(GRAD_NORM_METRIC.search(line).group(2)), 0.75, places=4
-        )
-
-    def test_a_rank_without_a_loss_prints_no_loss_field(self) -> None:
-        """Only the last pipeline stage computes one, and nothing broadcasts.
-
-        ``results.py`` reads the trajectory from ``loss_visible_rank``,
-        which is a last-stage rank, so an absent field costs nothing and a
-        sentinel would add a constant that is not a loss.
-        """
-        line = self.line(loss=None)
-        self.assertIsNone(LOSS_METRIC.search(line))
-        self.assertIsNotNone(STEP_METRICS.search(line))
-        self.assertIsNotNone(GRAD_NORM_METRIC.search(line))
-
-    def test_a_skipped_step_prints_nan(self) -> None:
-        line = self.line(grad_norm=None)
-        self.assertEqual(GRAD_NORM_METRIC.search(line).group(2), "nan")
+        self.assertTrue(math.isnan(sample.grad_norm))
 
     def test_tokens_per_second_divides_by_the_pipeline_degree(self) -> None:
         """The published figure is per device, as TorchTitan's is."""
@@ -2076,25 +2061,15 @@ class StepLineTest(unittest.TestCase):
 
 
 class LossBroadcastTest(unittest.TestCase):
-    """The loss every rank prints, and the path it comes through.
-
-    Only the last pipeline stage computes a loss. A rank without one would
-    print no loss field, and ``benchmarks/e2e/results.py`` reads the
-    trajectory from whichever rank it selects. So the driver broadcasts.
-    """
+    """The loss every rank prints; the last pipeline stage computes it and broadcasts it."""
 
     def test_the_loss_is_unchanged_without_a_process_group(self) -> None:
         """One rank is the whole pipeline, so there is nobody to ask."""
         self.assertEqual(step_log.broadcast_pipeline_loss(1.25), 1.25)
         self.assertIsNone(step_log.broadcast_pipeline_loss(None))
 
-    def test_the_step_line_takes_its_loss_from_the_broadcast(self) -> None:
-        """The shim must not print this rank's own empty ``loss_dict``.
-
-        A rank that is not the last stage holds no loss. Printing
-        ``loss_value(loss_dict)`` directly gives that rank a line with no
-        loss field, which ``LOSS_METRIC`` does not match.
-        """
+    def test_the_step_record_takes_its_loss_from_the_broadcast(self) -> None:
+        """The shim prints the broadcast loss, not the empty ``loss_dict`` of a rank that is not the last stage."""
         inner = [
             const
             for const in step_log.install_step_log_shim.__code__.co_consts

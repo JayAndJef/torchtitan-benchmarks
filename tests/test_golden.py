@@ -351,6 +351,13 @@ def _descriptions_drop_the_execution_model(record: dict[str, Any]) -> None:
             arm["description"] = arm["description"].replace(sentence, "")
 
 
+ENGINE_BY_ARM = {
+    "titan_compiled": "torchtitan",
+    "titan_eager": "torchtitan",
+    "megatron_stock": "megatron_stock",
+}
+"""The engine of each golden arm, which names its extras."""
+
 OLD_MEGATRON_DRIVER = "benchmarks.e2e.megatron_stock.train"
 MEGATRON_DRIVER = "benchmarks.e2e.engines.megatron_stock.driver.train"
 OLD_TITAN_MODULE = "benchmarks.models.piper_qwen3"
@@ -520,10 +527,20 @@ class GoldenEvaluationTest(unittest.TestCase):
                 self.assertTrue((run_dir / EXPECTED_RESULTS).is_file())
 
     def test_every_run_directory_evaluates_to_its_expected_results(self) -> None:
+        """The written text matches byte for byte, without the ``extras`` of each arm, which the baseline did not have."""
         for run_dir in sorted(path for path in RUNS_DIR.iterdir() if path.is_dir()):
             with self.subTest(run=run_dir.name):
-                expected = json.loads((run_dir / EXPECTED_RESULTS).read_text())
-                self.assertEqual(evaluation(run_dir), expected)
+                actual = evaluation(run_dir)
+                for arm, result in actual["results"].items():
+                    extras = result.pop("extras")
+                    self.assertEqual(
+                        list(extras), [ENGINE_BY_ARM[arm]], f"{arm} extras"
+                    )
+                    self.assertEqual(sorted(extras[ENGINE_BY_ARM[arm]]), ["mfu", "tflops"])
+                self.assertEqual(
+                    json.dumps(actual, indent=2, allow_nan=False) + "\n",
+                    (run_dir / EXPECTED_RESULTS).read_text(),
+                )
 
 
 if __name__ == "__main__":

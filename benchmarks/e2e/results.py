@@ -1,10 +1,10 @@
-"""The end-to-end evaluation: the figures that the step lines give, ``results.json`` and the printed report."""
+"""The end-to-end evaluation: the figures of the step samples, ``results.json`` and the printed report."""
 
 from __future__ import annotations
 
 import math
-import re
 import statistics
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -13,19 +13,12 @@ from benchmarks.artifacts.layout import atomic_write_json, logs_by_rank
 from benchmarks.artifacts.manifests import ArmRecord, load_run_record
 from benchmarks.artifacts.summaries import _value
 from benchmarks.e2e.checks import run_warnings
-from benchmarks.e2e.engines.api import ProfileWindow
-from benchmarks.e2e.evidence import (
-    GRAD_NORM_METRIC,
-    LOSS_METRIC,
-    non_finite_refusals,
-    trajectory,
-)
+from benchmarks.e2e.engines.api import Arm, ProfileWindow, StepSample
+from benchmarks.e2e.engines.registry import engine_for
+from benchmarks.e2e.evidence import non_finite_refusals, rank_steps
 from benchmarks.execution.affinity import is_pinned
 
 
-STEP_METRICS = re.compile(
-    r"step:\s*(\d+).*?memory:\s*([0-9.]+)GiB.*?tps:\s*([0-9,]+)"
-)
 @dataclass(frozen=True)
 class StepMs:
     """The step cost of one rank, in milliseconds; ``p95`` is a nearest-rank value, so it is always a measured step."""
@@ -57,6 +50,8 @@ class ArmResult:
     rank_reduction: str
     published_rank: int
     per_rank: tuple[RankThroughput, ...]
+    extras: dict[str, dict[str, float]]
+    """The engine's other figures, each the median over the published rank's samples, under the engine's name."""
 
 
 @dataclass(frozen=True)
@@ -106,11 +101,13 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _log_by_rank(log_path: Path) -> dict[int, str]:
-    """This arm's log, split into what each rank wrote. Empty when missing."""
+def arm_steps(arm: Arm, log_path: Path) -> dict[int, list[StepSample]]:
+    """The step samples of each rank in the arm's log, read by the arm's engine; a missing log holds no rank."""
     if not log_path.exists():
         return {}
-    return logs_by_rank(log_path.read_text(errors="replace"))
+    return rank_steps(
+        engine_for(arm), logs_by_rank(log_path.read_text(errors="replace"))
+    )
 
 
 def loss_visible_rank(*, world_size: int, pp: int) -> int:
@@ -118,13 +115,20 @@ def loss_visible_rank(*, world_size: int, pp: int) -> int:
     return (world_size // pp) * (pp - 1)
 
 
-def losses(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
-    return trajectory(_log_by_rank(log_path).get(rank, ""), LOSS_METRIC)
+def trajectory(samples: Sequence[StepSample], metric: str) -> list[tuple[int, float]]:
+    """The (step, value) pairs of ``metric``, which is ``loss`` or ``grad_norm``; a step without the value is absent."""
+    return [
+        (sample.step, value)
+        for sample in samples
+        if (value := getattr(sample, metric)) is not None
+    ]
 
 
-def refuse_non_finite_trajectories(arm: str, log_path: Path) -> None:
-    """Raise ``ValueError`` when any rank's step lines carry a ``nan`` or an ``inf``."""
-    refusals = non_finite_refusals(_log_by_rank(log_path))
+def refuse_non_finite_trajectories(
+    arm: str, steps: Mapping[int, Sequence[StepSample]], log_path: Path
+) -> None:
+    """Raise ``ValueError`` when the loss or the gradient norm of any rank is a ``nan`` or an ``inf``."""
+    refusals = non_finite_refusals(steps)
     if refusals:
         raise ValueError(
             f"{arm}: {refusals[0]}; a run that diverged cannot publish a "
@@ -132,60 +136,34 @@ def refuse_non_finite_trajectories(arm: str, log_path: Path) -> None:
         )
 
 
-def grad_norms(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
-    return trajectory(_log_by_rank(log_path).get(rank, ""), GRAD_NORM_METRIC)
-
-
-def _rows(text: str) -> list[tuple[int, float, int]]:
-    rows = []
-    for line in text.splitlines():
-        match = STEP_METRICS.search(line)
-        if match:
-            rows.append(
-                (
-                    int(match.group(1)),
-                    float(match.group(2)),
-                    int(match.group(3).replace(",", "")),
-                )
-            )
-    return rows
-
-
-def per_rank_training_metrics(
-    log_path: Path,
-) -> dict[int, list[tuple[int, float, int]]]:
-    """The (step, peak memory GiB, tokens/s) rows of each rank."""
-    return {
-        rank: _rows(text) for rank, text in _log_by_rank(log_path).items()
-    }
-
-
-def training_metrics(log_path: Path) -> list[tuple[int, float, int]]:
-    """Every rank's rows, pooled in rank order; a memory input and not a throughput input."""
-    return [
-        row
-        for _, rows in sorted(per_rank_training_metrics(log_path).items())
-        for row in rows
-    ]
-
-
-def stable_tps(
-    rows: list[tuple[int, float, int]], window: ProfileWindow
-) -> list[int]:
-    """The tokens/s samples of a profiled run: the steps of each profiler cycle that carry no profiler cost."""
+def stable_samples(
+    samples: Sequence[StepSample], window: ProfileWindow
+) -> list[StepSample]:
+    """The samples of a profiled run: the steps of each profiler cycle that carry no profiler cost."""
     wait = window.freq - window.warmup - window.active
     return [
-        tps
-        for step, _, tps in rows
-        if 2 <= ((step - 1) % window.freq) + 1 <= wait
+        sample
+        for sample in samples
+        if 2 <= ((sample.step - 1) % window.freq) + 1 <= wait
     ]
 
 
-def measured_tps(
-    rows: list[tuple[int, float, int]], warmup_steps: int
-) -> list[int]:
-    """The tokens/s samples of an unprofiled run: every step after the warmup."""
-    return [tps for step, _, tps in rows if step > warmup_steps]
+def measured_samples(
+    samples: Sequence[StepSample], warmup_steps: int
+) -> list[StepSample]:
+    """The samples of an unprofiled run: every step after the warmup."""
+    return [sample for sample in samples if sample.step > warmup_steps]
+
+
+def extras_medians(samples: Sequence[StepSample]) -> dict[str, float]:
+    """The median of each extra figure over the samples that state it."""
+    names = sorted({name for sample in samples for name in sample.extras})
+    return {
+        name: statistics.median(
+            sample.extras[name] for sample in samples if name in sample.extras
+        )
+        for name in names
+    }
 
 
 def _slowest_rank(per_rank: dict[int, float | None]) -> int:
@@ -223,7 +201,7 @@ def _nearest_rank_percentile(values: list[float], fraction: float) -> float:
 
 
 def step_ms(
-    samples: list[int], *, tokens_per_step: int, pp: int
+    samples: list[float], *, tokens_per_step: int, pp: int
 ) -> StepMs:
     """The step costs of one rank's tokens/s samples; a sample of zero has no cost and is dropped."""
     series = tuple(
@@ -266,31 +244,36 @@ def evaluate_run(
         *run_warnings(run, tuple(each.arm for each in selected)),
         *pinning_warnings(selected),
     ]
-    profile = run.profile
     world_size = run.parallelism.world_size
-    raw_training = {
-        arm: per_rank_training_metrics(out_dir / f"{arm}.log") for arm in arms
+    steps = {
+        arm: arm_steps(record.arm(arm).arm, out_dir / f"{arm}.log") for arm in arms
     }
-    # The sample rule follows the axis the run was measured under.
-    if profile:
-        def _samples(rows: list[tuple[int, float, int]]) -> list[int]:
-            return stable_tps(rows, run.window)
+    if run.profile:
+        def _samples(samples: list[StepSample]) -> list[StepSample]:
+            return stable_samples(samples, run.window)
     else:
         warmup_steps = run.warmup_steps
 
-        def _samples(rows: list[tuple[int, float, int]]) -> list[int]:
-            return measured_tps(rows, warmup_steps)
+        def _samples(samples: list[StepSample]) -> list[StepSample]:
+            return measured_samples(samples, warmup_steps)
 
-    stable_samples = {
-        arm: {rank: _samples(rows) for rank, rows in by_rank.items()}
-        for arm, by_rank in raw_training.items()
+    sampled = {
+        arm: {rank: _samples(samples) for rank, samples in by_rank.items()}
+        for arm, by_rank in steps.items()
+    }
+    tps_samples = {
+        arm: {
+            rank: [sample.tokens_per_second for sample in samples]
+            for rank, samples in by_rank.items()
+        }
+        for arm, by_rank in sampled.items()
     }
     throughput = {
         arm: {
             rank: statistics.median(samples) if samples else None
             for rank, samples in by_rank.items()
         }
-        for arm, by_rank in stable_samples.items()
+        for arm, by_rank in tps_samples.items()
     }
     published_throughput_rank = {
         arm: _slowest_rank(by_rank) for arm, by_rank in throughput.items()
@@ -303,7 +286,7 @@ def evaluate_run(
             rank: step_ms(samples, tokens_per_step=tokens_per_step, pp=pp)
             for rank, samples in by_rank.items()
         }
-        for arm, by_rank in stable_samples.items()
+        for arm, by_rank in tps_samples.items()
     }
     results = {}
     for arm in arms:
@@ -311,15 +294,15 @@ def evaluate_run(
         median_tps = throughput[arm].get(rank)
         peak_memory = max(
             (
-                memory
-                for rows in raw_training[arm].values()
-                for _, memory, _ in rows
+                sample.peak_memory_gib
+                for samples in steps[arm].values()
+                for sample in samples
             ),
             default=None,
         )
         results[arm] = ArmResult(
             stable_tokens_per_second=median_tps,
-            stable_sample_count=len(stable_samples[arm].get(rank, ())),
+            stable_sample_count=len(tps_samples[arm].get(rank, ())),
             peak_memory_gib=peak_memory,
             step_ms=rank_step_ms[arm].get(
                 rank, StepMs(mean=None, median=None, p95=None, series=())
@@ -330,11 +313,16 @@ def evaluate_run(
                 RankThroughput(
                     rank=each,
                     stable_tokens_per_second=throughput[arm][each],
-                    stable_sample_count=len(stable_samples[arm][each]),
+                    stable_sample_count=len(tps_samples[arm][each]),
                     step_ms=rank_step_ms[arm][each],
                 )
                 for each in sorted(throughput[arm])
             ),
+            extras={
+                engine_for(record.arm(arm).arm).name: extras_medians(
+                    sampled[arm].get(rank, ())
+                )
+            },
         )
         spread = _throughput_spread(throughput[arm])
         if spread is not None and spread > 1.15:
@@ -349,7 +337,7 @@ def evaluate_run(
     trajectory_rank = loss_visible_rank(world_size=world_size, pp=pp)
     # Refuse a diverged rank before anything is published.
     for arm in arms:
-        refuse_non_finite_trajectories(arm, out_dir / f"{arm}.log")
+        refuse_non_finite_trajectories(arm, steps[arm], out_dir / f"{arm}.log")
     return EvaluationResult(
         output_dir=str(out_dir),
         scenario=record.scenario,
@@ -357,11 +345,11 @@ def evaluate_run(
         arms=tuple(arms),
         results=results,
         losses={
-            arm: losses(out_dir / f"{arm}.log", rank=trajectory_rank)
+            arm: trajectory(steps[arm].get(trajectory_rank, ()), "loss")
             for arm in arms
         },
         gradient_norms={
-            arm: grad_norms(out_dir / f"{arm}.log", rank=trajectory_rank)
+            arm: trajectory(steps[arm].get(trajectory_rank, ()), "grad_norm")
             for arm in arms
         },
         warnings=tuple(warnings),

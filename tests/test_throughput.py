@@ -38,30 +38,41 @@ from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig  # noqa: E
 from benchmarks.e2e.registry import SCENARIOS, SEED  # noqa: E402
 from benchmarks.models.piper_qwen3.shape import PIPER_1B  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
+    arm_steps,
     evaluate_run,
     pinning_warnings,
     loss_visible_rank,
-    losses,
-    per_rank_training_metrics,
     refuse_non_finite_trajectories,
     render_evaluation,
     step_ms,
-    training_metrics,
+    trajectory,
     write_results,
 )
 
 
-from tests.engine_helpers import TEST_METADATA, run_spec  # noqa: E402
+from tests.engine_helpers import (  # noqa: E402
+    TEST_METADATA,
+    run_spec,
+    titan_step_line,
+)
 
 
 FIXTURE_RUN = run_spec(seq_len=1024, local_batch_size=4)
 """A profiled run at sequence length 1024 and local batch 4."""
 
 
+TITAN_ARM = Arm(
+    name="baseline",
+    description="baseline",
+    config=TorchTitanConfig(compile=CompileMode.NONE),
+)
+"""A TorchTitan arm, whose engine reads the fork's step line."""
+
+
 def _step_lines(*, tps: int, first_step: int = 2, count: int = 4) -> str:
     """Step lines a rank prints, inside the stable window rule."""
     return "".join(
-        f"step: {step} loss: 1.0 grad_norm: 2.0 memory: 3.00GiB tps: {tps}\n"
+        titan_step_line(step, tps=tps)
         for step in range(first_step, first_step + count)
     )
 
@@ -134,15 +145,17 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
 
 
 class PerRankLogParsingTests(unittest.TestCase):
-    """One file, two ranks: the rows belong to whoever printed them."""
+    """One file, two ranks: the samples belong to whoever printed them."""
 
     def test_an_unprefixed_log_reads_as_one_rank(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text(_step_lines(tps=1000))
-            by_rank = per_rank_training_metrics(log)
+            by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(list(by_rank), [0])
-        self.assertEqual([row[2] for row in by_rank[0]], [1000] * 4)
+        self.assertEqual(
+            [sample.tokens_per_second for sample in by_rank[0]], [1000] * 4
+        )
 
     def test_two_ranks_do_not_pool_into_one_series(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -151,20 +164,19 @@ class PerRankLogParsingTests(unittest.TestCase):
                 _prefixed(_step_lines(tps=1000), 0)
                 + _prefixed(_step_lines(tps=800), 1)
             )
-            by_rank = per_rank_training_metrics(log)
-            pooled = training_metrics(log)
+            by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(sorted(by_rank), [0, 1])
-        self.assertEqual([row[2] for row in by_rank[0]], [1000] * 4)
-        self.assertEqual([row[2] for row in by_rank[1]], [800] * 4)
-        # The pooled reading is still available for peak memory, and it holds
-        # both ranks' rows rather than one rank's.
-        self.assertEqual(len(pooled), 8)
+        self.assertEqual(
+            [sample.tokens_per_second for sample in by_rank[0]], [1000] * 4
+        )
+        self.assertEqual(
+            [sample.tokens_per_second for sample in by_rank[1]], [800] * 4
+        )
+        self.assertEqual({sample.rank for sample in by_rank[1]}, {1})
 
     def test_a_missing_log_reads_as_no_ranks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            self.assertEqual(
-                per_rank_training_metrics(Path(temporary) / "absent.log"), {}
-            )
+            self.assertEqual(arm_steps(TITAN_ARM, Path(temporary) / "absent.log"), {})
 
 
 class LossVisibleRankTests(unittest.TestCase):
@@ -501,16 +513,15 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
     did, and it names the rank and the step.
     """
 
-    def _lines(self, *, loss: str = "1.0", grad_norm: str = "2.0", at: int = 3):
-        lines = []
-        for step in range(2, 6):
-            value_loss = loss if step == at else "1.0"
-            value_norm = grad_norm if step == at else "2.0"
-            lines.append(
-                f"step: {step} loss: {value_loss} grad_norm: {value_norm} "
-                "memory: 3.00GiB tps: 1000\n"
+    def _lines(self, *, loss: float = 1.0, grad_norm: float = 2.0, at: int = 3):
+        return "".join(
+            titan_step_line(
+                step,
+                loss=loss if step == at else 1.0,
+                grad_norm=grad_norm if step == at else 2.0,
             )
-        return "".join(lines)
+            for step in range(2, 6)
+        )
 
     def _evaluate(self, logs: dict[str, str], parallelism=None):
         with tempfile.TemporaryDirectory() as temporary:
@@ -523,7 +534,7 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, r"baseline: rank 0 logged a non-finite loss at step 3"
         ):
-            self._evaluate({"baseline": self._lines(loss="nan")})
+            self._evaluate({"baseline": self._lines(loss=float("nan"))})
 
     def test_an_inf_grad_norm_fails_the_arm_and_names_the_step(self) -> None:
         with self.assertRaisesRegex(
@@ -533,13 +544,13 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
             self._evaluate(
                 {
                     "baseline": self._lines(),
-                    "optimized": self._lines(grad_norm="inf", at=4),
+                    "optimized": self._lines(grad_norm=float("inf"), at=4),
                 }
             )
 
     def test_a_negative_inf_is_not_finite_either(self) -> None:
         with self.assertRaisesRegex(ValueError, r"step 5 \(-inf\)"):
-            self._evaluate({"baseline": self._lines(loss="-inf", at=5)})
+            self._evaluate({"baseline": self._lines(loss=float("-inf"), at=5)})
 
     def test_every_rank_is_read_and_the_failure_names_the_rank(self) -> None:
         """The published trajectory is one rank's; the guard reads all of
@@ -550,38 +561,39 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
             self._evaluate(
                 {
                     "baseline": _prefixed(self._lines(), 0)
-                    + _prefixed(self._lines(loss="nan"), 1)
+                    + _prefixed(self._lines(loss=float("nan")), 1)
                 },
                 {"world_size": 2, "pp": 2},
             )
 
-    def test_the_titan_sentinel_is_finite_and_passes(self) -> None:
-        """A rank without the loss prints ``-1.0``, which is a number."""
+    def test_the_titan_sentinel_reads_as_no_loss(self) -> None:
+        """A TorchTitan rank without the loss prints ``-1.0``, which is not a loss."""
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             _RunFixture.build(
                 out_dir,
                 {
-                    "baseline": _prefixed(self._lines(loss="-1.00000"), 0)
+                    "baseline": _prefixed(self._lines(loss=-1.0, at=3), 0)
                     + _prefixed(self._lines(), 1)
                 },
                 {"world_size": 2, "pp": 2},
             )
             result = evaluate_run(out_dir)
+            steps = arm_steps(TITAN_ARM, out_dir / "baseline.log")
         self.assertEqual(result.losses["baseline"][1], (3, 1.0))
+        self.assertIsNone(steps[0][1].loss)
 
-    def test_the_guard_reads_a_bare_log_directly(self) -> None:
+    def test_the_guard_reads_the_samples_directly(self) -> None:
         """Callable on its own, so a reader of an old directory can ask."""
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text(self._lines())
-            refuse_non_finite_trajectories("baseline", log)
-            log.write_text(self._lines(grad_norm="nan", at=2))
+            refuse_non_finite_trajectories("baseline", arm_steps(TITAN_ARM, log), log)
+            log.write_text(self._lines(grad_norm=float("nan"), at=2))
             with self.assertRaisesRegex(ValueError, r"grad_norm at step 2"):
-                refuse_non_finite_trajectories("baseline", log)
-            log.unlink()
-            # A missing log is a validation failure, not this guard's.
-            refuse_non_finite_trajectories("baseline", log)
+                refuse_non_finite_trajectories(
+                    "baseline", arm_steps(TITAN_ARM, log), log
+                )
 
 
 class WholeEvaluationTests(unittest.TestCase):
@@ -595,10 +607,10 @@ class WholeEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text(
-                "step:  1  loss:  7.44780\n"
-                "step:  2  loss:  nan\n"
+                titan_step_line(1, loss=7.4478)
+                + titan_step_line(2, loss=float("nan"))
             )
-            parsed = losses(log)
+            parsed = trajectory(arm_steps(TITAN_ARM, log)[0], "loss")
         self.assertEqual(parsed[0], (1, 7.4478))
         self.assertNotEqual(parsed[1][1], parsed[1][1])  # NaN
 
@@ -671,8 +683,12 @@ class WholeEvaluationTests(unittest.TestCase):
                     "rank_reduction",
                     "published_rank",
                     "per_rank",
+                    "extras",
                 ]
             ),
+        )
+        self.assertEqual(
+            arm["extras"], {"torchtitan": {"mfu": 1.26, "tflops": 12.5}}
         )
         self.assertEqual(
             sorted(arm["step_ms"]), ["mean", "median", "p95", "series"]

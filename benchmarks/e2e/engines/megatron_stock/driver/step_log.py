@@ -1,4 +1,4 @@
-"""The shim that makes Megatron print the step line that the evaluation parses.
+"""The shim that makes Megatron print one step record per rank and step.
 
 This module imports torch and megatron inside its functions alone.
 """
@@ -10,10 +10,9 @@ from typing import Any, Callable
 
 from benchmarks.e2e.engines.megatron_stock.driver.markers import (
     H100_CLASS_BF16_PEAK_FLOPS,
-    STEP_LINE,
-    STEP_LINE_NO_LOSS,
     TRAINING_LOG_HEAD,
 )
+from benchmarks.e2e.engines.megatron_stock.steps import step_record
 
 
 def tokens_per_second(
@@ -37,35 +36,9 @@ def loss_value(loss_dict: dict) -> float | None:
         except (TypeError, ValueError, RuntimeError) as error:
             raise RuntimeError(
                 f"megatron's loss entry {key!r} is {value!r}, not one number; "
-                "the step line cannot state a loss"
+                "the step record cannot state a loss"
             ) from error
     return None
-
-
-def step_log_line(
-    *,
-    step: int,
-    loss: float | None,
-    grad_norm: float | None,
-    memory_bytes: int,
-    device_total_bytes: int,
-    tps: int,
-    tflops: float,
-    mfu: float,
-) -> str:
-    """One step line; a ``None`` gradient norm prints as ``nan``."""
-    fields = {
-        "step": step,
-        "grad_norm": float("nan") if grad_norm is None else grad_norm,
-        "memory": memory_bytes / 2**30,
-        "percent": 100 * memory_bytes / device_total_bytes,
-        "tps": tps,
-        "tflops": tflops,
-        "mfu": mfu,
-    }
-    if loss is None:
-        return STEP_LINE_NO_LOSS.format(**fields)
-    return STEP_LINE.format(loss=loss, **fields)
 
 
 def install_step_log_shim(
@@ -74,7 +47,7 @@ def install_step_log_shim(
     pipeline_degree: int,
     num_flops_per_token: int,
 ) -> Callable[[], None]:
-    """Wrap Megatron's ``training_log`` so that each rank prints one step line, and return the function that removes the wrap.
+    """Wrap Megatron's ``training_log`` so that each rank prints one step record, and return the function that removes the wrap.
 
     The clock starts before ``pretrain`` builds the model, so step 1 holds the build time.
     """
@@ -92,10 +65,10 @@ def install_step_log_shim(
         raise RuntimeError(
             "megatron's training_log takes "
             f"{head} where this driver forwards {TRAINING_LOG_HEAD}; the "
-            "step line would print the wrong value in a column, so the "
+            "step record would hold the wrong value in a field, so the "
             "shim refuses to install"
         )
-    state: dict[str, Any] = {"last": time.perf_counter(), "total": None}
+    state = {"last": time.perf_counter()}
 
     def replacement(
         loss_dict: dict,
@@ -124,10 +97,6 @@ def install_step_log_shim(
         now = time.perf_counter()
         elapsed = now - state["last"]
         state["last"] = now
-        if state["total"] is None:
-            state["total"] = torch.cuda.get_device_properties(
-                torch.cuda.current_device()
-            ).total_memory
         reserved = torch.cuda.max_memory_reserved()
         torch.cuda.reset_peak_memory_stats()
         tps = tokens_per_second(
@@ -135,13 +104,13 @@ def install_step_log_shim(
         )
         tflops = num_flops_per_token * tps / 1e12
         print(
-            step_log_line(
+            step_record(
                 step=iteration,
+                tokens_per_second=tps,
+                peak_memory_gib=reserved / 2**30,
                 loss=broadcast_pipeline_loss(loss_value(loss_dict)),
-                grad_norm=None if grad_norm is None else float(grad_norm),
-                memory_bytes=reserved,
-                device_total_bytes=state["total"],
-                tps=tps,
+                # Megatron states no norm on a skipped step, and a skipped step fails the arm.
+                grad_norm=float("nan") if grad_norm is None else float(grad_norm),
                 tflops=tflops,
                 mfu=100 * tflops / (H100_CLASS_BF16_PEAK_FLOPS / 1e12),
             ),

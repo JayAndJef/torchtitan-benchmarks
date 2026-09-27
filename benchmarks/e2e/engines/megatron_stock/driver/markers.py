@@ -56,24 +56,10 @@ STAGE_SIZE_LINE = (
 MODEL_SIZE_LINE = (
     "Model qwen3_piper_{size} stock-megatron size: {total} total parameters"
 )
-"""The whole-model parameter line that rule 11 reads; ``STAGE_SIZE_LINE`` above gives the count of one stage."""
-
-STEP_LINE = (
-    "step: {step:2}  loss: {loss:8.5f}  grad_norm: {grad_norm:7.4f}  "
-    "memory: {memory:5.2f}GiB({percent:.2f}%)  tps: {tps:,}  "
-    "tflops: {tflops:,.2f}  mfu: {mfu:.2f}%"
-)
-"""The step line that the evaluation parses, in the TorchTitan format."""
-
-STEP_LINE_NO_LOSS = (
-    "step: {step:2}  grad_norm: {grad_norm:7.4f}  "
-    "memory: {memory:5.2f}GiB({percent:.2f}%)  tps: {tps:,}  "
-    "tflops: {tflops:,.2f}  mfu: {mfu:.2f}%"
-)
-"""The step line of a rank that holds no loss."""
+"""The whole-model parameter line that the model fact reads; ``STAGE_SIZE_LINE`` gives the count of one stage."""
 
 H100_CLASS_BF16_PEAK_FLOPS = 989e12
-"""The peak that the mfu column divides by."""
+"""The peak FLOPS that the mfu figure of the step record divides by."""
 
 TRAINING_LOG_HEAD = (
     "loss_dict",

@@ -33,7 +33,13 @@ from benchmarks.e2e.checks import step_floor_refusals
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.profiling import partial_cycle_refusal
 from benchmarks.e2e.registry import DEFAULT_PROFILE, ENGINES, scenario_by_name
-from tests.engine_helpers import command, run_spec, validate, write_run_manifest
+from tests.engine_helpers import (
+    command,
+    run_spec,
+    titan_step_line,
+    validate,
+    write_run_manifest,
+)
 from tests.test_runner import _SAC_LINE, _SIZE_LINE, _compiled_line
 
 
@@ -248,11 +254,7 @@ class TracelessEvaluationTests(unittest.TestCase):
             (ENGINES.arm("titan_eager"),),
         )
         (root / "titan_eager.log").write_text(
-            "".join(
-                f"step: {step} loss: 1.0 grad_norm: 2.0 memory: 3.00GiB "
-                "tps: 1000\n"
-                for step in range(2, 6)
-            )
+            "".join(titan_step_line(step) for step in range(2, 6))
         )
         return root
 

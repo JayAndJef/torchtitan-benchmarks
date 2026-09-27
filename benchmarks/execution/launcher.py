@@ -18,6 +18,9 @@ TORCHRUN_MODULE = "torch.distributed.run"
 LOG_RANK_TEMPLATE = "[rank${rank}]:"
 """The prefix that torchrun puts on every line a rank writes."""
 
+RANK_PREFIX = r"\[rank\d+\]:"
+"""The regular expression of that prefix; a torn write can put one inside the line of another rank."""
+
 ALLOCATOR_POLICY = "expandable_segments:True"
 """The CUDA allocator policy of every training process."""
 
