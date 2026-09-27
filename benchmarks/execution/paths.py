@@ -1,29 +1,9 @@
-"""Where the repository, its submodules, and a run's caches live.
+"""Where the repository, the TorchTitan checkout and the build caches of a run live.
 
-Defined once, deliberately. ``BENCH_DIR`` is this file's own location walked
-back to the repository root and ``TITAN_DIR`` is derived from it, not read
-from the environment: there is no ``TITAN_DIR`` override and no
-``TITAN_PYTHON``, so a run cannot be pointed at a torchtitan checkout that
-the manifest's ``torchtitan_git_rev`` does not describe. The only thing that
-invalidates ``parents[2]`` is moving this file. Check the walk against the
-directory that holds ``run_bench.sh`` after any move, because a stale
-``.parent`` chain does not raise -- it silently relocates ``out/``, the
-caches, and the git-rev lookups.
-
-These constants are split out from the rest of ``execution/`` because they
-have consumers that are not the runners. ``benchmarks.artifacts.layout``
-takes ``BENCH_DIR`` alone to root the default output directory, and
-``benchmarks.e2e.engines.megatron_stock.driver.data`` -- which executes inside the *training*
-subprocess rather than the supervisor -- takes ``TITAN_DIR`` alone to find
-torchtitan's ``c4_test`` assets. Neither should have to import
-subprocess-launching machinery to spell a path.
-
-``RuntimePaths`` belongs here rather than beside ``runtime_environment``
-because it is a record of resolved locations that the environment builder
-then consumes; its own docstring has always said so. It resolves the cache
-root and the compiler-env script from a caller-supplied mapping, defaulting
-to ``os.environ`` only when none is passed, so a test or a resume can
-resolve a run's paths without touching the real environment.
+The paths follow from the location of this file and not from the
+environment, so a run cannot use a TorchTitan checkout that
+``torchtitan_git_rev`` does not describe. A worker module imports this
+module to find the TorchTitan assets without the launcher code.
 """
 
 from __future__ import annotations

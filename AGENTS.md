@@ -80,6 +80,7 @@ shares one pre-push hook.
 | `benchmarks/cli/` | The Click CLI: `benchmarks/cli/e2e.py`, `benchmarks/cli/kernel.py`, and the group in `benchmarks/cli/main.py`. |
 | `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/overrides.py`, `benchmarks/e2e/checks.py`, `benchmarks/e2e/evidence.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines/`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
 | `benchmarks/e2e/engines/megatron_stock/` | The stock Megatron-LM engine: its command line, its validation and, in `benchmarks/e2e/engines/megatron_stock/driver/`, the driver. |
+| `benchmarks/e2e/data/c4_replay.py` | The pre-tokenized c4_test stream that both engines read. |
 | `benchmarks/e2e/engines/torchtitan/plugins/` | The modules the TorchTitan trainer imports through `--module`: the config registry, the parallelize function and the pre-tokenized replay dataloader. |
 | `benchmarks/artifacts/` | `manifest.json` and its schema 18 reader, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
@@ -464,7 +465,7 @@ harness connects through the arm's `engine` name alone.
 | `benchmarks/e2e/engines/megatron_stock/driver/bootstrap.py` | Sets the process environment the driver needs before torch, adds `typing.override` for Python 3.10, then puts Megatron on `sys.path`. |
 | `benchmarks/e2e/engines/megatron_stock/driver/train.py` | Parses the harness flags, refuses a run it cannot honour, reproduces the stock training entry point and calls `pretrain`. |
 | `benchmarks/e2e/engines/megatron_stock/driver/markers.py` | The log lines this arm prints, and the functions that format one. |
-| `benchmarks/e2e/engines/megatron_stock/driver/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
+| `benchmarks/e2e/engines/megatron_stock/driver/data.py` | Packs the shared c4_test stream for Megatron's external dataloader. |
 | `benchmarks/e2e/engines/megatron_stock/driver/model_builder.py` | Builds the stock GPT model and prints the parameter count that the model fact reads. |
 | `benchmarks/e2e/engines/megatron_stock/driver/dp_marker.py` | The data-parallel line, printed from the wrapper Megatron really built. |
 | `benchmarks/e2e/engines/megatron_stock/driver/step_log.py` | The shim that prints one step record per rank and step. |
@@ -479,9 +480,10 @@ Faithfulness guarantees that hold today:
 
 - **Same shape.** Both engines build from the same shape record in
   `benchmarks/models/piper_qwen3/shape.py`.
-- **Same data.** The driver drains TorchTitan's own dataset class with
-  TorchTitan's own tokenizer. The test suite asserts that the stream is
-  bit-identical to the TorchTitan replay loader's.
+- **Same data.** Both engines read the samples that
+  `benchmarks.e2e.data.c4_replay:materialize` drains from TorchTitan's own
+  dataset class with TorchTitan's own tokenizer. The test suite asserts that
+  the loaders of both engines give that class's tokens bit for bit.
 - **Same batch mapping at one pipeline rank.** The flag list sends
   `--micro-batch-size 1`, and the geometry packs the whole local batch into
   one Megatron sample there. So that ratio is not biased by the mapping.
@@ -801,9 +803,10 @@ has no DDP class, and it prints the `piper1b data parallel` line after it
 counts the FSDP units. That line, and not TorchTitan's mesh line, proves
 the wrap, because TorchTitan logs the mesh before the function runs.
 
-The TorchTitan replay loader and the Megatron driver both materialize the
-samples of the whole run at startup. So no measured step pays a data cost,
-and each engine raises when a step asks for a sample past the last one.
+The TorchTitan replay loader and the Megatron driver both call
+`benchmarks.e2e.data.c4_replay:materialize` at startup, which reads the
+samples of the whole run. So no measured step pays a data cost, and each
+engine raises when a step asks for a sample past the last one.
 
 `benchmarks/e2e/engines/torchtitan/plugins/config_registry.py` and
 `benchmarks/models/piper_qwen3/titan_model.py` import private Qwen3

@@ -40,13 +40,15 @@ LAYERED_PACKAGES = ("benchmarks.e2e", "benchmarks.artifacts", "benchmarks.cli")
 # ``engines`` and below ``runner``, because the runner writes the manifest.
 LAYER_ORDER = (
     "benchmarks.e2e.engines.megatron_stock.driver",
-    "benchmarks.e2e.engines.torchtitan.plugins.replay",
-    "benchmarks.e2e.engines.torchtitan.plugins.parallelize",
-    "benchmarks.e2e.engines.torchtitan.plugins.config_registry",
     "benchmarks.cli.rendering",
     "benchmarks.artifacts.summaries",
     "benchmarks.e2e.parallelism",
     "benchmarks.e2e.engines.api",
+    "benchmarks.e2e.data.c4_replay",
+    "benchmarks.e2e.engines.megatron_stock.driver.data",
+    "benchmarks.e2e.engines.torchtitan.plugins.replay",
+    "benchmarks.e2e.engines.torchtitan.plugins.parallelize",
+    "benchmarks.e2e.engines.torchtitan.plugins.config_registry",
     "benchmarks.e2e.engines.torchtitan.config",
     "benchmarks.e2e.engines.megatron_stock.config",
     "benchmarks.e2e.overrides",
