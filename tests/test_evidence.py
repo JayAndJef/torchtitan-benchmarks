@@ -313,12 +313,14 @@ class RankStepsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rank 1 logs step 1 after step 3"):
             rank_steps(self.ENGINE, {1: _record(3) + _record(1)})
 
-    def test_validation_names_the_arm_and_the_log(self) -> None:
+    def test_validation_lists_the_order_failure_beside_the_others(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "arm.log"
             path.write_text(_record(2) + _record(1) + "Training completed\n")
             with self.assertRaisesRegex(
-                RuntimeError, r"megatron_stock: rank 0 logs step 1 after step 2; .*; see"
+                RuntimeError,
+                r"^megatron_stock: .*no rank states a parameter count.*; "
+                r"rank 0 logs step 1 after step 2; .*; see ",
             ):
                 validate(
                     run_spec(ac_mode="none", profile=False),
