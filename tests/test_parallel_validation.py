@@ -235,7 +235,7 @@ def _titan_log(spec: ParallelismSpec = PP2) -> str:
     """One rank's titan output: every log line the rules read, and nothing else.
 
     The two parallelism lines are what arm rule 12 matches. They are built
-    here from the same profile the validator uses, so this fixture cannot
+    here from the same functions the validator uses, so this fixture cannot
     drift from the rule -- what it pins is that a rank whose OTHER lines are
     wrong still fails, not the wording of these two.
     """
@@ -363,6 +363,20 @@ class RankCoverageTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
             with self.assertRaisesRegex(RuntimeError, "no trace"):
+                validate(
+                    run_spec(parallelism=PP2),
+                    ENGINES.arm("titan_compiled"),
+                    fixture.root,
+                    fixture.log,
+                )
+
+    def test_a_rank_outside_the_run_with_traces_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0, 1, 2))
+            fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
+            with self.assertRaisesRegex(
+                RuntimeError, "rank 2 wrote traces under .*, and the run declares 2 ranks"
+            ):
                 validate(
                     run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
@@ -812,7 +826,7 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     """The ``--megatron-p2p-sync`` half of arm rule 12.
 
     Each megatron driver prints its p2p line off the config it built, on
-    every rank. Above ``pp`` 1 the profile asks for that line with the
+    every rank. Above ``pp`` 1 the validation asks for that line with the
     ``batch_p2p_sync`` token the requested value implies, so a run that
     ignored the flag cannot be published under the label it was asked for.
     """
@@ -854,11 +868,11 @@ def _stock_log(
     """One rank's stock-driver output: every line the rules read.
 
     The mesh lines, the p2p line and the precision fields come from the
-    profile the validator uses; the nan guard line is the argument, so a
+    functions the validator uses; the nan guard line is the argument, so a
     test can give a rank the wrong value or no line at all.
 
     ``megatron_precision`` builds the precision fields for a value. The
-    profile asks for them under BOTH values, so a fixture that omitted
+    validation asks for them under BOTH values, so a fixture that omitted
     them would fail every stock arm.
     """
     data = scenario_by_name("engines").data
@@ -881,7 +895,7 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     """The ``--megatron-nan-guard`` half of arm rule 12.
 
     The stock driver prints ``check_for_nan_in_loss_and_grad`` as Megatron
-    parsed it, on every rank at every mesh. The profile asks for that line
+    parsed it, on every rank at every mesh. The validation asks for that line
     with the token the requested value implies, so a run whose argv lost
     the token cannot be published under the label it was asked for.
     """
@@ -962,7 +976,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
     """The ``--megatron-precision`` half of arm rule 12.
 
     The stock driver prints the four precision fields off the arguments
-    Megatron resolved, on every rank at every mesh. The profile asks for
+    Megatron resolved, on every rank at every mesh. The validation asks for
     them under BOTH values: a ``stock`` label is a claim about the
     optimizer state exactly as a ``lean`` label is, so a run that gained
     the lean flags must fail a stock label as surely as a run that lost

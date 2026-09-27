@@ -36,6 +36,7 @@ from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.results import evaluate_run
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
+from benchmarks.execution.launcher import LAUNCHER_KEYS
 from benchmarks.execution.paths import BENCH_DIR
 
 
@@ -436,8 +437,8 @@ def _schema_19_facts(
 ) -> None:
     """Copy into ``expected`` the two arm facts that schema 18 did not record.
 
-    Plan 2.9 adds ``env_delta``, and each of its keys must hold the value
-    that the golden launch gave the child. Section C gives every arm an
+    Plan 2.9 adds ``env_delta``: it must hold the launcher's keys, each with
+    the value that the golden launch gave the child. Section C gives every arm an
     execution model, and schema 18 recorded one for the TorchTitan arms
     alone; ``tests/test_engines.py`` pins the Megatron strings.
     """
@@ -447,6 +448,11 @@ def _schema_19_facts(
         if found is None:
             continue
         delta = found["env_delta"]
+        if set(delta) != LAUNCHER_KEYS:
+            raise AssertionError(
+                f"{arm['name']}: env_delta holds {sorted(delta)}, and every "
+                f"launch of both engines sets {sorted(LAUNCHER_KEYS)} alone"
+            )
         env = launched[arm["name"]]["env"]
         wrong = {key: value for key, value in delta.items() if env.get(key) != value}
         if wrong:

@@ -187,7 +187,7 @@ the message gives the `--set` spelling of its value.
 | `--megatron-nan-guard` | `megatron_stock.nan_guard=<value>` |
 | `--megatron-precision` | `megatron_stock.precision=<value>` |
 | `--megatron-arg` | `megatron_stock.extra_flags+=<flags>` |
-| `--torchtitan-arg` | `titan_compiled.extra_flags+=<flags>` and `titan_eager.extra_flags+=<flags>` |
+| `--torchtitan-arg` | `titan_compiled.extra_flags+=<flags>` or `titan_eager.extra_flags+=<flags>`, once for each selected arm |
 
 ### Engine passthrough
 
@@ -201,7 +201,7 @@ the harness flags, and both parsers keep the last value of a repeated flag.
 Each engine holds three flag tables. The TorchTitan tables are in
 `benchmarks/e2e/engines/torchtitan/flags.py`, and the Megatron tables are
 in `benchmarks/e2e/engines/megatron_stock/flags.py`. The owned table maps each harness
-option to the flags it sets. The pinned table holds the flags that keep the
+option or `--set` field to the flags it sets. The pinned table holds the flags that keep the
 two engines on the same work: the optimizer, the routing, the data, the step
 lines and the timed steps. The perf table holds the flags a passthrough may
 set. A passthrough flag in the owned or pinned table is refused, and the
@@ -349,7 +349,7 @@ that this file uses; the code names each rule by its message.
 | 6 | a declared `trace_kernel_markers` string absent from every trace | both | yes |
 | 8 | a compile log line that contradicts the arm's own compile value | TorchTitan | no |
 | 10 | a SelectiveAC line that contradicts `--ac` | TorchTitan | no |
-| 11 | a parameter count other than the shape's; now the model fact | harness | no |
+| 11 | a parameter count other than the shape's, which the model fact refuses | harness | no |
 | 12 | a log that lacks a mesh line, the sync line, the NaN-guard line or the precision fields the run asked for | both | no |
 | 13 | a rank whose traces carry no all-reduce kernel, above one data-parallel rank | both | yes |
 

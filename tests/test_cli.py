@@ -376,8 +376,9 @@ class CliTests(unittest.TestCase):
             (
                 ("--torchtitan-arg", "--training.gc-freq 50"),
                 "--torchtitan-arg '--training.gc-freq 50' is now --set "
-                "'titan_compiled.extra_flags+=--training.gc-freq 50' --set "
-                "'titan_eager.extra_flags+=--training.gc-freq 50'",
+                "'titan_compiled.extra_flags+=--training.gc-freq 50' or --set "
+                "'titan_eager.extra_flags+=--training.gc-freq 50', once for "
+                "each selected arm",
             ),
         ):
             with self.subTest(option=arguments[0]):

@@ -114,11 +114,19 @@ def trace_refusals(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
     spec = run.parallelism
     windows = count_trace_windows(arm_dir)
     ranks = range(spec.world_size)
-    refusals = [
-        f"rank {rank} wrote no trace under {arm_dir}"
-        for rank in ranks
-        if spec.world_size > 1 and rank not in windows
-    ]
+    refusals = []
+    if spec.world_size > 1:
+        refusals.extend(
+            f"rank {rank} wrote no trace under {arm_dir}"
+            for rank in ranks
+            if rank not in windows
+        )
+        refusals.extend(
+            f"rank {rank} wrote traces under {arm_dir}, and the run declares "
+            f"{spec.world_size} ranks"
+            for rank in windows
+            if rank >= spec.world_size
+        )
     minimum = run.window.min_windows
     for rank, count in (windows or {0: 0}).items():
         if count < minimum:

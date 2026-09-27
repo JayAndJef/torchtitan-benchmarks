@@ -374,7 +374,7 @@ def write_results(result: EvaluationResult, path: Path | None = None) -> Path:
     return destination
 
 
-def _rendertrajectory(values: list[tuple[int, float]], nonfinite_label: str) -> str:
+def _render_trajectory(values: list[tuple[int, float]], nonfinite_label: str) -> str:
     if not values:
         return "(no log)"
     picks = [values[0]] + [values[i] for i in (9, 19, 29, 39) if i < len(values)]
@@ -413,14 +413,14 @@ def render_evaluation(result: EvaluationResult) -> str:
 
     lines.extend(["", "loss trajectories (sanity check, not a measurement):"])
     for arm in result.arms:
-        lines.append(f"  {arm:22s} {_rendertrajectory(result.losses[arm], 'LOSS')}")
+        lines.append(f"  {arm:22s} {_render_trajectory(result.losses[arm], 'LOSS')}")
     lines.extend(
         ["", "gradient norm trajectories (sanity check, not a measurement):"]
     )
     for arm in result.arms:
         lines.append(
             f"  {arm:22s} "
-            f"{_rendertrajectory(result.gradient_norms[arm], 'GRAD NORM')}"
+            f"{_render_trajectory(result.gradient_norms[arm], 'GRAD NORM')}"
         )
 
     if result.warnings:

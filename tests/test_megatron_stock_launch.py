@@ -1,12 +1,12 @@
-"""The wiring of the stock Megatron-LM scenario: argv, profile, registry.
+"""The wiring of the stock Megatron-LM scenario: argv, validation, registry.
 
 Three things join here, and each can fail silently:
 
 1. The engine command must build the stock argv and must leave every other
    arm's argv alone. A stray token at the trivial spec changes what every
    existing scenario measures, and no rule reads a command line back.
-2. The ``megatron_stock`` validation profile must prove the mesh. A profile
-   that proves nothing passes, which is worse than no profile.
+2. The ``megatron_stock`` validation must prove the mesh. A validation
+   that proves nothing passes, which is worse than no validation.
 3. The scenario must decline every mode its Megatron arm cannot honor, and
    must still admit a TorchTitan-only subset.
 
@@ -63,7 +63,7 @@ STOCK_PACKAGE = "benchmarks.e2e.engines.megatron_stock"
 # The mesh of the run matrix: two pipelines of four stages, eight GPUs.
 MESH = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4)
 # The same mesh under the other zero value, plus the expert
-# split that value makes legal. Every marker the profile builds moves
+# split that value makes legal. Every marker the validation builds moves
 # between the two, so a test that reads only MESH proves half the
 # contract.
 SHARDED_MESH = ParallelismSpec(
@@ -113,12 +113,12 @@ BENCH_FLAG_NAMES = (
     "--bench-profiler-active",
 )
 
-# The log fragments the driver and this profile must agree on, character for
+# The log fragments the driver and this validation must agree on, character for
 # character. They are the parts of the four marker strings that carry no
 # interpolated value, so they appear as literals in the driver's own source.
 #
 # ``StockMarkerContractTests`` pins them in both directions: every fragment
-# is a substring of a marker this profile really builds, and every fragment
+# is a substring of a marker this validation really builds, and every fragment
 # appears in the driver package's source.
 STOCK_LOG_FRAGMENTS = (
     "Training completed",
@@ -170,7 +170,7 @@ STOCK_OVERLAP_FRAGMENTS = {
     1: "(overlap_grad_reduce=False, grad_reduce_in_fp32=True,",
 }
 
-# The rest of the driver's own line. The profile's first precision marker
+# The rest of the driver's own line. The validation's first precision marker
 # stops at the open bracket, so no rule matches these fields twice.
 #
 # **Four of them carry a run-time rule now.** ``precision_markers`` is the
@@ -754,7 +754,7 @@ class StockValidationTests(unittest.TestCase):
         )
 
     def test_the_profile_proves_no_compile_treatment(self) -> None:
-        """``compile_marker`` is None, so rule 8 asks this engine nothing.
+        """No line proves a compile treatment, so rule 8 asks this engine nothing.
 
         megatron-core compiles no whole layer, so no log line proves the
         treatment either way. The Megatron config has no compile field.
@@ -1039,7 +1039,7 @@ class StockValidationTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 4. The contract between this profile and the driver the other agent owns.
+# 4. The contract between this validation and the driver the other agent owns.
 # --------------------------------------------------------------------------
 
 
@@ -1048,7 +1048,7 @@ class _StockArgs:
 
     Megatron's own parser produces these. Building them from a
     ``ParallelismSpec`` is what lets this module compare the driver's real
-    line against the profile's marker without a Megatron-LM checkout.
+    line against the validation's marker without a Megatron-LM checkout.
 
     ``expert_model_parallel_size`` is the flag verbatim, which is what
     Megatron's parser holds at the point the driver prints this line: no
@@ -1165,7 +1165,7 @@ def _driver_lines() -> list[str]:
 class StockMarkerContractTests(unittest.TestCase):
     """The marker strings, pinned in both directions.
 
-    A one-character difference between the driver's line and this profile's
+    A one-character difference between the driver's line and this validation's
     marker fails a real eight-GPU run at arm rule 12, hours after it
     started. These fragments are the parts of the four marker strings that
     carry no interpolated value.
@@ -1179,7 +1179,7 @@ class StockMarkerContractTests(unittest.TestCase):
     def test_every_fragment_belongs_to_a_marker_this_profile_builds(
         self,
     ) -> None:
-        """The fragments cannot drift away from the profile."""
+        """The fragments cannot drift away from the validation."""
         built = [
             COMPLETION_LINE,
             *precision_markers("stock"),
@@ -1193,7 +1193,7 @@ class StockMarkerContractTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertTrue(
                     any(fragment in marker for marker in built),
-                    f"{fragment!r} is in no marker this profile builds",
+                    f"{fragment!r} is in no marker this validation builds",
                 )
 
     def test_the_driver_prints_every_fragment(self) -> None:
@@ -1203,7 +1203,7 @@ class StockMarkerContractTests(unittest.TestCase):
         searched for in its source. A source search cannot see a fragment
         that spans an interpolated field, and the driver writes
         ``schedule={schedule} microbatches=`` rather than the literal the
-        profile matches.
+        validation matches.
 
         Importing the driver costs no torch and no megatron: every heavy
         import in ``train.py`` sits inside ``main``.
