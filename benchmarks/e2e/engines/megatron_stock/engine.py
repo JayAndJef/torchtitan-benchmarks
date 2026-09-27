@@ -34,6 +34,7 @@ from benchmarks.e2e.parallelism import (
     degree_terms,
     device_term,
 )
+from benchmarks.execution.paths import TITAN_DIR
 
 
 class MegatronStockEngine(Engine):
@@ -112,6 +113,8 @@ class MegatronStockEngine(Engine):
             ),
             processes="per_rank",
             pin=True,
+            # Both engines start in one working directory, so a relative path names one file.
+            cwd=TITAN_DIR,
         )
 
     def execution_model(self, run: RunSpec, arm: Arm) -> str:

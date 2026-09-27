@@ -97,6 +97,8 @@ class Launch:
     """The engine's own child environment keys; a launcher-owned key is refused."""
     host_compiler: bool = False
     """Whether the processes need the environment of the ``--compiler-env`` script."""
+    cwd: Path | None = None
+    """The working directory of the processes; ``None`` keeps the working directory of the harness."""
 
     def __post_init__(self) -> None:
         if self.target[:1] != ("-m",):
