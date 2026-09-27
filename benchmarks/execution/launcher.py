@@ -72,8 +72,7 @@ def command_line(
 ) -> tuple[str, ...]:
     """The argv: the pinning prefix, the interpreter, torchrun, then the target.
 
-    Raises ``ValueError`` when the launch sets a key that the launcher owns,
-    so the runner refuses the run before an arm starts.
+    Raises ``ValueError`` when the launch sets a key that the launcher owns.
     """
     collisions = sorted(set(launch.env) & LAUNCHER_KEYS)
     if collisions:

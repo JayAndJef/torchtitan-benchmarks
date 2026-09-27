@@ -5,8 +5,8 @@ the arm's config and returns a ``Launch``, and each engine in
 ``benchmarks.e2e.engines`` calls its own builder.
 
 At the trivial parallelism spec no ``--parallelism.*`` token appears.
-``tests/test_megatron_stock_launch.py`` asserts that over every arm of every
-scenario.
+``tests/test_megatron_stock_launch.py`` asserts that over every TorchTitan
+arm of every scenario.
 """
 
 from __future__ import annotations

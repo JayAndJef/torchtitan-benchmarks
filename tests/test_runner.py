@@ -2153,6 +2153,19 @@ class ResumeTests(unittest.TestCase):
                     environment=environment,
                 )
 
+            manifest_path = out_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["profile"] = True
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(
+                ValueError, "records profile True with warmup_steps 10"
+            ):
+                execute_run(
+                    resumed,
+                    process_runner=fake_process,
+                    environment=environment,
+                )
+
     def test_resume_rehydrates_the_recorded_ac_mode(self) -> None:
         metadata = {
             "requested_gpu": "0",
