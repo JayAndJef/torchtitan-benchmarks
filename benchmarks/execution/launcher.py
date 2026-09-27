@@ -47,6 +47,12 @@ def holds_rank_prefix(text: str) -> bool:
     return re.search(RANK_PREFIX, text) is not None
 
 
+def own_line(rank: int, line: str) -> str:
+    """``line`` without the prefix of ``rank``, which a log of one rank keeps at the start of each line."""
+    own = LOG_RANK_TEMPLATE.replace("${rank}", str(rank))
+    return line[len(own) :] if line.startswith(own) else line
+
+
 @dataclass(frozen=True)
 class LaunchedCommand:
     """The processes of one arm, as the process runner starts them."""

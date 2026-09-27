@@ -6,7 +6,7 @@ import re
 from types import MappingProxyType
 
 from benchmarks.e2e.engines.api import DroppedLine, StepRead, StepSample
-from benchmarks.execution.launcher import RANK_PREFIX, holds_rank_prefix
+from benchmarks.execution.launcher import RANK_PREFIX, holds_rank_prefix, own_line
 
 
 COLOR_CODE = re.compile(r"\x1b\[[0-9;]*m")
@@ -29,9 +29,6 @@ STEP_LINE = re.compile(
 
 STEP_NUMBER = re.compile(r"step:\s*(\d+)")
 """The step of a step line; the marker holds its first digit."""
-
-LEADING_PREFIX = re.compile(rf"^{RANK_PREFIX}")
-"""The rank prefix that a log of one rank keeps at the start of each line."""
 
 NO_LOSS = -1.0
 """The loss that the fork logs on a pipeline rank that holds no loss."""
@@ -59,12 +56,11 @@ def read_steps(rank: int, text: str) -> StepRead:
     samples = []
     dropped = []
     for number, line in enumerate(text.splitlines(), start=1):
-        plain = COLOR_CODE.sub("", line)
+        plain = COLOR_CODE.sub("", own_line(rank, line))
         marker = STEP_MARKER.search(plain)
         if marker is None:
             continue
-        lead = LEADING_PREFIX.match(plain)
-        if holds_rank_prefix(plain[lead.end() if lead else 0 : marker.start()]):
+        if holds_rank_prefix(plain[: marker.start()]):
             # The step line belongs to a line that a torn write appended.
             continue
         match = STEP_LINE.fullmatch(plain, marker.start())
