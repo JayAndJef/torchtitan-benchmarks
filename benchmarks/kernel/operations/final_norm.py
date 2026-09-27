@@ -252,7 +252,7 @@ def titan_final_norm_module(shape: PiperShape):
     enough here: there is no per-layer node to select, and no arithmetic over
     ``n_layers`` anywhere in this scenario.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     return _piper_1b_model(fuse_qkv=True, shape=shape).norm.build()
 

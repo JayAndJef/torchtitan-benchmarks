@@ -295,6 +295,20 @@ def _launcher_sets_rank_logging_at_one_rank(record: dict[str, Any]) -> None:
         launched["env"]["TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE"] = "[rank${rank}]:"
 
 
+def _titan_config_moves_into_the_engine_package(record: dict[str, Any]) -> None:
+    for _, argv in _argvs(record):
+        for index, token in enumerate(argv[:-1]):
+            if token == "--module" and argv[index + 1] == OLD_TITAN_MODULE:
+                argv[index + 1] = TITAN_MODULE
+    workload = record["manifest"]["workload"]
+    if workload["module"] == OLD_TITAN_MODULE:
+        workload["module"] = TITAN_MODULE
+
+
+OLD_TITAN_MODULE = "benchmarks.models.piper_qwen3"
+TITAN_MODULE = "benchmarks.e2e.engines.torchtitan.plugins"
+
+
 @dataclass(frozen=True)
 class AcceptedDifference:
     """One change from the baseline that the plan names, and its reason."""
@@ -345,6 +359,14 @@ ACCEPTED_DIFFERENCES = (
         "only after the loop, so the harness values always won and "
         "llama3 was never loaded.",
         None,
+    ),
+    AcceptedDifference(
+        "Plan 4: the TorchTitan config registry moves into the TorchTitan "
+        "engine package, so '--module' and the recorded workload module "
+        "name benchmarks.e2e.engines.torchtitan.plugins. The fork imports "
+        "'<module>.config_registry' first, so the trainer finds the same "
+        "config functions.",
+        _titan_config_moves_into_the_engine_package,
     ),
 )
 """The changes from the baseline that the plan names or that the review accepted."""

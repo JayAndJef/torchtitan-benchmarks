@@ -305,7 +305,7 @@ def titan_lm_head_module(shape: PiperShape, device: torch.device):
     calls ``init_weights``. It only chooses values, which a GEMM's cost does
     not depend on and which this arm overwrites.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     node = _piper_1b_model(fuse_qkv=True, shape=shape).lm_head
     previous_dtype = torch.get_default_dtype()

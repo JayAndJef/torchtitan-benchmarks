@@ -127,7 +127,7 @@ class _McoreOrderingRouter(nn.Module):
 
 def _titan_router_config(shape: PiperShape):
     """The production TorchTitan MoE node, built at the toy shape."""
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     return _piper_1b_model(fuse_qkv=True, shape=shape).layers[LAYER].moe
 

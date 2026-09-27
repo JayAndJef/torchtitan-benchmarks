@@ -56,72 +56,15 @@ from torchtitan.config import TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.models.common import CosSinRoPE, Embedding, Linear
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.qwen3 import (
-    _build_qwen3_moe_layers,
-    _EMBEDDING_INIT,
-    _output_linear_init,
-    _qwen3_norm,
-    Qwen3Model,
-)
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
-# See "Reverse edge, pending resolution" above: models/ -> e2e/.
-from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataLoader
-from benchmarks.models.piper_qwen3.parallelize import parallelize_piper1b
+from benchmarks.e2e.engines.torchtitan.plugins.parallelize import parallelize_piper1b
+from benchmarks.e2e.engines.torchtitan.plugins.replay import PretokenizedReplayDataLoader
 from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
-
-
-def _piper_1b_model(
-    *, fuse_qkv: bool, shape: PiperShape, attn_backend: str = "flex"
-) -> Qwen3Model.Config:
-    dim = shape.dim
-    head_dim = shape.head_dim
-    n_layers = shape.n_layers
-    vocab_size = shape.vocab_size
-    layers = _build_qwen3_moe_layers(
-        fuse_qkv=fuse_qkv,
-        n_layers=n_layers,
-        dim=dim,
-        n_heads=shape.n_heads,
-        n_kv_heads=shape.n_kv_heads,
-        head_dim=head_dim,
-        moe_hidden_dim=shape.moe_hidden_dim,
-        num_experts=shape.num_experts,
-        top_k=shape.top_k,
-        attn_backend=attn_backend,
-        moe_comm_backend="standard",
-        rope=CosSinRoPE.Config(
-            dim=head_dim,
-            max_seq_len=shape.max_seq_len,
-            theta=shape.rope_theta,
-        ),
-    )
-    # piper sets load_balance_coeff=None (no aux-free load balancing); the
-    # torchtitan builder defaults to 1e-3, so match piper explicitly.
-    for layer in layers:
-        layer.moe.load_balance_coeff = None
-    return Qwen3Model.Config(
-        vocab_size=vocab_size,
-        dim=dim,
-        norm=_qwen3_norm(dim),
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            # Real init: weight tying is OFF (as in piper), so the embedding is
-            # a free parameter. (_EMBEDDING_SKIP_INIT is only valid with tying.)
-            param_init=_EMBEDDING_INIT,
-        ),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=layers,
-    )
+from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
 
 # The ``1b`` in every public name below is the config family and not the

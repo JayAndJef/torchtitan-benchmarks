@@ -36,10 +36,10 @@ from benchmarks.e2e.registry import (
     ENGINES,
     scenario_by_name,
 )
+from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
 from benchmarks.e2e.validation import (
     ALL_REDUCE_MARKER,
     MEGATRON_STOCK_PROFILE,
-    TORCHTITAN_PROFILE,
 )
 from benchmarks.execution.launcher import LOG_RANK_TEMPLATE, launcher_environment
 from benchmarks.e2e.engines.api import Launch
@@ -660,7 +660,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         torch into the parent -- so the string is stated twice and this test
         is the link.
         """
-        from benchmarks.models.piper_qwen3.parallelize import (
+        from benchmarks.e2e.engines.torchtitan.plugins.parallelize import (
             DATA_PARALLEL_LINE,
         )
 
@@ -1120,7 +1120,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         import torch.nn as nn
         from torchtitan.config import ParallelismConfig, TrainingConfig
 
-        from benchmarks.models.piper_qwen3 import parallelize as module
+        from benchmarks.e2e.engines.torchtitan.plugins import parallelize as module
 
         class _Wrapped(nn.Module):
             pass
@@ -1212,7 +1212,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         import torch.nn as nn
         from torchtitan.config import ParallelismConfig, TrainingConfig
 
-        from benchmarks.models.piper_qwen3 import parallelize as module
+        from benchmarks.e2e.engines.torchtitan.plugins import parallelize as module
 
         sentinel = nn.Linear(2, 2)
         for name, dims in (

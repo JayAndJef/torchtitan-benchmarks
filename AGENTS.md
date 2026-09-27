@@ -80,12 +80,12 @@ shares one pre-push hook.
 | `benchmarks/cli/` | The Click CLI: `benchmarks/cli/e2e.py`, `benchmarks/cli/kernel.py`, and the group in `benchmarks/cli/main.py`. |
 | `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/launch.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines/`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
 | `benchmarks/e2e/megatron_stock/` | The stock Megatron-LM driver and its command line. |
-| `benchmarks/e2e/data/piper_qwen3.py` | The pre-tokenized replay dataloader. |
+| `benchmarks/e2e/engines/torchtitan/plugins/` | The modules the TorchTitan trainer imports through `--module`: the config registry, the parallelize function and the pre-tokenized replay dataloader. |
 | `benchmarks/artifacts/` | `manifest.json`, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
 | `benchmarks/execution/` | Subprocess environment, the launcher in `benchmarks/execution/launcher.py`, device parsing, CPU pinning and provenance. |
 | `benchmarks/kernel/` | The kernel-isolation system: registry, spans, runner, worker, timing engine, results. |
-| `benchmarks/models/piper_qwen3/` | The model port: `benchmarks/models/piper_qwen3/shape.py`, `benchmarks/models/piper_qwen3/config_registry.py`, `benchmarks/models/piper_qwen3/parallelize.py`, the Megatron model builder and the kernel components. |
+| `benchmarks/models/piper_qwen3/` | The model port: `benchmarks/models/piper_qwen3/shape.py`, the TorchTitan model config in `benchmarks/models/piper_qwen3/titan_model.py`, the Megatron model builder and the kernel components. |
 | `tools/` | `tools/run_matrix.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |
 | `tests/` | The CPU and GPU test suite. |
 | `third_party/torchtitan/` | Our TorchTitan fork, pinned. |
@@ -665,20 +665,20 @@ upstream does not have, and a rebase must preserve the two this code still
 needs:
 
 - **`--config-arg KEY=VALUE`**, which the fork's config manager forwards as
-  a keyword to the config function. `benchmarks/e2e/launch.py` sends
+  a keyword to the config function. `benchmarks/e2e/engines/torchtitan/flags.py` sends
   `--config-arg size=<name>`, so `--model-size` rides on it.
 - **Static varlen metadata across steps**, which pads the packed sequence
   offsets to a fixed multiple and pins the maximum sequence length.
   `benchmarks/kernel/operations/attention_core.py` depends on that padding,
   and it also removes a per-forward device-to-host sync.
 
-`benchmarks/models/piper_qwen3/parallelize.py` additionally needs
+`benchmarks/e2e/engines/torchtitan/plugins/parallelize.py` additionally needs
 `parallelize_qwen3`'s `skip_dp` keyword and its ordering guarantee:
 activation checkpointing, then the per-block compile, then the early return
 before mesh resolution.
 
-`benchmarks/models/piper_qwen3/config_registry.py` imports private Qwen3
-helpers. After a bump, verify that each of these still exists with unchanged
+`benchmarks/e2e/engines/torchtitan/plugins/config_registry.py` and
+`benchmarks/models/piper_qwen3/titan_model.py` import private Qwen3 helpers. After a bump, verify that each of these still exists with unchanged
 behaviour:
 
 - `_build_qwen3_moe_layers`, `_EMBEDDING_INIT`, `_output_linear_init`,

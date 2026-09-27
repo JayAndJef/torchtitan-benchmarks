@@ -6,12 +6,10 @@ from pathlib import Path
 
 from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, Launch, RunSpec
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
-from benchmarks.e2e.launch import titan_launch
+from benchmarks.e2e.engines.torchtitan.flags import titan_launch
+from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
 from benchmarks.e2e.parallelism import PP_SCHEDULES
-from benchmarks.e2e.validation import (
-    TORCHTITAN_PROFILE,
-    validate_against_profile,
-)
+from benchmarks.e2e.validation import validate_against_profile
 
 
 class TorchTitanEngine(Engine):

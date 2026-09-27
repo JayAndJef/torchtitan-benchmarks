@@ -17,7 +17,8 @@ from benchmarks.e2e.engines.api import Arm, CompileMode
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
-from benchmarks.e2e.launch import megatron_stock_launch, titan_launch
+from benchmarks.e2e.engines.torchtitan.flags import titan_launch
+from benchmarks.e2e.launch import megatron_stock_launch
 from benchmarks.e2e.megatron_stock.flags import (
     ALWAYS_OMITTED_FLAGS,
     stock_megatron_flags,

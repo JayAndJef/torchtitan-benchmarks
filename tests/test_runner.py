@@ -39,12 +39,12 @@ from dataclasses import fields, replace
 from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     PiperOptimizedCrossEntropyLoss,
 )
-from benchmarks.models.piper_qwen3.config_registry import (
+from benchmarks.e2e.engines.torchtitan.plugins.config_registry import (
     qwen3_piper_1b,
     qwen3_piper_1b_pretokenized,
 )
 from torchtitan.components.loss import CrossEntropyLoss
-from benchmarks.models.piper_qwen3.parallelize import (
+from benchmarks.e2e.engines.torchtitan.plugins.parallelize import (
     DATA_PARALLEL_LINE,
     parallelize_piper1b,
     skip_data_parallel,
@@ -149,7 +149,7 @@ class ScenarioTests(unittest.TestCase):
             for arm in scenario.arms:
                 if engine_for(arm).name == "torchtitan":
                     self.assertEqual(
-                        arm.config.module, "benchmarks.models.piper_qwen3"
+                        arm.config.module, "benchmarks.e2e.engines.torchtitan.plugins"
                     )
                     self.assertEqual(
                         arm.config.config, "qwen3_piper_1b_pretokenized"
@@ -1203,7 +1203,7 @@ class ParallelizeTests(unittest.TestCase):
         )
         sentinel = object()
         with mock.patch(
-            "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+            "benchmarks.e2e.engines.torchtitan.plugins.parallelize.parallelize_qwen3",
             return_value=sentinel,
         ) as delegate:
             result = parallelize_piper1b(
@@ -1265,10 +1265,10 @@ class ParallelizeTests(unittest.TestCase):
 
         model = nn.Sequential(_Wrapped(), _Wrapped(), nn.Linear(2, 2))
         with mock.patch(
-            "benchmarks.models.piper_qwen3.parallelize.FSDPModule", _Wrapped
+            "benchmarks.e2e.engines.torchtitan.plugins.parallelize.FSDPModule", _Wrapped
         ):
             with mock.patch(
-                "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+                "benchmarks.e2e.engines.torchtitan.plugins.parallelize.parallelize_qwen3",
                 return_value=model,
             ) as delegate:
                 with self.assertLogs(level="INFO") as logs:
@@ -1299,10 +1299,10 @@ class ParallelizeTests(unittest.TestCase):
             pass
 
         with mock.patch(
-            "benchmarks.models.piper_qwen3.parallelize.FSDPModule", _Wrapped
+            "benchmarks.e2e.engines.torchtitan.plugins.parallelize.FSDPModule", _Wrapped
         ):
             with mock.patch(
-                "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+                "benchmarks.e2e.engines.torchtitan.plugins.parallelize.parallelize_qwen3",
                 return_value=nn.Linear(2, 2),
             ):
                 with self.assertRaisesRegex(
@@ -1328,7 +1328,7 @@ class ParallelizeTests(unittest.TestCase):
             dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
         )
         with mock.patch(
-            "benchmarks.models.piper_qwen3.parallelize.parallelize_qwen3",
+            "benchmarks.e2e.engines.torchtitan.plugins.parallelize.parallelize_qwen3",
             return_value=nn.Linear(2, 2),
         ):
             with self.assertLogs(level="INFO") as logs:
@@ -1401,7 +1401,7 @@ class CommandTests(unittest.TestCase):
                 "-m",
                 "torchtitan.train",
                 "--module",
-                "benchmarks.models.piper_qwen3",
+                "benchmarks.e2e.engines.torchtitan.plugins",
                 "--config",
                 "qwen3_piper_1b_pretokenized",
             ],
@@ -1483,8 +1483,8 @@ class EnginesScenarioTests(unittest.TestCase):
             self.assertEqual(engine_for(arm).name, "torchtitan")
 
     def test_every_titan_arm_reads_the_replay_stream(self) -> None:
-        import benchmarks.models.piper_qwen3.config_registry as registry
-        from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataLoader
+        import benchmarks.e2e.engines.torchtitan.plugins.config_registry as registry
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import PretokenizedReplayDataLoader
 
         scenario = scenario_by_name("engines")
         config_names = {

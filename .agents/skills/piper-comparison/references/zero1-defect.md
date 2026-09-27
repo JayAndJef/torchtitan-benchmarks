@@ -114,7 +114,7 @@ it must therefore shard too -- ZeRO-2 (`optim_grads`) or ZeRO-3
 two memory strategies rather than two engines. **Replicated-on-both is the
 right parity only while `ep` is 1.** This repository's `piper_megatron_stock`
 scenario is built on replicated parity and its
-`benchmarks/models/piper_qwen3/parallelize.py` refuses `dp_shard > 1`, so
+`benchmarks/e2e/engines/torchtitan/plugins/parallelize.py` refuses `dp_shard > 1`, so
 an expert cell there needs a decision about which parity it measures before
 it needs any code.
 
