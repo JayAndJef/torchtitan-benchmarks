@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from benchmarks.e2e.engines.api import MeshObserved, RankEvidence
+from benchmarks.e2e.validation import one_value
 
 
 COMPLETION_LINE = "Training completed"
@@ -26,16 +27,6 @@ DATA_PARALLEL_LINE = re.compile(
 """The data-parallel mesh that the parallelize plug-in wraps."""
 
 
-def _one(rank: int, fact: str, values: set) -> object | None:
-    """The one value of ``fact`` that a rank states, or ``None``; two values raise."""
-    if len(values) > 1:
-        raise RuntimeError(
-            f"rank {rank} states two values of its {fact}: "
-            + ", ".join(sorted(str(value) for value in values))
-        )
-    return next(iter(values), None)
-
-
 def read_evidence(rank: int, text: str) -> RankEvidence:
     """The evidence in one rank's log; a rank that states no mesh ran on one device."""
     if not text.strip():
@@ -49,8 +40,8 @@ def read_evidence(rank: int, text: str) -> RankEvidence:
         tuple(int(group) for group in match.groups())
         for match in DATA_PARALLEL_LINE.finditer(text)
     }
-    stated = _one(rank, "mesh", meshes)
-    data_parallel = _one(rank, "data-parallel mesh", wrapped)
+    stated = one_value(rank, "mesh", meshes)
+    data_parallel = one_value(rank, "data-parallel mesh", wrapped)
     pp, replicate, shard, ep = stated or (1, *(data_parallel or (1, 1)), 1)
     if data_parallel is not None and data_parallel != (replicate, shard):
         raise RuntimeError(
@@ -62,7 +53,7 @@ def read_evidence(rank: int, text: str) -> RankEvidence:
     return RankEvidence(
         rank=rank,
         completed=COMPLETION_LINE in text,
-        param_count=_one(rank, "parameter count", counts),
+        param_count=one_value(rank, "parameter count", counts),
         mesh=MeshObserved(
             dp=dp,
             pp=pp,
