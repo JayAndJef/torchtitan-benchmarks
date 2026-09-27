@@ -41,9 +41,13 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.runner import _resolve_run
+from benchmarks.e2e.engines.megatron_stock.evidence import (
+    COMPLETION_LINE,
+    read_evidence,
+)
 from benchmarks.e2e.engines.megatron_stock.validate import (
-    MEGATRON_STOCK_PROFILE,
     nan_guard_markers,
+    required_lines,
     p2p_markers,
     mesh_markers as megatron_mesh_markers,
     precision_markers,
@@ -614,7 +618,6 @@ class StockArgvTests(unittest.TestCase):
         division, and compares the answer to the marker. It fails whichever
         side moves.
         """
-        profile = MEGATRON_STOCK_PROFILE
         scenario = scenario_by_name(SCENARIO_NAME)
         for spec, batch in (
             (TRIVIAL_SPEC, None),
@@ -708,26 +711,33 @@ class StockArgvRefusalTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# 3. The validation profile. The hazard is a profile that proves nothing.
+# 3. The validation. The hazard is a validation that proves nothing.
 # --------------------------------------------------------------------------
 
 
-class StockValidationProfileTests(unittest.TestCase):
+def _observed(line: str):
+    """The mesh that the stock evidence reader takes from one log line."""
+    return read_evidence(0, line + "\nTraining completed\n").mesh
+
+
+class StockValidationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.profile = MEGATRON_STOCK_PROFILE
         self.data = replace(
             scenario_by_name(SCENARIO_NAME).data, local_batch_size=32
         )
 
-    def test_the_profile_is_registered_and_selected_by_the_arm(self) -> None:
+    def test_the_engine_is_registered_and_asks_for_its_treatments(self) -> None:
         self.assertIn(MegatronStockConfig, ENGINE_RECORDS)
-        with mock.patch(
-            "benchmarks.e2e.engines.megatron_stock.validate.validate_against_profile"
-        ) as checked:
+        refusals = " ".join(
             engine_for(_stock_arm()).validate(
-                run_spec(ac_mode="none"), _stock_arm(), Path("/a"), Path("/a.log")
+                run_spec(ac_mode="none", profile=False),
+                _stock_arm(),
+                Path("/a"),
+                {0: "Training completed\n"},
             )
-        self.assertIs(checked.call_args.kwargs["profile"], self.profile)
+        )
+        self.assertIn("megatron nan guard did not apply", refusals)
+        self.assertIn("megatron precision did not apply", refusals)
 
     def test_the_driver_line_is_the_first_precision_marker(self) -> None:
         """Rule 8 no longer holds this line, and it is still matched: the
@@ -737,8 +747,11 @@ class StockValidationProfileTests(unittest.TestCase):
             "Megatron-LM stock training loop (",
         )
 
-    def test_the_profile_does_not_check_the_ac_line(self) -> None:
-        self.assertIsNone(self.profile.ac_line)
+    def test_the_engine_does_not_check_the_ac_line(self) -> None:
+        lines = required_lines(run_spec(ac_mode="none"), _stock_arm())
+        self.assertFalse(
+            any("SelectiveAC" in line for group in lines.values() for line in group)
+        )
 
     def test_the_profile_proves_no_compile_treatment(self) -> None:
         """``compile_marker`` is None, so rule 8 asks this engine nothing.
@@ -746,7 +759,10 @@ class StockValidationProfileTests(unittest.TestCase):
         megatron-core compiles no whole layer, so no log line proves the
         treatment either way. The Megatron config has no compile field.
         """
-        self.assertIsNone(self.profile.compile_marker)
+        lines = required_lines(run_spec(ac_mode="none"), _stock_arm())
+        self.assertFalse(
+            any("torch.compile" in line for group in lines.values() for line in group)
+        )
         self.assertFalse(hasattr(_stock_arm().config, "compile"))
 
     # -- arm rule 12 ----------------------------------------------------
@@ -950,7 +966,7 @@ class StockValidationProfileTests(unittest.TestCase):
             ParallelismSpec(dp=2), self.data, "stock", ()
         )[0]
         self.assertIn("pp=1", line)
-        self.assertIsNone(self.profile.pipelined_pattern.search(line))
+        self.assertEqual(_observed(line).pp, 1)
 
     def test_the_pipelined_pattern_sees_a_real_pipeline(self) -> None:
         for spec in (
@@ -962,9 +978,7 @@ class StockValidationProfileTests(unittest.TestCase):
                 line = megatron_mesh_markers(
                     spec, self.data, "stock", ()
                 )[0]
-                self.assertIsNotNone(
-                    self.profile.pipelined_pattern.search(line)
-                )
+                self.assertEqual(_observed(line).pp, spec.pp)
 
     def test_the_data_parallel_pattern_ignores_a_degree_of_one(self) -> None:
         """This is the hazard: a pattern that matches ``dp=1`` passes always.
@@ -982,10 +996,7 @@ class StockValidationProfileTests(unittest.TestCase):
                 for line in megatron_mesh_markers(
                     spec, self.data, "stock", ()
                 ):
-                    self.assertIsNone(
-                        self.profile.data_parallel_pattern.search(line),
-                        line,
-                    )
+                    self.assertEqual(_observed(line).dp, 1, line)
 
     def test_the_data_parallel_pattern_sees_every_degree_above_one(
         self,
@@ -994,12 +1005,10 @@ class StockValidationProfileTests(unittest.TestCase):
         for dp in (2, 4, 8, 10, 12, 16):
             with self.subTest(dp=dp):
                 line = (
-                    f"Megatron-LM stock parallelism: dp={dp} pp=1 "
+                    f"Megatron-LM stock parallelism: dp={dp} pp=1 ep=1 "
                     "schedule=1F1B microbatches=4 stages=1"
                 )
-                self.assertIsNotNone(
-                    self.profile.data_parallel_pattern.search(line)
-                )
+                self.assertEqual(_observed(line).dp, dp)
 
     def test_the_data_parallel_pattern_sees_the_wrapper_line(self) -> None:
         for spec in (MESH, SHARDED_MESH):
@@ -1007,9 +1016,8 @@ class StockValidationProfileTests(unittest.TestCase):
                 line = megatron_mesh_markers(
                     spec, self.data, "stock", ()
                 )[1]
-                self.assertIsNotNone(
-                    self.profile.data_parallel_pattern.search(line)
-                )
+                observed = _observed(line)
+                self.assertEqual((observed.dp, observed.zero), (spec.dp, spec.zero))
 
     def test_each_level_names_the_wrapper_class(self) -> None:
         """Asserted by name, from the table beside the flags that build it.
@@ -1164,7 +1172,6 @@ class StockMarkerContractTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.profile = MEGATRON_STOCK_PROFILE
         self.data = replace(
             scenario_by_name(SCENARIO_NAME).data, local_batch_size=32
         )
@@ -1174,7 +1181,7 @@ class StockMarkerContractTests(unittest.TestCase):
     ) -> None:
         """The fragments cannot drift away from the profile."""
         built = [
-            self.profile.completion_marker,
+            COMPLETION_LINE,
             *precision_markers("stock"),
             *megatron_mesh_markers(
                 MESH, self.data, "stock", ()
@@ -1224,7 +1231,6 @@ class StockMarkerContractTests(unittest.TestCase):
         """
         from benchmarks.e2e.engines.megatron_stock.driver import markers
 
-        profile = self.profile
         for spec, batch in STOCK_MESH_CASES:
             with self.subTest(spec=spec, batch=batch):
                 data = replace(

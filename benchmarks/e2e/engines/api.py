@@ -109,6 +109,29 @@ class Launch:
             )
 
 
+@dataclass(frozen=True)
+class MeshObserved:
+    """The mesh that an engine built, as its own log states it."""
+
+    dp: int
+    pp: int
+    ep: int
+    zero: int | None
+    """The ZeRO level; ``None`` when the log cannot state it, which is the case at one data-parallel rank."""
+
+
+@dataclass(frozen=True)
+class RankEvidence:
+    """The facts behind the published numbers of one rank, as the engine reads them from that rank's log."""
+
+    rank: int
+    completed: bool
+    param_count: int | None
+    """The whole-model parameter count; ``None`` when the rank does not state it."""
+    mesh: MeshObserved | None
+    """``None`` only when the rank printed nothing."""
+
+
 class Engine(ABC):
     """One training engine, as the harness process sees it."""
 
@@ -133,7 +156,15 @@ class Engine(ABC):
         return []
 
     @abstractmethod
+    def read_evidence(self, rank: int, text: str) -> RankEvidence:
+        """The evidence in one rank's log ``text``; a log that states two values of one fact raises."""
+
+    @abstractmethod
     def validate(
-        self, run: RunSpec, arm: Arm, arm_dir: Path, log_path: Path
-    ) -> None:
-        """Raise ``RuntimeError`` when the arm's log or traces refuse its numbers."""
+        self,
+        run: RunSpec,
+        arm: Arm,
+        arm_dir: Path,
+        rank_logs: Mapping[int, str],
+    ) -> list[str]:
+        """Every engine rule that the arm's logs or traces break; each string names the rank."""

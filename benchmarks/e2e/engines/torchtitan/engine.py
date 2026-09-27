@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, Launch, RunSpec
+from benchmarks.e2e.engines.api import (
+    Arm,
+    CompileMode,
+    Engine,
+    Launch,
+    RankEvidence,
+    RunSpec,
+)
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.flags import (
     TRAIN_MODULE,
@@ -12,6 +20,7 @@ from benchmarks.e2e.engines.torchtitan.flags import (
     trainer_args,
 )
 from benchmarks.e2e.engines.torchtitan.mesh import SCHEDULES, execution_model
+from benchmarks.e2e.engines.torchtitan.evidence import read_evidence
 from benchmarks.e2e.engines.torchtitan.validate import validate_outputs
 
 
@@ -69,7 +78,14 @@ class TorchTitanEngine(Engine):
         spec = run.parallelism
         return [ZERO2_AT_PP1] if spec.zero == 1 and spec.pp == 1 else []
 
+    def read_evidence(self, rank: int, text: str) -> RankEvidence:
+        return read_evidence(rank, text)
+
     def validate(
-        self, run: RunSpec, arm: Arm, arm_dir: Path, log_path: Path
-    ) -> None:
-        validate_outputs(run, arm, arm_dir, log_path)
+        self,
+        run: RunSpec,
+        arm: Arm,
+        arm_dir: Path,
+        rank_logs: Mapping[int, str],
+    ) -> list[str]:
+        return validate_outputs(run, arm, arm_dir, rank_logs)
