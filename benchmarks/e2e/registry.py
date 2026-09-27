@@ -1,21 +1,4 @@
-"""Benchmark scenario definitions and the global run axes.
-
-The declarations themselves live in ``benchmarks.e2e.schema``. This module
-holds the instances, the tables and the run-axis constants built from them.
-
-Scenarios describe what differs between arms, and nothing else: command
-construction (``benchmarks.e2e.engines``), provenance collection
-(``benchmarks.execution.provenance``), and validation
-(``benchmarks.e2e.validation``) each live in their own module and read these
-declarations. That is what lets a new ablation be a registry entry rather
-than a new copy of the training harness.
-
-The activation-checkpointing and execution-model constants live here too:
-they are per-run axes of a scenario execution, consumed by
-the engines (``benchmarks.e2e.engines``), validation
-(``benchmarks.e2e.validation``), and the manifest
-(``benchmarks.artifacts.manifests``).
-"""
+"""The scenarios, their arms and the defaults of the run-wide values."""
 
 from benchmarks.e2e.engines.api import Arm, CompileMode, DataSpec, ProfileWindow
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
@@ -23,61 +6,18 @@ from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.schema import Scenario
 
 
-EXECUTION_MODEL = "single-gpu-plain-bf16-no-fsdp"
-"""How a single-GPU training process executes the model.
-
-Plain bf16 parameters on one GPU, no FSDP wrapper and no fp32 masters.
-Every manifest since schema 7 records this string, so it is a fixed point
-rather than a format. The manifest no longer reads it: ``execution_model``
-composes the field from the run's own mesh, and this constant is what its
-trivial answer must reproduce character for character.
-"""
-
-
 AC_MODES = ("sac", "none")
-"""The activation-checkpointing modes selectable per run.
-
-``sac`` is TorchTitan's per-op SelectiveAC. ``none`` disables checkpointing
-entirely, delivered to TorchTitan as the tyro subcommand token
-``activation-checkpoint:none``.
-"""
+"""The activation checkpointing modes: TorchTitan's per-op SelectiveAC, or none."""
 
 DEFAULT_AC_MODE = "none"
-"""The default values of the global run axes.
 
-``_resolve_run`` and the skip pre-pass read these constants. Neither site
-repeats the literal value.
-"""
 DEFAULT_MODEL_SIZE = "30b-a3b"
 
 DEFAULT_PROFILE = False
-"""Whether a run collects profiler traces.
-
-Off is the default, and it is the treatment a published throughput number
-wants: the profiler costs GPU and host time on every window, and the whole
-40-step floor exists to hold two of them. Under ``--profile`` the run
-collects the trace layout an external analysis tool reads, and the floor
-and every trace validation rule apply again.
-
-It is a run axis and not an arm property. Both engines either write the
-layout or write nothing, and a run that profiled one arm and not another
-would publish two treatments under one label.
-"""
+"""Whether a run collects profiler traces; a published throughput number wants no profiler."""
 
 DEFAULT_WARMUP_STEPS = 10
-"""How many steps an unprofiled run discards before it measures.
-
-The engines compile, autotune and fill their caches in the first steps of a
-run, so a throughput taken over them is not the throughput of the workload.
-Under ``--profile`` the profiler schedule decides the sample set instead
-and this axis is refused; without it every step after the warmup is a
-sample.
-
-10 is half of one profiler cycle, which is the span the profiled rule
-samples. The two rules therefore discard a comparable prefix, but neither
-figure is the other's: results are only comparable within one value of this
-axis.
-"""
+"""How many steps an unprofiled run discards before it measures."""
 
 SEED = 42
 """The seed of every run; both engines draw the same initial parameters from it."""
@@ -99,10 +39,7 @@ ENGINES = Scenario(
         "each move the number: the Megatron arm keeps fp32 master weights "
         "and reduces gradients in fp32, runs Megatron's unfused native cross "
         "entropy, keeps --init-method-std 0.01 with no weight transfer, and "
-        "applies no permutation fusion. State all four beside every number. "
-        "The manifest's execution_model reads plain-bf16 because it is "
-        "composed from the parallelism spec; it describes the TorchTitan "
-        "arms and not the Megatron one."
+        "applies no permutation fusion. State all four beside every number."
     ),
     data=C4_REPLAY_DATA,
     window=ProfileWindow(),
@@ -134,8 +71,7 @@ ENGINES = Scenario(
                 "BF16: --bf16 alone keeps fp32 master weights, fp32 "
                 "optimizer moments and an fp32 gradient reduction, which is "
                 "about 18 bytes of state per parameter against TorchTitan's "
-                "8. The manifest's execution_model says plain-bf16 and "
-                "describes the other arms"
+                "8"
             ),
             config=MegatronStockConfig(
                 # Measured on all eight ranks of one dp 2 x pp 4 cell.
@@ -147,28 +83,10 @@ ENGINES = Scenario(
         ),
     ),
 )
-"""The engine comparison, on one pre-tokenized c4_test stream.
+"""The engine comparison: what each engine costs per token at one mesh.
 
-Three arms answer one question: what does each engine cost per token at
-this mesh. The cross-engine metrics are tokens/s, step time and peak
-memory. The ac axis is pinned to ``none``, because Megatron's recompute
-options are not parity with TorchTitan's per-op SAC and the Megatron arm
-does no recompute at all.
-
-The Megatron arm is not plain bf16, and the manifest cannot say so. Under
-``--bf16`` alone Megatron keeps fp32 master weights and fp32 optimizer
-moments, and it reduces gradients in fp32, so the arm holds about 18 bytes
-per parameter against TorchTitan's 8. That is the stock treatment, and this
-scenario keeps it. ``execution_model`` is composed from the parallelism
-spec, so it describes the TorchTitan arms alone; the difference lives in
-the scenario description, in the arm description, and in the report.
-
-At pp 1 the arms process the batch the same way. The flag list sends
-``--micro-batch-size 1`` at every degree, and ``microbatch_geometry`` packs
-the whole local batch into one Megatron sample at pp 1. So both engines run
-one forward and backward pass over the same tokens, the same GEMM rows and
-the same block-diagonal mask, because ``cu_seqlens`` already marks every
-document. A pp 1 ratio is not biased by the batch mapping.
+The scenario refuses ``--ac sac``, because Megatron's recompute options are
+not parity with TorchTitan's per-op SAC.
 """
 
 

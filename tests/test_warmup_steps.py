@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -21,12 +22,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.manifests import (
     MANIFEST_SCHEMA_VERSION,
-    _resume_mismatches,
-    manifest_data,
+    load_manifest,
+    resume_mismatches,
 )
 from benchmarks.cli.main import cli
+from benchmarks.e2e.checks import step_floor_refusals
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.axes import RunAxes
 from benchmarks.e2e.engines.api import RunSpec
 from benchmarks.e2e.registry import (
     DEFAULT_WARMUP_STEPS,
@@ -35,7 +36,7 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.results import evaluate_run, measured_tps, stable_tps
-from benchmarks.e2e.runner import data_with_overrides
+from tests.engine_helpers import write_run_manifest
 from benchmarks.models.piper_qwen3.shape import PIPER_1B
 
 
@@ -51,23 +52,6 @@ def _run(profile: bool, warmup_steps: int | None) -> RunSpec:
         warmup_steps=warmup_steps,
         seed=SEED,
     )
-
-
-_METADATA = {
-    "nvidia_smi": "test",
-    "cpu_pinning": "none: test",
-    "torchtitan_git_rev": "abc",
-    "benchmarks_git_rev": "def",
-    "megatron_git_rev": "ghi",
-}
-
-_WORKLOAD = {
-    "profile_freq": 20,
-    "profiler_warmup": 5,
-    "profiler_active": 5,
-    "local_batch_size": 4,
-    "seq_len": 1024,
-}
 
 
 def _rows(count: int) -> list[tuple[int, float, int]]:
@@ -98,89 +82,58 @@ class MeasuredTpsTests(unittest.TestCase):
         """The two rules are two figures, not one figure read two ways."""
         rows = _rows(40)
         self.assertEqual(len(measured_tps(rows, 10)), 30)
-        self.assertEqual(len(stable_tps(rows, _WORKLOAD)), 18)
+        self.assertEqual(len(stable_tps(rows, ENGINES.window)), 18)
 
 
 class StepFloorTests(unittest.TestCase):
     def test_a_run_must_take_a_step_after_its_warmup(self) -> None:
-        with self.assertRaisesRegex(ValueError, "must be more than the 12"):
-            data_with_overrides(
-                ENGINES, steps=12, profile=False, warmup_steps=12
-            )
+        run = _run(False, 12)
+        (refusal,) = step_floor_refusals(
+            replace(run, data=replace(run.data, steps=12))
+        )
+        self.assertIn("must be more than the 12", refusal)
 
     def test_one_measured_step_is_enough(self) -> None:
-        data = data_with_overrides(
-            ENGINES, steps=13, profile=False, warmup_steps=12
+        run = _run(False, 12)
+        self.assertEqual(
+            step_floor_refusals(
+                replace(run, data=replace(run.data, steps=13))
+            ),
+            [],
         )
-        self.assertEqual(data.steps, 13)
 
 
-def _manifest(profile: bool, warmup_steps: int | None) -> dict:
+def _manifest(root: Path, profile: bool, warmup_steps: int | None) -> dict:
     scenario = scenario_by_name("engines")
-    return manifest_data(
-        scenario,
-        _run(profile, warmup_steps),
-        (scenario.arm("titan_eager"),),
-        {"titan_eager": ["cmd"]},
-        "test-gpu",
-        _METADATA,
-        torchtitan_args=(),
-        megatron_args=(),
-        axes=RunAxes(
-            ac_mode="none",
-            model_size="1b",
-            parallelism=TRIVIAL_SPEC,
-            megatron_p2p_sync="off",
-            megatron_nan_guard="off",
-            megatron_precision="stock",
-            profile=profile,
-            warmup_steps=warmup_steps,
-        ),
-    )
+    write_run_manifest(root, _run(profile, warmup_steps), (scenario.arm("titan_eager"),))
+    return load_manifest(root)
 
 
 class ManifestTests(unittest.TestCase):
-    def test_the_manifest_records_the_count_under_schema_eighteen(
+    def test_the_manifest_records_the_count_under_schema_nineteen(
         self,
     ) -> None:
-        recorded = _manifest(False, 10)
+        with tempfile.TemporaryDirectory() as temporary:
+            recorded = _manifest(Path(temporary), False, 10)
         self.assertEqual(recorded["schema_version"], MANIFEST_SCHEMA_VERSION)
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
-        self.assertEqual(recorded["warmup_steps"], 10)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 19)
+        self.assertEqual(recorded["run"]["warmup_steps"], 10)
 
     def test_a_profiled_run_records_null(self) -> None:
-        recorded = _manifest(True, None)
-        self.assertIsNone(recorded["warmup_steps"])
-        self.assertIsNone(json.loads(json.dumps(recorded))["warmup_steps"])
+        with tempfile.TemporaryDirectory() as temporary:
+            recorded = _manifest(Path(temporary), True, None)
+        self.assertIsNone(recorded["run"]["warmup_steps"])
 
 
 class ResumeTests(unittest.TestCase):
     def test_a_resume_refuses_another_count(self) -> None:
         scenario = scenario_by_name("engines")
         arms = (scenario.arm("titan_eager"),)
-        manifest = _manifest(False, 10)
-        for requested, expected in ((10, []), (4, ["warmup_steps"])):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = _manifest(Path(temporary), False, 10)
+        for requested, expected in ((10, []), (4, ["run.warmup_steps"])):
             self.assertEqual(
-                _resume_mismatches(
-                    manifest,
-                    scenario,
-                    _run(False, requested),
-                    arms,
-                    "test-gpu",
-                    _METADATA,
-                    torchtitan_args=(),
-                    megatron_args=(),
-                    axes=RunAxes(
-                        ac_mode="none",
-                        model_size="1b",
-                        parallelism=TRIVIAL_SPEC,
-                        megatron_p2p_sync="off",
-                        megatron_nan_guard="off",
-                        megatron_precision="stock",
-                        profile=False,
-                        warmup_steps=requested,
-                    ),
-                ),
+                resume_mismatches(manifest, run=_run(False, requested), arms=arms),
                 expected,
             )
 
@@ -229,18 +182,12 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
     def _build(
         self, root: Path, *, profile: bool, warmup_steps: int | None
     ) -> Path:
-        manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "profile": profile,
-            "warmup_steps": warmup_steps,
-            "scenario": "engines",
-            "hardware": "test-gpu",
-            "workload": _WORKLOAD,
-            "selected_arms": ["titan_eager"],
-            "arms": [{"name": "titan_eager", "engine": "torchtitan"}],
-            "parallelism": {"world_size": 1, "dp": 1, "pp": 1, "ep": 1},
-        }
-        (root / "manifest.json").write_text(json.dumps(manifest))
+        run = _run(profile, warmup_steps)
+        write_run_manifest(
+            root,
+            replace(run, data=replace(run.data, seq_len=1024)),
+            (ENGINES.arm("titan_eager"),),
+        )
         # Step 1 is fast, every later step is slow. The profiled rule drops
         # step 1 and keeps steps 2..10; a warmup of 1 keeps steps 2..12.
         (root / "titan_eager.log").write_text(

@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts import layout
 from benchmarks.artifacts.manifests import (
     MANIFEST_SCHEMA_VERSION,
-    _resume_mismatches,
-    manifest_data,
+    load_manifest,
+    resume_mismatches,
 )
 from benchmarks.e2e.engines.megatron_stock.driver import profiling
 from benchmarks.e2e.engines.megatron_stock.flags import (
@@ -29,23 +29,13 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
     BENCH_PROFILE_SCHEDULE_FLAGS,
     stock_megatron_flags,
 )
-from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.axes import RunAxes
+from benchmarks.e2e.checks import step_floor_refusals
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.profiling import partial_cycle_refusal
 from benchmarks.e2e.registry import DEFAULT_PROFILE, ENGINES, scenario_by_name
-from benchmarks.e2e.runner import data_with_overrides
-from tests.engine_helpers import command, run_spec, validate
+from tests.engine_helpers import command, run_spec, validate, write_run_manifest
 from tests.test_runner import _SAC_LINE, _SIZE_LINE, _compiled_line
 
-
-_METADATA = {
-    "nvidia_smi": "test",
-    "cpu_pinning": "none: test",
-    "torchtitan_git_rev": "abc",
-    "benchmarks_git_rev": "def",
-    "megatron_git_rev": "ghi",
-}
 
 # Megatron's own profiler tokens, which stock Megatron defaults off.
 _MEGATRON_PROFILER_FLAGS = (
@@ -102,16 +92,15 @@ class StepFloorTests(unittest.TestCase):
     """40 steps hold two profiler windows, and nothing else needs them."""
 
     def test_a_profiled_run_keeps_the_forty_step_floor(self) -> None:
-        with self.assertRaisesRegex(ValueError, "at least 40"):
-            data_with_overrides(
-                ENGINES, steps=12, profile=True, warmup_steps=None
-            )
+        refusals = step_floor_refusals(run_spec(profile=True, steps=12))
+        self.assertEqual(len(refusals), 1)
+        self.assertIn("at least 40", refusals[0])
 
     def test_an_unprofiled_run_accepts_a_short_run(self) -> None:
-        data = data_with_overrides(
-            ENGINES, steps=12, profile=False, warmup_steps=2
+        self.assertEqual(
+            step_floor_refusals(run_spec(profile=False, warmup_steps=2, steps=12)),
+            [],
         )
-        self.assertEqual(data.steps, 12)
 
 
 class TitanArgvTests(unittest.TestCase):
@@ -211,93 +200,53 @@ class ValidationSkipsTheTraceRulesTests(unittest.TestCase):
 
 class ManifestTests(unittest.TestCase):
     def _manifest(self, profile: bool) -> dict:
-        scenario = scenario_by_name("engines")
-        return manifest_data(
-            scenario,
-            run_spec(ac_mode="none", profile=profile),
-            (scenario.arm("titan_eager"),),
-            {"titan_eager": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="off",
-                megatron_nan_guard="off",
-                megatron_precision="stock",
-                profile=profile,
-                warmup_steps=None if profile else 10,
-            ),
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            write_run_manifest(
+                out_dir,
+                run_spec(ac_mode="none", profile=profile),
+                (ENGINES.arm("titan_eager"),),
+            )
+            return load_manifest(out_dir)
 
-    def test_the_manifest_records_the_axis_under_schema_eighteen(
-        self,
-    ) -> None:
+    def test_the_manifest_records_the_axis_in_the_run_block(self) -> None:
         recorded = self._manifest(True)
         self.assertEqual(recorded["schema_version"], MANIFEST_SCHEMA_VERSION)
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
-        self.assertIs(recorded["profile"], True)
-        self.assertIs(self._manifest(False)["profile"], False)
-        # It survives the round trip a resume reads it back through.
-        self.assertIs(json.loads(json.dumps(recorded))["profile"], True)
+        self.assertIs(recorded["run"]["profile"], True)
+        self.assertIsNone(recorded["run"]["warmup_steps"])
+        self.assertIs(self._manifest(False)["run"]["profile"], False)
 
     def test_a_resume_refuses_a_mismatch_and_accepts_a_match(self) -> None:
-        scenario = scenario_by_name("engines")
-        arms = (scenario.arm("titan_eager"),)
+        arms = (ENGINES.arm("titan_eager"),)
         for recorded in (True, False):
             manifest = self._manifest(recorded)
             for requested in (True, False):
-                mismatches = _resume_mismatches(
+                mismatches = resume_mismatches(
                     manifest,
-                    scenario,
-                    run_spec(ac_mode="none", profile=requested),
-                    arms,
-                    "test-gpu",
-                    _METADATA,
-                    torchtitan_args=(),
-                    megatron_args=(),
-                    axes=RunAxes(
-                        ac_mode="none",
-                        model_size="1b",
-                        parallelism=TRIVIAL_SPEC,
-                        megatron_p2p_sync="off",
-                        megatron_nan_guard="off",
-                        megatron_precision="stock",
-                        profile=requested,
-                        warmup_steps=None if requested else 10,
-                    ),
+                    run=run_spec(ac_mode="none", profile=requested),
+                    arms=arms,
                 )
                 if recorded == requested:
                     self.assertEqual(mismatches, [])
                 else:
-                    self.assertIn("profile", mismatches)
+                    self.assertIn("run.profile", mismatches)
 
 
 class TracelessEvaluationTests(unittest.TestCase):
     """A run without traces still publishes its throughput."""
 
     def _out_dir(self, root: Path) -> Path:
-        manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "profile": False,
-            "warmup_steps": 3,
-            "scenario": "engines",
-            "hardware": "test-gpu",
-            "workload": {
-                "profile_freq": 20,
-                "profiler_warmup": 5,
-                "profiler_active": 5,
-                "local_batch_size": 4,
-                "seq_len": 1024,
-            },
-            "selected_arms": ["titan_eager"],
-            "arms": [{"name": "titan_eager", "engine": "torchtitan"}],
-            "parallelism": {"world_size": 1, "dp": 1, "pp": 1, "ep": 1},
-        }
-        (root / "manifest.json").write_text(json.dumps(manifest))
+        write_run_manifest(
+            root,
+            run_spec(
+                ac_mode="none",
+                profile=False,
+                warmup_steps=3,
+                seq_len=1024,
+                local_batch_size=4,
+            ),
+            (ENGINES.arm("titan_eager"),),
+        )
         (root / "titan_eager.log").write_text(
             "".join(
                 f"step: {step} loss: 1.0 grad_norm: 2.0 memory: 3.00GiB "
@@ -317,7 +266,6 @@ class TracelessEvaluationTests(unittest.TestCase):
         self.assertEqual(
             result.results["titan_eager"].stable_tokens_per_second, 1000
         )
-        # Schema 6 publishes no kernel time in either profile mode.
         self.assertNotIn("gpu_time", result.to_dict())
         self.assertNotIn("gpu kernel time", render_evaluation(result))
 

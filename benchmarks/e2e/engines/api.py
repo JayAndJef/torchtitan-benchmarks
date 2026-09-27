@@ -95,6 +95,8 @@ class Launch:
     """Whether the engine accepts the CPU pinning prefix."""
     env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     """The engine's own child environment keys; a launcher-owned key is refused."""
+    host_compiler: bool = False
+    """Whether the processes need the environment of the ``--compiler-env`` script."""
 
     def __post_init__(self) -> None:
         if self.target[:1] != ("-m",):
@@ -121,6 +123,14 @@ class Engine(ABC):
     @abstractmethod
     def launch(self, run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
         """The training processes of the arm; the same inputs give the same launch."""
+
+    @abstractmethod
+    def execution_model(self, run: RunSpec, arm: Arm) -> str:
+        """How the arm's processes hold the model state, as one manifest string."""
+
+    def warnings(self, run: RunSpec, arm: Arm) -> list[str]:
+        """What a reader must not conclude from this arm's numbers at this mesh."""
+        return []
 
     @abstractmethod
     def validate(

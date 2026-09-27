@@ -1,9 +1,4 @@
-"""Which engine flags a ``--torchtitan-arg`` or ``--megatron-arg`` may carry.
-
-A perf flag passes; a flag that would change a fact the manifest records is
-refused and names its owner. Each engine keeps its own tables. A pattern
-ending in ``*`` is a prefix.
-"""
+"""Which engine flags an arm's ``extra_flags`` may carry; a pattern that ends in ``*`` is a prefix."""
 
 from __future__ import annotations
 

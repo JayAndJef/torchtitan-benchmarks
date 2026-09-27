@@ -8,16 +8,22 @@ from benchmarks.e2e.engines.api import Arm, Engine, Launch, RunSpec
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.flags import (
     DRIVER_MODULE,
+    MEGATRON_LM_SCHEDULES,
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,
     PP_SCHEDULE,
+    PRECISION_STATES,
     passthrough_refusals,
     stock_megatron_flags,
 )
 from benchmarks.e2e.engines.megatron_stock.profiling import partial_cycle_refusal
 from benchmarks.e2e.engines.megatron_stock.validate import validate_outputs
-from benchmarks.e2e.parallelism import PP_SCHEDULES
+from benchmarks.e2e.parallelism import (
+    data_parallel_term,
+    degree_terms,
+    device_term,
+)
 
 
 class MegatronStockEngine(Engine):
@@ -40,19 +46,19 @@ class MegatronStockEngine(Engine):
                     f"{arm.name}: {label} {value!r} is not one of "
                     + ", ".join(repr(choice) for choice in choices)
                 )
-        schedule = PP_SCHEDULES.get(spec.pp_schedule or "")
-        if schedule is not None and not schedule.megatron_supported:
+        schedule = spec.pp_schedule
+        if schedule is not None and schedule not in MEGATRON_LM_SCHEDULES:
             refusals.append(
-                f"pipeline schedule {schedule.name!r} is not implemented by "
+                f"pipeline schedule {schedule!r} is not implemented by "
                 "Megatron-LM, and this run holds a megatron arm; there would be "
                 "no cross-engine comparison; choose --pp-schedule "
                 f"{PP_SCHEDULE}, or select the TorchTitan arms alone"
             )
-        elif schedule is not None and schedule.name != PP_SCHEDULE:
+        elif schedule is not None and schedule != PP_SCHEDULE:
             refusals.append(
                 f"{arm.name}: the stock megatron driver implements "
                 f"{PP_SCHEDULE!r} alone, and this run asks for "
-                f"{schedule.name!r}; choose --pp-schedule "
+                f"{schedule!r}; choose --pp-schedule "
                 f"{PP_SCHEDULE}, or select the TorchTitan arms alone"
             )
         if config.p2p_sync == "on" and spec.pp == 1:
@@ -96,6 +102,17 @@ class MegatronStockEngine(Engine):
             ),
             processes="per_rank",
             pin=True,
+        )
+
+    def execution_model(self, run: RunSpec, arm: Arm) -> str:
+        spec = run.parallelism
+        return "-".join(
+            (
+                device_term(spec),
+                PRECISION_STATES[arm.config.precision],
+                data_parallel_term(spec),
+                *degree_terms(spec),
+            )
         )
 
     def validate(

@@ -1,18 +1,4 @@
-"""The parallelism axis threaded through the harness, without leaving one GPU.
-
-``tests/test_parallelism.py`` covers the axis itself -- the degrees, the
-schedules and the sixteen validator rules. This module covers the path the
-value takes: the ``<gpu>`` positional read as a device set, the six CLI
-options, ``RunRequest``, ``_resolve_run``, the child environment, the
-provenance query, the NUMA walk, and manifest schema 16.
-
-**The properties under test are mostly negative.** At the trivial spec every
-recorded fact and every environment variable has to be the one this repo has
-always produced, character for character, because ``--resume`` compares
-several of them in every directory under ``out/`` and roughly one hundred
-manifests record the ``<gpu>`` string. The command lines are pinned in
-``tests/test_megatron_stock_launch.py``.
-"""
+"""The path that the parallelism options take from the CLI to the child environment and the manifest."""
 
 import json
 import os
@@ -30,10 +16,10 @@ from click.testing import CliRunner
 
 from benchmarks.artifacts.manifests import (
     MANIFEST_SCHEMA_VERSION,
-    _resume_mismatches,
     load_manifest,
-    load_run,
+    load_run_record,
     manifest_data,
+    resume_mismatches,
 )
 from benchmarks.cli.e2e import (
     _PARALLELISM_OPTIONS,
@@ -41,24 +27,13 @@ from benchmarks.cli.e2e import (
     run_command,
 )
 from benchmarks.cli.main import cli
-from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
-from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.parallelism import (
-    TRIVIAL_SPEC,
-    describe,
-    execution_model,
-)
-from benchmarks.e2e.registry import (
-    DEFAULT_AC_MODE,
-    EXECUTION_MODEL,
-    scenario_by_name,
-)
-from tests.engine_helpers import run_spec
-from benchmarks.e2e.runner import (
-    MEGATRON_DEFAULTS,
-    _resolve_run,
-    execute_run,
-)
+from benchmarks.e2e.axes import RequestedAxes, RunRequest
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
+from benchmarks.e2e.engines.torchtitan import mesh
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec, describe
+from benchmarks.e2e.registry import DEFAULT_AC_MODE, ENGINES
+from benchmarks.e2e.runner import _resolve_run, execute_run
+from tests.engine_helpers import TEST_METADATA, configured, run_spec, write_run_manifest
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
@@ -70,18 +45,7 @@ from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
 
 
-_RUN = run_spec(profile=False)
-"""The run that the manifest tests record: one GPU, the 1b shape, the scenario data."""
-
-
-_METADATA = {
-    "requested_gpu": "0",
-    "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
-    "torch_version": "test",
-    "torchtitan_git_rev": "titan-rev",
-    "benchmarks_git_rev": "bench-rev",
-    "megatron_git_rev": "mcore-rev",
-}
+_METADATA = TEST_METADATA
 
 
 class ParseDevicesTests(unittest.TestCase):
@@ -145,27 +109,17 @@ class ExecutionOptionTests(unittest.TestCase):
             for option in parameter.opts
         }
 
-    def test_the_flipped_axes_take_their_default_from_the_registry(
-        self,
-    ) -> None:
-        """``--ac``, ``--megatron-p2p-sync`` and ``--megatron-nan-guard``
-        each default to "not requested" on the command line, so the
-        registry constant is the one default and the CLI cannot disagree
-        with it."""
-        parameters = self._parameters()
-        for option, constant in (
-            ("--ac", DEFAULT_AC_MODE),
-            ("--megatron-p2p-sync", MEGATRON_DEFAULTS.p2p_sync),
-            ("--megatron-nan-guard", MEGATRON_DEFAULTS.nan_guard),
-        ):
-            with self.subTest(option=option):
-                # Click leaves an unset default unset, so the option
-                # carries no value of its own.
-                self.assertFalse(parameters[option].required)
-                self.assertIn(f"[default: {constant}]", parameters[option].help)
+    def test_the_ac_option_takes_its_default_from_the_registry(self) -> None:
+        parameter = self._parameters()["--ac"]
+        self.assertFalse(parameter.required)
+        self.assertIn(f"[default: {DEFAULT_AC_MODE}]", parameter.help)
         self.assertEqual(DEFAULT_AC_MODE, "none")
-        self.assertEqual(MEGATRON_DEFAULTS.p2p_sync, "off")
-        self.assertEqual(MEGATRON_DEFAULTS.nan_guard, "off")
+
+    def test_the_megatron_treatments_default_off(self) -> None:
+        config = MegatronStockConfig()
+        self.assertEqual(config.p2p_sync, "off")
+        self.assertEqual(config.nan_guard, "off")
+        self.assertEqual(config.precision, "stock")
 
     def test_the_megatron_flag_gates_read_the_literal_value(self) -> None:
         """The token follows the treatment, never the default of the day.
@@ -536,800 +490,260 @@ class AffinityDeviceTests(unittest.TestCase):
         )
 
 
-class ManifestSchemaEighteenTests(unittest.TestCase):
-    def _manifest(
-        self,
-        parallelism: ParallelismSpec,
-        megatron_p2p_sync: str = "on",
-        megatron_nan_guard: str = "on",
-        megatron_precision: str = "stock",
-    ) -> dict:
-        scenario = scenario_by_name("engines")
-        return manifest_data(
-            scenario,
-            _RUN,
-            (scenario.arm("megatron_stock"),),
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="1b",
-                parallelism=parallelism,
-                megatron_p2p_sync=megatron_p2p_sync,
-                megatron_nan_guard=megatron_nan_guard,
-                megatron_precision=megatron_precision,
-                profile=False,
-                warmup_steps=10,
-            ),
+def _manifest(
+    parallelism: ParallelismSpec = TRIVIAL_SPEC, **megatron_fields: str
+) -> dict:
+    """The schema 19 manifest of a titan_eager and megatron_stock run at ``parallelism``."""
+    arms = (
+        ENGINES.arm("titan_eager"),
+        configured(ENGINES.arm("megatron_stock"), **megatron_fields),
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        out_dir = Path(temporary)
+        write_run_manifest(
+            out_dir, run_spec(profile=False, parallelism=parallelism), arms
         )
+        return load_manifest(out_dir)
 
-    def test_the_schema_is_eighteen(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
-        self.assertEqual(self._manifest(TRIVIAL_SPEC)["schema_version"], 18)
 
-    def test_a_foreign_schema_is_refused_and_both_versions_are_named(
+def _arm(manifest: dict, name: str) -> dict:
+    """The record of the arm ``name`` in ``manifest``."""
+    (record,) = [arm for arm in manifest["arms"] if arm["name"] == name]
+    return record
+
+
+class ManifestSchemaNineteenTests(unittest.TestCase):
+    def test_the_schema_is_nineteen(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 19)
+        self.assertEqual(_manifest()["schema_version"], 19)
+
+    def test_a_foreign_schema_is_refused_and_the_versions_are_named(
         self,
     ) -> None:
-        """One refusal, and no per-version branch behind it.
-
-        Every field of a manifest is a comparability boundary, so a file
-        another schema wrote is read by the code that wrote it. The message
-        names the version found and the version wanted, because those two
-        numbers are what a reader acts on.
-        """
-        for recorded in (8, 17, 19, None):
+        for recorded in (8, 17, 20, None):
             with self.subTest(schema_version=recorded):
                 with tempfile.TemporaryDirectory() as temporary:
                     out_dir = Path(temporary)
-                    manifest = self._manifest(TRIVIAL_SPEC)
+                    manifest = _manifest()
                     if recorded is None:
                         del manifest["schema_version"]
                     else:
                         manifest["schema_version"] = recorded
-                    (out_dir / "manifest.json").write_text(
-                        json.dumps(manifest)
-                    )
-                    for read in (
-                        lambda path: load_manifest(path),
-                        lambda path: load_run(path, None),
-                    ):
+                    (out_dir / "manifest.json").write_text(json.dumps(manifest))
+                    for read in (load_manifest, load_run_record):
                         with self.assertRaises(ValueError) as caught:
                             read(out_dir)
                         message = str(caught.exception)
                         self.assertIn(repr(recorded), message)
                         self.assertIn(str(MANIFEST_SCHEMA_VERSION), message)
 
-    def test_a_current_schema_manifest_reads_and_names_its_arms(self) -> None:
+    def test_a_current_manifest_reads_back_its_run_and_arms(self) -> None:
+        spec = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
+        manifest = _manifest(spec, precision="lean")
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
-            manifest = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
             (out_dir / "manifest.json").write_text(json.dumps(manifest))
             self.assertEqual(load_manifest(out_dir), manifest)
-            self.assertEqual(
-                load_run(out_dir, None), (manifest, manifest["selected_arms"])
-            )
-            self.assertEqual(load_run(out_dir, ["other"])[1], ["other"])
+            record = load_run_record(out_dir)
+        self.assertEqual(record.run, run_spec(profile=False, parallelism=spec))
+        self.assertEqual(
+            [arm.arm.name for arm in record.arms], ["titan_eager", "megatron_stock"]
+        )
+        self.assertEqual(
+            record.arm("megatron_stock").arm,
+            configured(ENGINES.arm("megatron_stock"), precision="lean"),
+        )
 
     def test_the_trivial_spec_round_trips_through_json(self) -> None:
-        recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
-        self.assertEqual(
-            recorded["parallelism"], describe(TRIVIAL_SPEC, local_batch_size=4)
-        )
-        self.assertEqual(recorded["parallelism"]["world_size"], 1)
-        self.assertEqual(recorded["parallelism"]["pp_schedule"], None)
+        recorded = _manifest()["run"]["parallelism"]
+        self.assertEqual(recorded, describe(TRIVIAL_SPEC, local_batch_size=4))
+        self.assertEqual(recorded["world_size"], 1)
+        self.assertIsNone(recorded["pp_schedule"])
+        self.assertEqual(recorded["zero"], 0)
 
     def test_a_pipelined_spec_round_trips_through_json(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
-        recorded = json.loads(json.dumps(self._manifest(spec)))
-        self.assertEqual(
-            recorded["parallelism"], describe(spec, local_batch_size=4)
-        )
-        self.assertEqual(recorded["parallelism"]["world_size"], 2)
-        self.assertEqual(recorded["parallelism"]["n_microbatches"], 2)
+        recorded = _manifest(spec)["run"]["parallelism"]
+        self.assertEqual(recorded, describe(spec, local_batch_size=4))
+        self.assertEqual(recorded["world_size"], 2)
+        self.assertEqual(recorded["n_microbatches"], 2)
 
-    def test_the_default_parity_is_recorded_rather_than_left_out(self) -> None:
-        """A key that appears only under ``shard`` would make a replicated
-        run and a schema-11 run look the same, and one of the two states a
-        fact the other cannot state."""
-        recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
+    def test_a_sharded_spec_records_the_level_and_no_engine_mesh(self) -> None:
+        manifest = _manifest(ParallelismSpec(dp=2, zero=1))
+        self.assertEqual(manifest["run"]["parallelism"]["zero"], 1)
+        self.assertNotIn("dp_shard", manifest["run"]["parallelism"])
         self.assertEqual(
-            recorded["parallelism"]["zero"], 0
+            _arm(manifest, "titan_eager")["execution_model"],
+            "2-gpu-plain-bf16-dp2-zero1",
         )
 
-    def test_a_sharded_spec_round_trips_through_json(self) -> None:
-        """Both halves reach the file: the parity the operator asked for,
-        and the TorchTitan mesh it resolves to."""
-        spec = ParallelismSpec(dp=2, zero=1)
-        recorded = json.loads(json.dumps(self._manifest(spec)))
-        self.assertEqual(
-            recorded["parallelism"], describe(spec, local_batch_size=4)
-        )
-        self.assertEqual(recorded["parallelism"]["zero"], 1)
-        self.assertEqual(recorded["parallelism"]["dp_replicate"], 1)
-        self.assertEqual(recorded["parallelism"]["dp_shard"], 2)
-        self.assertEqual(
-            recorded["execution_model"], "2-gpu-plain-bf16-dp2-zero1"
-        )
-
-    def test_an_omitted_parallelism_is_a_type_error(self) -> None:
-        """A defaulted value would record dp 1 x pp 1 for any mesh."""
-        scenario = scenario_by_name("engines")
+    def test_an_omitted_field_is_a_type_error(self) -> None:
         with self.assertRaises(TypeError):
             manifest_data(
-                scenario,
-                _RUN,
-                (scenario.arm("megatron_stock"),),
-                {"baseline": ["cmd"]},
-                "test-gpu",
-                _METADATA,
-                torchtitan_args=(),
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="sac",
-                    model_size="1b",
-                    profile=False,
-                    warmup_steps=10,
-                ),
+                scenario=ENGINES,
+                hardware="test-gpu",
+                metadata=_METADATA,
+                arms=(),
             )
 
-    def test_the_p2p_sync_default_is_recorded_rather_than_left_out(
-        self,
-    ) -> None:
-        """A key that appears only under ``off`` would make a schema-13
-        run at ``on`` and a schema-12 run look the same, and one of the two
-        states a fact the other cannot state."""
-        recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
-        self.assertEqual(recorded["megatron_p2p_sync"], "on")
-        # Its own field beside ac_mode, not a key of the parallelism
-        # block: it is a treatment of the pipeline messages, not a degree.
-        self.assertNotIn("megatron_p2p_sync", recorded["parallelism"])
-
-    def test_the_p2p_sync_value_round_trips_through_json(self) -> None:
-        spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
-        recorded = json.loads(json.dumps(self._manifest(spec, "off")))
-        self.assertEqual(recorded["megatron_p2p_sync"], "off")
+    def test_the_megatron_treatments_sit_in_the_arm_config(self) -> None:
+        manifest = _manifest(p2p_sync="on", nan_guard="on", precision="lean")
+        config = _arm(manifest, "megatron_stock")["config"]
         self.assertEqual(
-            recorded["parallelism"], describe(spec, local_batch_size=4)
+            (config["p2p_sync"], config["nan_guard"], config["precision"]),
+            ("on", "on", "lean"),
         )
-        # The value is not part of the execution model, so two runs of one
-        # mesh under the two values record the same string there.
+        for key in ("p2p_sync", "nan_guard", "precision"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, manifest["run"])
+                self.assertNotIn(key, manifest["run"]["parallelism"])
+                self.assertNotIn(key, _arm(manifest, "titan_eager")["config"])
+
+    def test_only_the_precision_moves_the_megatron_execution_model(self) -> None:
+        stock = _arm(_manifest(), "megatron_stock")["execution_model"]
         self.assertEqual(
-            recorded["execution_model"],
-            self._manifest(spec, "on")["execution_model"],
+            _arm(_manifest(p2p_sync="on", nan_guard="on"), "megatron_stock")[
+                "execution_model"
+            ],
+            stock,
         )
-
-    def test_an_omitted_p2p_sync_is_a_type_error(self) -> None:
-        """A writer that defaulted it would record ``on`` for a run that
-        turned the sync off, and the two are a comparability boundary."""
-        scenario = scenario_by_name("engines")
-        with self.assertRaises(TypeError):
-            manifest_data(
-                scenario,
-                _RUN,
-                (scenario.arm("megatron_stock"),),
-                {"baseline": ["cmd"]},
-                "test-gpu",
-                _METADATA,
-                torchtitan_args=(),
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="sac",
-                    model_size="1b",
-                    parallelism=TRIVIAL_SPEC,
-                    profile=False,
-                    warmup_steps=10,
-                ),
-            )
-
-    def test_the_nan_guard_default_is_recorded_rather_than_left_out(
-        self,
-    ) -> None:
-        """A key that appears only under ``off`` would make a schema-14 run
-        at ``on`` and a schema-13 run look the same."""
-        recorded = json.loads(json.dumps(self._manifest(TRIVIAL_SPEC)))
-        self.assertEqual(recorded["megatron_nan_guard"], "on")
-        # Its own field, not a key of the parallelism block: a treatment
-        # of the stock engine's checks, not a degree.
-        self.assertNotIn("megatron_nan_guard", recorded["parallelism"])
-
-    def test_the_nan_guard_value_round_trips_through_json(self) -> None:
-        recorded = json.loads(
-            json.dumps(self._manifest(TRIVIAL_SPEC, megatron_nan_guard="off"))
+        self.assertNotEqual(
+            _arm(_manifest(precision="lean"), "megatron_stock")["execution_model"],
+            stock,
         )
-        self.assertEqual(recorded["megatron_nan_guard"], "off")
-        self.assertEqual(recorded["megatron_p2p_sync"], "on")
-        # Not part of the execution model, so two runs of one mesh under
-        # the two values record the same string there.
-        self.assertEqual(
-            recorded["execution_model"],
-            self._manifest(TRIVIAL_SPEC)["execution_model"],
-        )
-
-    def test_the_precision_value_round_trips_through_json(self) -> None:
-        recorded = json.loads(
-            json.dumps(
-                self._manifest(TRIVIAL_SPEC, megatron_precision="lean")
-            )
-        )
-        self.assertEqual(recorded["megatron_precision"], "lean")
-        # Not part of the execution model either, for the same reason: it
-        # is a treatment of the optimizer state and not a degree.
-        self.assertEqual(
-            recorded["execution_model"],
-            self._manifest(TRIVIAL_SPEC)["execution_model"],
-        )
-
-    def test_the_precision_default_is_recorded_rather_than_left_out(
-        self,
-    ) -> None:
-        """An absent key would read as ``stock`` by inference. The record
-        is what separates "this run held 18 bytes for each parameter" from
-        "this file predates the question"."""
-        self.assertEqual(
-            self._manifest(TRIVIAL_SPEC)["megatron_precision"], "stock"
-        )
-
-    def test_an_omitted_nan_guard_is_a_type_error(self) -> None:
-        """A writer that defaulted it would record ``on`` for a run that
-        turned the guard off, and the two are a comparability boundary."""
-        scenario = scenario_by_name("engines")
-        with self.assertRaises(TypeError):
-            manifest_data(
-                scenario,
-                _RUN,
-                (scenario.arm("megatron_stock"),),
-                {"baseline": ["cmd"]},
-                "test-gpu",
-                _METADATA,
-                torchtitan_args=(),
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="sac",
-                    model_size="1b",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    profile=False,
-                    warmup_steps=10,
-                ),
-            )
-
-    def test_an_omitted_precision_is_a_type_error(self) -> None:
-        """A writer that defaulted it would record ``stock`` for a run that
-        held 10 bytes for each parameter rather than 18."""
-        scenario = scenario_by_name("engines")
-        with self.assertRaises(TypeError):
-            manifest_data(
-                scenario,
-                _RUN,
-                (scenario.arm("megatron_stock"),),
-                {"baseline": ["cmd"]},
-                "test-gpu",
-                _METADATA,
-                torchtitan_args=(),
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="sac",
-                    model_size="1b",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    profile=False,
-                    warmup_steps=10,
-                ),
-            )
 
 
 class ExecutionModelFollowsTheMeshTests(unittest.TestCase):
-    """The manifest describes the run it recorded, not a constant.
+    """The TorchTitan execution model follows the run's own mesh."""
 
-    A manifest exists so a directory self-describes without a git-rev
-    lookup. One constant cannot describe two meshes, so the field is
-    composed from the run's own spec -- and the trivial answer has to be the
-    string every directory since schema 7 already carries.
-    """
-
-    def _manifest(self, parallelism: ParallelismSpec) -> dict:
-        scenario = scenario_by_name("engines")
-        return manifest_data(
-            scenario,
-            _RUN,
-            (scenario.arm("megatron_stock"),),
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="1b",
-                parallelism=parallelism,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def test_the_trivial_spec_records_the_string_it_always_recorded(self) -> None:
+    def test_the_trivial_spec_records_the_single_gpu_string(self) -> None:
         self.assertEqual(
-            self._manifest(TRIVIAL_SPEC)["execution_model"],
+            _arm(_manifest(), "titan_eager")["execution_model"],
             "single-gpu-plain-bf16-no-fsdp",
-        )
-        self.assertEqual(
-            self._manifest(TRIVIAL_SPEC)["execution_model"], EXECUTION_MODEL
         )
 
     def test_a_pipelined_spec_records_its_own_mesh(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
         self.assertEqual(
-            self._manifest(spec)["execution_model"],
+            _arm(_manifest(spec), "titan_eager")["execution_model"],
             "2-gpu-plain-bf16-no-fsdp-pp2-1F1B",
         )
 
-    def test_the_field_is_whatever_the_spec_module_composes(self) -> None:
-        # One derivation, so the manifest cannot drift from the module that
-        # owns the vocabulary.
+    def test_the_field_is_what_the_engine_composes(self) -> None:
         for spec in (
             TRIVIAL_SPEC,
             ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2),
         ):
-            self.assertEqual(
-                self._manifest(spec)["execution_model"], execution_model(spec)
-            )
+            with self.subTest(spec=spec):
+                self.assertEqual(
+                    _arm(_manifest(spec), "titan_eager")["execution_model"],
+                    mesh.execution_model(spec),
+                )
 
 
 class ExecutionModelIsNotResumeGatedTests(unittest.TestCase):
-    """It is derived from ``parallelism``, which the resume already gates.
+    """A resume gates the parallelism block and not the execution model that derives from it."""
 
-    Gating it too would refuse the same run twice and report the derived
-    field rather than the field an operator set.
-    """
+    ARMS = (ENGINES.arm("titan_eager"), ENGINES.arm("megatron_stock"))
 
-    def setUp(self) -> None:
-        self.scenario = scenario_by_name("engines")
-        self.arms = (self.scenario.arm("megatron_stock"),)
-
-    def test_a_manifest_whose_only_difference_is_the_derived_field_resumes(
-        self,
-    ) -> None:
-        manifest = manifest_data(
-            self.scenario,
-            _RUN,
-            self.arms,
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-        manifest["execution_model"] = "something-else-entirely"
+    def test_a_changed_execution_model_alone_resumes(self) -> None:
+        manifest = _manifest()
+        for record in manifest["arms"]:
+            record["execution_model"] = "something-else-entirely"
         self.assertEqual(
-            _resume_mismatches(
-                manifest,
-                self.scenario,
-                _RUN,
-                self.arms,
-                "test-gpu",
-                _METADATA,
-                torchtitan_args=(),
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="sac",
-                    model_size="1b",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    megatron_precision="stock",
-                    profile=False,
-                    warmup_steps=10,
-                ),
+            resume_mismatches(
+                manifest, run=run_spec(profile=False), arms=self.ARMS
             ),
             [],
         )
 
     def test_the_spec_it_derives_from_is_gated(self) -> None:
-        manifest = manifest_data(
-            self.scenario,
-            _RUN,
-            self.arms,
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-        self.assertIn(
-            "parallelism",
-            _resume_mismatches(
-                manifest,
-                self.scenario,
-                _RUN,
-                self.arms,
-                "test-gpu",
-                _METADATA,
-                torchtitan_args=(),
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="sac",
-                    model_size="1b",
-                    parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    megatron_precision="stock",
+        self.assertEqual(
+            resume_mismatches(
+                _manifest(),
+                run=run_spec(
                     profile=False,
-                    warmup_steps=10,
+                    parallelism=ParallelismSpec(pp=2, pp_schedule="1F1B"),
                 ),
+                arms=self.ARMS,
             ),
+            ["run.parallelism"],
         )
 
 
 class ResumeParallelismTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.scenario = scenario_by_name("engines")
-        self.arms = (self.scenario.arm("megatron_stock"),)
+    ARMS = (ENGINES.arm("titan_eager"), ENGINES.arm("megatron_stock"))
 
-    def _manifest(self, parallelism: ParallelismSpec) -> dict:
-        return manifest_data(
-            self.scenario,
-            _RUN,
-            self.arms,
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="1b",
-                parallelism=parallelism,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def _mismatches(self, manifest: dict, parallelism: ParallelismSpec):
-        return _resume_mismatches(
+    def _mismatches(self, manifest: dict, parallelism: ParallelismSpec) -> list[str]:
+        return resume_mismatches(
             manifest,
-            self.scenario,
-            _RUN,
-            self.arms,
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="1b",
-                parallelism=parallelism,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
+            run=run_spec(profile=False, parallelism=parallelism),
+            arms=self.ARMS,
         )
 
-    def test_the_same_spec_resumes_and_a_different_one_does_not(self) -> None:
+    def test_a_different_mesh_refuses_a_resume(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
-        manifest = self._manifest(spec)
+        manifest = _manifest(spec)
         self.assertEqual(self._mismatches(manifest, spec), [])
-        self.assertIn("parallelism", self._mismatches(manifest, TRIVIAL_SPEC))
-        self.assertIn(
-            "parallelism",
-            self._mismatches(
-                manifest, ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B")
-            ),
-        )
+        for requested in (
+            TRIVIAL_SPEC,
+            ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
+            ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2),
+        ):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    self._mismatches(manifest, requested), ["run.parallelism"]
+                )
 
-    def test_the_microbatch_size_alone_refuses_a_resume(self) -> None:
-        # It decides every arm's command line, and --resume compares no
-        # command line, so the record is what has to carry it.
-        recorded = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=1)
-        requested = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
-        self.assertIn(
-            "parallelism", self._mismatches(self._manifest(recorded), requested)
-        )
-
-    def test_the_zero_value_alone_refuses_a_resume(self) -> None:
-        """It is a comparability boundary: the two parities hold different
-        amounts of optimizer state per rank and exchange different tensors.
-        ``_resume_mismatches`` compares the whole record, so the key is gated
-        the moment ``describe`` records it.
-        """
+    def test_the_zero_level_alone_refuses_a_resume(self) -> None:
         recorded = ParallelismSpec(dp=2)
         requested = ParallelismSpec(dp=2, zero=1)
         self.assertIn(
-            "parallelism", self._mismatches(self._manifest(recorded), requested)
+            "run.parallelism", self._mismatches(_manifest(recorded), requested)
         )
         self.assertIn(
-            "parallelism", self._mismatches(self._manifest(requested), recorded)
+            "run.parallelism", self._mismatches(_manifest(requested), recorded)
         )
 
-    def test_a_block_without_the_key_cannot_claim_the_default_parity(
-        self,
-    ) -> None:
-        """A block without ``zero`` cannot claim a parity.
-
-        Reading its absence as ``zero 0`` would be an inference. The safe
-        direction is to refuse the resume rather than to record a parity the
-        file never carried. ``_resume_mismatches`` compares the whole
-        ``parallelism`` block, so the missing key alone is what refuses this.
-        """
-        manifest = self._manifest(TRIVIAL_SPEC)
-        del manifest["parallelism"]["zero"]
-        self.assertIn("parallelism", self._mismatches(manifest, TRIVIAL_SPEC))
+    def test_a_block_without_the_zero_key_refuses_a_resume(self) -> None:
+        manifest = _manifest()
+        del manifest["run"]["parallelism"]["zero"]
+        self.assertIn("run.parallelism", self._mismatches(manifest, TRIVIAL_SPEC))
 
 
-class ResumeMegatronP2pSyncTests(unittest.TestCase):
-    """``--resume`` gates ``megatron_p2p_sync`` the way it gates the ac
-    mode: the same value resumes, a different one is refused in either
-    direction, and a directory that predates the field reads as ``on``.
-    """
+class ResumeMegatronConfigTests(unittest.TestCase):
+    """A resume gates each Megatron treatment as one field of the arm's config."""
 
-    PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
-
-    def setUp(self) -> None:
-        self.scenario = scenario_by_name("engines")
-        self.arms = (self.scenario.arm("megatron_stock"),)
-
-    def _manifest(self, megatron_p2p_sync: str) -> dict:
-        return manifest_data(
-            self.scenario,
-            _RUN,
-            self.arms,
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=self.PP2,
-                megatron_p2p_sync=megatron_p2p_sync,
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def _mismatches(self, manifest: dict, megatron_p2p_sync: str) -> list[str]:
-        return _resume_mismatches(
-            manifest,
-            self.scenario,
-            _RUN,
-            self.arms,
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=self.PP2,
-                megatron_p2p_sync=megatron_p2p_sync,
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def test_the_same_value_resumes_and_a_different_one_is_refused(
-        self,
-    ) -> None:
-        for recorded, requested in (("on", "off"), ("off", "on")):
-            with self.subTest(recorded=recorded, requested=requested):
-                manifest = self._manifest(recorded)
-                self.assertEqual(self._mismatches(manifest, recorded), [])
-                self.assertIn(
-                    "megatron_p2p_sync", self._mismatches(manifest, requested)
-                )
-
-    def test_the_value_alone_refuses_a_resume(self) -> None:
-        """Toggling only the value toggles only that mismatch, so the
-        refusal names the field rather than something that co-varies with
-        it -- and it is not reported as a parallelism mismatch."""
-        manifest = self._manifest("off")
-        refused = self._mismatches(manifest, "on")
-        self.assertEqual(refused, ["megatron_p2p_sync"])
-        self.assertNotIn("parallelism", refused)
+    def test_each_treatment_alone_refuses_a_resume(self) -> None:
+        for field, values in (
+            ("p2p_sync", ("on", "off")),
+            ("nan_guard", ("on", "off")),
+            ("precision", ("stock", "lean")),
+        ):
+            for recorded in values:
+                for requested in values:
+                    with self.subTest(
+                        field=field, recorded=recorded, requested=requested
+                    ):
+                        mismatches = resume_mismatches(
+                            _manifest(**{field: recorded}),
+                            run=run_spec(profile=False),
+                            arms=(
+                                ENGINES.arm("titan_eager"),
+                                configured(
+                                    ENGINES.arm("megatron_stock"),
+                                    **{field: requested},
+                                ),
+                            ),
+                        )
+                        self.assertEqual(
+                            mismatches,
+                            []
+                            if recorded == requested
+                            else [f"megatron_stock.config.{field}"],
+                        )
 
 
-class ResumeMegatronNanGuardTests(unittest.TestCase):
-    """``--resume`` gates ``megatron_nan_guard`` the way it gates the p2p
-    value: the same value resumes, and a different one is refused in either
-    direction.
-    """
-
-    def setUp(self) -> None:
-        self.scenario = scenario_by_name("engines")
-        self.arms = (self.scenario.arm("megatron_stock"),)
-
-    def _manifest(
-        self, megatron_nan_guard: str, megatron_precision: str = "stock"
-    ) -> dict:
-        return manifest_data(
-            self.scenario,
-            _RUN,
-            self.arms,
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard=megatron_nan_guard,
-                megatron_precision=megatron_precision,
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def _mismatches(
-        self,
-        manifest: dict,
-        megatron_nan_guard: str,
-        megatron_precision: str = "stock",
-    ) -> list[str]:
-        return _resume_mismatches(
-            manifest,
-            self.scenario,
-            _RUN,
-            self.arms,
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard=megatron_nan_guard,
-                megatron_precision=megatron_precision,
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def test_the_same_value_resumes_and_a_different_one_is_refused(
-        self,
-    ) -> None:
-        for recorded, requested in (("on", "off"), ("off", "on")):
-            with self.subTest(recorded=recorded, requested=requested):
-                manifest = self._manifest(recorded)
-                self.assertEqual(self._mismatches(manifest, recorded), [])
-                self.assertIn(
-                    "megatron_nan_guard", self._mismatches(manifest, requested)
-                )
-
-    def test_the_value_alone_refuses_a_resume(self) -> None:
-        """Toggling only the value toggles only that mismatch, so the
-        refusal names the field and not something that co-varies with it."""
-        manifest = self._manifest("off")
-        refused = self._mismatches(manifest, "on")
-        self.assertEqual(refused, ["megatron_nan_guard"])
-
-
-class ResumeMegatronPrecisionTests(unittest.TestCase):
-    """``--resume`` gates ``megatron_precision`` the way it gates the two
-    values above: the same value resumes, and a different one is refused in
-    either direction.
-    """
-
-    def setUp(self) -> None:
-        self.scenario = scenario_by_name("engines")
-        self.arms = (self.scenario.arm("megatron_stock"),)
-
-    def _manifest(
-        self,
-        megatron_precision: str,
-        parallelism: ParallelismSpec = TRIVIAL_SPEC,
-    ) -> dict:
-        return manifest_data(
-            self.scenario,
-            _RUN,
-            self.arms,
-            {"baseline": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=parallelism,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision=megatron_precision,
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def _mismatches(
-        self,
-        manifest: dict,
-        megatron_precision: str,
-        parallelism: ParallelismSpec = TRIVIAL_SPEC,
-    ) -> list[str]:
-        return _resume_mismatches(
-            manifest,
-            self.scenario,
-            _RUN,
-            self.arms,
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=parallelism,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision=megatron_precision,
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def test_the_same_value_resumes_and_a_different_one_is_refused(
-        self,
-    ) -> None:
-        for recorded, requested in (("stock", "lean"), ("lean", "stock")):
-            with self.subTest(recorded=recorded, requested=requested):
-                manifest = self._manifest(recorded)
-                self.assertEqual(self._mismatches(manifest, recorded), [])
-                self.assertIn(
-                    "megatron_precision",
-                    self._mismatches(manifest, requested),
-                )
-
-    def test_a_sharded_record_resumes(self) -> None:
-        """A sharded level is a value of the axis like any other."""
-        spec = ParallelismSpec(dp=2, zero=1)
-        manifest = self._manifest("stock", parallelism=spec)
-        self.assertEqual(
-            self._mismatches(manifest, "stock", parallelism=spec), []
-        )
-
-
-# The eight names ``RequestedAxes`` owns, used to split a flat keyword
-# mapping into the axes and the rest.
 _AXIS_KEYWORDS = tuple(field.name for field in fields(RequestedAxes))
 
 
@@ -1360,10 +774,10 @@ class ResolveRunTests(unittest.TestCase):
 
     def test_a_single_gpu_run_resolves_to_the_trivial_spec(self) -> None:
         resolved = self._resolve(gpu="0")
-        self.assertEqual(resolved.axes.parallelism, TRIVIAL_SPEC)
+        self.assertEqual(resolved.run.parallelism, TRIVIAL_SPEC)
 
     def test_a_named_trivial_spec_resolves_the_same_way(self) -> None:
-        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC).axes.parallelism, TRIVIAL_SPEC)
+        self.assertEqual(self._resolve(gpu="0", parallelism=TRIVIAL_SPEC).run.parallelism, TRIVIAL_SPEC)
 
     def test_a_mesh_that_does_not_fill_the_device_list_is_refused(self) -> None:
         # Rule 1: not "at most". An under-filled request would leave a GPU
@@ -1375,7 +789,7 @@ class ResolveRunTests(unittest.TestCase):
 
     def test_a_legal_mesh_resolves(self) -> None:
         spec = ParallelismSpec(pp=2, pp_schedule="1F1B")
-        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec).axes.parallelism, spec)
+        self.assertEqual(self._resolve(gpu="0,1", parallelism=spec).run.parallelism, spec)
 
     def test_a_malformed_device_list_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "comma-separated GPU indices"):

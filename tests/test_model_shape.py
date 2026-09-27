@@ -20,20 +20,17 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts.manifests import (
-    _resume_mismatches,
-    manifest_data,
-)
+from benchmarks.artifacts.manifests import load_manifest, resume_mismatches
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
     SCENARIOS,
     scenario_by_name,
 )
-from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
+from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
-from tests.engine_helpers import command, run_spec, validate
+from tests.engine_helpers import command, run_spec, validate, write_run_manifest
 from benchmarks.models.piper_qwen3.shape import (
     canonical_size_name,
     GIANT,
@@ -857,15 +854,9 @@ class StageParamCountUnderAnExpertDegreeTest(unittest.TestCase):
                         shape.param_count,
                     )
 
-class ModelSizeAliasTests(unittest.TestCase):
-    """``normal`` is the retired name of ``1b``, and it must keep working.
 
-    Measured under ``out/`` on 2026-08-21: 42 e2e manifests record
-    ``"model_size": "normal"``, and 88 more record no size at all and are
-    defined to resume as that shape. ``--resume`` compares the recorded
-    string against the requested one, so a rename without an alias would
-    refuse a resume that should succeed for 130 of the 144 e2e runs on disk.
-    """
+class ModelSizeAliasTests(unittest.TestCase):
+    """``normal`` is a second name of ``1b``, and a manifest records the canonical name."""
 
     def test_the_retired_name_resolves_to_the_same_shape(self) -> None:
         self.assertIs(shape_by_name("normal"), PIPER_1B)
@@ -894,43 +885,23 @@ class ModelSizeAliasTests(unittest.TestCase):
         # raising, so the resume comparison can normalise any recorded string.
         self.assertEqual(canonical_size_name("enormous"), "enormous")
 
+    def _manifest(self, model_size: str) -> dict:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            write_run_manifest(
+                out_dir,
+                run_spec(model_size, profile=False),
+                (scenario_by_name("engines").arm("titan_compiled"),),
+            )
+            return load_manifest(out_dir)
+
     def test_a_fresh_manifest_records_the_canonical_name(self) -> None:
-        scenario = scenario_by_name("engines")
-        selected = (scenario.arm("titan_compiled"),)
-        recorded = manifest_data(
-            scenario,
-            run_spec(profile=False),
-            selected,
-            {"titan_compiled": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="normal",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-        self.assertEqual(recorded["model_size"], "1b")
-        self.assertEqual(recorded["model_shape"]["name"], "1b")
+        self.assertEqual(self._manifest("normal")["run"]["shape"]["name"], "1b")
 
     def test_a_manifest_recording_either_name_resumes_against_the_other(
         self,
     ) -> None:
-        """The site the rename could most easily have broken.
-
-        ``_resume_mismatches`` compares the recorded size against the
-        requested one. Both sides must normalise, or a run recorded before the
-        rename would be refused for naming its own shape.
-        """
-        scenario = scenario_by_name("engines")
-        selected = (scenario.arm("titan_compiled"),)
+        selected = (scenario_by_name("engines").arm("titan_compiled"),)
         for recorded_name, requested in (
             ("normal", "1b"),
             ("1b", "normal"),
@@ -938,95 +909,21 @@ class ModelSizeAliasTests(unittest.TestCase):
             ("1b", "1b"),
         ):
             with self.subTest(recorded=recorded_name, requested=requested):
-                manifest = manifest_data(
-                    scenario,
-                    run_spec(profile=False),
-                    selected,
-                    {"titan_compiled": ["cmd"]},
-                    "test-gpu",
-                    _METADATA,
-                    torchtitan_args=(),
-                    megatron_args=(),
-                    axes=RunAxes(
-                        ac_mode="sac",
-                        model_size="1b",
-                        parallelism=TRIVIAL_SPEC,
-                        megatron_p2p_sync="on",
-                        megatron_nan_guard="on",
-                        megatron_precision="stock",
-                        profile=False,
-                        warmup_steps=10,
-                    ),
-                )
-                # Written by hand, because manifest_data canonicalises: an
-                # on-disk manifest from before the rename says "normal".
-                manifest["model_size"] = recorded_name
                 self.assertEqual(
-                    _resume_mismatches(
-                        manifest,
-                        scenario,
-                        run_spec(profile=False),
-                        selected,
-                        "test-gpu",
-                        _METADATA,
-                        torchtitan_args=(),
-                        megatron_args=(),
-                        axes=RunAxes(
-                            ac_mode="sac",
-                            model_size=requested,
-                            parallelism=TRIVIAL_SPEC,
-                            megatron_p2p_sync="on",
-                            megatron_nan_guard="on",
-                            megatron_precision="stock",
-                            profile=False,
-                            warmup_steps=10,
-                        ),
+                    resume_mismatches(
+                        self._manifest(recorded_name),
+                        run=run_spec(requested, profile=False),
+                        arms=selected,
                     ),
                     [],
                 )
-        # A genuinely different size is still refused.
-        manifest = manifest_data(
-            scenario,
-            run_spec(profile=False),
-            selected,
-            {"titan_compiled": ["cmd"]},
-            "test-gpu",
-            _METADATA,
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="sac",
-                model_size="normal",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
         self.assertEqual(
-            _resume_mismatches(
-                manifest,
-                scenario,
-                run_spec(profile=False),
-                selected,
-                "test-gpu",
-                _METADATA,
-                torchtitan_args=(),
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="sac",
-                    model_size="huge",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    megatron_precision="stock",
-                    profile=False,
-                    warmup_steps=10,
-                ),
+            resume_mismatches(
+                self._manifest("normal"),
+                run=run_spec("huge", profile=False),
+                arms=selected,
             ),
-            ["model_size"],
+            ["run.shape"],
         )
 
 
@@ -1374,8 +1271,6 @@ def _fake_process(size_line: str):
     return run
 
 
-# The eight names ``RequestedAxes`` owns, used to split a flat keyword
-# mapping into the axes and the rest.
 _AXIS_KEYWORDS = tuple(field.name for field in fields(RequestedAxes))
 
 
@@ -1413,10 +1308,10 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 18)
-        self.assertEqual(manifest["model_size"], "huge")
-        self.assertEqual(manifest["model_shape"], HUGE.describe(seq_len=4096))
-        command = manifest["commands"]["titan_compiled"]
+        self.assertEqual(manifest["schema_version"], 19)
+        self.assertEqual(manifest["run"]["shape"], HUGE.describe(seq_len=4096))
+        (arm,) = manifest["arms"]
+        command = arm["command"]
         self.assertEqual(
             command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
         )
@@ -1433,7 +1328,7 @@ class ManifestAndResumeTests(unittest.TestCase):
                 model_size="huge",
             )
 
-            with self.assertRaisesRegex(Exception, "model_size"):
+            with self.assertRaisesRegex(ValueError, "run.shape"):
                 self._run(
                     scenario_name=None,
                     arm_names=("titan_compiled",),
