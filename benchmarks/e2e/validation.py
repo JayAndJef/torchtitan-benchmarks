@@ -104,10 +104,13 @@ def validate_arm(
         rank: engine.read_evidence(rank, text) for rank, text in rank_logs.items()
     }
     failures = check_evidence(run, evidence)
-    try:
-        failures.extend(non_finite_refusals(rank_steps(engine, rank_logs)))
-    except ValueError as error:
-        failures.append(str(error))
+    steps = {}
+    for rank, text in sorted(rank_logs.items()):
+        try:
+            steps.update(rank_steps(engine, {rank: text}))
+        except ValueError as error:
+            failures.append(str(error))
+    failures.extend(non_finite_refusals(steps))
     failures.extend(engine.validate(run, arm, arm_dir, rank_logs))
     if failures:
         raise RuntimeError(
