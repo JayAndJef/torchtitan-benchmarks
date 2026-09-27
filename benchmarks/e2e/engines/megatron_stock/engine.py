@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, Engine, Launch, RunSpec
+from benchmarks.e2e.engines.api import Arm, Engine, Launch, RankEvidence, RunSpec
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.flags import (
     DRIVER_MODULE,
@@ -18,6 +19,7 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
     stock_megatron_flags,
 )
 from benchmarks.e2e.engines.megatron_stock.profiling import partial_cycle_refusal
+from benchmarks.e2e.engines.megatron_stock.evidence import read_evidence
 from benchmarks.e2e.engines.megatron_stock.validate import validate_outputs
 from benchmarks.e2e.parallelism import (
     data_parallel_term,
@@ -115,7 +117,14 @@ class MegatronStockEngine(Engine):
             )
         )
 
+    def read_evidence(self, rank: int, text: str) -> RankEvidence:
+        return read_evidence(rank, text)
+
     def validate(
-        self, run: RunSpec, arm: Arm, arm_dir: Path, log_path: Path
-    ) -> None:
-        validate_outputs(run, arm, arm_dir, log_path)
+        self,
+        run: RunSpec,
+        arm: Arm,
+        arm_dir: Path,
+        rank_logs: Mapping[int, str],
+    ) -> list[str]:
+        return validate_outputs(run, arm, arm_dir, rank_logs)

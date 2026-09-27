@@ -35,25 +35,19 @@ from benchmarks.e2e.engines.torchtitan.mesh import SCHEDULES as TITAN_SCHEDULES
 from benchmarks.e2e.parallelism import PP_SCHEDULES, ParallelismSpec
 from benchmarks.e2e.registry import SCENARIOS
 from benchmarks.e2e.engines.torchtitan.flags import TRAIN_MODULE, trainer_args
-from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
-from benchmarks.e2e.engines.megatron_stock.validate import MEGATRON_STOCK_PROFILE
+from benchmarks.e2e.engines.api import MeshObserved, RankEvidence
+from benchmarks.e2e.engines.torchtitan.validate import COMPILE_LINE, mesh_markers
+from benchmarks.e2e.engines.megatron_stock.validate import required_lines
 from tests.engine_helpers import run_spec
 
 
-VALIDATOR = {
-    "torchtitan": "benchmarks.e2e.engines.torchtitan.validate.validate_against_profile",
-    "megatron_stock": "benchmarks.e2e.engines.megatron_stock.validate.validate_against_profile",
-}
-"""Where each engine calls the shared log rules."""
-
-
-def _validation_call(arm, run):
-    """The keyword arguments that the arm's engine gives the shared log rules."""
-    engine = engine_for(arm)
-    with mock.patch(VALIDATOR[engine.name]) as checked:
-        engine.validate(run, arm, Path("/a"), Path("/a.log"))
-    checked.assert_called_once()
-    return checked.call_args.kwargs
+def _parallelism_lines(arm, run) -> tuple[str, ...]:
+    """The mesh lines that the arm's engine asks every rank to print."""
+    if engine_for(arm).name == "torchtitan":
+        if run.parallelism.world_size == 1:
+            return ()
+        return mesh_markers(run.parallelism, run.data)
+    return required_lines(run, arm).get("parallelism", ())
 
 
 _MESHES = (
@@ -147,7 +141,7 @@ class ArmDeclarationTests(unittest.TestCase):
                 if getattr(arm.config, "compile", None) is CompileMode.TORCH:
                     with self.subTest(arm=arm.name):
                         self.assertIsInstance(engine_for(arm), TorchTitanEngine)
-                        self.assertIsNotNone(TORCHTITAN_PROFILE.compile_marker)
+                        self.assertTrue(COMPILE_LINE)
 
     def test_every_engine_asks_for_mesh_lines_above_one_rank(self):
         """Rule 12 needs a line for each mesh, from each engine."""
@@ -158,9 +152,7 @@ class ArmDeclarationTests(unittest.TestCase):
                     run = run_spec(
                         ac_mode="none", parallelism=spec, local_batch_size=8
                     )
-                    markers = _validation_call(arm, run)["required_lines"][
-                        "parallelism"
-                    ]
+                    markers = _parallelism_lines(arm, run)
                     self.assertTrue(markers)
                     for marker in markers:
                         self.assertTrue(marker.strip())
@@ -168,10 +160,9 @@ class ArmDeclarationTests(unittest.TestCase):
     def test_no_engine_asks_for_mesh_lines_at_one_rank(self):
         for arm in SCENARIOS["engines"].arms:
             with self.subTest(arm=arm.name):
-                lines = _validation_call(arm, run_spec(ac_mode="none"))[
-                    "required_lines"
-                ]
-                self.assertNotIn("parallelism", lines)
+                self.assertEqual(
+                    _parallelism_lines(arm, run_spec(ac_mode="none")), ()
+                )
 
 
 class EngineDelegationTests(unittest.TestCase):
@@ -205,25 +196,43 @@ class EngineDelegationTests(unittest.TestCase):
         )
         self.assertEqual((launch.processes, launch.pin), ("per_rank", True))
 
-    def test_each_engine_validates_with_its_own_profile(self):
-        scenario = SCENARIOS["engines"]
-        run = run_spec(ac_mode="none")
-        for arm_name, profile in (
-            ("titan_compiled", TORCHTITAN_PROFILE),
-            ("megatron_stock", MEGATRON_STOCK_PROFILE),
+    def test_each_engine_reads_the_evidence_of_its_own_log(self):
+        for arm_name, log in (
+            (
+                "titan_compiled",
+                "Building device mesh with parallelism: pp=2, dp_replicate=1, "
+                "dp_shard=2, cp=1, tp=1, ep=2\n"
+                "Model piper_qwen3 1b size: 1,066,241,024 total parameters\n"
+                "Training completed\n",
+            ),
+            (
+                "megatron_stock",
+                "Megatron-LM stock parallelism: dp=2 pp=2 ep=2 schedule=1F1B "
+                "microbatches=4 stages=2\n"
+                "Megatron-LM stock data parallel: DistributedDataParallel over "
+                "2 ranks (overlap_grad_reduce=False, grad_reduce_in_fp32=True, "
+                "sharding_strategy=no_shard, expert_parallel=2, "
+                "optimizer=ChainedOptimizer[DistributedOptimizer])\n"
+                "Model qwen3_piper_1b stock-megatron size: 1,066,241,024 total "
+                "parameters\n"
+                "Training completed\n",
+            ),
         ):
-            arm = scenario.arm(arm_name)
+            arm = SCENARIOS["engines"].arm(arm_name)
             with self.subTest(arm=arm_name):
-                keywords = _validation_call(arm, run)
-                self.assertIs(keywords["profile"], profile)
                 self.assertEqual(
-                    keywords["trace_kernel_markers"],
-                    arm.config.trace_kernel_markers,
+                    engine_for(arm).read_evidence(3, log),
+                    RankEvidence(
+                        rank=3,
+                        completed=True,
+                        param_count=1_066_241_024,
+                        mesh=MeshObserved(dp=2, pp=2, ep=2, zero=1),
+                    ),
                 )
 
     def test_the_megatron_engine_asks_for_its_three_treatments(self):
         arm = SCENARIOS["engines"].arm("megatron_stock")
-        lines = _validation_call(arm, run_spec(ac_mode="none"))["required_lines"]
+        lines = required_lines(run_spec(ac_mode="none"), arm)
         self.assertEqual(
             list(lines), ["megatron nan guard", "megatron precision"]
         )

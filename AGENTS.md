@@ -78,7 +78,7 @@ shares one pre-push hook.
 | path | contents |
 |---|---|
 | `benchmarks/cli/` | The Click CLI: `benchmarks/cli/e2e.py`, `benchmarks/cli/kernel.py`, and the group in `benchmarks/cli/main.py`. |
-| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/overrides.py`, `benchmarks/e2e/checks.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines/`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
+| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/overrides.py`, `benchmarks/e2e/checks.py`, `benchmarks/e2e/evidence.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines/`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
 | `benchmarks/e2e/engines/megatron_stock/` | The stock Megatron-LM engine: its command line, its validation and, in `benchmarks/e2e/engines/megatron_stock/driver/`, the driver. |
 | `benchmarks/e2e/engines/torchtitan/plugins/` | The modules the TorchTitan trainer imports through `--module`: the config registry, the parallelize function and the pre-tokenized replay dataloader. |
 | `benchmarks/artifacts/` | `manifest.json` and its schema 18 reader, `run_state.json`, the output layout and the atomic JSON writer. |
@@ -314,43 +314,52 @@ one run mix them.
 ## 5. Validation
 
 `benchmarks.e2e.validation:validate_arm` gates every arm before its numbers
-are published. Each log rule runs **once per rank**, because one `<arm>.log`
-holds every rank's output. Above one rank, a rank that wrote no log and a
-rank that wrote no trace each fail the arm.
+are published. It splits `<arm>.log` by rank, because one log holds every
+rank's output. The arm's engine reads one `RankEvidence` from each rank's
+log with `read_evidence`. Then `validate_arm` runs the harness facts and the
+engine's own `validate`, and it raises one error that lists every failure.
 
-The numbering below is the numbering the code uses. Rules 7 and 9 are
-deleted and their numbers stay empty, because messages and tests name the
-rules that remain.
+The harness facts live in `benchmarks/e2e/evidence.py` and apply to every
+engine:
 
-| rule | what it refuses | needs the profile axis |
-|---|---|---|
-| 1 | a missing log, or a log without the engine's completion marker | no |
-| 2 | an `[Override]` count other than `overrides_per_block * n_layers` | no |
-| 3 | a declared `override_imports` entry with no matching line | no |
-| 4 | a silent-fallback phrase in the log | no |
-| 5 | fewer trace files than `min_trace_windows`, per rank | yes |
-| 6 | a declared `trace_kernel_markers` string absent from every trace | yes |
-| 7 | DELETED with the compiled-region measurements | -- |
-| 8 | a compile log line that contradicts the arm's own compile value | no |
-| 9 | DELETED with the cuda-graph compile mode | -- |
-| 10 | a SelectiveAC line that contradicts `--ac` | no |
-| 11 | a missing `size: <N> total parameters` line for the shape | no |
-| 12 | a log that does not state the mesh, the sync value, the NaN-guard value or the precision the run asked for | no |
-| 13 | a rank whose traces carry no all-reduce kernel, above one data-parallel rank | yes |
+- **Completion:** each rank from 0 to the world size writes output and
+  completes. A missing rank fails, and so does a rank outside the run.
+- **Model:** each stated parameter count equals the shape's count, and at
+  least one rank states it.
+- **Mesh:** each rank's stated `dp`, `pp` and `ep` equal the run's spec.
+  Above one data-parallel rank the stated ZeRO level must also equal the
+  spec. A log that states no mesh reads as one device.
+- **Finite trajectories:** no rank's step lines carry a `nan` or an `inf`.
+
+The mesh fact reads both ways. A log that records a pipeline fails at one
+pipeline rank, and a log that records data parallelism fails at one
+data-parallel rank. The second one guards the worse mistake: a two-way
+data-parallel run published as one GPU reads as roughly twice the true
+rate.
+
+Each engine's `validate` holds its own rules. The numbers below are labels
+that this file uses; the code names each rule by its message.
+
+| rule | what it refuses | engine | needs the profile axis |
+|---|---|---|---|
+| 2 | an `[Override]` count other than `overrides_per_block * n_layers` | TorchTitan | no |
+| 3 | a declared `override_imports` entry with no matching line | TorchTitan | no |
+| 4 | a silent-fallback phrase in the log | TorchTitan | no |
+| 5 | fewer trace files than `min_windows`, per rank, or a rank with no trace | both | yes |
+| 6 | a declared `trace_kernel_markers` string absent from every trace | both | yes |
+| 8 | a compile log line that contradicts the arm's own compile value | TorchTitan | no |
+| 10 | a SelectiveAC line that contradicts `--ac` | TorchTitan | no |
+| 11 | a parameter count other than the shape's; now the model fact | harness | no |
+| 12 | a log that lacks a mesh line, the sync line, the NaN-guard line or the precision fields the run asked for | both | no |
+| 13 | a rank whose traces carry no all-reduce kernel, above one data-parallel rank | both | yes |
 
 Rule 8 reads both ways. The marker must be present when the arm declares
 `compile="torch"` and absent when it declares `compile="none"`. Never relax
 the absence half, or an arm that silently compiled publishes as eager.
 
-Rule 12 also reads two patterns the other way round. A log that records a
-pipeline fails at one pipeline rank, and a log that records data parallelism
-fails at one data-parallel rank. The second one guards the worse mistake: a
-two-way data-parallel run published as one GPU reads as roughly twice the
-true rate.
-
 Without the profile axis the arm writes no trace, so rules 5, 6 and 13 are
-skipped whole. Rule 12 then carries the data-parallel axis alone. Cite a
-data-parallel number from an unprofiled run as resting on that log line.
+skipped whole. The mesh fact then carries the data-parallel axis alone. Cite
+a data-parallel number from an unprofiled run as resting on that log line.
 
 Rule 13 matches the kernel name `ncclDevKernel_AllReduce`. Megatron issues
 its bucket reductions inside a coalescing manager, and a grouped NCCL launch
@@ -358,13 +367,11 @@ can surface under a generic name. Read a Megatron rule 13 failure as a
 question about the marker string, and settle it with the arm's own trace.
 Widening the marker to a bare `nccl` is not the repair. The marker is
 necessary and never sufficient: an all-reduce proves a collective ran, never
-which one. Read rule 12 and rule 13 together.
+which one. Read the mesh fact and rule 13 together.
 
-The engine differences live in two profiles, `TORCHTITAN_PROFILE` and
-`MEGATRON_STOCK_PROFILE`. The type of an arm's config selects its engine in
-`benchmarks/e2e/engines/`, and each engine passes its own command builder
-and its own profile. So an arm cannot take one engine's argv and another
-engine's log rules.
+The type of an arm's config selects its engine in `benchmarks/e2e/engines/`,
+and each engine owns its command builder, its log reader and its rules. So
+an arm cannot take one engine's argv and another engine's log rules.
 
 ## 6. Evaluation
 
@@ -397,7 +404,8 @@ each profiler cycle that carry no profiler cost. The two figures are
 different figures, not two readings of one.
 
 `benchmarks.e2e.results:refuse_non_finite_trajectories` fails an arm whose
-step lines carry a `nan` or an `inf`, on any rank. A run that diverged
+step lines carry a `nan` or an `inf`, on any rank. Validation refuses the
+same arm first, through the finite-trajectory fact. A run that diverged
 publishes no throughput. The stock driver prints `grad_norm: nan` on a step
 that Megatron skipped, so the refusal also refuses a skipped step. The arm
 sends no loss scale, so Megatron skips no step.
@@ -432,7 +440,8 @@ harness connects through the arm's `engine` name alone.
 
 | module | job |
 |---|---|
-| `benchmarks/e2e/engines/megatron_stock/engine.py` | The engine record: the run refusals, the launch and the validation call. |
+| `benchmarks/e2e/engines/megatron_stock/engine.py` | The engine record: the run refusals, the launch, the log reader and the validation call. |
+| `benchmarks/e2e/engines/megatron_stock/evidence.py` | Reads the completion, the parameter count and the mesh from one rank's log. |
 | `benchmarks/e2e/engines/megatron_stock/flags.py` | The whole Megatron command line, as data, and the passthrough tables. Torch-free, so a CPU test reads it. |
 | `benchmarks/e2e/engines/megatron_stock/profiling.py` | The Megatron profiler flags and the partial-cycle refusal. |
 | `benchmarks/e2e/engines/megatron_stock/validate.py` | The log lines that prove the mesh and the three Megatron treatments. |
@@ -440,7 +449,7 @@ harness connects through the arm's `engine` name alone.
 | `benchmarks/e2e/engines/megatron_stock/driver/train.py` | Parses the harness flags, refuses a run it cannot honour, reproduces the stock training entry point and calls `pretrain`. |
 | `benchmarks/e2e/engines/megatron_stock/driver/markers.py` | The log lines this arm prints, and the functions that format one. |
 | `benchmarks/e2e/engines/megatron_stock/driver/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
-| `benchmarks/e2e/engines/megatron_stock/driver/model_builder.py` | Builds the stock GPT model and prints the parameter count rule 11 reads. |
+| `benchmarks/e2e/engines/megatron_stock/driver/model_builder.py` | Builds the stock GPT model and prints the parameter count that the model fact reads. |
 | `benchmarks/e2e/engines/megatron_stock/driver/dp_marker.py` | The data-parallel line, printed from the wrapper Megatron really built. |
 | `benchmarks/e2e/engines/megatron_stock/driver/step_log.py` | The step line the evaluation parses, and the shim that prints it. |
 | `benchmarks/e2e/engines/megatron_stock/driver/profiling.py` | Gives Megatron the profiler schedule and the trace path the harness reads. |
@@ -793,7 +802,7 @@ unchanged behaviour:
   `CrossEntropyLoss`, `LRSchedulersContainer`, `MetricsProcessor`,
   `default_adamw`, `TrainingConfig`, `SelectiveAC`, `pipeline_llm` and
   `HuggingFaceTextDataLoader`
-- the trainer's `size: <N> total parameters` log line, which rule 11 matches
+- the trainer's `size: <N> total parameters` log line, which the model fact reads
 - the per-block compile log line, which rule 8 matches through the substring
   `with torch.compile`
 - `override` and `derive` from the config override module, and the

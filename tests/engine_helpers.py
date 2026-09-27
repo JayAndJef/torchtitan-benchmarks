@@ -10,6 +10,7 @@ from benchmarks.e2e.engines.api import Arm, DataSpec, ProfileWindow, RunSpec
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
 from benchmarks.e2e.registry import DEFAULT_WARMUP_STEPS, ENGINES, SEED
+from benchmarks.e2e.validation import validate_arm
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.execution.launcher import (
     command_line,
@@ -68,8 +69,8 @@ def command(run: RunSpec, arm: Arm, arm_dir: Path | str) -> list[str]:
 def validate(
     run: RunSpec, arm: Arm, arm_dir: Path | str, log_path: Path | str
 ) -> None:
-    """Validate one arm through its engine."""
-    engine_for(arm).validate(run, arm, Path(arm_dir), Path(log_path))
+    """Validate one arm as the runner does: the harness facts, then the arm's engine."""
+    validate_arm(run, arm, engine_for(arm), Path(arm_dir), Path(log_path))
 
 
 TEST_METADATA = {

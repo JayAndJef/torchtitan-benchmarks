@@ -36,12 +36,17 @@ from benchmarks.e2e.registry import (
     ENGINES,
     scenario_by_name,
 )
+from benchmarks.e2e.engines.megatron_stock.evidence import (
+    read_evidence as stock_evidence,
+)
+from benchmarks.e2e.engines.torchtitan.evidence import (
+    read_evidence as titan_evidence,
+)
 from benchmarks.e2e.engines.torchtitan.validate import (
-    TORCHTITAN_PROFILE,
     mesh_markers as titan_mesh_markers,
+    required_lines as titan_required_lines,
 )
 from benchmarks.e2e.engines.megatron_stock.validate import (
-    MEGATRON_STOCK_PROFILE,
     mesh_markers as megatron_mesh_markers,
     nan_guard_markers,
     p2p_markers,
@@ -49,7 +54,7 @@ from benchmarks.e2e.engines.megatron_stock.validate import (
 )
 from benchmarks.e2e.validation import ALL_REDUCE_MARKER
 from benchmarks.execution.launcher import LOG_RANK_TEMPLATE, launcher_environment
-from benchmarks.e2e.engines.api import Launch
+from benchmarks.e2e.engines.api import Launch, MeshObserved
 from tests.test_runner import (
     OVERRIDE_ARM,
     PIPER_OPTIMIZED_SWIGLU_OVERRIDE,
@@ -424,20 +429,21 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
                 fixture.log,
             )
 
-    def test_the_megatron_pattern_reads_the_degree_not_the_line(self) -> None:
+    def test_the_megatron_reader_reads_the_degree_not_the_line(self) -> None:
         """``pp=1`` is not a pipeline. Any other degree is."""
-        pattern = MEGATRON_STOCK_PROFILE.pipelined_pattern
-        trivial = "Megatron-LM stock parallelism: dp=1 pp=1 schedule=None"
-        pipelined = "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B"
-        deeper = "Megatron-LM stock parallelism: dp=1 pp=4 schedule=1F1B"
-        self.assertIsNone(pattern.search(trivial))
-        self.assertIsNotNone(pattern.search(pipelined))
-        self.assertIsNotNone(pattern.search(deeper))
+        for pp in (1, 2, 4):
+            with self.subTest(pp=pp):
+                self.assertEqual(
+                    _stock_mesh(
+                        f"Megatron-LM stock parallelism: dp=1 pp={pp} ep=1 "
+                        "schedule=1F1B"
+                    ).pp,
+                    pp,
+                )
 
-    def test_the_titan_pattern_does_not_match_a_one_gpu_mesh_line(self) -> None:
-        pattern = TORCHTITAN_PROFILE.pipelined_pattern
-        self.assertIsNone(pattern.search(_titan_log(TRIVIAL_SPEC)))
-        self.assertIsNotNone(pattern.search(_titan_log(PP2)))
+    def test_the_titan_reader_reads_the_one_gpu_mesh_line(self) -> None:
+        self.assertEqual(_titan_mesh(_titan_log(TRIVIAL_SPEC)).pp, 1)
+        self.assertEqual(_titan_mesh(_titan_log(PP2)).pp, 2)
 
 
 class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
@@ -478,91 +484,80 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
                 fixture.log,
             )
 
-    def test_each_pattern_names_two_witnesses(self) -> None:
-        """The engine's own mesh line, and this repo's wrapper line.
-
-        The mesh line is logged whatever this repo's code does, so a degree
-        above 1 shows there even in a run that never reached the wrapper.
-        Either alone must fail the arm.
-        """
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            titan.search(
+    def test_each_reader_takes_two_witnesses(self) -> None:
+        """The engine's own mesh line and this repository's wrapper line each state the degree."""
+        self.assertEqual(
+            _titan_mesh(
                 "Building device mesh with parallelism: pp=1, "
                 "dp_replicate=2, dp_shard=1, cp=1, tp=1, ep=1"
-            )
+            ).dp,
+            2,
         )
-        self.assertIsNotNone(
-            titan.search(
+        self.assertEqual(
+            _titan_mesh(
                 "piper1b data parallel: fully_shard applied "
                 "(dp_replicate=2, dp_shard=1); 17 FSDP units"
-            )
+            ).dp,
+            2,
         )
-        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            megatron.search(
-                "Megatron-LM stock parallelism: dp=2 pp=1 schedule=None "
+        self.assertEqual(
+            _stock_mesh(
+                "Megatron-LM stock parallelism: dp=2 pp=1 ep=1 schedule=1F1B "
                 "microbatches=1 stages=1"
-            )
+            ).dp,
+            2,
         )
-        self.assertIsNotNone(
-            megatron.search(
+        self.assertEqual(
+            _stock_mesh(
                 "Megatron-LM stock data parallel: DistributedDataParallel "
                 "over 2 ranks (overlap_grad_reduce=True, "
-                "grad_reduce_in_fp32=False)"
-            )
+                "grad_reduce_in_fp32=False, sharding_strategy=no_shard, "
+                "expert_parallel=1, "
+                "optimizer=ChainedOptimizer[Float16OptimizerWithFloat16Params])"
+            ),
+            MeshObserved(dp=2, pp=1, ep=1, zero=0),
         )
 
     def test_a_shard_degree_is_data_parallelism_too(self) -> None:
-        """Full parameter sharding is what an omitted shard-degree flag
-        produces.
-
-        ``parallelize_piper1b`` refuses it in the training process. This
-        pattern is what stops such a log being published as single-GPU if
-        the refusal is ever lifted.
-        """
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            titan.search(
+        self.assertEqual(
+            _titan_mesh(
                 "Building device mesh with parallelism: pp=1, "
                 "dp_replicate=1, dp_shard=2, cp=1, tp=1, ep=1"
-            )
+            ),
+            MeshObserved(dp=2, pp=1, ep=1, zero=1),
         )
 
     def test_a_pipeline_only_log_is_not_data_parallel(self) -> None:
-        """Read off the real ``pp 2, dp 1`` logs this harness has written.
-
-        Both engines print their degrees on one line, so a pattern that
-        matched the line rather than the degree would fail every honest
-        pipeline run.
-        """
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNone(
-            titan.search(
+        self.assertEqual(
+            _titan_mesh(
                 "Building device mesh with parallelism: pp=2, "
                 "dp_replicate=1, dp_shard=1, cp=1, tp=1, ep=1"
-            )
+            ).dp,
+            1,
         )
-        self.assertIsNone(titan.search(_titan_log(PP2)))
-        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
-        self.assertIsNone(
-            megatron.search(
-                "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B "
+        self.assertEqual(_titan_mesh(_titan_log(PP2)).dp, 1)
+        self.assertEqual(
+            _stock_mesh(
+                "Megatron-LM stock parallelism: dp=1 pp=2 ep=1 schedule=1F1B "
                 "microbatches=4 stages=2"
-            )
+            ).dp,
+            1,
         )
 
     def test_a_double_digit_degree_is_not_read_as_one(self) -> None:
-        """``dp=1`` must not match ``dp=12``, and the reverse."""
-        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            megatron.search(
-                "Megatron-LM stock parallelism: dp=12 pp=1 schedule=None"
-            )
+        self.assertEqual(
+            _stock_mesh(
+                "Megatron-LM stock parallelism: dp=12 pp=1 ep=1 schedule=None"
+            ).dp,
+            12,
         )
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(titan.search("dp_replicate=10, dp_shard=1,"))
-        self.assertIsNone(titan.search("dp_replicate=1, dp_shard=1,"))
+        self.assertEqual(
+            _titan_mesh(
+                "Building device mesh with parallelism: pp=1, "
+                "dp_replicate=10, dp_shard=1, cp=1, tp=1, ep=1"
+            ).dp,
+            10,
+        )
 
 
 class ArmRuleTwelveTests(unittest.TestCase):
@@ -837,17 +832,17 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
 
 def _titan_required_lines(spec: ParallelismSpec) -> dict[str, tuple[str, ...]]:
     """The lines that the TorchTitan engine asks every rank for at ``spec``."""
-    arm = ENGINES.arm("titan_compiled")
-    with mock.patch(
-        "benchmarks.e2e.engines.torchtitan.validate.validate_against_profile"
-    ) as checked:
-        validate(
-            run_spec(parallelism=spec, local_batch_size=8),
-            arm,
-            Path("/a"),
-            Path("/a.log"),
-        )
-    return dict(checked.call_args.kwargs["required_lines"])
+    return titan_required_lines(run_spec(parallelism=spec, local_batch_size=8))
+
+
+def _titan_mesh(text: str):
+    """The mesh that the TorchTitan evidence reader takes from ``text``."""
+    return titan_evidence(0, text + "\nTraining completed\n").mesh
+
+
+def _stock_mesh(text: str):
+    """The mesh that the stock evidence reader takes from ``text``."""
+    return stock_evidence(0, text + "\nTraining completed\n").mesh
 
 
 def _stock_log(
@@ -866,7 +861,6 @@ def _stock_log(
     profile asks for them under BOTH values, so a fixture that omitted
     them would fail every stock arm.
     """
-    profile = MEGATRON_STOCK_PROFILE
     data = scenario_by_name("engines").data
     lines = [
         # The first marker is the driver's own line, and the four fields
@@ -898,7 +892,6 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     def test_the_stock_line_is_pinned_to_the_driver_constant(self) -> None:
         """The validator and the driver state one line in two places, and
         the line is asked at every mesh."""
-        profile = MEGATRON_STOCK_PROFILE
         for value, line in (("on", self.ON_LINE), ("off", self.OFF_LINE)):
             with self.subTest(value=value):
                 self.assertEqual(nan_guard_markers(value), (line,))
@@ -985,7 +978,6 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         """Megatron maps each dtype to a ``torch.dtype``, so the markers
         carry the torch spelling rather than the flag's. The first marker
         is the driver's own line, which rule 8 no longer holds."""
-        profile = MEGATRON_STOCK_PROFILE
         self.assertEqual(
             precision_markers("stock"),
             (

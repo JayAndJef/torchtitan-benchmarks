@@ -14,19 +14,18 @@ from benchmarks.artifacts.manifests import ArmRecord, load_run_record
 from benchmarks.artifacts.summaries import _value
 from benchmarks.e2e.checks import run_warnings
 from benchmarks.e2e.engines.api import ProfileWindow
+from benchmarks.e2e.evidence import (
+    GRAD_NORM_METRIC,
+    LOSS_METRIC,
+    non_finite_refusals,
+    trajectory,
+)
 from benchmarks.execution.affinity import is_pinned
 
 
 STEP_METRICS = re.compile(
     r"step:\s*(\d+).*?memory:\s*([0-9.]+)GiB.*?tps:\s*([0-9,]+)"
 )
-LOSS_METRIC = re.compile(r"step:\s*(\d+).*?loss:\s*(nan|-?inf|[0-9.eE+-]+)")
-"""The loss pattern; the words come before the digits, because the digit class alone reads ``-inf`` as ``-``."""
-GRAD_NORM_METRIC = re.compile(
-    r"step:\s*(\d+).*?grad_norm:\s*(nan|-?inf|[0-9.eE+-]+)"
-)
-
-
 @dataclass(frozen=True)
 class StepMs:
     """The step cost of one rank, in milliseconds; ``p95`` is a nearest-rank value, so it is always a measured step."""
@@ -114,47 +113,27 @@ def _log_by_rank(log_path: Path) -> dict[int, str]:
     return logs_by_rank(log_path.read_text(errors="replace"))
 
 
-def _trajectory(text: str, pattern: re.Pattern[str]) -> list[tuple[int, float]]:
-    values = []
-    for line in text.splitlines():
-        match = pattern.search(line)
-        if match:
-            values.append((int(match.group(1)), float(match.group(2))))
-    return values
-
-
 def loss_visible_rank(*, world_size: int, pp: int) -> int:
     """The rank whose step line carries the run's real loss, for the ``1F1B`` and ``Interleaved1F1B`` schedules."""
     return (world_size // pp) * (pp - 1)
 
 
 def losses(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
-    return _trajectory(_log_by_rank(log_path).get(rank, ""), LOSS_METRIC)
-
-
-_TRAJECTORY_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("loss", LOSS_METRIC),
-    ("grad_norm", GRAD_NORM_METRIC),
-)
-"""The two trajectories a step line carries, by the name a failure prints."""
+    return trajectory(_log_by_rank(log_path).get(rank, ""), LOSS_METRIC)
 
 
 def refuse_non_finite_trajectories(arm: str, log_path: Path) -> None:
-    """Fail an arm when any rank's step lines carry a ``nan`` or an ``inf``."""
-    for rank, text in sorted(_log_by_rank(log_path).items()):
-        for metric, pattern in _TRAJECTORY_METRICS:
-            for step, value in _trajectory(text, pattern):
-                if not math.isfinite(value):
-                    raise ValueError(
-                        f"{arm}: rank {rank} logged a non-finite {metric} at "
-                        f"step {step} ({value}); a run that diverged cannot "
-                        "publish a throughput, so no results.json is written "
-                        f"for it (see {log_path})"
-                    )
+    """Raise ``ValueError`` when any rank's step lines carry a ``nan`` or an ``inf``."""
+    refusals = non_finite_refusals(_log_by_rank(log_path))
+    if refusals:
+        raise ValueError(
+            f"{arm}: {refusals[0]}; a run that diverged cannot publish a "
+            f"throughput, so no results.json is written for it (see {log_path})"
+        )
 
 
 def grad_norms(log_path: Path, *, rank: int = 0) -> list[tuple[int, float]]:
-    return _trajectory(_log_by_rank(log_path).get(rank, ""), GRAD_NORM_METRIC)
+    return trajectory(_log_by_rank(log_path).get(rank, ""), GRAD_NORM_METRIC)
 
 
 def _rows(text: str) -> list[tuple[int, float, int]]:
@@ -395,7 +374,7 @@ def write_results(result: EvaluationResult, path: Path | None = None) -> Path:
     return destination
 
 
-def _render_trajectory(values: list[tuple[int, float]], nonfinite_label: str) -> str:
+def _rendertrajectory(values: list[tuple[int, float]], nonfinite_label: str) -> str:
     if not values:
         return "(no log)"
     picks = [values[0]] + [values[i] for i in (9, 19, 29, 39) if i < len(values)]
@@ -434,14 +413,14 @@ def render_evaluation(result: EvaluationResult) -> str:
 
     lines.extend(["", "loss trajectories (sanity check, not a measurement):"])
     for arm in result.arms:
-        lines.append(f"  {arm:22s} {_render_trajectory(result.losses[arm], 'LOSS')}")
+        lines.append(f"  {arm:22s} {_rendertrajectory(result.losses[arm], 'LOSS')}")
     lines.extend(
         ["", "gradient norm trajectories (sanity check, not a measurement):"]
     )
     for arm in result.arms:
         lines.append(
             f"  {arm:22s} "
-            f"{_render_trajectory(result.gradient_norms[arm], 'GRAD NORM')}"
+            f"{_rendertrajectory(result.gradient_norms[arm], 'GRAD NORM')}"
         )
 
     if result.warnings:

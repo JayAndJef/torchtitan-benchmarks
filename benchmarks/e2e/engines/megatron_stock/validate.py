@@ -1,10 +1,11 @@
-"""The log lines that prove a stock Megatron arm ran the treatment it declares."""
+"""The stock Megatron rules that an arm's logs and traces must pass: the mesh detail, the three treatments and the profiler traces."""
 
 from __future__ import annotations
 
-import re
+from collections.abc import Mapping
 from pathlib import Path
 
+from benchmarks.artifacts.layout import trace_files_by_rank
 from benchmarks.e2e.engines.api import Arm, DataSpec, RunSpec
 from benchmarks.e2e.engines.megatron_stock.flags import (
     DATA_PARALLEL_WRAPPERS,
@@ -16,23 +17,11 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
     microbatch_geometry,
 )
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.validation import ValidationProfile, validate_against_profile
-
-
-MEGATRON_STOCK_PROFILE = ValidationProfile(
-    completion_marker="Training completed",
-    compile_marker=None,
-    failure_markers=(),
-    ac_line=None,
-    pipelined_pattern=re.compile(
-        r"Megatron-LM stock parallelism: dp=\d+ pp=(?!1\b)\d+"
-    ),
-    data_parallel_pattern=re.compile(
-        r"Megatron-LM stock parallelism: dp=(?!1\b)\d+"
-        r"|Megatron-LM stock data parallel:"
-    ),
+from benchmarks.e2e.validation import (
+    ALL_REDUCE_MARKER,
+    count_trace_windows,
+    trace_contains,
 )
-"""The stock Megatron log lines that the shared rules read."""
 
 
 def mesh_markers(
@@ -93,23 +82,72 @@ def precision_markers(precision: str) -> tuple[str, ...]:
     )
 
 
-def validate_outputs(run: RunSpec, arm: Arm, arm_dir: Path, log_path: Path) -> None:
-    """Raise ``RuntimeError`` when the log or the traces of a stock Megatron arm refuse its numbers."""
+def required_lines(run: RunSpec, arm: Arm) -> dict[str, tuple[str, ...]]:
+    """The lines that every rank must print, by the treatment that each one proves."""
     config = arm.config
     spec = run.parallelism
-    required_lines = {}
+    lines = {}
     if spec.world_size > 1:
-        required_lines["parallelism"] = mesh_markers(
+        lines["parallelism"] = mesh_markers(
             spec, run.data, config.precision, config.extra_flags
         ) + p2p_markers(spec, config.p2p_sync)
-    required_lines["megatron nan guard"] = nan_guard_markers(config.nan_guard)
-    required_lines["megatron precision"] = precision_markers(config.precision)
-    validate_against_profile(
-        run,
-        arm.name,
-        arm_dir,
-        log_path,
-        profile=MEGATRON_STOCK_PROFILE,
-        required_lines=required_lines,
-        trace_kernel_markers=config.trace_kernel_markers,
+    lines["megatron nan guard"] = nan_guard_markers(config.nan_guard)
+    lines["megatron precision"] = precision_markers(config.precision)
+    return lines
+
+
+def trace_refusals(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
+    """The trace rules that a profiled arm breaks: the windows of each rank, the kernel markers and the all-reduce."""
+    if not run.profile:
+        return []
+    spec = run.parallelism
+    windows = count_trace_windows(arm_dir)
+    ranks = range(spec.world_size)
+    refusals = [
+        f"rank {rank} wrote no trace under {arm_dir}"
+        for rank in ranks
+        if spec.world_size > 1 and rank not in windows
+    ]
+    minimum = run.window.min_windows
+    for rank, count in (windows or {0: 0}).items():
+        if count < minimum:
+            where = f"for rank {rank} under" if len(windows) > 1 else "under"
+            refusals.append(
+                f"expected at least {minimum} profiler windows, found {count} "
+                f"{where} {arm_dir}"
+            )
+    traces = trace_files_by_rank(arm_dir)
+    every_trace = [path for paths in traces.values() for path in paths]
+    # A pipeline stage can lack a marker kernel, so the markers read every rank as one set.
+    refusals.extend(
+        f"marker kernel {marker!r} absent from profiler traces"
+        for marker in arm.config.trace_kernel_markers
+        if not any(trace_contains(path, marker) for path in every_trace)
     )
+    if spec.dp > 1:
+        refusals.extend(
+            f"dp {spec.dp} was requested and rank {rank}'s profiler traces "
+            f"under {arm_dir} carry no {ALL_REDUCE_MARKER!r}"
+            for rank in ranks
+            if not any(
+                trace_contains(path, ALL_REDUCE_MARKER)
+                for path in traces.get(rank, ())
+            )
+        )
+    return refusals
+
+
+def validate_outputs(
+    run: RunSpec, arm: Arm, arm_dir: Path, rank_logs: Mapping[int, str]
+) -> list[str]:
+    """Every stock Megatron rule that the arm's logs and traces break."""
+    required = required_lines(run, arm)
+    refusals = [
+        f"the requested {treatment} did not apply; the engine never logged "
+        f"{marker!r} on rank {rank}"
+        for rank, log in sorted(rank_logs.items())
+        for treatment, markers in required.items()
+        for marker in markers
+        if marker not in log
+    ]
+    return refusals + trace_refusals(run, arm, arm_dir)
