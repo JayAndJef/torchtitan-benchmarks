@@ -258,7 +258,7 @@ TITAN_ARM = "titan"
 MCORE_LAYER = 0
 
 # The comm backend our production config asks for
-# (``benchmarks/models/piper_qwen3/config_registry.py:101``). It resolves to
+# (``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``). It resolves to
 # ``AllToAllTokenDispatcher`` (``models/common/config_utils.py:364-368``),
 # whose ``combine`` delegates to ``LocalTokenDispatcher.combine`` when
 # ``ep_mesh is None`` (``token_dispatcher.py:602-611``). The titan arm builds

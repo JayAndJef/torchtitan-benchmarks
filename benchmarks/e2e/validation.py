@@ -1,46 +1,12 @@
-"""Reject partial or wrongly configured end-to-end runs before analysis.
-
-``validate_arm`` is the gate every arm passes before its numbers are
-published. Engine differences live in two named profiles,
-``TORCHTITAN_PROFILE`` and ``MEGATRON_STOCK_PROFILE``, and each engine in
-``benchmarks.e2e.engines`` passes its own profile. The structural rules --
-trace-window count, kernel markers, override counting, and the
-parameter-count line -- are shared.
-
-**The log rules run once per rank.** One ``<arm>.log`` holds every rank's
-output, so a rule read against the whole file asks "did some rank do this".
-Arm rule 4 is the sharpest case: a kernel that silently degraded on rank 1
-alone leaves rank 0's log clean. ``benchmarks.artifacts.layout.logs_by_rank``
-does the split and returns a single-rank log whole, so a one-GPU arm is
-checked against exactly the text it was checked against before.
-
-A rank that wrote nothing is in neither the log split nor the trace
-grouping, so no rule fires for it. The declared world size is what makes
-that visible, and it is why this module takes a ``ParallelismSpec``.
-
-**Arm rule 12 is the other half of that spec.** Both engines log what mesh
-they really built, and a run that ignored the ``--parallelism.*`` flags --
-or a driver that read no ``RANK`` -- passes every other rule while training
-something else. The rule is consulted only above one rank, where there is a
-mesh to get wrong.
-
-**Arm rule 13 is the data-parallel axis's own hazard, read from the
-traces.** Two ranks that never reduce their gradients train two models and
-report roughly twice the true throughput, and every other rule passes. The
-rule asks each rank's traces for an all-reduce kernel. It does not stand
-alone: a mesh can carry an all-reduce that reduces no gradient -- TorchTitan
-reduces the loss over its own mesh on every logged step -- so arm rule 12's
-per-engine data-parallel log line is what names the mechanism, and this rule
-is what says a collective really ran on every rank.
-"""
+"""The log and trace rules that every engine's validation applies before the harness publishes an arm."""
 
 from __future__ import annotations
 
 import gzip
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.engines.api import Arm, CompileMode, DataSpec, Engine, RunSpec
@@ -57,68 +23,24 @@ from benchmarks.e2e.parallelism import ParallelismSpec
 
 @dataclass(frozen=True)
 class ValidationProfile:
-    """The engine-specific rules of ``validate_against_profile``; each engine passes its own.
-
-    Attributes:
-        completion_marker: Rule 1: the line a finished run prints.
-        compile_marker: Rule 8, read both ways: present under
-            ``compile="torch"``, absent under ``"none"``. ``None`` means the
-            engine has no whole-block compile, so no arm of it may ask.
-        failure_markers: Rule 4: phrases that mean a silent fallback.
-        check_ac_line: Rule 10: whether the SelectiveAC line is expected.
-        parallelism_markers: Rule 12: the lines that prove the mesh. Called
-            as ``(spec, data, megatron_precision, megatron_args)``,
-            because the stock data-parallel line moves with the precision
-            and with ``--overlap-grad-reduce``.
-        pipelined_pattern: Rule 12 inverted: a pipeline log at ``pp`` 1.
-        data_parallel_pattern: Rule 12 inverted: a data-parallel log at
-            ``dp`` 1, which would read as twice the true rate.
-        p2p_markers: The ``--megatron-p2p-sync`` line, above ``pp`` 1.
-        nan_guard_markers: The ``--megatron-nan-guard`` line, at every mesh.
-        precision_markers: The ``--megatron-precision`` fields, at every
-            mesh and under both values.
-    """
+    """The log lines of one engine that ``validate_against_profile`` reads."""
 
     completion_marker: str
+    """The line that every rank of a finished run prints."""
     compile_marker: str | None
+    """The line that proves whole-block ``torch.compile``; ``None`` when the engine has no such treatment."""
     failure_markers: tuple[str, ...]
-    check_ac_line: bool
-    parallelism_markers: Callable[
-        [ParallelismSpec, DataSpec, str | None, tuple[str, ...]],
-        tuple[str, ...],
-    ]
+    """The phrases that mean a silent fallback."""
+    ac_line: str | None
+    """The line that proves selective activation checkpointing; ``None`` when the engine never applies it."""
     pipelined_pattern: re.Pattern[str]
+    """A line that records a pipeline, which a run at one pipeline rank must not print."""
     data_parallel_pattern: re.Pattern[str]
-    p2p_markers: Callable[[ParallelismSpec, str | None], tuple[str, ...]]
-    nan_guard_markers: Callable[[str | None], tuple[str, ...]]
-    precision_markers: Callable[[str | None], tuple[str, ...]]
+    """A line that records data parallelism, which a run at one data-parallel rank must not print."""
 
-
-_SAC_APPLIED_LINE = "Applied SelectiveAC activation checkpointing"
 
 ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
-"""Arm rule 13's marker: the device kernel a gradient all-reduce runs.
-
-Both engines reduce over NCCL, so one string serves both. It names the
-all-reduce and not NCCL in general, because a pipeline emits send-receive
-and broadcast kernels of its own and a bare ``nccl`` would pass a
-data-parallel run that reduced nothing. The algorithm and protocol suffix
-is left off, because NCCL picks those per message size and topology.
-
-The marker is a necessary condition and not a sufficient one, measured
-rather than assumed. A real ``pp 2, dp 1`` trace carries an all-reduce five
-times per window from the gradient-norm reduction over the pipeline group,
-and above ``dp`` 1 both engines also reduce the loss. So an all-reduce
-kernel proves a collective ran, never which one. Arm rule 12's per-engine
-data-parallel log line is what names the mechanism; read the two rules
-together and do not strengthen this one by guessing at a count.
-
-If the megatron arm fails arm rule 13, read it as a question about this
-string first. Megatron issues its bucket reductions inside a coalescing
-manager, and a grouped NCCL launch can surface under a generic kernel name.
-Settle it by looking at the arm's own trace. Widening this to a bare
-``nccl`` is not the repair.
-"""
+"""The kernel name that rule 13 asks each rank's traces for above one data-parallel rank."""
 
 
 def _megatron_stock_parallelism_markers(
@@ -378,8 +300,7 @@ MEGATRON_STOCK_PROFILE = ValidationProfile(
     # None on purpose: no log line proves a whole-block treatment here.
     compile_marker=None,
     failure_markers=(),
-    check_ac_line=False,
-    parallelism_markers=_megatron_stock_parallelism_markers,
+    ac_line=None,
     # The driver's own resolved degrees, which the trivial spec forbids.
     pipelined_pattern=re.compile(
         r"Megatron-LM stock parallelism: dp=\d+ pp=(?!1\b)\d+"
@@ -389,16 +310,12 @@ MEGATRON_STOCK_PROFILE = ValidationProfile(
         r"Megatron-LM stock parallelism: dp=(?!1\b)\d+"
         r"|Megatron-LM stock data parallel:"
     ),
-    # The stock driver's own p2p line, and it carries the word "stock".
-    p2p_markers=_megatron_stock_p2p_markers,
-    # The stock driver's nan guard line, from the value Megatron parsed.
-    nan_guard_markers=_megatron_stock_nan_guard_markers,
-    precision_markers=_megatron_stock_precision_markers,
 )
 """The stock Megatron profile; every marker carries the word "stock"."""
 
 
 def _trace_contains(trace_path: Path, marker: str) -> bool:
+    """Whether the gzipped trace holds ``marker``; an unreadable trace holds nothing."""
     try:
         with gzip.open(trace_path, "rt", errors="replace") as trace_file:
             overlap = ""
@@ -420,36 +337,23 @@ def _validate_log(
     profile: ValidationProfile,
     shape,
     ac_mode: str,
-    compile: CompileMode,
+    compile: CompileMode | None,
     overrides_per_block: int,
     override_imports: tuple[str, ...],
-    parallelism_markers: tuple[str, ...] = (),
-    spec_pp: int = 1,
-    spec_dp: int = 1,
-    nan_guard_markers: tuple[str, ...] = (),
-    precision_markers: tuple[str, ...] = (),
+    required_lines: Mapping[str, tuple[str, ...]],
+    spec_pp: int,
+    spec_dp: int,
 ) -> None:
-    """The rules one rank's own output answers: 1, 2, 3, 4, 8, 10, 11 and 12.
-
-    Every one of them is a statement about a process. Read against the whole
-    file they become "some rank did this", which is the weaker question -- a
-    kernel that silently degraded on rank 1 alone, or a rank that never
-    reached the end of training, passes it. ``where`` names the rank in the
-    message and is empty at one rank, so a single-GPU failure reads exactly
-    as it read before.
-
-    The expected values do not change per rank, and that is a property of
-    both engines rather than an assumption. TorchTitan applies the overrides
-    and prints the parameter count while building the whole model, before
-    ``pipelining_fn`` splits it, so every rank states the same counts. The
-    megatron driver prints the declared total on every rank and puts its own
-    stage's count on a separate line.
-    """
+    """Raise when one rank's log breaks a log rule; ``where`` names the rank."""
     if profile.completion_marker not in log:
         raise RuntimeError(f"{arm_name}: training did not complete{where}")
-    # Arm rule 8, both ways. Never relax the absence half, or an arm that
-    # silently compiled publishes as eager.
+    # Rule 8 reads both ways, so an arm that compiled silently cannot publish as eager.
     if profile.compile_marker is not None:
+        if compile is None:
+            raise ValueError(
+                f"{arm_name}: the profile proves torch.compile, and the engine "
+                "passed no compile value to compare"
+            )
         if compile is CompileMode.TORCH:
             if profile.compile_marker not in log:
                 raise RuntimeError(
@@ -461,10 +365,8 @@ def _validate_log(
                 f"{arm_name}: the arm runs eager and the engine compiled the "
                 f"model{where}"
             )
-    if profile.check_ac_line:
-        # The AC policy logs its application; its presence must match the
-        # requested mode or the run measured the wrong recompute treatment.
-        sac_applied = _SAC_APPLIED_LINE in log
+    if profile.ac_line is not None:
+        sac_applied = profile.ac_line in log
         if ac_mode == "sac" and not sac_applied:
             raise RuntimeError(
                 f"{arm_name}: ac mode 'sac' requested but SelectiveAC was not "
@@ -475,8 +377,6 @@ def _validate_log(
                 f"{arm_name}: ac mode 'none' requested but SelectiveAC was "
                 f"applied{where}"
             )
-    # Without it, a shape that silently fell back publishes under the
-    # wrong size.
     size_marker = f"size: {shape.param_count:,} total parameters"
     if size_marker not in log:
         raise RuntimeError(
@@ -504,30 +404,13 @@ def _validate_log(
                 f"{arm_name}: silent fallback marker {marker!r} found in the "
                 f"log{where}"
             )
-    # Arm rule 12, per rank, and empty at the trivial spec.
-    for marker in parallelism_markers:
-        if marker not in log:
-            raise RuntimeError(
-                f"{arm_name}: the requested parallelism did not apply; the "
-                f"engine never logged {marker!r}{where}"
-            )
-    # The --megatron-nan-guard half of arm rule 12, asked at every mesh.
-    # Empty for an engine the value never reaches.
-    for marker in nan_guard_markers:
-        if marker not in log:
-            raise RuntimeError(
-                f"{arm_name}: the requested megatron nan guard did not "
-                f"apply; the engine never logged {marker!r}{where}"
-            )
-    # The --megatron-precision half of arm rule 12, asked at every mesh and
-    # under both values. Empty for an engine the value never reaches.
-    for marker in precision_markers:
-        if marker not in log:
-            raise RuntimeError(
-                f"{arm_name}: the requested megatron precision did not "
-                f"apply; the engine never logged {marker!r}{where}"
-            )
-    # The other half: the trivial spec asks the question the other way.
+    for treatment, markers in required_lines.items():
+        for marker in markers:
+            if marker not in log:
+                raise RuntimeError(
+                    f"{arm_name}: the requested {treatment} did not apply; "
+                    f"the engine never logged {marker!r}{where}"
+                )
     if spec_pp == 1:
         found = profile.pipelined_pattern.search(log)
         if found is not None:
@@ -535,8 +418,7 @@ def _validate_log(
                 f"{arm_name}: the run declares no pipeline, and the log "
                 f"records one: {found.group(0)!r}{where}"
             )
-    # The worse mistake: a dp 2 run published as one GPU reads as roughly
-    # twice the true rate.
+    # A dp 2 run published as one GPU reads as about twice the true rate.
     if spec_dp == 1:
         found = profile.data_parallel_pattern.search(log)
         if found is not None:
@@ -559,45 +441,25 @@ def validate_against_profile(
     arm_dir: Path,
     log_path: Path,
     *,
-    engine_profile: ValidationProfile,
-    compile: CompileMode,
+    profile: ValidationProfile,
+    required_lines: Mapping[str, tuple[str, ...]],
+    compile: CompileMode | None = None,
     overrides_per_block: int = 0,
     override_imports: tuple[str, ...] = (),
     trace_kernel_markers: tuple[str, ...] = (),
-    extra_flags: tuple[str, ...] = (),
-    megatron_p2p_sync: str | None = None,
-    megatron_nan_guard: str | None = None,
-    megatron_precision: str | None = None,
 ) -> None:
-    """Raise ``RuntimeError`` when an arm's log or traces break a profile rule.
+    """Raise ``RuntimeError`` when an arm's log or traces break a rule of ``profile``.
 
-    Each engine passes its own profile and its own config values. The
-    Megatron values are ``None`` for an engine that the values never reach.
-    Without ``run.profile`` the arm writes no trace, so arm rules 5, 6 and
-    13 are skipped, and arm rule 12 alone carries the data-parallel axis.
+    ``required_lines`` maps each requested treatment to the lines that every
+    rank must print for it. An unprofiled run writes no trace, so the trace
+    rules 5, 6 and 13 apply to a profiled run alone.
     """
     shape = run.shape
     parallelism = run.parallelism
-    # At every world size, and resolved before any log is read.
-    nan_guard_markers = engine_profile.nan_guard_markers(megatron_nan_guard)
-    # The optimizer state has a precision at every mesh too, and both
-    # values are a claim the log must carry.
-    precision_markers = engine_profile.precision_markers(megatron_precision)
     if not log_path.is_file():
         raise RuntimeError(f"{arm_name}: training log is missing: {log_path}")
     logs = logs_by_rank(log_path.read_text(errors="replace"))
     expected_ranks = set(range(parallelism.world_size))
-    # Arm rule 12 is consulted only where there is a mesh to prove.
-    parallelism_markers: tuple[str, ...] = ()
-    if parallelism.world_size > 1:
-        parallelism_markers = engine_profile.parallelism_markers(
-            parallelism, run.data, megatron_precision, extra_flags
-        )
-        # The p2p half may be empty and that is honest: a TorchTitan arm
-        # never receives the value.
-        parallelism_markers += engine_profile.p2p_markers(
-            parallelism, megatron_p2p_sync
-        )
     if parallelism.world_size > 1 and set(logs) != expected_ranks:
         raise RuntimeError(
             f"{arm_name}: the run declares {parallelism.world_size} ranks and "
@@ -611,29 +473,23 @@ def validate_against_profile(
             f" on rank {rank}; see {log_path}"
             if parallelism.world_size > 1
             else f"; see {log_path}",
-            profile=engine_profile,
+            profile=profile,
             shape=shape,
             ac_mode=run.ac_mode,
             compile=compile,
             overrides_per_block=overrides_per_block,
             override_imports=override_imports,
-            parallelism_markers=parallelism_markers,
+            required_lines=required_lines,
             spec_pp=parallelism.pp,
             spec_dp=parallelism.dp,
-            nan_guard_markers=nan_guard_markers,
-            precision_markers=precision_markers,
         )
 
-    # Every rule below reads a trace file, and an unprofiled run writes
-    # none, so the block is skipped whole rather than rule by rule.
     if not run.profile:
         return
 
-    # Arm rules 5 and 7 are per rank, because every rank runs the same
-    # number of profiler windows.
     traces_by_rank = trace_files_by_rank(arm_dir)
     traces = [path for paths in traces_by_rank.values() for path in paths]
-    # A rank that wrote nothing is no key, so the world size closes the gap.
+    # A rank that wrote no trace holds no key.
     if parallelism.world_size > 1 and set(traces_by_rank) != expected_ranks:
         raise RuntimeError(
             f"{arm_name}: the run declares {parallelism.world_size} ranks and "
@@ -651,16 +507,13 @@ def validate_against_profile(
                 "profiler windows, "
                 f"found {len(rank_traces)} {where}"
             )
-    # Arm rule 6 reads every rank's traces as one set, because under a
-    # pipeline a stage may legitimately lack a marker kernel.
+    # Rule 6 reads all ranks as one set, because a pipeline stage can lack a marker kernel.
     for marker in trace_kernel_markers:
         if not any(_trace_contains(path, marker) for path in traces):
             raise RuntimeError(
                 f"{arm_name}: marker kernel {marker!r} absent from profiler traces"
             )
-    # Arm rule 9 is DELETED with graph capture.
-
-    # Arm rule 13, every rank, with the spec's own marker.
+    # Rule 13: every rank reduces over NCCL above one data-parallel rank.
     if parallelism.dp > 1:
         for rank in sorted(expected_ranks):
             if not any(
@@ -673,4 +526,3 @@ def validate_against_profile(
                     f"{ALL_REDUCE_MARKER!r}; a rank that reduced no gradient "
                     "reports roughly twice the true throughput"
                 )
-    # Arm rule 7 is DELETED with the compiled-region measurements.

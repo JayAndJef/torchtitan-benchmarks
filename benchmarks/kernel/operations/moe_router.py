@@ -8,7 +8,7 @@ experts each token goes to, and with what weight.
   (``third_party/torchtitan/torchtitan/models/common/moe.py:459``; the module
   is built at ``:377`` and its class is ``TokenChoiceTopKRouter``, ``:186``).
   ``expert_bias_E`` is ``None`` here, because
-  ``benchmarks/models/piper_qwen3/config_registry.py:111`` sets
+  ``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py`` sets
   ``load_balance_coeff = None`` and ``moe.py:388-397`` builds the buffer only
   when it is not None.
 * Megatron-core: ``MoELayer.route``
@@ -725,7 +725,7 @@ def build_moe_router_titan(
     argument. ``MoE.__init__`` builds ``expert_bias_E`` only when the
     coefficient is not None (``moe.py:388-397``) and ``MoE.forward`` passes
     whatever it built (``:459``). Our config sets it to None
-    (``config_registry.py:108-111``), so production calls the router with
+    (``_piper_1b_model``), so production calls the router with
     ``None`` and so does this arm. A build where it is not None would have
     production adding a bias to the selection scores that megatron's base
     profile does not add.

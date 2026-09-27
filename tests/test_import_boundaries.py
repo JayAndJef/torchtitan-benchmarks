@@ -89,6 +89,7 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.engines.torchtitan.config",
     "benchmarks.e2e.engines.torchtitan.engine",
     "benchmarks.e2e.engines.torchtitan.flags",
+    "benchmarks.e2e.engines.torchtitan.profiling",
     "benchmarks.e2e.engines.torchtitan.validate",
     "benchmarks.e2e.engines.megatron_stock.config",
     "benchmarks.e2e.engines.megatron_stock.engine",

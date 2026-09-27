@@ -1,51 +1,4 @@
-"""Out-of-tree torchtitan configs for the piper Qwen3-1B model.
-
-Ports /data/zejiaqi/piper/examples/models/qwen3.py case '1B' onto current
-torchtitan (dim=1024, n_layers=16, n_heads=16, n_kv_heads=8, head_dim=64,
-MoE with 4 experts / top_k=2 / inter_dim=3584, qk_norm, rope theta 1e6,
-max_seq_len 4096, no weight tying, vocab 151936, load_balance_coeff=None).
-
-Every geometry knob comes from
-``benchmarks.models.piper_qwen3.shape.PiperShape`` -- the same object
-``benchmarks/models/piper_qwen3/megatron_model.py`` builds its twin
-from -- so the two engines cannot drift. Each public config takes one
-``size`` keyword naming a ``PIPER_SHAPES`` entry, so a shape costs one
-registry entry and no config edit at all. The runner delivers it as
-``--config-arg size=<name>``, which the fork's ``ConfigManager`` forwards
-as a keyword argument; the value arrives as a string and ``shape_by_name``
-raises on an unknown one. ``tests/test_model_shape.py`` asserts every
-(scenario, arm) config accepts every registered size and builds the shape
-it names.
-
-**Reverse edge, pending resolution.** The ``_pretokenized`` configs import
-``PretokenizedReplayDataLoader`` from ``benchmarks.e2e.data.piper_qwen3``,
-so ``models/`` depends on ``e2e/``. This is the one import direction the
-package layering does not want, and it is *new*: before the restructure the
-configs and the replay loader were siblings in a single model package, so the
-reference was intra-package and legal. Splitting that package by ownership --
-geometry and configs to ``models/``, the run-shaped replay loader to
-``e2e/`` -- is what exposed it.
-It is a real edge, not an artifact of annotations: the loader is constructed
-at runtime by the dataloader factory. It forms no cycle (nothing under
-``e2e/`` imports this module; torchtitan reaches it by ``--module`` through
-``ConfigManager``, not by import), and this module's sole non-test consumer
-is that ``getattr`` lookup. The candidate resolution is to move the replay
-loader under ``models/piper_qwen3/`` alongside the configs that are its only
-caller, which deletes the edge outright; it is deferred rather than done
-here because the flag-day commit moved code without redesigning it.
-
-Known deltas vs piper (identical across all benchmark arms, so they do not
-affect the RoPE comparison):
-- torchtitan's MoE layer builder hardcodes route_norm=True (piper: False);
-- experts run as torchtitan GroupedExperts (torch._grouped_mm) rather than
-  piper's BmmExperts (same post-expert score placement, different kernels);
-- the c4_test tokenizer (vocab 2020) is used against the full 151936-row
-  embedding, so losses are not comparable to real Qwen3 training.
-
-Usage:
-    PYTHONPATH=/data/zejiaqi/torchtitan-benchmarks torchtitan_train \
-        --module benchmarks.models.piper_qwen3 --config qwen3_piper_1b ...
-"""
+"""The TorchTitan trainer config that every TorchTitan arm names with ``--config``."""
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
@@ -55,7 +8,6 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -63,85 +15,45 @@ from torchtitan.trainer import Trainer
 
 from benchmarks.e2e.engines.torchtitan.plugins.parallelize import parallelize_piper1b
 from benchmarks.e2e.engines.torchtitan.plugins.replay import PretokenizedReplayDataLoader
-from benchmarks.models.piper_qwen3.shape import PiperShape, shape_by_name
+from benchmarks.models.piper_qwen3.shape import shape_by_name
 from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
 
-# The ``1b`` in every public name below is the config family and not the
-# geometry. The names are a contract, so do not rename them.
-def qwen3_piper_1b(*, size: str = "1b") -> Trainer.Config:
-    return _piper_1b_trainer(
-        fuse_qkv=True,
-        loss_kind="full_logits",
-        shape=shape_by_name(size),
-    )
-
-
 def qwen3_piper_1b_pretokenized(*, size: str = "1b") -> Trainer.Config:
-    """Stock model on the pre-tokenized replay stream (the engines scenario)."""
-    # Pass the size on rather than a resolved shape: the delegate resolves it
-    # itself, and resolving here as well would be two places to keep in step.
-    return _with_pretokenized_replay(qwen3_piper_1b(size=size))
+    """The Qwen3 MoE model of shape ``size`` on the pre-tokenized c4_test replay stream.
 
-
-def _with_pretokenized_replay(config: Trainer.Config) -> Trainer.Config:
-    """Swap the dataloader for the replay variant used by the megatron
-    comparison: same c4_test pipeline, materialized at startup so measured
-    steps carry ~zero data-host cost (matching the Megatron driver).
-    replay_steps tracks the config's own step count; running with more steps
-    fails loudly instead of silently reusing data, so the TorchTitan engine
-    delivers --dataloader.replay-steps alongside --training.steps."""
-    config.dataloader = PretokenizedReplayDataLoader.Config(
-        dataset="c4_test",
-        replay_steps=config.training.steps,
-    )
-    return config
-
-
-def _piper_1b_trainer(
-    *,
-    fuse_qkv: bool,
-    loss_kind: str,
-    shape: PiperShape,
-    attn_backend: str = "flex",
-) -> Trainer.Config:
+    The fork gives ``--config-arg size=<name>`` to the ``size`` keyword. A
+    manifest records the config name, so do not rename the function.
+    """
     model_spec = ModelSpec(
         name="qwen3",
         flavor="piper_1B",
-        model=_piper_1b_model(
-            fuse_qkv=fuse_qkv, attn_backend=attn_backend, shape=shape
-        ),
+        model=_piper_1b_model(fuse_qkv=True, shape=shape_by_name(size)),
         parallelize_fn=parallelize_piper1b,
         pipelining_fn=pipeline_llm,
-        # No register_moe_load_balancing_hook: load_balance_coeff is None
-        # (matching piper), so there is no expert-bias state to update.
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
     )
-    cross_entropy = CrossEntropyLoss.Config(
-        global_vocab_size=decoder_vocab_size(model_spec),
+    training = TrainingConfig(
+        local_batch_size=4,
+        seq_len=1024,
+        steps=40,
+        dtype="bfloat16",
     )
-    if loss_kind != "full_logits":
-        raise ValueError(f"Unknown piper-1B loss kind: {loss_kind}")
-    loss = cross_entropy
-
     return Trainer.Config(
-        loss=loss,
+        loss=CrossEntropyLoss.Config(
+            global_vocab_size=decoder_vocab_size(model_spec),
+        ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=PretokenizedReplayDataLoader.Config(
+            dataset="c4_test",
+            replay_steps=training.steps,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
-        training=TrainingConfig(
-            # piper harness defaults: batch 4, seq 1024
-            local_batch_size=4,
-            seq_len=1024,
-            steps=40,
-            # The only bf16 mechanism here, because there is no FSDP
-            # mixed-precision engine.
-            dtype="bfloat16",
-        ),
+        training=training,
         checkpoint=CheckpointManager.Config(
             interval=500,
             last_save_model_only=False,

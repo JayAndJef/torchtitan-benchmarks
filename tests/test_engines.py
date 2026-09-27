@@ -28,9 +28,26 @@ from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.engine import TorchTitanEngine
 from benchmarks.e2e.parallelism import PP_SCHEDULES, ParallelismSpec
 from benchmarks.e2e.registry import SCENARIOS
+from benchmarks.e2e.engines.torchtitan.flags import TRAIN_MODULE, trainer_args
 from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
 from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
 from tests.engine_helpers import run_spec
+
+
+VALIDATOR = {
+    "torchtitan": "benchmarks.e2e.engines.torchtitan.validate.validate_against_profile",
+    "megatron_stock": "benchmarks.e2e.engines.megatron_stock.engine.validate_against_profile",
+}
+"""Where each engine calls the shared log rules."""
+
+
+def _validation_call(arm, run):
+    """The keyword arguments that the arm's engine gives the shared log rules."""
+    engine = engine_for(arm)
+    with mock.patch(VALIDATOR[engine.name]) as checked:
+        engine.validate(run, arm, Path("/a"), Path("/a.log"))
+    checked.assert_called_once()
+    return checked.call_args.kwargs
 
 
 _MESHES = (
@@ -126,79 +143,83 @@ class ArmDeclarationTests(unittest.TestCase):
                         self.assertIsInstance(engine_for(arm), TorchTitanEngine)
                         self.assertIsNotNone(TORCHTITAN_PROFILE.compile_marker)
 
-    def test_every_profile_proves_every_mesh_above_one_rank(self):
-        """Arm rule 12 needs a marker for each mesh, from each profile."""
-        data = SCENARIOS["engines"].data
-        for profile in (TORCHTITAN_PROFILE, MEGATRON_STOCK_PROFILE):
+    def test_every_engine_asks_for_mesh_lines_above_one_rank(self):
+        """Rule 12 needs a line for each mesh, from each engine."""
+        scenario = SCENARIOS["engines"]
+        for arm in scenario.arms:
             for spec in _MESHES:
-                for precision in ("stock", "lean"):
-                    with self.subTest(spec=spec, precision=precision):
-                        markers = profile.parallelism_markers(
-                            spec, data, precision
-                        )
-                        self.assertTrue(markers)
-                        for marker in markers:
-                            self.assertTrue(marker.strip())
+                with self.subTest(arm=arm.name, spec=spec):
+                    run = run_spec(
+                        ac_mode="none", parallelism=spec, local_batch_size=8
+                    )
+                    markers = _validation_call(arm, run)["required_lines"][
+                        "parallelism"
+                    ]
+                    self.assertTrue(markers)
+                    for marker in markers:
+                        self.assertTrue(marker.strip())
+
+    def test_no_engine_asks_for_mesh_lines_at_one_rank(self):
+        for arm in SCENARIOS["engines"].arms:
+            with self.subTest(arm=arm.name):
+                lines = _validation_call(arm, run_spec(ac_mode="none"))[
+                    "required_lines"
+                ]
+                self.assertNotIn("parallelism", lines)
 
 
 class EngineDelegationTests(unittest.TestCase):
-    """Each engine calls its own builder and passes its own profile."""
+    """Each engine builds its own command and passes its own profile."""
 
-    CASES = (
-        ("titan_compiled", "torchtitan", "titan_launch", TORCHTITAN_PROFILE),
-        (
-            "megatron_stock",
-            "megatron_stock",
-            "megatron_stock_launch",
-            MEGATRON_STOCK_PROFILE,
-        ),
-    )
-
-    def test_each_engine_calls_its_own_builder_once(self):
-        scenario = SCENARIOS["engines"]
+    def test_the_torchtitan_launch_runs_the_trainer_with_the_arm_arguments(self):
+        arm = SCENARIOS["engines"].arm("titan_compiled")
         run = run_spec(ac_mode="none")
-        for arm_name, package, builder, _ in self.CASES:
-            arm = scenario.arm(arm_name)
-            with self.subTest(arm=arm_name), mock.patch(
-                f"benchmarks.e2e.engines.{package}.engine.{builder}",
-                return_value="built",
-            ) as built:
-                self.assertEqual(
-                    engine_for(arm).launch(run, arm, Path("/tmp/arm")), "built"
-                )
-            built.assert_called_once_with(run, arm, Path("/tmp/arm"))
+        launch = engine_for(arm).launch(run, arm, Path("/tmp/arm"))
+        self.assertEqual(
+            launch.target,
+            ("-m", TRAIN_MODULE, *trainer_args(run, arm.config, Path("/tmp/arm"))),
+        )
+        self.assertEqual((launch.processes, launch.pin), ("per_rank", True))
+
+    def test_the_megatron_engine_calls_its_own_builder_once(self):
+        arm = SCENARIOS["engines"].arm("megatron_stock")
+        run = run_spec(ac_mode="none")
+        with mock.patch(
+            "benchmarks.e2e.engines.megatron_stock.engine.megatron_stock_launch",
+            return_value="built",
+        ) as built:
+            self.assertEqual(
+                engine_for(arm).launch(run, arm, Path("/tmp/arm")), "built"
+            )
+        built.assert_called_once_with(run, arm, Path("/tmp/arm"))
 
     def test_each_engine_validates_with_its_own_profile(self):
         scenario = SCENARIOS["engines"]
         run = run_spec(ac_mode="none")
-        for arm_name, package, _, profile in self.CASES:
+        for arm_name, profile in (
+            ("titan_compiled", TORCHTITAN_PROFILE),
+            ("megatron_stock", MEGATRON_STOCK_PROFILE),
+        ):
             arm = scenario.arm(arm_name)
-            with self.subTest(arm=arm_name), mock.patch(
-                f"benchmarks.e2e.engines.{package}.engine.validate_against_profile"
-            ) as checked:
-                engine_for(arm).validate(run, arm, Path("/a"), Path("/a.log"))
-            self.assertIs(checked.call_args.kwargs["engine_profile"], profile)
-            self.assertEqual(
-                checked.call_args.kwargs["trace_kernel_markers"],
-                arm.config.trace_kernel_markers,
-            )
+            with self.subTest(arm=arm_name):
+                keywords = _validation_call(arm, run)
+                self.assertIs(keywords["profile"], profile)
+                self.assertEqual(
+                    keywords["trace_kernel_markers"],
+                    arm.config.trace_kernel_markers,
+                )
 
-    def test_the_megatron_engine_passes_its_three_treatments(self):
+    def test_the_megatron_engine_asks_for_its_three_treatments(self):
         arm = SCENARIOS["engines"].arm("megatron_stock")
-        with mock.patch(
-            "benchmarks.e2e.engines.megatron_stock.engine.validate_against_profile"
-        ) as checked:
-            engine_for(arm).validate(
-                run_spec(ac_mode="none"), arm, Path("/a"), Path("/a.log")
-            )
-        keywords = checked.call_args.kwargs
+        lines = _validation_call(arm, run_spec(ac_mode="none"))["required_lines"]
         self.assertEqual(
-            (
-                keywords["megatron_p2p_sync"],
-                keywords["megatron_nan_guard"],
-                keywords["megatron_precision"],
-            ),
-            ("off", "off", "stock"),
+            list(lines), ["megatron nan guard", "megatron precision"]
+        )
+        self.assertIn(
+            "check_for_nan_in_loss_and_grad=False", lines["megatron nan guard"][0]
+        )
+        self.assertIn(
+            "use_precision_aware_optimizer=False", lines["megatron precision"]
         )
 
     def test_a_launch_is_the_same_for_the_same_inputs(self):

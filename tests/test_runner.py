@@ -40,7 +40,6 @@ from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     PiperOptimizedCrossEntropyLoss,
 )
 from benchmarks.e2e.engines.torchtitan.plugins.config_registry import (
-    qwen3_piper_1b,
     qwen3_piper_1b_pretokenized,
 )
 from torchtitan.components.loss import CrossEntropyLoss
@@ -129,7 +128,9 @@ class ScenarioTests(unittest.TestCase):
         self.assertIn("--scenario", str(caught.exception))
 
     def test_the_stock_config_uses_plain_cross_entropy(self) -> None:
-        self.assertIsInstance(qwen3_piper_1b().loss, CrossEntropyLoss.Config)
+        self.assertIsInstance(
+            qwen3_piper_1b_pretokenized().loss, CrossEntropyLoss.Config
+        )
 
     def test_custom_lm_head_losses_honor_loss_compilation(self) -> None:
         compile_config = CompileConfig(enable=True, components=["loss"])
@@ -1118,10 +1119,7 @@ class MegatronPrecisionResolutionTests(unittest.TestCase):
 
 class ParallelizeTests(unittest.TestCase):
     def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
-        for factory in (
-            qwen3_piper_1b,
-            qwen3_piper_1b_pretokenized,
-        ):
+        for factory in (qwen3_piper_1b_pretokenized,):
             for size in PIPER_SHAPES:
                 with self.subTest(config=factory.__name__, size=size):
                     config = factory(size=size)

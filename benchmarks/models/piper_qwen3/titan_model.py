@@ -1,35 +1,4 @@
-"""Build the TorchTitan Qwen3-1B model in this process, from the registry.
-
-The e2e arms never need this: they hand ``--config`` and ``--override.imports``
-to a training subprocess, and the fork's ``ConfigManager`` does the work. But a
-kernel arm has no subprocess and no ConfigManager, so anything that wants "the
-module production builds, configured the way production configures it" has to
-build it here.
-
-Cross-engine kernel arms are the callers in prospect. They need this build so
-that what they time is the production module and not a hand-constructed
-lookalike -- the difference being every default the registry sets and a hand
-construction forgets.
-
-**Overrides are counted, not trusted.** ``--override.imports`` is applied in
-the training subprocess and ``validate_arm`` proves it landed by counting
-``[Override]`` log lines. In-process there are no log lines to count, so
-``apply_config_overrides`` counts the replacements ``apply_overrides`` returns
-and raises when the count is wrong. That check is the only guard some arms can
-have: ``piper_optimized_inductor`` deliberately emits no distinctive kernel
-name, so ``_assert_kernel_marker`` cannot see it, and an override that silently
-matched nothing would leave the arm measuring the baseline under its own name.
-
-The expected count is ``overrides_per_block * n_layers``, which is the same
-arithmetic ``validate_arm`` rule 2 uses. Verified against the fork: the swiglu
-override on a 2-layer model returns exactly 2 replacement lines, one per block.
-
-**The override registry is process-global and that is safe here.** The fork
-keeps registered overrides in a module-level registry, so the correctness pass
--- which builds every arm in one interpreter -- accumulates them. Accumulation
-is inert: ``apply_overrides`` activates only the targets it is *named*, so an
-override another arm registered is never applied and never conflicts.
-"""
+"""The TorchTitan Qwen3 model of one shape: its config, and an in-process build of it for kernel-bench."""
 
 from __future__ import annotations
 
@@ -51,6 +20,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 def _piper_1b_model(
     *, fuse_qkv: bool, shape: PiperShape, attn_backend: str = "flex"
 ) -> Qwen3Model.Config:
+    """The TorchTitan config of the Qwen3 MoE model of ``shape``."""
     dim = shape.dim
     head_dim = shape.head_dim
     n_layers = shape.n_layers
@@ -73,8 +43,7 @@ def _piper_1b_model(
             theta=shape.rope_theta,
         ),
     )
-    # piper sets load_balance_coeff=None (no aux-free load balancing); the
-    # torchtitan builder defaults to 1e-3, so match piper explicitly.
+    # Piper trains without aux-free load balancing.
     for layer in layers:
         layer.moe.load_balance_coeff = None
     return Qwen3Model.Config(
@@ -84,8 +53,7 @@ def _piper_1b_model(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
-            # Real init: weight tying is OFF (as in piper), so the embedding is
-            # a free parameter. (_EMBEDDING_SKIP_INIT is only valid with tying.)
+            # Piper ties no weights, so the embedding gets its own init.
             param_init=_EMBEDDING_INIT,
         ),
         lm_head=Linear.Config(
@@ -103,15 +71,9 @@ def apply_config_overrides(
     *,
     expected: int,
 ) -> list[str]:
-    """Apply ``targets`` to ``config`` in place and prove they landed.
+    """Apply ``targets`` to ``config``, and raise unless exactly ``expected`` nodes change.
 
-    ``expected`` is how many config nodes must be replaced. Pass 0 with no
-    targets. A mismatch raises: too few means an override matched nothing (a
-    wrong target class, or a glob that selects no node), too many means it
-    claimed nodes the arm did not intend to change.
-
-    Returns the replacement lines, which are the same strings the training
-    subprocess logs as ``[Override] ...``.
+    Returns the ``[Override]`` lines that the trainer also logs.
     """
     from torchtitan.config.override import OverrideConfig, apply_overrides
 
@@ -142,31 +104,11 @@ def build_titan_model(
     seed: int = 42,
     eval_mode: bool = False,
 ):
-    """The registry's Qwen3 model, built on ``device`` in ``dtype``.
+    """The Qwen3 model of ``shape``, built on ``device`` with ``dtype`` as the default dtype, as the trainer builds it.
 
-    ``dtype`` is delivered as the default dtype during construction rather
-    than by casting afterwards, because that is what the trainer does:
-    ``trainer.py:299-303`` opens ``utils.set_default_dtype`` around
-    ``model_config.build()``. Constructing in bf16 also never allocates the
-    fp32 parameters a later cast would have to make first.
-
-    The default dtype is process-global, so the ``finally`` restores it. The
-    correctness pass builds every arm in one interpreter, and a leaked bf16
-    default would change every tensor a later arm creates -- including the
-    fp64 references the attention gates compare against.
-
-    **This does not make ``training.dtype`` the whole dtype story.** There is
-    no mixed-precision wrapper and no autocast in ``parallelize_piper1b``, but
-    upstream wraps the MoE router gate in ``torch.autocast(dtype=float32)``
-    (``models/common/moe.py:292``), and this model has MoE on every layer. An
-    arm that times the router times an fp32 GEMM, and the fp32 copy of the
-    hidden state that autocast materializes to feed it.
-
-    ``seed`` is set before ``init_states`` so two processes that build the
-    same arm get the same parameters. Kernel-bench relies on that: the
-    correctness pass and the timing pass are different processes, and a gate
-    that checked different weights than the timing measured would prove
-    nothing.
+    The function restores the default dtype, and it seeds before
+    ``init_states``, so two processes that build one arm hold the same
+    parameters.
     """
     config = _piper_1b_model(
         fuse_qkv=fuse_qkv, shape=shape, attn_backend=attn_backend

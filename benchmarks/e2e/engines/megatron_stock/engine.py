@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, Launch, RunSpec
+from benchmarks.e2e.engines.api import Arm, Engine, Launch, RunSpec
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.launch import (
     STOCK_MEGATRON_PP_SCHEDULE,
@@ -13,6 +13,10 @@ from benchmarks.e2e.launch import (
 from benchmarks.e2e.parallelism import PP_SCHEDULES
 from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
+    _megatron_stock_nan_guard_markers,
+    _megatron_stock_p2p_markers,
+    _megatron_stock_parallelism_markers,
+    _megatron_stock_precision_markers,
     validate_against_profile,
 )
 
@@ -50,16 +54,24 @@ class MegatronStockEngine(Engine):
         self, run: RunSpec, arm: Arm, arm_dir: Path, log_path: Path
     ) -> None:
         config = arm.config
+        spec = run.parallelism
+        required_lines = {}
+        if spec.world_size > 1:
+            required_lines["parallelism"] = _megatron_stock_parallelism_markers(
+                spec, run.data, config.precision, config.extra_flags
+            ) + _megatron_stock_p2p_markers(spec, config.p2p_sync)
+        required_lines["megatron nan guard"] = _megatron_stock_nan_guard_markers(
+            config.nan_guard
+        )
+        required_lines["megatron precision"] = _megatron_stock_precision_markers(
+            config.precision
+        )
         validate_against_profile(
             run,
             arm.name,
             arm_dir,
             log_path,
-            engine_profile=MEGATRON_STOCK_PROFILE,
-            compile=CompileMode.NONE,
+            profile=MEGATRON_STOCK_PROFILE,
+            required_lines=required_lines,
             trace_kernel_markers=config.trace_kernel_markers,
-            extra_flags=config.extra_flags,
-            megatron_p2p_sync=config.p2p_sync,
-            megatron_nan_guard=config.nan_guard,
-            megatron_precision=config.precision,
         )

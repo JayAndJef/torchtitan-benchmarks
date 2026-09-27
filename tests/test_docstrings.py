@@ -38,9 +38,10 @@ IN_SCOPE_PREFIXES = (
 EXCLUDED = frozenset({"benchmarks/cli/kernel.py"})
 
 OUT_OF_TREE_REFERENCE = re.compile(
-    r"third_party/|megatron/core|torchtitan/|reports/|AGENTS\.md|CLAUDE\.md"
-    r"|distributed/compile\.py"
+    r"third_party/|megatron/core|(?<!engines/)torchtitan/|reports/"
+    r"|AGENTS\.md|CLAUDE\.md|distributed/compile\.py"
 )
+"""A path into an upstream checkout; the TorchTitan engine package is ours."""
 
 
 def in_scope_files() -> tuple[str, ...]:

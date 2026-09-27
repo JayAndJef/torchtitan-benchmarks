@@ -734,7 +734,7 @@ def _titan_dispatch(
     reads ``sp_size = 1``, so both pad counts are zero and it launches no
     kernel. The ``tokens_per_expert_E.add_`` accumulation (``:481-483``) is
     behind ``if self.load_balance_coeff is not None``, and our config sets that
-    to ``None`` (``benchmarks/models/piper_qwen3/config_registry.py:111``); the
+    to ``None`` (``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``); the
     fork carries that gate specifically so the in-place input mutation does not
     block cudagraph capture. And the shared-expert branch (``:496-498``) is
     ``None`` because the Piper config declares no shared expert.
@@ -770,7 +770,7 @@ def titan_dispatcher(shape: PiperShape):
     """The production token dispatcher, built from the production config node.
 
     ``_piper_1b_model`` sets ``moe_comm_backend="standard"``
-    (``benchmarks/models/piper_qwen3/config_registry.py:101``), which
+    (``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``), which
     ``make_token_dispatcher_config`` turns into an
     ``AllToAllTokenDispatcher.Config``
     (``third_party/torchtitan/torchtitan/models/common/config_utils.py:

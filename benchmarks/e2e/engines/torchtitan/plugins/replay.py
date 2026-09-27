@@ -1,30 +1,4 @@
-"""Pre-tokenized replay dataloader for the engine-comparison scenario.
-
-Wraps the stock torchtitan c4_test pipeline (same dataset class, same
-tokenizer), drains the first ``replay_steps x local_batch_size`` samples at
-construction, and replays the materialized tensors during training. Measured
-steps therefore carry ~zero data-host cost, matching the Megatron driver's
-treatment (benchmarks/e2e/megatron_stock/data.py drains the identical
-class), so
-the two engines see bit-identical token streams and identical per-step host
-work.
-
-Requesting more batches than were materialized is a hard error, not a wrap:
-silently reusing data would change the workload relative to the lazy loader.
-``replay_steps`` therefore tracks the run's step count: the config registry
-defaults it to the config's own ``training.steps``, and the TorchTitan
-engine sends ``--dataloader.replay-steps`` next to ``--training.steps``.
-
-**Under a data-parallel degree each rank replays its own shard.** The
-forwarding was always here: ``dp_rank`` and ``dp_world_size`` have reached
-the stock dataset class since this loader was written, and its
-``split_dataset_by_node`` is the split TorchTitan's own loader uses. What
-stood above it was a refusal of ``dp_world_size != 1``, kept while no run
-could ask for one, and only that refusal is gone. The megatron driver
-drains the same class with the same two values, so the engines stay
-bit-identical rank for rank. The materialized count is per rank, and a rank
-still hard-fails at exhaustion.
-"""
+"""The TorchTitan dataloader that materializes the c4_test samples of a run at startup and then replays them."""
 
 from __future__ import annotations
 
@@ -67,16 +41,12 @@ class PretokenizedReplayDataset(IterableDataset, Stateful):
 
 
 class PretokenizedReplayDataLoader(ParallelAwareDataloader):
-    """HuggingFaceTextDataLoader twin that pre-materializes the sample stream."""
+    """``HuggingFaceTextDataLoader`` with the samples of the whole run materialized at construction."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(HuggingFaceTextDataLoader.Config):
         replay_steps: int = 40
-        """Training steps' worth of samples to materialize.
-
-        Must be >= --training.steps or the run dies when the stream is
-        exhausted. The registry sets it from the config's own step count and
-        the runner overrides both together."""
+        """The steps whose samples the loader materializes; it must be at least ``--training.steps``."""
 
     def __init__(
         self,
@@ -90,8 +60,6 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
-        # The two arguments below give each data-parallel rank its own
-        # shard, and the megatron driver passes the same two values.
         inner = HuggingFaceTextDataset(
             dataset_name=config.dataset,
             dataset_path=config.dataset_path,

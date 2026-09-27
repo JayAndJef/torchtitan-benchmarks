@@ -63,6 +63,7 @@ LAYER_ORDER = (
     "benchmarks.e2e.megatron_stock.model_builder",
     "benchmarks.e2e.launch",
     "benchmarks.e2e.validation",
+    "benchmarks.e2e.engines.torchtitan.profiling",
     "benchmarks.e2e.engines.torchtitan.flags",
     "benchmarks.e2e.engines.torchtitan.validate",
     "benchmarks.e2e.engines.torchtitan.engine",

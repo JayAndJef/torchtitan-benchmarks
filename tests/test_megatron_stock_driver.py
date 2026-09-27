@@ -1612,9 +1612,10 @@ class MarkerStringTest(unittest.TestCase):
 
         A one-character difference fails a real run at arm rule 12.
         """
-        from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
-
-        profile = MEGATRON_STOCK_PROFILE
+        from benchmarks.e2e.validation import (
+            _megatron_stock_parallelism_markers,
+            _megatron_stock_precision_markers,
+        )
         cases = {
             "stock": stock_args(),
             "lean": stock_args(
@@ -1626,7 +1627,7 @@ class MarkerStringTest(unittest.TestCase):
         }
         for value, args in cases.items():
             line = markers.mode_line(args)
-            for marker in profile.precision_markers(value):
+            for marker in _megatron_stock_precision_markers(value):
                 with self.subTest(value=value, marker=marker):
                     self.assertIn(marker, line)
 
@@ -2567,9 +2568,10 @@ class DataParallelMarkerTest(unittest.TestCase):
             DATA_PARALLEL_OPTIMIZERS,
             grad_reduce_in_fp32,
         )
-        from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
-
-        profile = MEGATRON_STOCK_PROFILE
+        from benchmarks.e2e.validation import (
+            _megatron_stock_parallelism_markers,
+            _megatron_stock_precision_markers,
+        )
         ddp_cls, _ = self.wrapper_classes()
         for spec, cls in (
             (PP4_SPEC, ddp_cls),
@@ -2601,7 +2603,7 @@ class DataParallelMarkerTest(unittest.TestCase):
                         optimizer=CHAINED_OPTIMIZER,
                         members=(inner, inner),
                     )
-                    markers = profile.parallelism_markers(
+                    markers = _megatron_stock_parallelism_markers(
                         spec, BATCH_32, precision
                     )
                     self.assertEqual(printed, markers[1])
