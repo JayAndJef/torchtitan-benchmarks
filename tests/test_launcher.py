@@ -1,12 +1,16 @@
 """The shared launcher: the argv and the child environment of one launch."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.engines.api import Launch
+from benchmarks.e2e.engines.megatron_stock.engine import MegatronStockEngine
 from benchmarks.e2e.engines.registry import ENGINES
 from benchmarks.e2e.registry import ENGINES as ENGINES_SCENARIO
 from benchmarks.execution.affinity import CpuPinning
@@ -15,9 +19,12 @@ from benchmarks.execution.launcher import (
     LOG_RANK_TEMPLATE,
     PINNING_DECLINED,
     build_command,
+    command_line,
     torchrun_flags,
 )
+from benchmarks.e2e.runner import execute_run
 from tests.engine_helpers import run_spec
+from tests.test_golden import HARDWARE, HOST_ENVIRONMENT, METADATA, PINNING
 
 
 PINNED = CpuPinning(
@@ -115,7 +122,14 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(launched.env["PATH"], "/usr/bin")
 
     def test_a_single_launch_gets_no_rank_logging(self) -> None:
-        launched = _build(Launch(target=TARGET, processes="single", pin=True))
+        launched = _build(
+            Launch(target=TARGET, processes="single", pin=True),
+            base_env={
+                "PATH": "/usr/bin",
+                "LOG_RANK": "5",
+                "TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE": "[x]:",
+            },
+        )
         self.assertNotIn("LOG_RANK", launched.env)
         self.assertNotIn("TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE", launched.env)
 
@@ -131,6 +145,8 @@ class EnvironmentTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "NGPU, which the launcher owns"):
             _build(launch)
+        with self.assertRaisesRegex(ValueError, "NGPU, which the launcher owns"):
+            command_line(launch, world_size=1, pinning=PINNED)
 
 
 class LaunchRecordTests(unittest.TestCase):
@@ -153,6 +169,37 @@ class LaunchRecordTests(unittest.TestCase):
                 self.assertEqual(launch.processes, "per_rank")
                 self.assertTrue(launch.pin)
                 self.assertFalse(set(launch.env) & LAUNCHER_KEYS)
+
+
+class RunnerRefusalTests(unittest.TestCase):
+    def test_a_launcher_key_is_refused_before_any_arm_starts(self) -> None:
+        """The runner builds every command line before it writes or starts anything."""
+        colliding = Launch(
+            target=TARGET, processes="per_rank", pin=True, env={"NGPU": "4"}
+        )
+        process_runner = mock.Mock()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=(HARDWARE, {"requested_gpu": "0", **METADATA}),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning", return_value=PINNING
+        ), mock.patch.object(
+            MegatronStockEngine, "launch", return_value=colliding
+        ):
+            out_dir = Path(temporary) / "run"
+            with self.assertRaisesRegex(ValueError, "NGPU, which the launcher owns"):
+                execute_run(
+                    RunRequest(
+                        gpu="0",
+                        scenario_name="engines",
+                        out_dir=out_dir,
+                        axes=RequestedAxes(model_size="1b", profile=False),
+                    ),
+                    process_runner=process_runner,
+                    environment=dict(HOST_ENVIRONMENT),
+                )
+            process_runner.assert_not_called()
+            self.assertFalse(out_dir.exists())
 
 
 if __name__ == "__main__":

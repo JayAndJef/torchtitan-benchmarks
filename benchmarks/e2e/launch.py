@@ -4,12 +4,9 @@ This module holds one builder per engine. Each builder reads the run and
 the arm's config and returns a ``Launch``, and each engine in
 ``benchmarks.e2e.engines`` calls its own builder.
 
-**At the trivial parallelism spec the argv is the argv this repo has always
-built.** ``_titan_parallelism_flags`` returns an empty tuple there, so no
-``--parallelism.*`` token appears and every published command line is
-reproduced token for token. ``tests/test_megatron_stock_launch.py`` asserts
-that mechanically over every arm of every scenario, not by reading a golden
-list.
+At the trivial parallelism spec no ``--parallelism.*`` token appears.
+``tests/test_megatron_stock_launch.py`` asserts that over every arm of every
+scenario.
 """
 
 from __future__ import annotations

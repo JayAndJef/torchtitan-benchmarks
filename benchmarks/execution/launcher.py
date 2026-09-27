@@ -70,7 +70,17 @@ def torchrun_flags(world_size: int) -> tuple[str, ...]:
 def command_line(
     launch: Launch, *, world_size: int, pinning: CpuPinning
 ) -> tuple[str, ...]:
-    """The argv: the pinning prefix, the interpreter, torchrun, then the target."""
+    """The argv: the pinning prefix, the interpreter, torchrun, then the target.
+
+    Raises ``ValueError`` when the launch sets a key that the launcher owns,
+    so the runner refuses the run before an arm starts.
+    """
+    collisions = sorted(set(launch.env) & LAUNCHER_KEYS)
+    if collisions:
+        raise ValueError(
+            f"the launch sets {', '.join(collisions)}, which the launcher owns; "
+            "remove the keys from Launch.env"
+        )
     if world_size < 1:
         raise ValueError(f"world size {world_size} must be >= 1")
     prefix = pinning.prefix if launch.pin else ()
@@ -81,7 +91,7 @@ def command_line(
 def launcher_environment(
     launch: Launch, *, world_size: int, gpu: str
 ) -> dict[str, str]:
-    """The values of ``LAUNCHER_KEYS`` for one launch."""
+    """The launcher's keys for one launch; a single process gets no rank logging."""
     result = {
         **device_environment(gpu, world_size=world_size),
         "PYTORCH_ALLOC_CONF": ALLOCATOR_POLICY,
@@ -101,20 +111,13 @@ def build_command(
     base_env: Mapping[str, str],
 ) -> LaunchedCommand:
     """The command line and the child environment of one launch."""
-    collisions = sorted(set(launch.env) & LAUNCHER_KEYS)
-    if collisions:
-        raise ValueError(
-            f"the launch sets {', '.join(collisions)}, which the launcher owns; "
-            "remove the keys from Launch.env"
-        )
+    argv = command_line(launch, world_size=world_size, pinning=pinning)
+    owned = launcher_environment(launch, world_size=world_size, gpu=gpu)
+    inherited = {
+        key: value for key, value in base_env.items() if key not in LAUNCHER_KEYS
+    }
     return LaunchedCommand(
-        argv=command_line(launch, world_size=world_size, pinning=pinning),
-        env=MappingProxyType(
-            {
-                **base_env,
-                **launcher_environment(launch, world_size=world_size, gpu=gpu),
-                **launch.env,
-            }
-        ),
+        argv=argv,
+        env=MappingProxyType({**inherited, **owned, **launch.env}),
         cpu_pinning=pinning.description if launch.pin else PINNING_DECLINED,
     )

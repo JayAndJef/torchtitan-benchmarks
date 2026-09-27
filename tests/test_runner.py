@@ -2135,6 +2135,24 @@ class ResumeTests(unittest.TestCase):
                     environment=environment,
                 )
 
+            conflicting_profile_and_args = RunRequest(
+                axes=RequestedAxes(profile=True),
+                gpu="0",
+                scenario_name=None,
+                arm_names=("titan_compiled",),
+                resume_dir=out_dir,
+                torchtitan_args=("--training.gc-freq", "9"),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match the existing manifest: extra_torchtitan_args, profile$",
+            ):
+                execute_run(
+                    conflicting_profile_and_args,
+                    process_runner=fake_process,
+                    environment=environment,
+                )
+
     def test_resume_rehydrates_the_recorded_ac_mode(self) -> None:
         metadata = {
             "requested_gpu": "0",
