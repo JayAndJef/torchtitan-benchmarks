@@ -1,10 +1,10 @@
-"""The engine registry, and what each engine passes to its builder and its profile.
+"""The engine registry, and what each engine passes to its builder and its validation.
 
 The type of an arm's config selects its engine. These tests hold the
 registry contracts: every engine class is registered once, a config type
 selects one engine, and an unknown config type or name raises and names
 the choices. They also hold what each engine hands on: its own command
-builder and its own validation profile.
+builder and its own validation.
 """
 
 import sys
@@ -135,7 +135,7 @@ class ArmDeclarationTests(unittest.TestCase):
                     self.assertIn(engine_for(arm), ENGINES.values())
 
     def test_every_compiled_arm_runs_on_an_engine_that_can_prove_it(self):
-        """Arm rule 8 reads a log line, so the profile must name one."""
+        """Arm rule 8 reads a log line, so the validation must name one."""
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
                 if getattr(arm.config, "compile", None) is CompileMode.TORCH:
@@ -166,7 +166,7 @@ class ArmDeclarationTests(unittest.TestCase):
 
 
 class EngineDelegationTests(unittest.TestCase):
-    """Each engine builds its own command and passes its own profile."""
+    """Each engine builds its own command and passes its own validation."""
 
     def test_the_torchtitan_launch_runs_the_trainer_with_the_arm_arguments(self):
         arm = SCENARIOS["engines"].arm("titan_compiled")

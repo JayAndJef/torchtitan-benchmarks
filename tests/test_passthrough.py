@@ -66,7 +66,7 @@ def _owner_options() -> set[str]:
         for owned, _, _ in TABLES.values()
         for owner in owned
         if owner.startswith("--")
-        for name in owner.split("/")
+        for name in owner.split()[0].split("/")
     }
 
 
@@ -199,7 +199,7 @@ class MegatronTableTests(unittest.TestCase):
         for tokens, reason in (
             (("--num-layers=4",), "owned by --model-size"),
             (("--bench-seq-len", "8"), "pinned by the harness driver"),
-            (("--fp8-format", "hybrid"), "owned by the arm's precision value"),
+            (("--fp8-format", "hybrid"), "owned by --set megatron_stock.precision"),
             (("--recompute-granularity", "full"), "owned by --ac"),
         ):
             with self.subTest(tokens=tokens):

@@ -47,11 +47,14 @@ REMOVED_OPTIONS: dict[str, tuple[str, ...]] = {
 
 
 def replacement(flag: str, value: str) -> str:
-    """The ``--set`` spelling of one value of the removed option ``flag``."""
-    return " ".join(
+    """The ``--set`` spelling of one value of the removed option ``flag``; an option of several arms names each one."""
+    spellings = [
         f"--set {shlex.quote(template.format(value))}"
         for template in REMOVED_OPTIONS[flag]
-    )
+    ]
+    if len(spellings) == 1:
+        return spellings[0]
+    return " or ".join(spellings) + ", once for each selected arm"
 
 
 def _refuse_removed(

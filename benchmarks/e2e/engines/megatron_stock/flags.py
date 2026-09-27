@@ -502,7 +502,7 @@ OWNED_FLAGS: dict[str, tuple[str, ...]] = {
         "--recompute-num-layers",
         "--recompute-modules",
     ),
-    "the arm's precision value": (
+    "--set <arm>.precision": (
         *LEAN_PRECISION_FLAGS,
         "--main-params-dtype",
         "--grad-reduce-in-bf16",
@@ -517,7 +517,7 @@ OWNED_FLAGS: dict[str, tuple[str, ...]] = {
         "--num-layers-at-start-in-bf16",
         "--num-layers-at-end-in-bf16",
     ),
-    "the arm's nan_guard value": (NO_CHECK_FOR_NAN_FLAG, "--rerun-mode"),
+    "--set <arm>.nan_guard": (NO_CHECK_FOR_NAN_FLAG, "--rerun-mode"),
     "--profile": (
         "--profile",
         "--use-pytorch-profiler",
@@ -529,7 +529,7 @@ OWNED_FLAGS: dict[str, tuple[str, ...]] = {
         "--pytorch-profiler-collect-chakra",
     ),
 }
-"""The Megatron flags that each harness option, or arm setting, sets."""
+"""The Megatron flags that each harness option or ``--set`` field sets; ``<arm>`` stands for the arm name."""
 
 PINNED_FLAGS: dict[str, tuple[str, ...]] = {
     "the harness driver": ("--bench-*",),
@@ -603,14 +603,14 @@ def passthrough_refusals(
     """Every refusal of the passthrough ``tokens`` at ZeRO level ``zero``."""
     refusals = []
     offenders = [
-        f"{token} ({reason})"
+        f"{token} ({reason.replace('<arm>', arm_name)})"
         for token in tokens
         if (reason := refusal(token)) is not None
     ]
     if offenders:
         refusals.append(
             f"{arm_name}: {', '.join(offenders)} cannot pass through "
-            f"{arm_name}.extra_flags; set the owning harness option instead"
+            f"{arm_name}.extra_flags; set the owner instead"
         )
     names = {flag_name(token) for token in tokens}
     if "--overlap-param-gather" in names and zero == 0:

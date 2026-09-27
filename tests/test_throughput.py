@@ -39,6 +39,7 @@ from benchmarks.e2e.registry import SCENARIOS, SEED  # noqa: E402
 from benchmarks.models.piper_qwen3.shape import PIPER_1B  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     evaluate_run,
+    pinning_warnings,
     loss_visible_rank,
     losses,
     per_rank_training_metrics,
@@ -293,6 +294,81 @@ class ZeroWarningsReachTheArtifactTests(unittest.TestCase):
                     "ep": 1,
                     "zero": 0,
                 }
+            ),
+            [],
+        )
+
+
+class PinningWarningTests(unittest.TestCase):
+    """A run whose arms mix pinned and unpinned processes says so in results.json."""
+
+    PINNED = "numactl --cpunodebind=1 --membind=1"
+
+    def _warnings(self, pinnings: dict[str, str]) -> list[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            arms = tuple(
+                ArmRecord(
+                    arm=Arm(
+                        name=name,
+                        description=name,
+                        config=TorchTitanConfig(compile=CompileMode.NONE),
+                    ),
+                    command=("python",),
+                    env_delta={},
+                    cpu_pinning=pinning,
+                    execution_model="test",
+                )
+                for name, pinning in pinnings.items()
+            )
+            write_manifest(
+                out_dir,
+                scenario=SCENARIOS["engines"],
+                hardware="test-gpu",
+                metadata=TEST_METADATA,
+                run=FIXTURE_RUN,
+                arms=arms,
+            )
+            for name in pinnings:
+                (out_dir / f"{name}.log").write_text(_step_lines(tps=1000))
+            return json.loads(
+                write_results(evaluate_run(out_dir)).read_text()
+            )["warnings"]
+
+    def test_a_pinned_arm_beside_a_declined_arm_warns(self) -> None:
+        (warning,) = self._warnings(
+            {"pinned": self.PINNED, "declined": "declined by engine"}
+        )
+        self.assertIn("the arms mix CPU pinning", warning)
+        self.assertIn("declined: declined by engine", warning)
+
+    def test_arms_with_one_pinning_do_not_warn(self) -> None:
+        for pinning in (self.PINNED, "none: numactl not available"):
+            with self.subTest(pinning=pinning):
+                self.assertEqual(
+                    self._warnings({"first": pinning, "second": pinning}), []
+                )
+
+    def test_two_unpinned_reasons_are_one_pinning(self) -> None:
+        self.assertEqual(
+            pinning_warnings(
+                [
+                    ArmRecord(
+                        arm=Arm(
+                            name=name,
+                            description=name,
+                            config=TorchTitanConfig(compile=CompileMode.NONE),
+                        ),
+                        command=(),
+                        env_delta=None,
+                        cpu_pinning=pinning,
+                        execution_model=None,
+                    )
+                    for name, pinning in (
+                        ("a", "declined by engine"),
+                        ("b", "none: numactl not available"),
+                    )
+                ]
             ),
             [],
         )

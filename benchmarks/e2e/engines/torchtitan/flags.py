@@ -215,5 +215,5 @@ def passthrough_refusals(arm_name: str, tokens: tuple[str, ...]) -> list[str]:
         return []
     return [
         f"{arm_name}: {', '.join(offenders)} cannot pass through "
-        f"{arm_name}.extra_flags; set the owning harness option instead"
+        f"{arm_name}.extra_flags; set the owner instead"
     ]
