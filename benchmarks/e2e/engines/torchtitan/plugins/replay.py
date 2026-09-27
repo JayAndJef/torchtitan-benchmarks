@@ -11,8 +11,8 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 
-from benchmarks.e2e.data.c4_replay import DATASET, Sample, materialize
-from benchmarks.e2e.engines.api import DataSpec
+from benchmarks.e2e.data.c4_replay import Sample, materialize
+from benchmarks.e2e.engines.api import REPLAY_DATASET, DataSpec
 
 
 class PretokenizedReplayDataset(IterableDataset, Stateful):
@@ -40,7 +40,7 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ParallelAwareDataloader.Config):
-        dataset: str = DATASET
+        dataset: str = REPLAY_DATASET
         replay_steps: int = 40
         """The steps whose samples the loader materializes; it must be at least ``--training.steps``."""
 
@@ -57,6 +57,12 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
     ):
         # materialize reads the same tokenizer files as the trainer.
         del tokenizer
+        if config.dataset_path is not None:
+            raise ValueError(
+                f"the replay loader reads {REPLAY_DATASET!r} from the TorchTitan "
+                f"checkout, and the config names the path {config.dataset_path!r}; "
+                "remove --dataloader.dataset-path"
+            )
         spec = DataSpec(
             dataset=config.dataset,
             seq_len=seq_len,

@@ -39,6 +39,10 @@ class Arm:
     config: EngineConfig
 
 
+REPLAY_DATASET = "c4_test"
+"""The one dataset that the engines read."""
+
+
 @dataclass(frozen=True)
 class DataSpec:
     """The training data of one run."""
@@ -48,6 +52,13 @@ class DataSpec:
     local_batch_size: int
     steps: int
     """The step count, which also sets the samples each rank materializes."""
+
+    def __post_init__(self) -> None:
+        if self.dataset != REPLAY_DATASET:
+            raise ValueError(
+                f"the engines read the dataset {REPLAY_DATASET!r} alone, and "
+                f"the run names {self.dataset!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -177,7 +188,7 @@ class Engine(ABC):
 
     @abstractmethod
     def read_steps(self, rank: int, text: str) -> list[StepSample]:
-        """The step samples in one rank's log ``text``, in step order; a step line that does not parse raises ``ValueError``."""
+        """The step samples in one rank's log ``text``, in log order; a step line that does not parse raises ``ValueError``."""
 
     @abstractmethod
     def read_evidence(self, rank: int, text: str) -> RankEvidence:

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from benchmarks.e2e.data.c4_replay import DATASET, Sample, materialize
-from benchmarks.e2e.engines.api import DataSpec
+from benchmarks.e2e.data.c4_replay import Sample, materialize
+from benchmarks.e2e.engines.api import REPLAY_DATASET, DataSpec
 
 
 MICROBATCH_KEYS: tuple[str, ...] = (
@@ -175,7 +175,7 @@ def train_valid_test_datasets_provider(
             "token slice and the recorded mesh would disagree"
         )
     spec = DataSpec(
-        dataset=DATASET,
+        dataset=REPLAY_DATASET,
         # One TorchTitan row, because --seq-length is the packed sample.
         seq_len=args.bench_seq_len,
         local_batch_size=args.bench_local_batch_size,
