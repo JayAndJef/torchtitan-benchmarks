@@ -384,7 +384,8 @@ published figure on a step line, so a directory evaluates the same way under
 either profile value. The engine's `read_steps` turns the lines of one rank
 into step samples, and the evaluation reads the samples alone.
 
-- TorchTitan prints its own step line.
+- TorchTitan prints its own step line. A pipeline rank that holds no loss
+  prints the loss `-1`, and the reader reads it as no loss.
 - The stock Megatron driver prints one JSON step record per rank and step,
   after the prefix `bench-step: `. The reader also reads the text step line
   that the stored run directories hold.
