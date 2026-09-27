@@ -386,8 +386,9 @@ run writes.
 `(world_size // pp) * (pp - 1)`. That is right for `1F1B` and
 `Interleaved1F1B`. It is wrong for `ZBVZeroBubble` and `DualPipeV`, where
 rank 0 holds the last stage and the loss. The Megatron engine's check
-refuses a V-shaped schedule, so a TorchTitan-only run may ask for one. No run has ever used one. Repair `loss_visible_rank` before you
-run one. Do not lift `MAX_PP` instead.
+refuses a V-shaped schedule, so a TorchTitan-only run may ask for one. No
+run has ever used one. Repair `loss_visible_rank` before you run one. Do
+not lift `MAX_PP` instead.
 
 ## 7. The stock Megatron arm
 
