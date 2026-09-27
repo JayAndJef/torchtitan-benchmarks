@@ -24,7 +24,7 @@ from benchmarks.artifacts.run_state import (
 )
 from benchmarks.e2e.axes import RunAxes, RunRequest
 from benchmarks.e2e.engines.registry import engine_for, engine_named
-from benchmarks.e2e.engines.api import Arm, DataSpec, RunSpec
+from benchmarks.e2e.engines.api import Arm, DataSpec, Launch, RunSpec
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.megatron_stock.flags import (
     MEGATRON_NAN_GUARD_MODES,
@@ -48,13 +48,14 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.schema import Scenario
 from benchmarks.e2e.validation import validate_arm
-from benchmarks.execution.affinity import resolve_cpu_pinning
+from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
 from benchmarks.execution.environment import (
     add_compiler_environment,
     runtime_environment,
 )
 from benchmarks.execution.events import EventHandler, ProcessRunner, _emit
+from benchmarks.execution.launcher import build_command, command_line
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
 from benchmarks.models.piper_qwen3.shape import (
@@ -162,6 +163,8 @@ class ResolvedRun:
         hardware: The provenance label of the output directory.
         metadata: The provenance block, including the CPU pinning.
         out_dir: Where the run writes.
+        launches: One launch per arm name.
+        pinning: The CPU pinning of the host.
         commands: One argv per arm name.
         axes: The eight global run axes, resolved.
         torchtitan_args: The ``--torchtitan-arg`` tokens, resolved.
@@ -176,6 +179,8 @@ class ResolvedRun:
     hardware: str
     metadata: dict[str, str]
     out_dir: Path
+    launches: dict[str, Launch]
+    pinning: CpuPinning
     commands: dict[str, list[str]]
     axes: RunAxes
     resumed: bool
@@ -459,10 +464,17 @@ def _resolve_run(
         request.timestamp,
         request.occurrence,
     )
-    commands = {
-        arm.name: list(pinning.prefix)
-        + engine_for(arm).command(run, arm, out_dir / arm.name)
+    launches = {
+        arm.name: engine_for(arm).launch(run, arm, out_dir / arm.name)
         for arm in arms
+    }
+    commands = {
+        name: list(
+            command_line(
+                launch, world_size=parallelism.world_size, pinning=pinning
+            )
+        )
+        for name, launch in launches.items()
     }
 
     if existing_manifest is not None:
@@ -490,6 +502,8 @@ def _resolve_run(
         hardware=hardware,
         metadata=metadata,
         out_dir=out_dir,
+        launches=launches,
+        pinning=pinning,
         commands=commands,
         axes=axes,
         resumed=resumed,
@@ -686,10 +700,7 @@ def execute_run(
     _emit(event_handler, "summary", f"output: {out_dir}")
 
     base_environment = runtime_environment(
-        resolved.paths,
-        request.gpu,
-        environment=host_environment,
-        world_size=axes.parallelism.world_size,
+        resolved.paths, environment=host_environment
     )
     for arm in arms:
         arm_dir = out_dir / arm.name
@@ -730,6 +741,13 @@ def execute_run(
                 arm_environment = add_compiler_environment(
                     base_environment, resolved.paths.compiler_env
                 )
+            launched = build_command(
+                resolved.launches[arm.name],
+                world_size=axes.parallelism.world_size,
+                gpu=request.gpu,
+                pinning=resolved.pinning,
+                base_env=arm_environment,
+            )
             with log_path.open("w") as log:
                 log.write(
                     f"# scenario={resolved.scenario.name} arm={arm.name} "
@@ -739,9 +757,9 @@ def execute_run(
                 log.write(resolved.metadata["nvidia_smi"] + "\n")
                 log.flush()
                 completed = process_runner(
-                    command,
+                    list(launched.argv),
                     cwd=resolved.paths.titan_dir,
-                    env=arm_environment,
+                    env=dict(launched.env),
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     check=False,

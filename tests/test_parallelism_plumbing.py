@@ -62,7 +62,10 @@ from benchmarks.e2e.runner import (
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
-from benchmarks.execution.environment import runtime_environment
+from benchmarks.execution.environment import (
+    device_environment,
+    runtime_environment,
+)
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
 
@@ -362,31 +365,32 @@ class RequestTests(unittest.TestCase):
             self.assertEqual(request.gpu, "0,1")
 
 
-class RuntimeEnvironmentTests(unittest.TestCase):
-    def _environment(self, gpu: str, **kwargs) -> dict:
-        paths = RuntimePaths.resolve(environment={"PATH": os.environ["PATH"]})
-        return runtime_environment(
-            paths, gpu, environment={"PATH": os.environ["PATH"]}, **kwargs
+class DeviceEnvironmentTests(unittest.TestCase):
+    def test_one_device(self) -> None:
+        self.assertEqual(
+            device_environment("0", world_size=1),
+            {
+                "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "NGPU": "1",
+            },
         )
-
-    def test_one_device_is_unchanged(self) -> None:
-        result = self._environment("0")
-        self.assertEqual(result["NGPU"], "1")
-        self.assertEqual(result["CUDA_VISIBLE_DEVICES"], "0")
-        self.assertEqual(result["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
-        # Set only when a run has more than one rank to label, which is a
-        # later stage; its absence is what a single-GPU log has always had.
-        self.assertNotIn("LOG_RANK", result)
 
     def test_ngpu_follows_the_world_size(self) -> None:
-        self.assertEqual(self._environment("0,1", world_size=2)["NGPU"], "2")
-        self.assertEqual(
-            self._environment("0,1", world_size=2)["CUDA_VISIBLE_DEVICES"], "0,1"
-        )
+        result = device_environment("0,1", world_size=2)
+        self.assertEqual(result["NGPU"], "2")
+        self.assertEqual(result["CUDA_VISIBLE_DEVICES"], "0,1")
 
     def test_a_world_size_below_one_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "world size"):
-            self._environment("0", world_size=0)
+            device_environment("0", world_size=0)
+
+    def test_the_runtime_environment_sets_no_device_key(self) -> None:
+        paths = RuntimePaths.resolve(environment={"PATH": os.environ["PATH"]})
+        result = runtime_environment(paths, environment={"PATH": os.environ["PATH"]})
+        for key in ("CUDA_DEVICE_ORDER", "CUDA_VISIBLE_DEVICES", "NGPU", "LOG_RANK"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, result)
 
 
 class ProvenanceDeviceTests(unittest.TestCase):

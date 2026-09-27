@@ -1,14 +1,14 @@
-"""The stock Megatron-LM engine, around its command builder and ``MEGATRON_STOCK_PROFILE``."""
+"""The stock Megatron-LM engine, around its launch builder and ``MEGATRON_STOCK_PROFILE``."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, RunSpec
+from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, Launch, RunSpec
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.launch import (
     STOCK_MEGATRON_PP_SCHEDULE,
-    megatron_stock_command,
+    megatron_stock_launch,
 )
 from benchmarks.e2e.parallelism import PP_SCHEDULES
 from benchmarks.e2e.validation import (
@@ -43,8 +43,8 @@ class MegatronStockEngine(Engine):
             ]
         return []
 
-    def command(self, run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
-        return megatron_stock_command(run, arm, arm_dir)
+    def launch(self, run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
+        return megatron_stock_launch(run, arm, arm_dir)
 
     def validate(
         self, run: RunSpec, arm: Arm, arm_dir: Path, log_path: Path

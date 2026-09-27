@@ -55,6 +55,7 @@ from benchmarks.e2e.validation import (
     _megatron_stock_parallelism_markers,
 )
 from benchmarks.execution.affinity import CpuPinning
+from benchmarks.execution.launcher import torchrun_flags
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 from tests.engine_helpers import command, configured, run_spec
 
@@ -406,7 +407,10 @@ class TrivialSpecArgvTests(unittest.TestCase):
             ],
             [],
         )
-        self.assertEqual(command[0], "./run_train.sh")
+        self.assertEqual(
+            command[: command.index("torchtitan.train") + 1],
+            [sys.executable, *torchrun_flags(1), "-m", "torchtitan.train"],
+        )
 
 
 @_skip_without_stock_package(STOCK_FLAGS_MODULE)
@@ -544,11 +548,12 @@ class StockArgvTests(unittest.TestCase):
             _command(_titan_arm(), parallelism=MESH, local_batch_size=32),
         )
 
-    def test_the_trivial_spec_argv_starts_no_launcher(self) -> None:
+    def test_the_trivial_spec_argv_starts_torchrun_for_one_rank(self) -> None:
         command = _command(_stock_arm())
-        self.assertEqual(command[0], sys.executable)
-        self.assertEqual(command[1:3], ["-m", STOCK_MEGATRON_DRIVER_MODULE])
-        self.assertNotIn("torch.distributed.run", command)
+        self.assertEqual(
+            command[: command.index(STOCK_MEGATRON_DRIVER_MODULE) + 1],
+            [sys.executable, *torchrun_flags(1), "-m", STOCK_MEGATRON_DRIVER_MODULE],
+        )
         # A schedule at pp 1 would name a split that does not happen.
         self.assertNotIn("--bench-pp-schedule", command)
 
@@ -556,7 +561,7 @@ class StockArgvTests(unittest.TestCase):
         command = _command(_stock_arm())
         self.assertEqual(
             command,
-            [sys.executable, "-m", STOCK_MEGATRON_DRIVER_MODULE]
+            [sys.executable, *torchrun_flags(1), "-m", STOCK_MEGATRON_DRIVER_MODULE]
             + self._flags(TRIVIAL_SPEC),
         )
 

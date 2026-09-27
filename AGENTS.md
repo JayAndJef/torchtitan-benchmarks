@@ -83,7 +83,7 @@ shares one pre-push hook.
 | `benchmarks/e2e/data/piper_qwen3.py` | The pre-tokenized replay dataloader. |
 | `benchmarks/artifacts/` | `manifest.json`, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
-| `benchmarks/execution/` | Subprocess environment, device parsing, CPU pinning and provenance. |
+| `benchmarks/execution/` | Subprocess environment, the launcher in `benchmarks/execution/launcher.py`, device parsing, CPU pinning and provenance. |
 | `benchmarks/kernel/` | The kernel-isolation system: registry, spans, runner, worker, timing engine, results. |
 | `benchmarks/models/piper_qwen3/` | The model port: `benchmarks/models/piper_qwen3/shape.py`, `benchmarks/models/piper_qwen3/config_registry.py`, `benchmarks/models/piper_qwen3/parallelize.py`, the Megatron model builder and the kernel components. |
 | `tools/` | `tools/run_matrix.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |

@@ -144,11 +144,11 @@ class EngineDelegationTests(unittest.TestCase):
     """Each engine calls its own builder and passes its own profile."""
 
     CASES = (
-        ("titan_compiled", "torchtitan", "titan_command", TORCHTITAN_PROFILE),
+        ("titan_compiled", "torchtitan", "titan_launch", TORCHTITAN_PROFILE),
         (
             "megatron_stock",
             "megatron_stock",
-            "megatron_stock_command",
+            "megatron_stock_launch",
             MEGATRON_STOCK_PROFILE,
         ),
     )
@@ -160,11 +160,10 @@ class EngineDelegationTests(unittest.TestCase):
             arm = scenario.arm(arm_name)
             with self.subTest(arm=arm_name), mock.patch(
                 f"benchmarks.e2e.engines.{package}.engine.{builder}",
-                return_value=["built"],
+                return_value="built",
             ) as built:
                 self.assertEqual(
-                    engine_for(arm).command(run, arm, Path("/tmp/arm")),
-                    ["built"],
+                    engine_for(arm).launch(run, arm, Path("/tmp/arm")), "built"
                 )
             built.assert_called_once_with(run, arm, Path("/tmp/arm"))
 
@@ -201,15 +200,15 @@ class EngineDelegationTests(unittest.TestCase):
             ("off", "off", "stock"),
         )
 
-    def test_a_command_is_the_same_for_the_same_inputs(self):
+    def test_a_launch_is_the_same_for_the_same_inputs(self):
         scenario = SCENARIOS["engines"]
         run = run_spec(ac_mode="none")
         for arm in scenario.arms:
             with self.subTest(arm=arm.name):
                 engine = engine_for(arm)
                 self.assertEqual(
-                    engine.command(run, arm, Path("/tmp/arm")),
-                    engine.command(run, arm, Path("/tmp/arm")),
+                    engine.launch(run, arm, Path("/tmp/arm")),
+                    engine.launch(run, arm, Path("/tmp/arm")),
                 )
 
 

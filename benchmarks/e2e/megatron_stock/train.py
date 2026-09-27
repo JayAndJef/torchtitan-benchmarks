@@ -92,8 +92,6 @@ def main(argv: list[str] | None = None) -> int:
     if argv is not None:
         sys.argv = [sys.argv[0], *argv]
 
-    bootstrap.install_allocator_defaults()
-    bootstrap.install_rendezvous_defaults()
     bootstrap.prepare()
 
     # Deferred, so a --help run does not pay for the ML stack.

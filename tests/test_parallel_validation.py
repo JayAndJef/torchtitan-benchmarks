@@ -41,9 +41,8 @@ from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
     TORCHTITAN_PROFILE,
 )
-from benchmarks.execution.environment import LOG_RANK_TEMPLATE
-from benchmarks.execution.paths import RuntimePaths
-from benchmarks.execution.environment import runtime_environment
+from benchmarks.execution.launcher import LOG_RANK_TEMPLATE, launcher_environment
+from benchmarks.e2e.engines.api import Launch
 from tests.test_runner import (
     OVERRIDE_ARM,
     PIPER_OPTIMIZED_SWIGLU_OVERRIDE,
@@ -65,7 +64,7 @@ def _prefixed(rank: int, text: str) -> str:
 
 class LogsByRankTests(unittest.TestCase):
     def test_an_unprefixed_log_comes_back_whole(self) -> None:
-        """The megatron arm's log at one rank: no torchrun, no prefix."""
+        """A stored Megatron log at one rank, written before torchrun started every arm."""
         text = "Megatron-LM training loop (mode=default,\nTraining completed\n"
         self.assertEqual(logs_by_rank(text), {0: text})
 
@@ -74,7 +73,7 @@ class LogsByRankTests(unittest.TestCase):
 
         A single-rank titan log already carries ``[rank0]:`` prefixes, and it
         also carries unprefixed lines that belong to no rank: the runner's
-        header, the nvidia-smi block and run_train.sh's shell trace.
+        header, the nvidia-smi block and torchrun's own lines.
         Splitting would drop those and change what every rule reads.
         """
         text = "# scenario=x arm=y\n" + _prefixed(0, "Training completed")
@@ -149,8 +148,8 @@ class LogsByRankTests(unittest.TestCase):
 
         They are not one constant because the reader must also parse
         torchrun's own default, ``[${role_name}${local_rank}]:``, which
-        every single-GPU log already carries through run_train.sh's
-        ``--role rank``.
+        every single-GPU log written before the launcher set the template
+        carries through ``--role rank``.
         """
         rendered = LOG_RANK_TEMPLATE.replace("${rank}", "7")
         text = f"{rendered}alpha\n{rendered.replace('7', '9')}beta\n"
@@ -161,23 +160,17 @@ class LogsByRankTests(unittest.TestCase):
 
 class RankLoggingEnvironmentTests(unittest.TestCase):
     def _environment(self, world_size: int) -> dict[str, str]:
-        paths = RuntimePaths.resolve(environment={"PATH": "/usr/bin"})
-        return runtime_environment(
-            paths, "0", environment={"PATH": "/usr/bin"}, world_size=world_size
+        launch = Launch(target=("-m", "x"), processes="per_rank", pin=True)
+        return launcher_environment(launch, world_size=world_size, gpu="0")
+
+    def test_one_rank_names_rank_zero_and_the_prefix(self) -> None:
+        environment = self._environment(1)
+        self.assertEqual(environment["LOG_RANK"], "0")
+        self.assertEqual(
+            environment["TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE"], LOG_RANK_TEMPLATE
         )
 
-    def test_one_rank_sets_neither_variable(self) -> None:
-        """A single-GPU log stays byte for byte the log it always was."""
-        environment = self._environment(1)
-        self.assertNotIn("LOG_RANK", environment)
-        self.assertNotIn("TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE", environment)
-
     def test_two_ranks_ask_for_every_rank_and_the_global_prefix(self) -> None:
-        """TorchTitan's run_train.sh defaults LOG_RANK to 0.
-
-        Without this, rank 1's output reaches no console and every per-rank
-        rule below has nothing to read.
-        """
         environment = self._environment(2)
         self.assertEqual(environment["LOG_RANK"], "0,1")
         self.assertEqual(

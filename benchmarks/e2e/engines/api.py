@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import ClassVar, Literal
 
 from benchmarks.e2e.parallelism import ParallelismSpec
@@ -81,6 +83,30 @@ class RunSpec:
             )
 
 
+@dataclass(frozen=True)
+class Launch:
+    """What one arm's training processes are."""
+
+    target: tuple[str, ...]
+    """The arguments after the interpreter; the first one is ``-m``."""
+    processes: Literal["per_rank", "single"]
+    """``per_rank`` starts one process per rank under torchrun; ``single`` starts one."""
+    pin: bool
+    """Whether the engine accepts the CPU pinning prefix."""
+    env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    """The engine's own child environment keys; a launcher-owned key is refused."""
+
+    def __post_init__(self) -> None:
+        if self.target[:1] != ("-m",):
+            raise ValueError(
+                f"a launch target starts with '-m', got {self.target[:2]!r}"
+            )
+        if self.processes not in ("per_rank", "single"):
+            raise ValueError(
+                f"launch processes {self.processes!r} is not one of: per_rank, single"
+            )
+
+
 class Engine(ABC):
     """One training engine, as the harness process sees it."""
 
@@ -93,8 +119,8 @@ class Engine(ABC):
         """Every reason this arm cannot run; each one names its repair."""
 
     @abstractmethod
-    def command(self, run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
-        """The command line that trains the arm, without the CPU pinning prefix."""
+    def launch(self, run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
+        """The training processes of the arm; the same inputs give the same launch."""
 
     @abstractmethod
     def validate(

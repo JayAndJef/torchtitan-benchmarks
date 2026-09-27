@@ -9,6 +9,8 @@ from benchmarks.e2e.engines.api import Arm, DataSpec, ProfileWindow, RunSpec
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
 from benchmarks.e2e.registry import DEFAULT_WARMUP_STEPS, ENGINES, SEED
+from benchmarks.execution.affinity import CpuPinning
+from benchmarks.execution.launcher import command_line
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 
@@ -44,9 +46,18 @@ def configured(arm: Arm, **fields: object) -> Arm:
     return replace(arm, config=replace(arm.config, **fields))
 
 
+UNPINNED = CpuPinning((), "none: test")
+"""A host pinning with no prefix."""
+
+
 def command(run: RunSpec, arm: Arm, arm_dir: Path | str) -> list[str]:
-    """The command line that the arm's engine builds."""
-    return engine_for(arm).command(run, arm, Path(arm_dir))
+    """The unpinned command line of the arm's launch."""
+    launch = engine_for(arm).launch(run, arm, Path(arm_dir))
+    return list(
+        command_line(
+            launch, world_size=run.parallelism.world_size, pinning=UNPINNED
+        )
+    )
 
 
 def validate(

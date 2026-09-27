@@ -36,6 +36,7 @@ from benchmarks.artifacts.layout import atomic_write_json, run_timestamp
 from benchmarks.execution.affinity import resolve_cpu_pinning
 from benchmarks.execution.environment import (
     add_compiler_environment,
+    device_environment,
     runtime_environment,
 )
 from benchmarks.execution.events import EventHandler, _emit
@@ -558,9 +559,10 @@ def execute_kernel_run(
     pinning = resolve_cpu_pinning(request.gpu)
     metadata = {**metadata, "cpu_pinning": pinning.description}
     timestamp = request.timestamp or run_timestamp()
-    base_environment = runtime_environment(
-        paths, request.gpu, environment=host_environment
-    )
+    base_environment = {
+        **runtime_environment(paths, environment=host_environment),
+        **device_environment(request.gpu, world_size=1),
+    }
 
     _emit(event_handler, "summary", f"GPU (PCI index): {request.gpu}")
     _emit(event_handler, "summary", metadata["nvidia_smi"])

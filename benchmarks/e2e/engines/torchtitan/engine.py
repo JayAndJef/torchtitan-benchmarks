@@ -1,12 +1,12 @@
-"""The TorchTitan engine, around the ``run_train.sh`` builder and ``TORCHTITAN_PROFILE``."""
+"""The TorchTitan engine, around its launch builder and ``TORCHTITAN_PROFILE``."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, RunSpec
+from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, Launch, RunSpec
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
-from benchmarks.e2e.launch import titan_command
+from benchmarks.e2e.launch import titan_launch
 from benchmarks.e2e.parallelism import PP_SCHEDULES
 from benchmarks.e2e.validation import (
     TORCHTITAN_PROFILE,
@@ -34,8 +34,8 @@ class TorchTitanEngine(Engine):
             ]
         return []
 
-    def command(self, run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
-        return titan_command(run, arm, arm_dir)
+    def launch(self, run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
+        return titan_launch(run, arm, arm_dir)
 
     def validate(
         self, run: RunSpec, arm: Arm, arm_dir: Path, log_path: Path
