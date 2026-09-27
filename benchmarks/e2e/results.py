@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -13,10 +14,11 @@ from benchmarks.artifacts.layout import atomic_write_json, logs_by_rank
 from benchmarks.artifacts.manifests import ArmRecord, load_run_record
 from benchmarks.artifacts.summaries import _value
 from benchmarks.e2e.checks import run_warnings
-from benchmarks.e2e.engines.api import Arm, ProfileWindow, StepSample
+from benchmarks.e2e.engines.api import Arm, ProfileWindow, StepRead, StepSample
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.evidence import non_finite_refusals, rank_steps
 from benchmarks.execution.affinity import is_pinned
+from benchmarks.execution.launcher import RANK_PREFIX
 
 
 @dataclass(frozen=True)
@@ -101,13 +103,47 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def arm_steps(arm: Arm, log_path: Path) -> dict[int, list[StepSample]]:
-    """The step samples of each rank in the arm's log, read by the arm's engine; a missing log holds no rank."""
+RANK_LINE = re.compile(rf"^{RANK_PREFIX}")
+"""A log line that starts with a rank prefix."""
+
+
+def arm_steps(arm: Arm, log_path: Path) -> dict[int, StepRead]:
+    """What the arm's engine reads from each rank in the arm's log; a missing log holds no rank."""
     if not log_path.exists():
         return {}
     return rank_steps(
         engine_for(arm), logs_by_rank(log_path.read_text(errors="replace"))
     )
+
+
+def _log_line(text: str, rank: int, line: int) -> int:
+    """The line number in the whole log of line ``line`` of the rank's text, as ``logs_by_rank`` splits it."""
+    lines = text.replace("\x00", "").splitlines()
+    prefixed = [
+        (number, int(match.group()[len("[rank") : -len("]:")]))
+        for number, content in enumerate(lines, start=1)
+        if (match := RANK_LINE.match(content))
+    ]
+    if len({owner for _, owner in prefixed}) < 2:
+        return line
+    return [number for number, owner in prefixed if owner == rank][line - 1]
+
+
+def dropped_line_warnings(
+    arm: str, log_path: Path, reads: Mapping[int, StepRead]
+) -> list[str]:
+    """One warning for each step line that the engine dropped, with its line in the log."""
+    dropped = [line for read in reads.values() for line in read.dropped]
+    if not dropped:
+        return []
+    text = log_path.read_text(errors="replace")
+    return [
+        f"{arm}: rank {line.rank} step "
+        f"{'unknown' if line.step is None else line.step}: another rank's "
+        f"output cut the step line at line {_log_line(text, line.rank, line.line)} "
+        f"of {log_path.name}, so the evaluation drops that step"
+        for line in dropped
+    ]
 
 
 def loss_visible_rank(*, world_size: int, pp: int) -> int:
@@ -245,8 +281,16 @@ def evaluate_run(
         *pinning_warnings(selected),
     ]
     world_size = run.parallelism.world_size
-    steps = {
+    reads = {
         arm: arm_steps(record.arm(arm).arm, out_dir / f"{arm}.log") for arm in arms
+    }
+    for arm in arms:
+        warnings.extend(
+            dropped_line_warnings(arm, out_dir / f"{arm}.log", reads[arm])
+        )
+    steps = {
+        arm: {rank: list(read.samples) for rank, read in by_rank.items()}
+        for arm, by_rank in reads.items()
     }
     if run.profile:
         def _samples(samples: list[StepSample]) -> list[StepSample]:

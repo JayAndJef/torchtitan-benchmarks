@@ -141,6 +141,25 @@ class StepSample:
 
 
 @dataclass(frozen=True)
+class DroppedLine:
+    """A step line that another rank's log prefix cut, which the reader drops."""
+
+    rank: int
+    line: int
+    """The line number in the log text of the rank, from 1."""
+    step: int | None
+    """The step that the line names; ``None`` when the cut removed it."""
+
+
+@dataclass(frozen=True)
+class StepRead:
+    """The step samples of one rank's log, in log order, and the step lines that the reader dropped."""
+
+    samples: tuple[StepSample, ...]
+    dropped: tuple[DroppedLine, ...] = ()
+
+
+@dataclass(frozen=True)
 class MeshObserved:
     """The mesh that an engine built, as its own log states it."""
 
@@ -187,8 +206,13 @@ class Engine(ABC):
         return []
 
     @abstractmethod
-    def read_steps(self, rank: int, text: str) -> list[StepSample]:
-        """The step samples in one rank's log ``text``, in log order; a step line that does not parse raises ``ValueError``."""
+    def read_steps(self, rank: int, text: str) -> StepRead:
+        """The step samples and the dropped step lines of one rank's log ``text``.
+
+        A torn write can put another rank's log prefix inside a step line.
+        The reader drops a step line that such a prefix cut, and it raises
+        ``ValueError`` for any other step line that does not parse.
+        """
 
     @abstractmethod
     def read_evidence(self, rank: int, text: str) -> RankEvidence:

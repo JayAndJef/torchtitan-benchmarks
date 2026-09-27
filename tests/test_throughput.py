@@ -69,6 +69,11 @@ TITAN_ARM = Arm(
 """A TorchTitan arm, whose engine reads the fork's step line."""
 
 
+def _samples(arm: Arm, log: Path) -> dict:
+    """The step samples of each rank in the log."""
+    return {rank: read.samples for rank, read in arm_steps(arm, log).items()}
+
+
 def _step_lines(*, tps: int, first_step: int = 2, count: int = 4) -> str:
     """Step lines a rank prints, inside the stable window rule."""
     return "".join(
@@ -154,7 +159,7 @@ class PerRankLogParsingTests(unittest.TestCase):
             by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(list(by_rank), [0])
         self.assertEqual(
-            [sample.tokens_per_second for sample in by_rank[0]], [1000] * 4
+            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 4
         )
 
     def test_two_ranks_do_not_pool_into_one_series(self) -> None:
@@ -167,12 +172,12 @@ class PerRankLogParsingTests(unittest.TestCase):
             by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(sorted(by_rank), [0, 1])
         self.assertEqual(
-            [sample.tokens_per_second for sample in by_rank[0]], [1000] * 4
+            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 4
         )
         self.assertEqual(
-            [sample.tokens_per_second for sample in by_rank[1]], [800] * 4
+            [sample.tokens_per_second for sample in by_rank[1].samples], [800] * 4
         )
-        self.assertEqual({sample.rank for sample in by_rank[1]}, {1})
+        self.assertEqual({sample.rank for sample in by_rank[1].samples}, {1})
 
     def test_a_missing_log_reads_as_no_ranks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -504,6 +509,50 @@ class ARankWithNoSampleDoesNotWinTests(unittest.TestCase):
         self.assertEqual(summary.per_rank[1].step_ms.series, ())
 
 
+class TornStepLineTests(unittest.TestCase):
+    """A step line that another rank's prefix cut is dropped, and results.json names it."""
+
+    def test_the_warning_names_the_arm_the_rank_the_step_and_the_log_line(
+        self,
+    ) -> None:
+        cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        lines = [
+            "[rank0]:" + titan_step_line(2),
+            "[rank1]:" + titan_step_line(2),
+            "[rank0]:" + titan_step_line(3),
+            "[rank1]:" + cut,
+            "[rank0]:" + titan_step_line(4),
+            "[rank1]:" + titan_step_line(4),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir, {"baseline": "".join(lines)}, {"world_size": 2, "pp": 2}
+            )
+            result = evaluate_run(out_dir)
+        self.assertIn(
+            "baseline: rank 1 step 3: another rank's output cut the step line "
+            "at line 4 of baseline.log, so the evaluation drops that step",
+            result.warnings,
+        )
+        self.assertEqual(result.results["baseline"].per_rank[1].stable_sample_count, 2)
+
+    def test_the_log_line_of_a_one_rank_log_is_its_own(self) -> None:
+        cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {"baseline": "header\n" + titan_step_line(2) + cut},
+                {"world_size": 1, "pp": 1},
+            )
+            warnings = evaluate_run(out_dir).warnings
+        self.assertTrue(
+            any("rank 0 step 3" in w and "at line 3 of" in w for w in warnings),
+            warnings,
+        )
+
+
 class NonFiniteTrajectoryTests(unittest.TestCase):
     """A ``nan`` or an ``inf`` on a step line fails the arm before publication.
 
@@ -581,18 +630,18 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
             result = evaluate_run(out_dir)
             steps = arm_steps(TITAN_ARM, out_dir / "baseline.log")
         self.assertEqual(result.losses["baseline"][1], (3, 1.0))
-        self.assertIsNone(steps[0][1].loss)
+        self.assertIsNone(steps[0].samples[1].loss)
 
     def test_the_guard_reads_the_samples_directly(self) -> None:
         """Callable on its own, so a reader of an old directory can ask."""
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text(self._lines())
-            refuse_non_finite_trajectories("baseline", arm_steps(TITAN_ARM, log), log)
+            refuse_non_finite_trajectories("baseline", _samples(TITAN_ARM, log), log)
             log.write_text(self._lines(grad_norm=float("nan"), at=2))
             with self.assertRaisesRegex(ValueError, r"grad_norm at step 2"):
                 refuse_non_finite_trajectories(
-                    "baseline", arm_steps(TITAN_ARM, log), log
+                    "baseline", _samples(TITAN_ARM, log), log
                 )
 
 
@@ -610,7 +659,7 @@ class WholeEvaluationTests(unittest.TestCase):
                 titan_step_line(1, loss=7.4478)
                 + titan_step_line(2, loss=float("nan"))
             )
-            parsed = trajectory(arm_steps(TITAN_ARM, log)[0], "loss")
+            parsed = trajectory(arm_steps(TITAN_ARM, log)[0].samples, "loss")
         self.assertEqual(parsed[0], (1, 7.4478))
         self.assertNotEqual(parsed[1][1], parsed[1][1])  # NaN
 

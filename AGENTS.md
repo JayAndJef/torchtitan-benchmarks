@@ -391,11 +391,15 @@ alone.
 - The stock Megatron driver prints one JSON step record per rank and step,
   after the prefix `bench-step: `. The reader also reads the text step line
   that the stored run directories hold.
-- A step line or record that does not parse fails the arm. A step that
-  does not follow the previous step of its rank also fails the arm.
-- Every rank writes to one log, and a torn write can append the line of one
-  rank to a step line of another rank. The readers read the step line and
-  drop the appended line, so that step of the other rank is absent.
+- Every rank writes to one log, so a torn write can put the prefix and the
+  line of one rank inside a step line of another rank.
+- When the step line is whole before the prefix, the reader reads it and
+  drops the appended line. That step of the other rank is then absent.
+- When the prefix cuts the step line, the reader drops the step line.
+  `results.json` records a warning that names the arm, the rank, the step and
+  the line of the log. Validation does not fail on a dropped line.
+- Any other step line or record that does not parse fails the arm. A step
+  that does not follow the previous step of its rank also fails the arm.
 
 `results.json` is schema 6. Per arm it carries `stable_tokens_per_second`,
 `stable_sample_count`, `peak_memory_gib`, `step_ms` with `mean`, `median`,

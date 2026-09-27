@@ -300,10 +300,10 @@ class RankStepsTests(unittest.TestCase):
     def test_each_rank_reads_its_own_samples(self) -> None:
         steps = rank_steps(self.ENGINE, {0: _record(1) + _record(2), 1: _record(1)})
         self.assertEqual(
-            {rank: [sample.step for sample in samples] for rank, samples in steps.items()},
+            {rank: [sample.step for sample in read.samples] for rank, read in steps.items()},
             {0: [1, 2], 1: [1]},
         )
-        self.assertEqual({sample.rank for sample in steps[1]}, {1})
+        self.assertEqual({sample.rank for sample in steps[1].samples}, {1})
 
     def test_a_repeated_step_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "rank 0 logs step 2 after step 2"):
@@ -312,6 +312,23 @@ class RankStepsTests(unittest.TestCase):
     def test_a_step_out_of_order_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "rank 1 logs step 1 after step 3"):
             rank_steps(self.ENGINE, {1: _record(3) + _record(1)})
+
+    def test_a_dropped_step_line_fails_no_validation_rule(self) -> None:
+        cut = _record(2).rstrip("\n")[:30] + "[rank1]:USDT: profiler_stop\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "arm.log"
+            path.write_text(_record(1) + cut + _record(3) + "Training completed\n")
+            with self.assertRaises(RuntimeError) as caught:
+                validate(
+                    run_spec(ac_mode="none", profile=False),
+                    ENGINES.arm("megatron_stock"),
+                    Path(temporary),
+                    path,
+                )
+        message = str(caught.exception)
+        self.assertIn("no rank states a parameter count", message)
+        self.assertNotIn("does not parse", message)
+        self.assertNotIn("logs step", message)
 
     def test_validation_lists_each_rank_step_failure_and_the_non_finite_values(
         self,

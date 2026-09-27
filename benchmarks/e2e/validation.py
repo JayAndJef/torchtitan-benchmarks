@@ -107,7 +107,7 @@ def validate_arm(
     steps = {}
     for rank, text in sorted(rank_logs.items()):
         try:
-            steps.update(rank_steps(engine, {rank: text}))
+            steps[rank] = rank_steps(engine, {rank: text})[rank].samples
         except ValueError as error:
             failures.append(str(error))
     failures.extend(non_finite_refusals(steps))

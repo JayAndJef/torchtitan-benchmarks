@@ -2036,7 +2036,7 @@ class StepRecordTest(unittest.TestCase):
                 tflops=1.0,
                 mfu=1.0,
             ),
-        )
+        ).samples
         self.assertTrue(math.isnan(sample.grad_norm))
 
     def test_tokens_per_second_divides_by_the_pipeline_degree(self) -> None:
