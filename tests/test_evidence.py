@@ -7,14 +7,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.e2e.engines.api import MeshObserved, RankEvidence
+from benchmarks.e2e.engines.api import MeshObserved, RankEvidence, StepSample
 from benchmarks.e2e.engines.megatron_stock.evidence import (
     read_evidence as stock_evidence,
 )
 from benchmarks.e2e.engines.torchtitan.evidence import (
     read_evidence as titan_evidence,
 )
-from benchmarks.e2e.evidence import check_evidence, non_finite_refusals
+from benchmarks.e2e.engines.megatron_stock.steps import step_record
+from benchmarks.e2e.engines.registry import engine_for
+from benchmarks.e2e.evidence import check_evidence, non_finite_refusals, rank_steps
 from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.registry import ENGINES
 from benchmarks.models.piper_qwen3.shape import PIPER_1B
@@ -224,14 +226,42 @@ class ReaderTests(unittest.TestCase):
             )
 
 
+def _sample(rank: int, step: int, loss: float | None, grad_norm: float | None) -> StepSample:
+    return StepSample(
+        rank=rank,
+        step=step,
+        tokens_per_second=1000,
+        peak_memory_gib=3.0,
+        loss=loss,
+        grad_norm=grad_norm,
+    )
+
+
+def _record(step: int, *, loss: float | None = 1.0, grad_norm: float = 2.0) -> str:
+    return (
+        step_record(
+            step=step,
+            tokens_per_second=1000,
+            peak_memory_gib=3.0,
+            loss=loss,
+            grad_norm=grad_norm,
+            tflops=1.0,
+            mfu=0.1,
+        )
+        + "\n"
+    )
+
+
 class NonFiniteTests(unittest.TestCase):
     def test_the_first_non_finite_value_of_each_rank_is_named(self) -> None:
         self.assertEqual(
             non_finite_refusals(
                 {
-                    0: "step: 1 loss: 2.0 grad_norm: 1.0\n",
-                    1: "step: 1 loss: nan grad_norm: 1.0\n"
-                    "step: 2 loss: nan grad_norm: inf\n",
+                    0: [_sample(0, 1, 2.0, 1.0)],
+                    1: [
+                        _sample(1, 1, float("nan"), 1.0),
+                        _sample(1, 2, float("nan"), float("inf")),
+                    ],
                 }
             ),
             [
@@ -240,16 +270,55 @@ class NonFiniteTests(unittest.TestCase):
             ],
         )
 
+    def test_a_value_that_the_rank_does_not_state_passes(self) -> None:
+        self.assertEqual(non_finite_refusals({0: [_sample(0, 1, None, None)]}), [])
+
     def test_a_diverged_rank_fails_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "arm.log"
             path.write_text(
-                "step: 1 loss: nan grad_norm: 1.0\n"
-                f"size: {PIPER_1B.param_count:,} total parameters\n"
+                _record(1, loss=float("nan"))
+                + f"size: {PIPER_1B.param_count:,} total parameters\n"
                 "Training completed\n"
             )
             with self.assertRaisesRegex(
                 RuntimeError, "rank 0 logged a non-finite loss at step 1"
+            ):
+                validate(
+                    run_spec(ac_mode="none", profile=False),
+                    ENGINES.arm("megatron_stock"),
+                    Path(temporary),
+                    path,
+                )
+
+
+class RankStepsTests(unittest.TestCase):
+    """The step samples of each rank, as the arm's engine reads them."""
+
+    ENGINE = engine_for(ENGINES.arm("megatron_stock"))
+
+    def test_each_rank_reads_its_own_samples(self) -> None:
+        steps = rank_steps(self.ENGINE, {0: _record(1) + _record(2), 1: _record(1)})
+        self.assertEqual(
+            {rank: [sample.step for sample in samples] for rank, samples in steps.items()},
+            {0: [1, 2], 1: [1]},
+        )
+        self.assertEqual({sample.rank for sample in steps[1]}, {1})
+
+    def test_a_repeated_step_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rank 0 logs step 2 after step 2"):
+            rank_steps(self.ENGINE, {0: _record(1) + _record(2) + _record(2)})
+
+    def test_a_step_out_of_order_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rank 1 logs step 1 after step 3"):
+            rank_steps(self.ENGINE, {1: _record(3) + _record(1)})
+
+    def test_validation_names_the_arm_and_the_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "arm.log"
+            path.write_text(_record(2) + _record(1) + "Training completed\n")
+            with self.assertRaisesRegex(
+                RuntimeError, r"megatron_stock: rank 0 logs step 1 after step 2; .*; see"
             ):
                 validate(
                     run_spec(ac_mode="none", profile=False),

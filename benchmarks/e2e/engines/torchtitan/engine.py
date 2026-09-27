@@ -12,6 +12,7 @@ from benchmarks.e2e.engines.api import (
     Launch,
     RankEvidence,
     RunSpec,
+    StepSample,
 )
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.flags import (
@@ -21,6 +22,7 @@ from benchmarks.e2e.engines.torchtitan.flags import (
 )
 from benchmarks.e2e.engines.torchtitan.mesh import SCHEDULES, execution_model
 from benchmarks.e2e.engines.torchtitan.evidence import read_evidence
+from benchmarks.e2e.engines.torchtitan.steps import read_steps
 from benchmarks.e2e.engines.torchtitan.validate import validate_outputs
 
 
@@ -77,6 +79,9 @@ class TorchTitanEngine(Engine):
     def warnings(self, run: RunSpec, arm: Arm) -> list[str]:
         spec = run.parallelism
         return [ZERO2_AT_PP1] if spec.zero == 1 and spec.pp == 1 else []
+
+    def read_steps(self, rank: int, text: str) -> list[StepSample]:
+        return read_steps(rank, text)
 
     def read_evidence(self, rank: int, text: str) -> RankEvidence:
         return read_evidence(rank, text)

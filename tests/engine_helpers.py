@@ -85,6 +85,25 @@ TEST_METADATA = {
 """A provenance block for a manifest that no host probe wrote."""
 
 
+def titan_step_line(
+    step: int,
+    *,
+    tps: int = 1000,
+    loss: float = 1.0,
+    grad_norm: float = 2.0,
+    memory: float = 3.0,
+) -> str:
+    """One step line in the format of the TorchTitan fork, with its color codes."""
+    return (
+        f"[titan] 2026-09-26 10:00:00,000 - root - INFO - \x1b[31mstep: {step:2}  "
+        f"\x1b[32mloss: {loss:8.5f}  "
+        f"\x1b[38;2;180;60;0mgrad_norm: {grad_norm:7.4f}  "
+        f"\x1b[38;2;54;234;195mmemory: {memory:5.2f}GiB(2.14%)  "
+        f"\x1b[34mtps: {tps:,}  \x1b[36mtflops: 12.50  "
+        "\x1b[35mmfu: 1.26%\x1b[39m\n"
+    )
+
+
 def write_run_manifest(
     out_dir: Path,
     run: RunSpec,

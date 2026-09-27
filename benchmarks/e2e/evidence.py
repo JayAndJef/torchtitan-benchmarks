@@ -3,46 +3,45 @@
 from __future__ import annotations
 
 import math
-import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
-from benchmarks.e2e.engines.api import MeshObserved, RankEvidence, RunSpec
-
-
-LOSS_METRIC = re.compile(r"step:\s*(\d+).*?loss:\s*(nan|-?inf|[0-9.eE+-]+)")
-"""The loss pattern; the words come before the digits, because the digit class alone reads ``-inf`` as ``-``."""
-
-GRAD_NORM_METRIC = re.compile(
-    r"step:\s*(\d+).*?grad_norm:\s*(nan|-?inf|[0-9.eE+-]+)"
+from benchmarks.e2e.engines.api import (
+    Engine,
+    MeshObserved,
+    RankEvidence,
+    RunSpec,
+    StepSample,
 )
 
-TRAJECTORY_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("loss", LOSS_METRIC),
-    ("grad_norm", GRAD_NORM_METRIC),
-)
-"""The two trajectories that a step line carries, by the name that a failure prints."""
 
-
-def trajectory(text: str, pattern: re.Pattern[str]) -> list[tuple[int, float]]:
-    """The (step, value) pairs that ``pattern`` finds in ``text``, in log order."""
-    values = []
-    for line in text.splitlines():
-        match = pattern.search(line)
-        if match:
-            values.append((int(match.group(1)), float(match.group(2))))
-    return values
-
-
-def non_finite_refusals(rank_logs: Mapping[int, str]) -> list[str]:
-    """The first ``nan`` or ``inf`` of each trajectory on each rank."""
-    refusals = []
+def rank_steps(
+    engine: Engine, rank_logs: Mapping[int, str]
+) -> dict[int, list[StepSample]]:
+    """The step samples of each rank's log; a step that does not follow the previous step of its rank raises ``ValueError``."""
+    steps = {}
     for rank, text in sorted(rank_logs.items()):
-        for metric, pattern in TRAJECTORY_METRICS:
-            for step, value in trajectory(text, pattern):
-                if not math.isfinite(value):
+        samples = engine.read_steps(rank, text)
+        for before, after in zip(samples, samples[1:]):
+            if after.step <= before.step:
+                raise ValueError(
+                    f"rank {rank} logs step {after.step} after step "
+                    f"{before.step}; a rank logs each step once, in order"
+                )
+        steps[rank] = samples
+    return steps
+
+
+def non_finite_refusals(steps: Mapping[int, Sequence[StepSample]]) -> list[str]:
+    """The first ``nan`` or ``inf`` loss and gradient norm of each rank."""
+    refusals = []
+    for rank, samples in sorted(steps.items()):
+        for metric in ("loss", "grad_norm"):
+            for sample in samples:
+                value = getattr(sample, metric)
+                if value is not None and not math.isfinite(value):
                     refusals.append(
                         f"rank {rank} logged a non-finite {metric} at step "
-                        f"{step} ({value})"
+                        f"{sample.step} ({value})"
                     )
                     break
     return refusals

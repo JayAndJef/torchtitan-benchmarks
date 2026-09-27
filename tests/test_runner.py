@@ -28,9 +28,15 @@ from benchmarks.e2e.registry import (
     SEED,
     scenario_by_name,
 )
-from tests.engine_helpers import command, configured, run_spec, validate
+from tests.engine_helpers import (
+    command,
+    configured,
+    run_spec,
+    titan_step_line,
+    validate,
+)
 from benchmarks.e2e.engines.api import ProfileWindow
-from benchmarks.e2e.results import stable_tps, training_metrics
+from benchmarks.e2e.results import arm_steps, stable_samples
 from benchmarks.e2e.runner import (
     _resolve_run,
     execute_run,
@@ -1457,21 +1463,31 @@ class ValidationTests(unittest.TestCase):
 
 
 class TrainingMetricsTests(unittest.TestCase):
-    def test_stable_tps_excludes_compile_and_profiler_steps(self) -> None:
+    def test_stable_samples_exclude_compile_and_profiler_steps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "arm.log"
             log.write_text(
-                "step:  1  loss: 1.0  memory: 10.00GiB(20%)  tps: 100\n"
-                "step:  2  loss: 1.0  memory: 11.00GiB(22%)  tps: 9,900\n"
-                "step: 10  loss: 1.0  memory: 12.00GiB(24%)  tps: 10,100\n"
-                "step: 11  loss: 1.0  memory: 12.00GiB(24%)  tps: 8,000\n"
-                "step: 21  loss: 1.0  memory: 12.00GiB(24%)  tps: 200\n"
-                "step: 22  loss: 1.0  memory: 12.00GiB(24%)  tps: 10,000\n"
+                "".join(
+                    titan_step_line(step, tps=tps)
+                    for step, tps in (
+                        (1, 100),
+                        (2, 9900),
+                        (10, 10100),
+                        (11, 8000),
+                        (21, 200),
+                        (22, 10000),
+                    )
+                )
             )
-            rows = training_metrics(log)
+            samples = arm_steps(ENGINES.arm("titan_eager"), log)[0]
 
         self.assertEqual(
-            stable_tps(rows, ProfileWindow(freq=20, warmup=5, active=5)),
+            [
+                sample.tokens_per_second
+                for sample in stable_samples(
+                    samples, ProfileWindow(freq=20, warmup=5, active=5)
+                )
+            ],
             [9900, 10100, 10000],
         )
 

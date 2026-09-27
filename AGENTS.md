@@ -295,7 +295,7 @@ the CPU pinning. `evaluate` and `tools/collect_matrix.py` read schemas 18
 and 19, and `benchmarks/artifacts/manifest_v18.py` converts a schema 18
 manifest. The reader refuses any other version by name.
 
-The `tps` figure of a step line, and `stable_tokens_per_second`, are **per
+The tokens/s figure of a step sample, and `stable_tokens_per_second`, are **per
 device**. Both engines divide one rank's token count by `cp * tp * pp`. The
 data-parallel degree is absent from that divisor, because each data-parallel
 rank reads a batch of its own. The manifest records the definition as
@@ -329,7 +329,8 @@ engine:
 - **Mesh:** each rank's stated `dp`, `pp` and `ep` equal the run's spec.
   Above one data-parallel rank the stated ZeRO level must also equal the
   spec. A log that states no mesh reads as one device.
-- **Finite trajectories:** no rank's step lines carry a `nan` or an `inf`.
+- **Finite trajectories:** no rank's step samples carry a `nan` or an `inf`
+  loss or gradient norm.
 
 The mesh fact reads both ways. A log that records a pipeline fails at one
 pipeline rank, and a log that records data parallelism fails at one
@@ -376,14 +377,28 @@ an arm cannot take one engine's argv and another engine's log rules.
 ## 6. Evaluation
 
 `run` always evaluates, and `evaluate <out_dir>` re-evaluates a finished
-directory. **Evaluation reads the logs alone.** Both engines print every
+directory. **Evaluation reads the logs alone.** Each engine prints every
 published figure on a step line, so a directory evaluates the same way under
-either profile value.
+either profile value. The engine's `read_steps` turns the lines of one rank
+into step samples, and the evaluation reads the samples alone.
+
+- TorchTitan prints its own step line.
+- The stock Megatron driver prints one JSON step record per rank and step,
+  after the prefix `bench-step: `. The reader also reads the text step line
+  that the stored run directories hold.
+- A step line that does not parse fails the arm, and so does a step that
+  does not follow the previous step of its rank.
+- Every rank writes to one log, and a torn write can append the line of one
+  rank to a step line of another rank. The readers read the step line and
+  drop the appended line, so that step of the other rank is absent.
 
 `results.json` is schema 6. Per arm it carries `stable_tokens_per_second`,
 `stable_sample_count`, `peak_memory_gib`, `step_ms` with `mean`, `median`,
 `p95` and `series`, plus `rank_reduction`, `published_rank` and a `per_rank`
-list. The file also carries `losses`, `gradient_norms` and `warnings`.
+list. Its `extras` holds the other figures of the engine's step line, under
+the engine's name, each the median over the published rank's samples. Do not
+compare an extra across engines, because each engine computes its own. The
+file also carries `losses`, `gradient_norms` and `warnings`.
 
 `benchmarks.e2e.results:step_ms` derives the step cost from the throughput:
 
@@ -398,16 +413,16 @@ ranks. The 95th percentile uses the nearest-rank method, so it is always a
 measured step.
 
 The sample rule follows the recorded axis.
-`benchmarks.e2e.results:measured_tps` takes every step after the warmup in
-an unprofiled run. `benchmarks.e2e.results:stable_tps` takes the steps of
+`benchmarks.e2e.results:measured_samples` takes every step after the warmup in
+an unprofiled run. `benchmarks.e2e.results:stable_samples` takes the steps of
 each profiler cycle that carry no profiler cost. The two figures are
 different figures, not two readings of one.
 
 `benchmarks.e2e.results:refuse_non_finite_trajectories` fails an arm whose
-step lines carry a `nan` or an `inf`, on any rank. Validation refuses the
+step samples carry a `nan` or an `inf`, on any rank. Validation refuses the
 same arm first, through the finite-trajectory fact. A run that diverged
-publishes no throughput. The stock driver prints `grad_norm: nan` on a step
-that Megatron skipped, so the refusal also refuses a skipped step. The arm
+publishes no throughput. The stock driver records a `nan` gradient norm on a
+step that Megatron skipped, so the refusal also refuses a skipped step. The arm
 sends no loss scale, so Megatron skips no step.
 
 The evaluation warns when tokens/s spreads more than 1.15x across ranks and
@@ -445,13 +460,14 @@ harness connects through the arm's `engine` name alone.
 | `benchmarks/e2e/engines/megatron_stock/flags.py` | The whole Megatron command line, as data, and the passthrough tables. Torch-free, so a CPU test reads it. |
 | `benchmarks/e2e/engines/megatron_stock/profiling.py` | The Megatron profiler flags and the partial-cycle refusal. |
 | `benchmarks/e2e/engines/megatron_stock/validate.py` | The log lines that prove the mesh and the three Megatron treatments. |
+| `benchmarks/e2e/engines/megatron_stock/steps.py` | The step record that the driver prints, and the reader of the step records and of the stored text step lines. |
 | `benchmarks/e2e/engines/megatron_stock/driver/bootstrap.py` | Sets the process environment the driver needs before torch, adds `typing.override` for Python 3.10, then puts Megatron on `sys.path`. |
 | `benchmarks/e2e/engines/megatron_stock/driver/train.py` | Parses the harness flags, refuses a run it cannot honour, reproduces the stock training entry point and calls `pretrain`. |
 | `benchmarks/e2e/engines/megatron_stock/driver/markers.py` | The log lines this arm prints, and the functions that format one. |
 | `benchmarks/e2e/engines/megatron_stock/driver/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
 | `benchmarks/e2e/engines/megatron_stock/driver/model_builder.py` | Builds the stock GPT model and prints the parameter count that the model fact reads. |
 | `benchmarks/e2e/engines/megatron_stock/driver/dp_marker.py` | The data-parallel line, printed from the wrapper Megatron really built. |
-| `benchmarks/e2e/engines/megatron_stock/driver/step_log.py` | The step line the evaluation parses, and the shim that prints it. |
+| `benchmarks/e2e/engines/megatron_stock/driver/step_log.py` | The shim that prints one step record per rank and step. |
 | `benchmarks/e2e/engines/megatron_stock/driver/profiling.py` | Gives Megatron the profiler schedule and the trace path the harness reads. |
 
 The driver substitutes **one** provider, the dataset provider. The model

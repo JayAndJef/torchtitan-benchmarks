@@ -35,8 +35,9 @@ from benchmarks.e2e.registry import (
     SEED,
     scenario_by_name,
 )
-from benchmarks.e2e.results import evaluate_run, measured_tps, stable_tps
-from tests.engine_helpers import write_run_manifest
+from benchmarks.e2e.engines.api import StepSample
+from benchmarks.e2e.results import evaluate_run, measured_samples, stable_samples
+from tests.engine_helpers import titan_step_line, write_run_manifest
 from benchmarks.models.piper_qwen3.shape import PIPER_1B
 
 
@@ -54,9 +55,23 @@ def _run(profile: bool, warmup_steps: int | None) -> RunSpec:
     )
 
 
-def _rows(count: int) -> list[tuple[int, float, int]]:
-    """``(step, peak GiB, tokens/s)`` rows, one per step, numbered from 1."""
-    return [(step, 3.0, 100 * step) for step in range(1, count + 1)]
+def _samples(count: int) -> list[StepSample]:
+    """One sample per step, numbered from 1, at ``100 * step`` tokens/s."""
+    return [
+        StepSample(
+            rank=0,
+            step=step,
+            tokens_per_second=100 * step,
+            peak_memory_gib=3.0,
+            loss=1.0,
+            grad_norm=2.0,
+        )
+        for step in range(1, count + 1)
+    ]
+
+
+def _tps(samples: list[StepSample]) -> list[float]:
+    return [sample.tokens_per_second for sample in samples]
 
 
 class DefaultTests(unittest.TestCase):
@@ -64,25 +79,25 @@ class DefaultTests(unittest.TestCase):
         self.assertEqual(DEFAULT_WARMUP_STEPS, 10)
 
 
-class MeasuredTpsTests(unittest.TestCase):
+class MeasuredSamplesTests(unittest.TestCase):
     def test_every_step_after_the_warmup_is_a_sample(self) -> None:
         self.assertEqual(
-            measured_tps(_rows(6), 2), [300, 400, 500, 600]
+            _tps(measured_samples(_samples(6), 2)), [300, 400, 500, 600]
         )
 
     def test_a_zero_warmup_measures_every_step(self) -> None:
-        self.assertEqual(measured_tps(_rows(3), 0), [100, 200, 300])
+        self.assertEqual(_tps(measured_samples(_samples(3), 0)), [100, 200, 300])
 
     def test_a_warmup_that_covers_the_run_measures_nothing(self) -> None:
-        self.assertEqual(measured_tps(_rows(3), 3), [])
+        self.assertEqual(measured_samples(_samples(3), 3), [])
 
     def test_the_count_grows_with_the_run_where_the_profiled_rule_does_not(
         self,
     ) -> None:
         """The two rules are two figures, not one figure read two ways."""
-        rows = _rows(40)
-        self.assertEqual(len(measured_tps(rows, 10)), 30)
-        self.assertEqual(len(stable_tps(rows, ENGINES.window)), 18)
+        samples = _samples(40)
+        self.assertEqual(len(measured_samples(samples, 10)), 30)
+        self.assertEqual(len(stable_samples(samples, ENGINES.window)), 18)
 
 
 class StepFloorTests(unittest.TestCase):
@@ -192,8 +207,7 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
         # step 1 and keeps steps 2..10; a warmup of 1 keeps steps 2..12.
         (root / "titan_eager.log").write_text(
             "".join(
-                f"step: {step} loss: 1.0 grad_norm: 2.0 memory: 3.00GiB "
-                f"tps: {9000 if step == 1 else 1000}\n"
+                titan_step_line(step, tps=9000 if step == 1 else 1000)
                 for step in range(1, 13)
             )
         )

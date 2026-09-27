@@ -8,7 +8,7 @@ from pathlib import Path
 
 from benchmarks.artifacts.layout import logs_by_rank, trace_files_by_rank
 from benchmarks.e2e.engines.api import Arm, Engine, RunSpec
-from benchmarks.e2e.evidence import check_evidence, non_finite_refusals
+from benchmarks.e2e.evidence import check_evidence, non_finite_refusals, rank_steps
 
 
 ALL_REDUCE_MARKER = "ncclDevKernel_AllReduce"
@@ -54,9 +54,13 @@ def validate_arm(
     evidence = {
         rank: engine.read_evidence(rank, text) for rank, text in rank_logs.items()
     }
+    try:
+        steps = rank_steps(engine, rank_logs)
+    except ValueError as error:
+        raise RuntimeError(f"{arm.name}: {error}; see {log_path}") from error
     failures = [
         *check_evidence(run, evidence),
-        *non_finite_refusals(rank_logs),
+        *non_finite_refusals(steps),
         *engine.validate(run, arm, arm_dir, rank_logs),
     ]
     if failures:

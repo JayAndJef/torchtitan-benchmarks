@@ -110,6 +110,24 @@ class Launch:
 
 
 @dataclass(frozen=True)
+class StepSample:
+    """The figures that one rank logs for one training step."""
+
+    rank: int
+    step: int
+    tokens_per_second: float
+    """One rank's tokens divided by the step time and by ``cp * tp * pp``."""
+    peak_memory_gib: float
+    """The peak reserved memory since the previous step."""
+    loss: float | None
+    """``None`` on a rank that holds no loss."""
+    grad_norm: float | None
+    """``None`` when the engine cannot state the norm."""
+    extras: Mapping[str, float] = field(default_factory=lambda: MappingProxyType({}))
+    """Other figures of the step, under the names that the engine gives them."""
+
+
+@dataclass(frozen=True)
 class MeshObserved:
     """The mesh that an engine built, as its own log states it."""
 
@@ -154,6 +172,10 @@ class Engine(ABC):
     def warnings(self, run: RunSpec, arm: Arm) -> list[str]:
         """What a reader must not conclude from this arm's numbers at this mesh."""
         return []
+
+    @abstractmethod
+    def read_steps(self, rank: int, text: str) -> list[StepSample]:
+        """The step samples in one rank's log ``text``, in step order; a step line that does not parse raises ``ValueError``."""
 
     @abstractmethod
     def read_evidence(self, rank: int, text: str) -> RankEvidence:
