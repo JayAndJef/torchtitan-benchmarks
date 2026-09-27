@@ -10,24 +10,24 @@ from benchmarks.e2e.engines.api import (
     MeshObserved,
     RankEvidence,
     RunSpec,
+    StepRead,
     StepSample,
 )
 
 
-def rank_steps(
-    engine: Engine, rank_logs: Mapping[int, str]
-) -> dict[int, list[StepSample]]:
-    """The step samples of each rank's log; a step that does not follow the previous step of its rank raises ``ValueError``."""
+def rank_steps(engine: Engine, rank_logs: Mapping[int, str]) -> dict[int, StepRead]:
+    """What the engine reads from each rank's log; a step that does not follow the previous step of its rank raises ``ValueError``."""
     steps = {}
     for rank, text in sorted(rank_logs.items()):
-        samples = engine.read_steps(rank, text)
+        read = engine.read_steps(rank, text)
+        samples = read.samples
         for before, after in zip(samples, samples[1:]):
             if after.step <= before.step:
                 raise ValueError(
                     f"rank {rank} logs step {after.step} after step "
                     f"{before.step}; a rank logs each step once, in order"
                 )
-        steps[rank] = samples
+        steps[rank] = read
     return steps
 
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from types import MappingProxyType
 
-from benchmarks.e2e.engines.api import StepSample
-from benchmarks.execution.launcher import RANK_PREFIX
+from benchmarks.e2e.engines.api import DroppedLine, StepRead, StepSample
+from benchmarks.execution.launcher import RANK_PREFIX, holds_rank_prefix
 
 
 COLOR_CODE = re.compile(r"\x1b\[[0-9;]*m")
@@ -27,22 +27,14 @@ STEP_LINE = re.compile(
 )
 """The fields of the step line, from ``step:`` to the end of the line."""
 
+STEP_NUMBER = re.compile(r"step:\s*(\d+)")
+
 NO_LOSS = -1.0
 """The loss that the fork logs on a pipeline rank that holds no loss."""
 
 
-def _step_sample(rank: int, line: str) -> StepSample | None:
-    """The sample of one log line, or ``None`` when the line is not a step line."""
-    plain = COLOR_CODE.sub("", line)
-    marker = STEP_MARKER.search(plain)
-    if marker is None:
-        return None
-    match = STEP_LINE.fullmatch(plain, marker.start())
-    if match is None:
-        raise ValueError(
-            f"rank {rank} logs a TorchTitan step line that does not parse: "
-            f"{plain.strip()!r}"
-        )
+def _step_sample(rank: int, match: re.Match[str]) -> StepSample:
+    """The sample of one step line that parses."""
     step, loss, grad_norm, memory, tps, tflops, mfu = match.groups()
     extras = {"tflops": float(tflops.replace(",", ""))}
     if mfu is not None:
@@ -58,10 +50,29 @@ def _step_sample(rank: int, line: str) -> StepSample | None:
     )
 
 
-def read_steps(rank: int, text: str) -> list[StepSample]:
-    """The step samples in one rank's log, in log order."""
-    return [
-        sample
-        for line in text.splitlines()
-        if (sample := _step_sample(rank, line)) is not None
-    ]
+def read_steps(rank: int, text: str) -> StepRead:
+    """The step samples of one rank's log, and the step lines that a rank prefix cut."""
+    samples = []
+    dropped = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        plain = COLOR_CODE.sub("", line)
+        marker = STEP_MARKER.search(plain)
+        if marker is None:
+            continue
+        match = STEP_LINE.fullmatch(plain, marker.start())
+        fields = plain[marker.start() :]
+        if match is not None:
+            samples.append(_step_sample(rank, match))
+        elif holds_rank_prefix(fields):
+            step = STEP_NUMBER.match(fields)
+            dropped.append(
+                DroppedLine(
+                    rank=rank, line=number, step=int(step.group(1)) if step else None
+                )
+            )
+        else:
+            raise ValueError(
+                f"rank {rank} logs a TorchTitan step line that does not parse: "
+                f"{plain.strip()!r}"
+            )
+    return StepRead(samples=tuple(samples), dropped=tuple(dropped))

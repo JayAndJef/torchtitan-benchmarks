@@ -11,8 +11,8 @@ import re
 from types import MappingProxyType
 from typing import Any
 
-from benchmarks.e2e.engines.api import StepSample
-from benchmarks.execution.launcher import RANK_PREFIX
+from benchmarks.e2e.engines.api import DroppedLine, StepRead, StepSample
+from benchmarks.execution.launcher import RANK_PREFIX, holds_rank_prefix
 
 
 STEP_PREFIX = "bench-step: "
@@ -31,6 +31,12 @@ RECORD_KEYS = frozenset(
 
 TEXT_MARKER = re.compile(rf"^(?:{RANK_PREFIX})?step:")
 """The start of the text step line."""
+
+RECORD_STEP = re.compile(r'^\{"step": (\d+)')
+"""The step at the start of a step record, which a cut record can still show."""
+
+TEXT_STEP = re.compile(r"\s*(\d+)")
+"""The step after the text marker."""
 
 _NUMBER = r"(nan|-?inf|-?[0-9.]+)"
 
@@ -80,18 +86,18 @@ def _number(rank: int, record: dict[str, Any], key: str) -> float:
     return value
 
 
-def _record_sample(rank: int, text: str) -> StepSample:
-    """The sample of one step record."""
+def _whole_record(text: str) -> bool:
+    """Whether ``text`` starts with a whole JSON value, followed by nothing but an appended rank line."""
     try:
-        record, end = json.JSONDecoder().raw_decode(text)
-    except json.JSONDecodeError as error:
-        raise ValueError(
-            f"rank {rank} logs a step record that is not JSON: {text!r}"
-        ) from error
-    if TORN_TAIL.fullmatch(text, end) is None:
-        raise ValueError(
-            f"rank {rank} logs a step record with trailing text: {text!r}"
-        )
+        _, end = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        return False
+    return TORN_TAIL.fullmatch(text, end) is not None
+
+
+def _record_sample(rank: int, text: str) -> StepSample:
+    """The sample of one whole step record."""
+    record, _ = json.JSONDecoder().raw_decode(text)
     if not isinstance(record, dict) or set(record) != RECORD_KEYS:
         found = sorted(record) if isinstance(record, dict) else type(record).__name__
         raise ValueError(
@@ -121,13 +127,8 @@ def _record_sample(rank: int, text: str) -> StepSample:
     )
 
 
-def _text_sample(rank: int, line: str) -> StepSample:
-    """The sample of one text step line."""
-    match = TEXT_LINE.match(line)
-    if match is None:
-        raise ValueError(
-            f"rank {rank} logs a Megatron step line that does not parse: {line!r}"
-        )
+def _text_sample(rank: int, match: re.Match[str]) -> StepSample:
+    """The sample of one text step line that parses."""
     step, loss, grad_norm, memory, tps, tflops, mfu = match.groups()
     return StepSample(
         rank=rank,
@@ -142,13 +143,40 @@ def _text_sample(rank: int, line: str) -> StepSample:
     )
 
 
-def read_steps(rank: int, text: str) -> list[StepSample]:
-    """The step samples in one rank's log, in log order, from step records or text step lines."""
+def _dropped(rank: int, number: int, step: re.Match[str] | None) -> DroppedLine:
+    """The dropped step line at ``number``, with the step that ``step`` matched."""
+    return DroppedLine(
+        rank=rank, line=number, step=int(step.group(1)) if step else None
+    )
+
+
+def read_steps(rank: int, text: str) -> StepRead:
+    """The step samples of one rank's log, from step records or text step lines, and the step lines that a rank prefix cut."""
     samples = []
-    for line in text.splitlines():
+    dropped = []
+    for number, line in enumerate(text.splitlines(), start=1):
         record = STEP_RECORD.match(line)
+        marker = TEXT_MARKER.match(line)
         if record is not None:
-            samples.append(_record_sample(rank, record.group(1)))
-        elif TEXT_MARKER.match(line):
-            samples.append(_text_sample(rank, line))
-    return samples
+            body = record.group(1)
+            if _whole_record(body):
+                samples.append(_record_sample(rank, body))
+            elif holds_rank_prefix(body):
+                dropped.append(_dropped(rank, number, RECORD_STEP.match(body)))
+            else:
+                raise ValueError(
+                    f"rank {rank} logs a step record that does not parse: {body!r}"
+                )
+        elif marker is not None:
+            match = TEXT_LINE.match(line)
+            fields = line[marker.end() :]
+            if match is not None:
+                samples.append(_text_sample(rank, match))
+            elif holds_rank_prefix(fields):
+                dropped.append(_dropped(rank, number, TEXT_STEP.match(fields)))
+            else:
+                raise ValueError(
+                    f"rank {rank} logs a Megatron step line that does not parse: "
+                    f"{line!r}"
+                )
+    return StepRead(samples=tuple(samples), dropped=tuple(dropped))

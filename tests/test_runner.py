@@ -1479,7 +1479,7 @@ class TrainingMetricsTests(unittest.TestCase):
                     )
                 )
             )
-            samples = arm_steps(ENGINES.arm("titan_eager"), log)[0]
+            samples = arm_steps(ENGINES.arm("titan_eager"), log)[0].samples
 
         self.assertEqual(
             [
