@@ -276,6 +276,13 @@ def _resolve_run(
             else requested.profile
         )
         recorded_warmup = existing_manifest["warmup_steps"]
+        if (recorded_warmup is None) != bool(existing_manifest["profile"]):
+            raise ValueError(
+                f"{resume_dir / 'manifest.json'} records profile "
+                f"{existing_manifest['profile']!r} with warmup_steps "
+                f"{recorded_warmup!r}; a profiled run records no warmup steps, "
+                "and an unprofiled run records them; start a new run"
+            )
         # A request wins; the mismatch check below refuses a disagreement.
         warmup_steps = (
             requested.warmup_steps
@@ -373,7 +380,7 @@ def _resolve_run(
     )
     run_warmup_steps = warmup_steps
     if (warmup_steps is None) != profile:
-        # Only a resume breaks the pair, and the manifest comparison below refuses it.
+        # Only a resume request breaks the pair, and the manifest comparison refuses it.
         run_warmup_steps = None if profile else DEFAULT_WARMUP_STEPS
     run = RunSpec(
         shape=shape,
@@ -514,7 +521,7 @@ def _with_run_options(
     megatron_nan_guard: str,
     megatron_precision: str,
 ) -> tuple[Arm, ...]:
-    """The arms, with each passthrough list and the Megatron values in the config they reach."""
+    """The arms, with the passthrough lists and the Megatron values in their configs."""
     torchtitan = engine_named("torchtitan")
     megatron = engine_named("megatron_stock")
     result = []
