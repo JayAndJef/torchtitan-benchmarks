@@ -1,6 +1,12 @@
 """The scenarios, their arms and the defaults of the run-wide values."""
 
-from benchmarks.e2e.engines.api import Arm, CompileMode, DataSpec, ProfileWindow
+from benchmarks.e2e.engines.api import (
+    REPLAY_DATASET,
+    Arm,
+    CompileMode,
+    DataSpec,
+    ProfileWindow,
+)
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.schema import Scenario
@@ -23,7 +29,7 @@ SEED = 42
 """The seed of every run; both engines draw the same initial parameters from it."""
 
 C4_REPLAY_DATA = DataSpec(
-    dataset="c4_test",
+    dataset=REPLAY_DATASET,
     seq_len=4096,
     local_batch_size=4,
     steps=40,

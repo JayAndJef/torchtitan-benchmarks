@@ -47,10 +47,7 @@ def qwen3_piper_1b_pretokenized(*, size: str = "1b") -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=PretokenizedReplayDataLoader.Config(
-            dataset="c4_test",
-            replay_steps=training.steps,
-        ),
+        dataloader=PretokenizedReplayDataLoader.Config(replay_steps=training.steps),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=training,
