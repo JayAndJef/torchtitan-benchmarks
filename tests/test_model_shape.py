@@ -1031,6 +1031,49 @@ class ModelSizeAliasTests(unittest.TestCase):
 
 
 class ConfigSizeClosureTests(unittest.TestCase):
+    def test_the_fork_parses_every_titan_argv_through_its_module_flag(self) -> None:
+        """The fork's own ``ConfigManager`` resolves ``--module`` and parses the whole argv.
+
+        ``--module`` names the plug-in package, and the fork imports its
+        ``config_registry``. A parse of the argv the engine builds proves the
+        trainer finds the config and accepts every other argument.
+        """
+        from torchtitan.config.manager import ConfigManager
+
+        from benchmarks.e2e.engines.torchtitan.flags import trainer_args
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import (
+            PretokenizedReplayDataLoader,
+        )
+        from benchmarks.e2e.parallelism import ParallelismSpec
+
+        mesh = ParallelismSpec(dp=2, pp=2, ep=2, zero=1, pp_schedule="1F1B")
+        for scenario in SCENARIOS.values():
+            for arm in scenario.arms:
+                if engine_for(arm).name != "torchtitan":
+                    continue
+                for spec, profile in ((TRIVIAL_SPEC, False), (mesh, True)):
+                    with self.subTest(arm=arm.name, spec=spec):
+                        run = run_spec(
+                            "huge",
+                            parallelism=spec,
+                            profile=profile,
+                            ac_mode="none",
+                            local_batch_size=8,
+                        )
+                        argv = trainer_args(run, arm.config, Path("/tmp/arm"))
+                        config = ConfigManager().parse_args(list(argv))
+                        self.assertEqual(config.model_spec.model.dim, HUGE.dim)
+                        self.assertIsInstance(
+                            config.dataloader, PretokenizedReplayDataLoader.Config
+                        )
+                        self.assertEqual(
+                            config.dataloader.replay_steps, run.data.steps
+                        )
+                        self.assertEqual(
+                            config.compile.enable,
+                            arm.config.compile.value == "torch",
+                        )
+
     def test_every_scenario_arm_builds_at_every_size(self) -> None:
         """Every arm's config resolves and accepts every registered size.
 
@@ -1107,18 +1150,13 @@ class ConfigSizeClosureTests(unittest.TestCase):
         """
         import inspect
 
-        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import _piper_1b_trainer
         from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
-        for builder in (_piper_1b_model, _piper_1b_trainer):
-            with self.subTest(builder=builder.__name__):
-                parameter = inspect.signature(builder).parameters["shape"]
-                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
-                self.assertIs(parameter.default, inspect.Parameter.empty)
+        parameter = inspect.signature(_piper_1b_model).parameters["shape"]
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(parameter.default, inspect.Parameter.empty)
         with self.assertRaises(TypeError):
             _piper_1b_model(fuse_qkv=True)
-        with self.assertRaises(TypeError):
-            _piper_1b_trainer(fuse_qkv=True, loss_kind="full_logits")
 
     def test_the_megatron_builder_requires_an_explicit_shape(self) -> None:
         """The same rule on the other engine's builder, for the same reason.
@@ -1140,24 +1178,28 @@ class ConfigSizeClosureTests(unittest.TestCase):
         self.assertIs(parameter.default, inspect.Parameter.empty)
 
     def test_size_round_trips_through_the_config_argument(self) -> None:
-        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import qwen3_piper_1b
+        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import (
+            qwen3_piper_1b_pretokenized,
+        )
 
-        self.assertEqual(qwen3_piper_1b(size="huge").model_spec.model.dim, 12288)
-        self.assertEqual(qwen3_piper_1b(size="normal").model_spec.model.dim, 1024)
+        self.assertEqual(qwen3_piper_1b_pretokenized(size="huge").model_spec.model.dim, 12288)
+        self.assertEqual(qwen3_piper_1b_pretokenized(size="normal").model_spec.model.dim, 1024)
         # The default is the normal shape, so an unparameterized call is the
         # historical config.
-        self.assertEqual(qwen3_piper_1b().model_spec.model.dim, PIPER_1B.dim)
+        self.assertEqual(qwen3_piper_1b_pretokenized().model_spec.model.dim, PIPER_1B.dim)
         with self.assertRaisesRegex(ValueError, "Unknown model size"):
-            qwen3_piper_1b(size="enormous")
+            qwen3_piper_1b_pretokenized(size="enormous")
 
     def test_built_models_carry_the_requested_shape(self) -> None:
-        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import qwen3_piper_1b
+        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import (
+            qwen3_piper_1b_pretokenized,
+        )
 
-        normal = qwen3_piper_1b().model_spec.model
+        normal = qwen3_piper_1b_pretokenized().model_spec.model
         self.assertEqual(normal.dim, PIPER_1B.dim)
         self.assertEqual(len(normal.layers), PIPER_1B.n_layers)
 
-        huge = qwen3_piper_1b(size="huge").model_spec.model
+        huge = qwen3_piper_1b_pretokenized(size="huge").model_spec.model
         self.assertEqual(huge.dim, HUGE.dim)
         self.assertEqual(len(huge.layers), HUGE.n_layers)
         self.assertEqual(huge.vocab_size, HUGE.vocab_size)

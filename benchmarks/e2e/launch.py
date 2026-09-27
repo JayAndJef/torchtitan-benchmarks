@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from benchmarks.e2e.engines.api import Arm, Launch, RunSpec
-from benchmarks.e2e.passthrough import refuse_passthrough
+from benchmarks.e2e.passthrough import refuse_megatron_passthrough
 
 
 STOCK_MEGATRON_DRIVER_MODULE = "benchmarks.e2e.megatron_stock.train"
@@ -59,7 +59,7 @@ def megatron_stock_launch(run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
     # Below the refusals, so a refused request fails with its own message.
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
-    refuse_passthrough("megatron", arm.name, config.extra_flags, spec.zero)
+    refuse_megatron_passthrough(arm.name, config.extra_flags, spec.zero)
     return Launch(
         target=(
             "-m",

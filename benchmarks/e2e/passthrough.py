@@ -1,15 +1,13 @@
 """Which engine flags a ``--torchtitan-arg`` or ``--megatron-arg`` may carry.
 
 A perf flag passes; a flag that would change a fact the manifest records is
-refused and names its owner. Each table row holds both engines' patterns,
-so one owner or one reason covers both. A pattern ending in ``*`` is a
-prefix.
+refused and names its owner. Each engine keeps its own tables. A pattern
+ending in ``*`` is a prefix.
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from collections.abc import Mapping
 
 from benchmarks.e2e.megatron_stock.flags import (
     LEAN_PRECISION_FLAGS,
@@ -18,268 +16,8 @@ from benchmarks.e2e.megatron_stock.flags import (
 )
 
 
-@dataclass(frozen=True)
-class EngineFlags:
-    """One row's flag patterns, per engine."""
-
-    torchtitan: tuple[str, ...] = ()
-    megatron: tuple[str, ...] = ()
-
-
-OWNED_FLAGS: dict[str, EngineFlags] = {
-    "--seq-len": EngineFlags(
-        torchtitan=("--training.seq-len",),
-        megatron=("--seq-length", "--max-position-embeddings"),
-    ),
-    "--steps": EngineFlags(
-        torchtitan=("--training.steps",),
-        megatron=("--train-iters", "--lr-decay-iters"),
-    ),
-    "--batch": EngineFlags(
-        torchtitan=("--training.local-batch-size", "--training.global-batch-size"),
-        megatron=("--micro-batch-size", "--global-batch-size"),
-    ),
-    "--pp-microbatch-size": EngineFlags(
-        torchtitan=("--parallelism.pipeline-parallel-microbatch-size",),
-    ),
-    "--model-size": EngineFlags(
-        torchtitan=("--config", "--config-arg", "--module"),
-        megatron=(
-            "--num-layers",
-            "--hidden-size",
-            "--num-attention-heads",
-            "--group-query-attention",
-            "--num-query-groups",
-            "--kv-channels",
-            "--ffn-hidden-size",
-            "--moe-ffn-hidden-size",
-            "--num-experts",
-            "--moe-router-topk",
-            "--moe-layer-freq",
-            "--position-embedding-type",
-            "--use-rotary-position-embeddings",
-            "--rotary-percent",
-            "--rotary-base",
-            "--normalization",
-            "--norm-epsilon",
-            "--swiglu",
-            "--disable-bias-linear",
-            "--untie-embeddings-and-output-weights",
-            "--qk-layernorm",
-            "--attention-dropout",
-            "--hidden-dropout",
-            "--init-method-std",
-            "--vocab-size",
-            "--padded-vocab-size",
-            "--no-pad-vocab-size",
-            "--disable-pad-vocab-size",
-        ),
-    ),
-    "--dp/--pp/--ep": EngineFlags(
-        torchtitan=(
-            "--parallelism.data-parallel-replicate-degree",
-            "--parallelism.data-parallel-shard-degree",
-            "--parallelism.tensor-parallel-degree",
-            "--parallelism.pipeline-parallel-degree",
-            "--parallelism.context-parallel-degree",
-            "--parallelism.expert-parallel-degree",
-            "--parallelism.module-fqns-per-model-part",
-            "--parallelism.pipeline-parallel-first-stage-less-layers",
-            "--parallelism.pipeline-parallel-last-stage-less-layers",
-            "--parallelism.pipeline-parallel-layers-per-stage",
-        ),
-        megatron=(
-            "--tensor-model-parallel-size",
-            "--pipeline-model-parallel-size",
-            "--expert-model-parallel-size",
-            "--context-parallel-size",
-            "--expert-tensor-parallel-size",
-            "--num-layers-per-virtual-pipeline-stage",
-            "--num-virtual-stages-per-pipeline-rank",
-        ),
-    ),
-    "--pp-schedule": EngineFlags(
-        torchtitan=(
-            "--parallelism.pipeline-parallel-schedule",
-            "--parallelism.pipeline-parallel-schedule-csv",
-        ),
-    ),
-    "--zero": EngineFlags(
-        torchtitan=("--parallelism.fsdp-reshard-after-forward",),
-        megatron=ZERO1_FLAGS,
-    ),
-    "--ac": EngineFlags(
-        torchtitan=("--activation-checkpoint.*", "activation-checkpoint:*"),
-        megatron=(
-            "--recompute-activations",
-            "--recompute-granularity",
-            "--recompute-method",
-            "--recompute-num-layers",
-            "--recompute-modules",
-        ),
-    ),
-    "--megatron-precision": EngineFlags(
-        megatron=(
-            *LEAN_PRECISION_FLAGS,
-            "--main-params-dtype",
-            "--grad-reduce-in-bf16",
-            "--accumulate-allreduce-grads-in-fp32",
-            "--bf16",
-            "--fp16",
-            "--fp8-*",
-            "--fp4-*",
-            "--no-fp8-wgrad",
-            "--disable-fp8-wgrad",
-            "--first-last-layers-bf16",
-            "--num-layers-at-start-in-bf16",
-            "--num-layers-at-end-in-bf16",
-        ),
-    ),
-    "--megatron-nan-guard": EngineFlags(
-        megatron=(NO_CHECK_FOR_NAN_FLAG, "--rerun-mode"),
-    ),
-    "--profile": EngineFlags(
-        torchtitan=("--profiler.*",),
-        megatron=(
-            "--profile",
-            "--use-pytorch-profiler",
-            "--profile-step-start",
-            "--profile-step-end",
-            "--profile-ranks",
-            "--pytorch-profiler-collect-shapes",
-            "--pytorch-profiler-collect-callstack",
-            "--pytorch-profiler-collect-chakra",
-        ),
-    ),
-    "the arm's compile value": EngineFlags(torchtitan=("--compile.enable",)),
-    "the arm's override imports": EngineFlags(torchtitan=("--override.*",)),
-}
-"""The flags each harness option, or arm property, sets."""
-
-PINNED_FLAGS: dict[str, EngineFlags] = {
-    "the harness driver": EngineFlags(megatron=("--bench-*",)),
-    "the precision recipe": EngineFlags(
-        torchtitan=(
-            "--training.dtype",
-            "--training.mixed-precision-param",
-            "--training.mixed-precision-reduce",
-        ),
-    ),
-    "the optimizer matched across engines": EngineFlags(
-        torchtitan=("--optimizer.*", "--lr-scheduler.*", "--training.max-norm"),
-        megatron=(
-            "--lr",
-            "--lr-decay-style",
-            "--lr-warmup-iters",
-            "--min-lr",
-            "--adam-beta1",
-            "--adam-beta2",
-            "--adam-eps",
-            "--weight-decay",
-            "--clip-grad",
-        ),
-    ),
-    "the routing matched across engines": EngineFlags(
-        torchtitan=("--debug.moe-force-load-balance",),
-        megatron=(
-            "--moe-router-load-balancing-type",
-            "--moe-aux-loss-coeff",
-            "--moe-router-dtype",
-        ),
-    ),
-    "the shared data stream": EngineFlags(
-        torchtitan=(
-            "--dataloader.*",
-            "--tokenizer.*",
-            "--hf-assets-path",
-            "--debug.seed",
-        ),
-        megatron=(
-            "--seed",
-            "--tokenizer-type",
-            "--dataloader-type",
-            "--data-path",
-            "--mock-data",
-            "--num-workers",
-            "--dataloader-inter-document-masking",
-            "--no-create-attention-mask-in-dataloader",
-        ),
-    ),
-    "the step lines the evaluation reads": EngineFlags(
-        torchtitan=("--metrics.*",),
-        megatron=("--log-interval", "--log-throughput", "--eval-iters", "--eval-interval"),
-    ),
-    "the timed steps": EngineFlags(
-        torchtitan=("--checkpoint.*", "--validator.*", "--dump-folder"),
-        megatron=(
-            "--save",
-            "--load",
-            "--save-interval",
-            "--persistent-save-interval",
-            "--tensorboard-dir",
-        ),
-    ),
-}
-"""The flags no option owns and no passthrough may change, by reason."""
-
-PERF_FLAGS = EngineFlags(
-    torchtitan=(
-        "--training.enable-cpu-offload",
-        "--training.gc-freq",
-        "--training.gc-debug",
-        "--parallelism.enable-fsdp-symm-mem",
-        "--parallelism.enable-async-tensor-parallel",
-        "--parallelism.enable-sequence-parallel",
-        "--parallelism.spmd-backend",
-        "--parallelism.context-parallel-load-balancer",
-        "--parallelism.context-parallel-ptrr-mask-key",
-        "--compile.components",
-        "--compile.backend",
-        "--compile.mode",
-        "--debug.spmd-typechecking",
-        "--debug.deterministic",
-        "--debug.deterministic-warn-only",
-        "--debug.detect-anomaly",
-        "--debug.batch-invariant",
-        "--debug.print-config",
-        "--debug.save-config-file",
-        "--debug.enable-structured-logging",
-        "--comm.*",
-        "--loss.*",
-    ),
-    megatron=(
-        "--transformer-impl",
-        "--moe-token-dispatcher-type",
-        "--moe-grouped-gemm",
-        "--use-mcore-models",
-    ),
-)
-"""The flags a builder emits, or a config declares, that a passthrough may set.
-
-An unlisted Megatron flag passes, because Megatron offers hundreds of
-fusion flags and its parser refuses a misspelling. An unlisted TorchTitan
-flag is refused, because the fork's config is small enough to classify
-whole, so a field that a bump adds fails loudly.
-"""
-
-_SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)*:[A-Za-z0-9_-]+")
-
-
-def flag_name(side: str, token: str) -> str | None:
-    """The canonical flag name in ``token``, or ``None`` for a value.
-
-    tyro accepts ``_`` and ``-`` alike and spells a false boolean as
-    ``--section.no-field``, so a TorchTitan name is normalized first.
-    """
-    if side == "megatron":
-        return token.split("=", 1)[0] if token.startswith("--") else None
-    if not token.startswith("--") and not _SUBCOMMAND.fullmatch(token):
-        return None
-    name = token.split("=", 1)[0].replace("_", "-")
-    section, dot, field = name.rpartition(".")
-    if dot and field.startswith("no-"):
-        return f"{section}.{field[3:]}"
-    return name
+FlagTable = Mapping[str, tuple[str, ...]]
+"""One engine's flag patterns, by the owner or the reason of each row."""
 
 
 def matches(name: str, pattern: str) -> bool:
@@ -289,49 +27,191 @@ def matches(name: str, pattern: str) -> bool:
     return name == pattern
 
 
-def row_for(side: str, name: str, table: dict[str, EngineFlags]) -> str | None:
+def row_for(name: str, table: FlagTable) -> str | None:
     """The key of the first ``table`` row that covers ``name``, or ``None``."""
-    for key, flags in table.items():
-        if any(matches(name, pattern) for pattern in getattr(flags, side)):
+    for key, patterns in table.items():
+        if any(matches(name, pattern) for pattern in patterns):
             return key
     return None
 
 
-def refusal(side: str, token: str) -> str | None:
-    """Why ``token`` cannot pass through to ``side``, or ``None``."""
-    name = flag_name(side, token)
-    if name is None:
-        return None
-    owner = row_for(side, name, OWNED_FLAGS)
+def ownership(name: str, owned: FlagTable, pinned: FlagTable) -> str | None:
+    """``owned by <row>`` or ``pinned by <row>`` for ``name``, or ``None`` when no row covers it."""
+    owner = row_for(name, owned)
     if owner is not None:
         return f"owned by {owner}"
-    reason = row_for(side, name, PINNED_FLAGS)
+    reason = row_for(name, pinned)
     if reason is not None:
         return f"pinned by {reason}"
-    if side == "megatron" or any(
-        matches(name, pattern) for pattern in PERF_FLAGS.torchtitan
-    ):
+    return None
+
+
+MEGATRON_OWNED_FLAGS: dict[str, tuple[str, ...]] = {
+    "--seq-len": ("--seq-length", "--max-position-embeddings"),
+    "--steps": ("--train-iters", "--lr-decay-iters"),
+    "--batch": ("--micro-batch-size", "--global-batch-size"),
+    "--model-size": (
+        "--num-layers",
+        "--hidden-size",
+        "--num-attention-heads",
+        "--group-query-attention",
+        "--num-query-groups",
+        "--kv-channels",
+        "--ffn-hidden-size",
+        "--moe-ffn-hidden-size",
+        "--num-experts",
+        "--moe-router-topk",
+        "--moe-layer-freq",
+        "--position-embedding-type",
+        "--use-rotary-position-embeddings",
+        "--rotary-percent",
+        "--rotary-base",
+        "--normalization",
+        "--norm-epsilon",
+        "--swiglu",
+        "--disable-bias-linear",
+        "--untie-embeddings-and-output-weights",
+        "--qk-layernorm",
+        "--attention-dropout",
+        "--hidden-dropout",
+        "--init-method-std",
+        "--vocab-size",
+        "--padded-vocab-size",
+        "--no-pad-vocab-size",
+        "--disable-pad-vocab-size",
+    ),
+    "--dp/--pp/--ep": (
+        "--tensor-model-parallel-size",
+        "--pipeline-model-parallel-size",
+        "--expert-model-parallel-size",
+        "--context-parallel-size",
+        "--expert-tensor-parallel-size",
+        "--num-layers-per-virtual-pipeline-stage",
+        "--num-virtual-stages-per-pipeline-rank",
+    ),
+    "--zero": ZERO1_FLAGS,
+    "--ac": (
+        "--recompute-activations",
+        "--recompute-granularity",
+        "--recompute-method",
+        "--recompute-num-layers",
+        "--recompute-modules",
+    ),
+    "--megatron-precision": (
+        *LEAN_PRECISION_FLAGS,
+        "--main-params-dtype",
+        "--grad-reduce-in-bf16",
+        "--accumulate-allreduce-grads-in-fp32",
+        "--bf16",
+        "--fp16",
+        "--fp8-*",
+        "--fp4-*",
+        "--no-fp8-wgrad",
+        "--disable-fp8-wgrad",
+        "--first-last-layers-bf16",
+        "--num-layers-at-start-in-bf16",
+        "--num-layers-at-end-in-bf16",
+    ),
+    "--megatron-nan-guard": (NO_CHECK_FOR_NAN_FLAG, "--rerun-mode"),
+    "--profile": (
+        "--profile",
+        "--use-pytorch-profiler",
+        "--profile-step-start",
+        "--profile-step-end",
+        "--profile-ranks",
+        "--pytorch-profiler-collect-shapes",
+        "--pytorch-profiler-collect-callstack",
+        "--pytorch-profiler-collect-chakra",
+    ),
+}
+"""The Megatron flags that each harness option sets."""
+
+MEGATRON_PINNED_FLAGS: dict[str, tuple[str, ...]] = {
+    "the harness driver": ("--bench-*",),
+    "the optimizer matched across engines": (
+        "--lr",
+        "--lr-decay-style",
+        "--lr-warmup-iters",
+        "--min-lr",
+        "--adam-beta1",
+        "--adam-beta2",
+        "--adam-eps",
+        "--weight-decay",
+        "--clip-grad",
+    ),
+    "the routing matched across engines": (
+        "--moe-router-load-balancing-type",
+        "--moe-aux-loss-coeff",
+        "--moe-router-dtype",
+    ),
+    "the shared data stream": (
+        "--seed",
+        "--tokenizer-type",
+        "--dataloader-type",
+        "--data-path",
+        "--mock-data",
+        "--num-workers",
+        "--dataloader-inter-document-masking",
+        "--no-create-attention-mask-in-dataloader",
+    ),
+    "the step lines the evaluation reads": (
+        "--log-interval",
+        "--log-throughput",
+        "--eval-iters",
+        "--eval-interval",
+    ),
+    "the timed steps": (
+        "--save",
+        "--load",
+        "--save-interval",
+        "--persistent-save-interval",
+        "--tensorboard-dir",
+    ),
+}
+"""The Megatron flags that no option owns and no passthrough may change, by reason."""
+
+MEGATRON_PERF_FLAGS: tuple[str, ...] = (
+    "--transformer-impl",
+    "--moe-token-dispatcher-type",
+    "--moe-grouped-gemm",
+    "--use-mcore-models",
+)
+"""The Megatron flags that the builder emits and that a passthrough may set.
+
+An unlisted Megatron flag passes too, because Megatron's parser refuses a
+misspelled flag.
+"""
+
+
+def megatron_flag_name(token: str) -> str | None:
+    """The Megatron flag name in ``token``, or ``None`` for a value."""
+    return token.split("=", 1)[0] if token.startswith("--") else None
+
+
+def megatron_refusal(token: str) -> str | None:
+    """Why ``token`` cannot pass through to Megatron, or ``None``."""
+    name = megatron_flag_name(token)
+    if name is None:
         return None
-    return "not classified in benchmarks/e2e/passthrough.py"
+    return ownership(name, MEGATRON_OWNED_FLAGS, MEGATRON_PINNED_FLAGS)
 
 
-def refuse_passthrough(
-    side: str, arm_name: str, tokens: tuple[str, ...], zero: int
+def refuse_megatron_passthrough(
+    arm_name: str, tokens: tuple[str, ...], zero: int
 ) -> None:
-    """Raise when a passthrough token for ``side`` is not a perf flag."""
-    option = f"--{side}-arg"
+    """Raise when a Megatron passthrough token is not a perf flag."""
     offenders = [
         f"{token} ({reason})"
         for token in tokens
-        if (reason := refusal(side, token)) is not None
+        if (reason := megatron_refusal(token)) is not None
     ]
     if offenders:
         raise ValueError(
             f"{arm_name}: {', '.join(offenders)} cannot pass through "
-            f"{option}; set the owning harness option instead"
+            "--megatron-arg; set the owning harness option instead"
         )
-    names = {flag_name(side, token) for token in tokens}
-    if side == "megatron" and "--overlap-param-gather" in names and zero == 0:
+    names = {megatron_flag_name(token) for token in tokens}
+    if "--overlap-param-gather" in names and zero == 0:
         raise ValueError(
             f"{arm_name}: --overlap-param-gather needs --zero 1, because "
             "Megatron asserts a distributed optimizer for it"

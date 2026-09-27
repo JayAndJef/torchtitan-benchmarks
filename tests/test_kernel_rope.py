@@ -351,7 +351,7 @@ class TitanArmTest(unittest.TestCase):
         from benchmarks.models.piper_qwen3.shape import shape_by_name
 
         shape = shape_by_name("normal")
-        trainer = config_registry.qwen3_piper_1b(size="normal")
+        trainer = config_registry.qwen3_piper_1b_pretokenized(size="normal")
         production = trainer.model_spec.model.layers[0].attention.rope
         self.assertEqual(
             production,

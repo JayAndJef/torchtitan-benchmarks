@@ -1,88 +1,32 @@
-"""Build the training launch of one TorchTitan arm."""
+"""The ``torchtitan.train`` command line of one arm, and the flags a passthrough may carry."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, CompileMode, Launch, RunSpec
+from benchmarks.e2e.engines.api import CompileMode, RunSpec
+from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
+from benchmarks.e2e.engines.torchtitan.profiling import profiler_args
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
     ParallelismSpec,
     titan_mesh,
     titan_reshard_after_forward,
 )
-from benchmarks.e2e.passthrough import refuse_passthrough
+from benchmarks.e2e.passthrough import matches, ownership
 
 
-def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
-    """The ``--parallelism.*`` block TorchTitan needs for this spec.
+TRAIN_MODULE = "torchtitan.train"
+"""The module that ``python -m`` starts for a TorchTitan arm."""
 
-    Empty at the trivial spec, which is what keeps a single-GPU argv exactly
-    the argv it was before this axis existed.
 
-    Two of the flags are sent whenever they apply, and neither is optional:
-
-    ``--parallelism.data-parallel-shard-degree`` -- TorchTitan defaults
-    ``data_parallel_shard_degree`` to ``-1`` (``config/configs.py``), which
-    resolves to "every remaining rank". An omitted flag therefore turns a
-    dp 2 run into full sharding rather than the intended replication, and
-    neither the log nor the manifest would say so. ``titan_mesh`` decides
-    the pair and both halves are delivered.
-
-    **The pair is gated on the mesh, not on ``dp``.** ``titan_mesh`` reads
-    ``spec.zero``: it returns ``(1, dp)`` at level 1 and ``(dp, 1)`` at
-    level 0, at every expert degree. So the shard degree moves without
-    ``dp`` moving, and a ``dp``-gated test would send a sharded run no
-    shard degree at all -- which is the silent substitution this whole
-    paragraph exists to prevent. Gating on the mesh also keeps the trivial
-    spec's argv empty, because ``titan_mesh`` returns ``(1, 1)`` there at
-    every level.
-
-    **``--parallelism.fsdp-reshard-after-forward`` is what makes level 1
-    ZeRO-1 here.** The mesh flags alone would reshard every forward. The
-    fork
-    types the field as ``Literal["default", "always", "never"]`` on its
-    ``ParallelismConfig`` (``config/configs.py``), and
-    ``get_fsdp_reshard_after_forward_policy`` reads it. Under ``never``
-    FSDP2 gathers the parameters at the first microbatch forward and holds
-    them for the whole step, which shards the optimizer states and keeps
-    whole parameters.
-
-    **The token is sent only when ``titan_reshard_after_forward`` returns a
-    value.** Every other spec sends nothing, so TorchTitan keeps its own
-    default and no recorded argv moves. That one function decides it, so
-    this argv and the tests cannot disagree about which value forces the
-    policy.
-
-    **``--parallelism.expert-parallel-degree`` needs no gate of its own.**
-    Spec rule 14 refuses ``ep > 1`` under ``zero 0``, so every spec that
-    reaches here with an expert degree also asks for a sharded value and
-    therefore already carries the pair above. The expert mesh degree TorchTitan derives
-    is ``efsdp = dp_shard * cp * tp // ep``, which needs the shard degree the
-    pair delivers.
-
-    ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
-    ``last`` twin -- both default to **1**, which counts the embedding and
-    the output head as layers. At 16 layers and 2 stages the two conventions
-    agree, but at 4 stages the default splits [4, 5, 4, 3] where weight 0
-    splits [4, 4, 4, 4], and Megatron always divides ``config.num_layers``
-    evenly. Rule 7 of ``benchmarks/e2e/parallelism.py`` checks
-    ``n_layers % (pp * stages_per_rank)``, which is the arithmetic weight 0
-    produces; these two flags are what make that assumption true, and
-    ``_golden_titan_pp2_command`` freezes them so an upstream default change
-    breaks a test rather than a split.
-    """
-    flags: list[str] = []
+def parallelism_args(spec: ParallelismSpec) -> tuple[str, ...]:
+    """The ``--parallelism.*`` arguments of ``spec``; the single-GPU spec has none."""
+    args: list[str] = []
     if spec.pp > 1:
-        # Restated here, because a caller may build an argv without a run.
-        if spec.pp_schedule not in PP_SCHEDULES:
-            raise ValueError(
-                f"pp {spec.pp} needs a registered pipeline schedule, got "
-                f"{spec.pp_schedule!r}; choose one of "
-                + ", ".join(PP_SCHEDULES)
-            )
         schedule = PP_SCHEDULES[spec.pp_schedule]
-        flags.extend(
+        args.extend(
             (
                 "--parallelism.pipeline-parallel-degree",
                 str(spec.pp),
@@ -90,6 +34,7 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
                 schedule.titan_name,
                 "--parallelism.pipeline-parallel-microbatch-size",
                 str(spec.pp_microbatch_size),
+                # Zero, so the stages split the layers evenly, as Megatron does.
                 "--parallelism.pipeline-parallel-first-stage-less-layers",
                 "0",
                 "--parallelism.pipeline-parallel-last-stage-less-layers",
@@ -98,7 +43,8 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
         )
     replicate, shard = titan_mesh(spec)
     if (replicate, shard) != (1, 1):
-        flags.extend(
+        # TorchTitan reads an omitted shard degree as every remaining rank.
+        args.extend(
             (
                 "--parallelism.data-parallel-replicate-degree",
                 str(replicate),
@@ -106,53 +52,24 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
                 str(shard),
             )
         )
-    reshard_after_forward = titan_reshard_after_forward(spec)
-    if reshard_after_forward is not None:
-        flags.extend(
-            (
-                "--parallelism.fsdp-reshard-after-forward",
-                reshard_after_forward,
-            )
-        )
+    # ZeRO level 1 keeps whole parameters through the step.
+    policy = titan_reshard_after_forward(spec)
+    if policy is not None:
+        args.extend(("--parallelism.fsdp-reshard-after-forward", policy))
     if spec.ep > 1:
-        flags.extend(("--parallelism.expert-parallel-degree", str(spec.ep)))
-    return tuple(flags)
+        args.extend(("--parallelism.expert-parallel-degree", str(spec.ep)))
+    return tuple(args)
 
 
-TORCHTITAN_TRAIN_MODULE = "torchtitan.train"
-"""What ``python -m`` starts for a TorchTitan arm."""
-
-
-def titan_launch(run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
-    """The ``torchtitan.train`` launch of one TorchTitan arm."""
-    config = arm.config
-    refuse_passthrough(
-        "torchtitan", arm.name, config.extra_flags, run.parallelism.zero
-    )
-    # The fork defaults it off, so an eager arm passes no negation.
-    compile_flags = (
-        ("--compile.enable",) if config.compile is CompileMode.TORCH else ()
-    )
-    # Off unless these tokens ask for it, so an unprofiled run drops them.
-    profiler_flags = (
-        (
-            "--profiler.enable_profiling",
-            "--profiler.profile_freq",
-            str(run.window.freq),
-            "--profiler.profiler_active",
-            str(run.window.active),
-            "--profiler.profiler_warmup",
-            str(run.window.warmup),
-        )
-        if run.profile
-        else ()
-    )
+def trainer_args(
+    run: RunSpec, config: TorchTitanConfig, arm_dir: Path
+) -> tuple[str, ...]:
+    """The ``torchtitan.train`` arguments of one arm."""
     args = [
         "--module",
         config.module,
         "--config",
         config.config,
-        # The fork forwards a --config-arg pair as a config keyword.
         "--config-arg",
         f"size={run.shape.name}",
         "--training.seq-len",
@@ -161,23 +78,146 @@ def titan_launch(run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
         str(run.data.steps),
         "--training.local-batch-size",
         str(run.data.local_batch_size),
-        *compile_flags,
-        *profiler_flags,
-        *_titan_parallelism_flags(run.parallelism),
-        # The replay loader refuses a run longer than the steps it holds.
-        "--dataloader.replay-steps",
-        str(run.data.steps),
     ]
+    if config.compile is CompileMode.TORCH:
+        args.append("--compile.enable")
+    if run.profile:
+        args.extend(profiler_args(run.window))
+    args.extend(parallelism_args(run.parallelism))
+    # The replay loader refuses a step past the samples it holds.
+    args.extend(("--dataloader.replay-steps", str(run.data.steps)))
     if run.seed is not None:
         args.extend(("--debug.seed", str(run.seed)))
     if config.override_imports:
         args.extend(("--override.imports", ",".join(config.override_imports)))
-    args = args + list(config.extra_flags) + ["--dump-folder", str(arm_dir)]
+    args.extend(config.extra_flags)
+    args.extend(("--dump-folder", str(arm_dir)))
     if run.ac_mode == "none":
-        # A tyro subcommand token, which has to come last.
+        # A tyro subcommand token, which comes last.
         args.append("activation-checkpoint:none")
-    return Launch(
-        target=("-m", TORCHTITAN_TRAIN_MODULE, *args),
-        processes="per_rank",
-        pin=True,
-    )
+    return tuple(args)
+
+
+OWNED_FLAGS: dict[str, tuple[str, ...]] = {
+    "--seq-len": ("--training.seq-len",),
+    "--steps": ("--training.steps",),
+    "--batch": ("--training.local-batch-size", "--training.global-batch-size"),
+    "--pp-microbatch-size": ("--parallelism.pipeline-parallel-microbatch-size",),
+    "--model-size": ("--config", "--config-arg", "--module"),
+    "--dp/--pp/--ep": (
+        "--parallelism.data-parallel-replicate-degree",
+        "--parallelism.data-parallel-shard-degree",
+        "--parallelism.tensor-parallel-degree",
+        "--parallelism.pipeline-parallel-degree",
+        "--parallelism.context-parallel-degree",
+        "--parallelism.expert-parallel-degree",
+        "--parallelism.module-fqns-per-model-part",
+        "--parallelism.pipeline-parallel-first-stage-less-layers",
+        "--parallelism.pipeline-parallel-last-stage-less-layers",
+        "--parallelism.pipeline-parallel-layers-per-stage",
+    ),
+    "--pp-schedule": (
+        "--parallelism.pipeline-parallel-schedule",
+        "--parallelism.pipeline-parallel-schedule-csv",
+    ),
+    "--zero": ("--parallelism.fsdp-reshard-after-forward",),
+    "--ac": ("--activation-checkpoint.*", "activation-checkpoint:*"),
+    "--profile": ("--profiler.*",),
+    "the arm's compile value": ("--compile.enable",),
+    "the arm's override imports": ("--override.*",),
+}
+"""The TorchTitan flags that each harness option, or arm setting, sets."""
+
+PINNED_FLAGS: dict[str, tuple[str, ...]] = {
+    "the precision recipe": (
+        "--training.dtype",
+        "--training.mixed-precision-param",
+        "--training.mixed-precision-reduce",
+    ),
+    "the optimizer matched across engines": (
+        "--optimizer.*",
+        "--lr-scheduler.*",
+        "--training.max-norm",
+    ),
+    "the routing matched across engines": ("--debug.moe-force-load-balance",),
+    "the shared data stream": (
+        "--dataloader.*",
+        "--tokenizer.*",
+        "--hf-assets-path",
+        "--debug.seed",
+    ),
+    "the step lines the evaluation reads": ("--metrics.*",),
+    "the timed steps": ("--checkpoint.*", "--validator.*", "--dump-folder"),
+}
+"""The TorchTitan flags that no option owns and no passthrough may change, by reason."""
+
+PERF_FLAGS: tuple[str, ...] = (
+    "--training.enable-cpu-offload",
+    "--training.gc-freq",
+    "--training.gc-debug",
+    "--parallelism.enable-fsdp-symm-mem",
+    "--parallelism.enable-async-tensor-parallel",
+    "--parallelism.enable-sequence-parallel",
+    "--parallelism.spmd-backend",
+    "--parallelism.context-parallel-load-balancer",
+    "--parallelism.context-parallel-ptrr-mask-key",
+    "--compile.components",
+    "--compile.backend",
+    "--compile.mode",
+    "--debug.spmd-typechecking",
+    "--debug.deterministic",
+    "--debug.deterministic-warn-only",
+    "--debug.detect-anomaly",
+    "--debug.batch-invariant",
+    "--debug.print-config",
+    "--debug.save-config-file",
+    "--debug.enable-structured-logging",
+    "--comm.*",
+    "--loss.*",
+)
+"""The TorchTitan flags that a passthrough may set; every other unowned flag is refused."""
+
+_SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)*:[A-Za-z0-9_-]+")
+
+
+def flag_name(token: str) -> str | None:
+    """The canonical flag name in ``token``, or ``None`` for a value.
+
+    tyro accepts ``_`` and ``-`` alike and spells a false boolean as
+    ``--section.no-field``, so the name is normalized first.
+    """
+    if not token.startswith("--") and not _SUBCOMMAND.fullmatch(token):
+        return None
+    name = token.split("=", 1)[0].replace("_", "-")
+    section, dot, field = name.rpartition(".")
+    if dot and field.startswith("no-"):
+        return f"{section}.{field[3:]}"
+    return name
+
+
+def refusal(token: str) -> str | None:
+    """Why ``token`` cannot pass through to TorchTitan, or ``None``."""
+    name = flag_name(token)
+    if name is None:
+        return None
+    reason = ownership(name, OWNED_FLAGS, PINNED_FLAGS)
+    if reason is not None:
+        return reason
+    if any(matches(name, pattern) for pattern in PERF_FLAGS):
+        return None
+    return "not classified in benchmarks/e2e/engines/torchtitan/flags.py"
+
+
+def passthrough_refusals(arm_name: str, tokens: tuple[str, ...]) -> list[str]:
+    """One refusal that names every passthrough token that is not a perf flag, or none."""
+    offenders = [
+        f"{token} ({reason})"
+        for token in tokens
+        if (reason := refusal(token)) is not None
+    ]
+    if not offenders:
+        return []
+    return [
+        f"{arm_name}: {', '.join(offenders)} cannot pass through "
+        "--torchtitan-arg; set the owning harness option instead"
+    ]

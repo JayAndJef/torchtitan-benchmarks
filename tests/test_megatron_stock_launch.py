@@ -49,10 +49,12 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.runner import _resolve_run
-from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
 from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
+    _megatron_stock_nan_guard_markers,
+    _megatron_stock_p2p_markers,
     _megatron_stock_parallelism_markers,
+    _megatron_stock_precision_markers,
 )
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.execution.launcher import torchrun_flags
@@ -667,7 +669,7 @@ class StockArgvTests(unittest.TestCase):
                 data = scenario.data
                 if batch is not None:
                     data = replace(data, local_batch_size=batch)
-                marker = profile.parallelism_markers(spec, data, "stock")[0]
+                marker = _megatron_stock_parallelism_markers(spec, data, "stock")[0]
                 self.assertIn(f"microbatches={megatron} ", marker)
 
     def test_the_argv_carries_no_torchtitan_parallelism_token(self) -> None:
@@ -759,18 +761,18 @@ class StockValidationProfileTests(unittest.TestCase):
             engine_for(_stock_arm()).validate(
                 run_spec(ac_mode="none"), _stock_arm(), Path("/a"), Path("/a.log")
             )
-        self.assertIs(checked.call_args.kwargs["engine_profile"], self.profile)
+        self.assertIs(checked.call_args.kwargs["profile"], self.profile)
 
     def test_the_driver_line_is_the_first_precision_marker(self) -> None:
         """Rule 8 no longer holds this line, and it is still matched: the
         precision markers ask every rank for it at every mesh."""
         self.assertEqual(
-            self.profile.precision_markers("stock")[0],
+            _megatron_stock_precision_markers("stock")[0],
             "Megatron-LM stock training loop (",
         )
 
     def test_the_profile_does_not_check_the_ac_line(self) -> None:
-        self.assertFalse(self.profile.check_ac_line)
+        self.assertIsNone(self.profile.ac_line)
 
     def test_the_profile_proves_no_compile_treatment(self) -> None:
         """``compile_marker`` is None, so rule 8 asks this engine nothing.
@@ -914,7 +916,7 @@ class StockValidationProfileTests(unittest.TestCase):
             ParallelismSpec(dp=8),
         ):
             with self.subTest(spec=spec):
-                markers = self.profile.parallelism_markers(
+                markers = _megatron_stock_parallelism_markers(
                     spec, self.data, "stock"
                 )
                 self.assertTrue(markers)
@@ -923,13 +925,13 @@ class StockValidationProfileTests(unittest.TestCase):
                 )
 
     def test_the_data_parallel_line_appears_only_above_dp_one(self) -> None:
-        pipeline_only = self.profile.parallelism_markers(
+        pipeline_only = _megatron_stock_parallelism_markers(
             ParallelismSpec(pp=4, pp_schedule="1F1B", pp_microbatch_size=4),
             self.data,
             "stock",
         )
         self.assertEqual(len(pipeline_only), 1)
-        with_dp = self.profile.parallelism_markers(
+        with_dp = _megatron_stock_parallelism_markers(
             MESH, self.data, "stock"
         )
         self.assertEqual(len(with_dp), 2)
@@ -966,7 +968,7 @@ class StockValidationProfileTests(unittest.TestCase):
                 data = replace(
                     self.data, local_batch_size=local_batch_size
                 )
-                marker = self.profile.parallelism_markers(
+                marker = _megatron_stock_parallelism_markers(
                     spec, data, "stock"
                 )[0]
                 self.assertIn(f"microbatches={megatron} ", marker)
@@ -978,7 +980,7 @@ class StockValidationProfileTests(unittest.TestCase):
     def test_the_pipelined_pattern_ignores_a_pipeline_degree_of_one(
         self,
     ) -> None:
-        line = self.profile.parallelism_markers(
+        line = _megatron_stock_parallelism_markers(
             ParallelismSpec(dp=2), self.data, "stock"
         )[0]
         self.assertIn("pp=1", line)
@@ -991,7 +993,7 @@ class StockValidationProfileTests(unittest.TestCase):
             ParallelismSpec(pp=4, pp_schedule="1F1B", pp_microbatch_size=4),
         ):
             with self.subTest(spec=spec):
-                line = self.profile.parallelism_markers(
+                line = _megatron_stock_parallelism_markers(
                     spec, self.data, "stock"
                 )[0]
                 self.assertIsNotNone(
@@ -1011,7 +1013,7 @@ class StockValidationProfileTests(unittest.TestCase):
             ParallelismSpec(pp=4, pp_schedule="1F1B", pp_microbatch_size=4),
         ):
             with self.subTest(spec=spec):
-                for line in self.profile.parallelism_markers(
+                for line in _megatron_stock_parallelism_markers(
                     spec, self.data, "stock"
                 ):
                     self.assertIsNone(
@@ -1036,7 +1038,7 @@ class StockValidationProfileTests(unittest.TestCase):
     def test_the_data_parallel_pattern_sees_the_wrapper_line(self) -> None:
         for spec in (MESH, SHARDED_MESH):
             with self.subTest(zero=spec.zero):
-                line = self.profile.parallelism_markers(
+                line = _megatron_stock_parallelism_markers(
                     spec, self.data, "stock"
                 )[1]
                 self.assertIsNotNone(
@@ -1053,7 +1055,7 @@ class StockValidationProfileTests(unittest.TestCase):
         """
         for spec in (MESH, SHARDED_MESH):
             with self.subTest(zero=spec.zero):
-                line = self.profile.parallelism_markers(
+                line = _megatron_stock_parallelism_markers(
                     spec, self.data, "stock"
                 )[1]
                 for roster in (
@@ -1207,12 +1209,12 @@ class StockMarkerContractTests(unittest.TestCase):
         """The fragments cannot drift away from the profile."""
         built = [
             self.profile.completion_marker,
-            *self.profile.precision_markers("stock"),
-            *self.profile.parallelism_markers(
+            *_megatron_stock_precision_markers("stock"),
+            *_megatron_stock_parallelism_markers(
                 MESH, self.data, "stock"
             ),
-            *self.profile.p2p_markers(MESH, "on"),
-            *self.profile.nan_guard_markers("on"),
+            *_megatron_stock_p2p_markers(MESH, "on"),
+            *_megatron_stock_nan_guard_markers("on"),
         ]
         for fragment in STOCK_LOG_FRAGMENTS:
             with self.subTest(fragment=fragment):
@@ -1269,7 +1271,7 @@ class StockMarkerContractTests(unittest.TestCase):
                 printed = markers.parallelism_lines(
                     _StockArgs(spec), microbatches=microbatches
                 )
-                expected = profile.parallelism_markers(
+                expected = _megatron_stock_parallelism_markers(
                     spec, data, "stock"
                 )
                 self.assertEqual(printed[0], expected[0])
@@ -1310,7 +1312,7 @@ class StockMarkerContractTests(unittest.TestCase):
                 printed = _driver_data_parallel_line(
                     spec.zero, dp=spec.dp, ep=spec.ep
                 )
-                markers = self.profile.parallelism_markers(
+                markers = _megatron_stock_parallelism_markers(
                     spec, data, "stock"
                 )
                 self.assertEqual(printed, markers[1])
@@ -1330,7 +1332,7 @@ class StockMarkerContractTests(unittest.TestCase):
         for value, sync in (("on", True), ("off", False)):
             with self.subTest(value=value):
                 self.assertEqual(
-                    self.profile.p2p_markers(MESH, value),
+                    _megatron_stock_p2p_markers(MESH, value),
                     (markers.P2P_LINE.format(comm=True, sync=sync),),
                 )
 
@@ -1339,7 +1341,7 @@ class StockMarkerContractTests(unittest.TestCase):
         for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
             for value in ("on", "off"):
                 with self.subTest(spec=spec, value=value):
-                    self.assertEqual(self.profile.p2p_markers(spec, value), ())
+                    self.assertEqual(_megatron_stock_p2p_markers(spec, value), ())
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_nan_guard_line_equals_this_profile_marker(
@@ -1355,16 +1357,15 @@ class StockMarkerContractTests(unittest.TestCase):
         for value, parsed in (("on", True), ("off", False)):
             with self.subTest(value=value):
                 self.assertEqual(
-                    self.profile.nan_guard_markers(value),
+                    _megatron_stock_nan_guard_markers(value),
                     (markers.NAN_GUARD_LINE.format(value=parsed),),
                 )
 
     def test_the_nan_guard_line_is_asked_at_every_mesh(self) -> None:
         """Unlike the p2p line: the guard runs at pp 1 and at dp 1, so the
         callable takes no spec and the same line is asked everywhere."""
-        (line,) = self.profile.nan_guard_markers("on")
+        (line,) = _megatron_stock_nan_guard_markers("on")
         self.assertIn("stock", line)
-        self.assertEqual(TORCHTITAN_PROFILE.nan_guard_markers("off"), ())
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)
     def test_the_driver_mode_line_starts_with_this_profile_marker(
@@ -1385,7 +1386,7 @@ class StockMarkerContractTests(unittest.TestCase):
             dispatcher="alltoall",
         )
         self.assertTrue(
-            printed.startswith(self.profile.precision_markers("stock")[0])
+            printed.startswith(_megatron_stock_precision_markers("stock")[0])
         )
 
     @_skip_without_stock_package(STOCK_DRIVER_MODULE)

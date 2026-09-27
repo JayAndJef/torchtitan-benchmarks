@@ -243,7 +243,7 @@ def titan_final_norm_module(shape: PiperShape):
     ``self.norm = config.norm.build()``
     (``third_party/torchtitan/torchtitan/models/common/decoder.py:240``), and
     ``_piper_1b_model`` is where our registry sets that node
-    (``benchmarks/models/piper_qwen3/config_registry.py:115``). So the module
+    (``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``). So the module
     below is the production module, configured by the production config, and
     the extraction is one attribute read.
 

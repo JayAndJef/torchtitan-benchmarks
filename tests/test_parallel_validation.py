@@ -36,10 +36,17 @@ from benchmarks.e2e.registry import (
     ENGINES,
     scenario_by_name,
 )
-from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
+from benchmarks.e2e.engines.torchtitan.validate import (
+    TORCHTITAN_PROFILE,
+    mesh_markers as titan_mesh_markers,
+)
 from benchmarks.e2e.validation import (
     ALL_REDUCE_MARKER,
     MEGATRON_STOCK_PROFILE,
+    _megatron_stock_nan_guard_markers,
+    _megatron_stock_p2p_markers,
+    _megatron_stock_parallelism_markers,
+    _megatron_stock_precision_markers,
 )
 from benchmarks.execution.launcher import LOG_RANK_TEMPLATE, launcher_environment
 from benchmarks.e2e.engines.api import Launch
@@ -228,9 +235,7 @@ def _titan_log(spec: ParallelismSpec = PP2) -> str:
     wrong still fails, not the wording of these two.
     """
     markers = "\n".join(
-        TORCHTITAN_PROFILE.parallelism_markers(
-            spec, ENGINES.data, "stock"
-        )
+        titan_mesh_markers(spec, ENGINES.data)
     )
     return (
         _compiled_line("default").rstrip("\n")
@@ -637,9 +642,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
                 )
 
     def test_the_titan_markers_name_the_degrees_and_the_schedule(self) -> None:
-        markers = TORCHTITAN_PROFILE.parallelism_markers(
-            PP2, ENGINES.data, "stock"
-        )
+        markers = titan_mesh_markers(PP2, ENGINES.data)
         self.assertEqual(
             markers,
             (
@@ -664,9 +667,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
             DATA_PARALLEL_LINE,
         )
 
-        markers = TORCHTITAN_PROFILE.parallelism_markers(
-            DP2, ENGINES.data, "stock"
-        )
+        markers = titan_mesh_markers(DP2, ENGINES.data)
         self.assertIn(
             DATA_PARALLEL_LINE.format(replicate=2, shard=1), markers
         )
@@ -679,9 +680,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         """
         for spec in (TRIVIAL_SPEC, PP2):
             with self.subTest(spec=spec):
-                markers = TORCHTITAN_PROFILE.parallelism_markers(
-                    spec, ENGINES.data, "stock"
-                )
+                markers = titan_mesh_markers(spec, ENGINES.data)
                 self.assertEqual(
                     [m for m in markers if "data parallel" in m], []
                 )
@@ -826,21 +825,29 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     def test_no_line_is_asked_below_a_pipeline(self) -> None:
         """Below ``pp`` 1 there is no message to synchronize, and ``off``
         is refused parent-side; the callable asks for nothing there."""
-        for profile in (MEGATRON_STOCK_PROFILE, TORCHTITAN_PROFILE):
-            for spec in (TRIVIAL_SPEC, DP2):
-                for value in ("on", "off"):
-                    with self.subTest(profile=profile, spec=spec, value=value):
-                        self.assertEqual(profile.p2p_markers(spec, value), ())
+        for spec in (TRIVIAL_SPEC, DP2):
+            for value in ("on", "off"):
+                with self.subTest(spec=spec, value=value):
+                    self.assertEqual(_megatron_stock_p2p_markers(spec, value), ())
 
-    def test_the_titan_profile_asks_for_no_line(self) -> None:
-        """The option reaches the megatron command alone.
+    def test_the_titan_engine_asks_for_the_mesh_lines_alone(self) -> None:
+        """The option reaches the megatron command alone."""
+        self.assertEqual(list(_titan_required_lines(PP2)), ["parallelism"])
 
-        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
-        tuple, so an unknown value never reaches a profile.
-        """
-        titan = TORCHTITAN_PROFILE
-        for value in ("on", "off"):
-            self.assertEqual(titan.p2p_markers(PP2, value), ())
+
+def _titan_required_lines(spec: ParallelismSpec) -> dict[str, tuple[str, ...]]:
+    """The lines that the TorchTitan engine asks every rank for at ``spec``."""
+    arm = ENGINES.arm("titan_compiled")
+    with mock.patch(
+        "benchmarks.e2e.engines.torchtitan.validate.validate_against_profile"
+    ) as checked:
+        validate(
+            run_spec(parallelism=spec, local_batch_size=8),
+            arm,
+            Path("/a"),
+            Path("/a.log"),
+        )
+    return dict(checked.call_args.kwargs["required_lines"])
 
 
 def _stock_log(
@@ -865,10 +872,10 @@ def _stock_log(
         # The first marker is the driver's own line, and the four fields
         # after it are printed on that line, off the arguments Megatron
         # resolved.
-        ", ".join(profile.precision_markers(megatron_precision)),
+        ", ".join(_megatron_stock_precision_markers(megatron_precision)),
         _SIZE_LINE.rstrip("\n"),
-        *profile.parallelism_markers(spec, data, megatron_precision),
-        *profile.p2p_markers(spec, "off"),
+        *_megatron_stock_parallelism_markers(spec, data, megatron_precision),
+        *_megatron_stock_p2p_markers(spec, "off"),
     ]
     if nan_guard_line is not None:
         lines.append(nan_guard_line)
@@ -894,17 +901,11 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
         profile = MEGATRON_STOCK_PROFILE
         for value, line in (("on", self.ON_LINE), ("off", self.OFF_LINE)):
             with self.subTest(value=value):
-                self.assertEqual(profile.nan_guard_markers(value), (line,))
+                self.assertEqual(_megatron_stock_nan_guard_markers(value), (line,))
 
-    def test_the_titan_profile_asks_for_no_line(self) -> None:
-        """The option reaches the stock megatron command alone.
-
-        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
-        tuple, so an unknown value never reaches a profile.
-        """
-        titan = TORCHTITAN_PROFILE
-        for value in ("on", "off"):
-            self.assertEqual(titan.nan_guard_markers(value), ())
+    def test_the_titan_engine_asks_for_no_line(self) -> None:
+        """The option reaches the stock megatron command alone."""
+        self.assertEqual(_titan_required_lines(TRIVIAL_SPEC), {})
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,
@@ -986,7 +987,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         is the driver's own line, which rule 8 no longer holds."""
         profile = MEGATRON_STOCK_PROFILE
         self.assertEqual(
-            profile.precision_markers("stock"),
+            _megatron_stock_precision_markers("stock"),
             (
                 "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=False",
@@ -996,7 +997,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            profile.precision_markers("lean"),
+            _megatron_stock_precision_markers("lean"),
             (
                 "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=True",
@@ -1006,15 +1007,9 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
             ),
         )
 
-    def test_the_titan_profile_asks_for_no_field(self) -> None:
-        """The option reaches the stock megatron command alone.
-
-        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
-        tuple, so an unknown value never reaches a profile.
-        """
-        titan = TORCHTITAN_PROFILE
-        for value in ("stock", "lean"):
-            self.assertEqual(titan.precision_markers(value), ())
+    def test_the_titan_engine_asks_for_no_field(self) -> None:
+        """The option reaches the stock megatron command alone."""
+        self.assertEqual(_titan_required_lines(TRIVIAL_SPEC), {})
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,

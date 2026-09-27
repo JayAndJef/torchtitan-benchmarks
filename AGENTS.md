@@ -177,13 +177,14 @@ value, so `--megatron-arg="--moe-token-dispatcher-type flex"` is two tokens.
 A list that reaches no selected arm is refused. The tokens go after the
 harness flags, and both parsers keep the last value of a repeated flag.
 
-`benchmarks/e2e/passthrough.py` holds three tables, and each row holds
-both engines' patterns. The owned table maps each harness option to the
-flags it sets. The pinned table holds the flags that keep the two engines
-on the same work: the optimizer, the routing, the data, the step lines and
-the timed steps. The perf table holds the flags a passthrough may set. A
-passthrough flag in the owned or pinned table is refused, and the message
-names the owner.
+Each engine holds three flag tables. The TorchTitan tables are in
+`benchmarks/e2e/engines/torchtitan/flags.py`, and the Megatron tables are
+in `benchmarks/e2e/passthrough.py`. The owned table maps each harness
+option to the flags it sets. The pinned table holds the flags that keep the
+two engines on the same work: the optimizer, the routing, the data, the step
+lines and the timed steps. The perf table holds the flags a passthrough may
+set. A passthrough flag in the owned or pinned table is refused, and the
+message names the owner.
 
 - An unlisted Megatron flag passes, so every fusion flag Megatron offers
   passes. §7 names the stock omissions a passthrough can add.
@@ -469,6 +470,11 @@ context parallelism are deliberately absent.
 `--use-distributed-optimizer`, and TorchTitan gets the whole data-parallel
 width as its shard degree plus `fsdp-reshard-after-forward never`.
 
+TorchTitan always gets its shard degree explicitly, because it reads an
+omitted shard degree as every remaining rank. Its pipeline flags set both
+`less-layers` values to 0, so its stages split the layers evenly, as
+Megatron's do.
+
 `validate_parallelism` refuses a spec before any host probe. The numbering
 below is the code's own, and rules 5, 6, 13, 15, 16 and 17 are deleted.
 
@@ -675,11 +681,21 @@ needs:
 `benchmarks/e2e/engines/torchtitan/plugins/parallelize.py` additionally needs
 `parallelize_qwen3`'s `skip_dp` keyword and its ordering guarantee:
 activation checkpointing, then the per-block compile, then the early return
-before mesh resolution.
+before mesh resolution. At one data-parallel rank the function skips FSDP,
+so the model holds plain bf16 parameters and `training.dtype` is the only
+bf16 mechanism. Above one rank it applies `fully_shard`, because TorchTitan
+has no DDP class, and it prints the `piper1b data parallel` line after it
+counts the FSDP units. That line, and not TorchTitan's mesh line, proves
+the wrap, because TorchTitan logs the mesh before the function runs.
+
+The TorchTitan replay loader and the Megatron driver both materialize the
+samples of the whole run at startup. So no measured step pays a data cost,
+and each engine raises when a step asks for a sample past the last one.
 
 `benchmarks/e2e/engines/torchtitan/plugins/config_registry.py` and
-`benchmarks/models/piper_qwen3/titan_model.py` import private Qwen3 helpers. After a bump, verify that each of these still exists with unchanged
-behaviour:
+`benchmarks/models/piper_qwen3/titan_model.py` import private Qwen3
+helpers. After a bump, verify that each of these still exists with
+unchanged behaviour:
 
 - `_build_qwen3_moe_layers`, `_EMBEDDING_INIT`, `_output_linear_init`,
   `_qwen3_norm` and `Qwen3Model` from `torchtitan.models.qwen3`

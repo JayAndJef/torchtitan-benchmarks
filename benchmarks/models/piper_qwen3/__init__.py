@@ -1,1 +1,1 @@
-"""Piper Qwen3-1B: the single source of geometry, configs, and per-engine model builders."""
+"""The Piper Qwen3 model port: the shape registry, the model builder of each engine and the kernel components."""
