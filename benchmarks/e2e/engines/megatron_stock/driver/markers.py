@@ -5,7 +5,7 @@ holds the other half, and a test compares the two rosters. The formatters
 build one line from resolved Megatron arguments, so a log records what
 Megatron built rather than what the harness asked for.
 
-``benchmarks.e2e.megatron_stock.model_builder`` prints the two parameter
+``benchmarks.e2e.engines.megatron_stock.driver.model_builder`` prints the two parameter
 lines, ``dp_marker`` the data-parallel line and ``step_log`` the step line.
 The rest are printed by ``train.main``.
 """
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from benchmarks.e2e.megatron_stock.flags import SUPPORTED_PP_SCHEDULE
+from benchmarks.e2e.engines.megatron_stock.flags import SUPPORTED_PP_SCHEDULE
 
 
 MODE_LINE = (

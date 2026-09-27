@@ -63,21 +63,21 @@ is Megatron's own, so a help run pays for the ML stack like any other.
 
 from __future__ import annotations
 
-from benchmarks.e2e.megatron_stock import bootstrap
-from benchmarks.e2e.megatron_stock.dp_marker import install_data_parallel_marker
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.megatron_stock.driver import bootstrap
+from benchmarks.e2e.engines.megatron_stock.driver.dp_marker import install_data_parallel_marker
+from benchmarks.e2e.engines.megatron_stock.flags import (
     add_bench_args,
     apply_p2p_sync,
     refuse_unsupported_run,
 )
-from benchmarks.e2e.megatron_stock.markers import (
+from benchmarks.e2e.engines.megatron_stock.driver.markers import (
     TRAINING_COMPLETED,
     mode_line,
     nan_guard_line,
     p2p_line,
     parallelism_lines,
 )
-from benchmarks.e2e.megatron_stock.step_log import install_step_log_shim
+from benchmarks.e2e.engines.megatron_stock.driver.step_log import install_step_log_shim
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap.prepare()
 
     # Deferred, so a --help run does not pay for the ML stack.
-    from benchmarks.e2e.megatron_stock import data, profiling
+    from benchmarks.e2e.engines.megatron_stock.driver import data, profiling
 
     import pretrain_gpt
     from megatron.core.enums import ModelType
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     from megatron.training.arguments import parse_and_validate_args
 
-    from benchmarks.e2e.megatron_stock.model_builder import BenchGPTModelConfig
+    from benchmarks.e2e.engines.megatron_stock.driver.model_builder import BenchGPTModelConfig
     from benchmarks.models.piper_qwen3.shape import shape_by_name
 
     # Every rank builds the data, as the stock entry point asks for.

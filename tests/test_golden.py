@@ -277,7 +277,7 @@ def _megatron_uses_torchrun_at_one_rank(record: dict[str, Any]) -> None:
     if _world_size(record) != 1:
         return
     for _, argv in _argvs(record):
-        if "benchmarks.e2e.megatron_stock.train" in argv:
+        if OLD_MEGATRON_DRIVER in argv:
             at = argv.index("<PYTHON_BIN>/python")
             argv[at : at + 1] = _torchrun(1)
 
@@ -305,6 +305,14 @@ def _titan_config_moves_into_the_engine_package(record: dict[str, Any]) -> None:
         workload["module"] = TITAN_MODULE
 
 
+def _megatron_driver_moves_into_the_engine_package(record: dict[str, Any]) -> None:
+    for _, argv in _argvs(record):
+        if OLD_MEGATRON_DRIVER in argv:
+            argv[argv.index(OLD_MEGATRON_DRIVER)] = MEGATRON_DRIVER
+
+
+OLD_MEGATRON_DRIVER = "benchmarks.e2e.megatron_stock.train"
+MEGATRON_DRIVER = "benchmarks.e2e.engines.megatron_stock.driver.train"
 OLD_TITAN_MODULE = "benchmarks.models.piper_qwen3"
 TITAN_MODULE = "benchmarks.e2e.engines.torchtitan.plugins"
 
@@ -367,6 +375,12 @@ ACCEPTED_DIFFERENCES = (
         "'<module>.config_registry' first, so the trainer finds the same "
         "config functions.",
         _titan_config_moves_into_the_engine_package,
+    ),
+    AcceptedDifference(
+        "Plan 4: the stock Megatron driver moves into the driver package of "
+        "the Megatron engine, so the '-m' target of the Megatron arm is "
+        "benchmarks.e2e.engines.megatron_stock.driver.train.",
+        _megatron_driver_moves_into_the_engine_package,
     ),
 )
 """The changes from the baseline that the plan names or that the review accepted."""

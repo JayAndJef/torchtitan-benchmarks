@@ -18,22 +18,21 @@ from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan import flags as titan_flags
-from benchmarks.e2e.launch import megatron_stock_launch
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.megatron_stock.engine import megatron_stock_launch
+from benchmarks.e2e.engines.megatron_stock.flags import (
     ALWAYS_OMITTED_FLAGS,
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
-from benchmarks.e2e.passthrough import (
+from benchmarks.e2e.engines.megatron_stock.flags import (
     MEGATRON_OWNED_FLAGS,
     MEGATRON_PERF_FLAGS,
     MEGATRON_PINNED_FLAGS,
-    matches,
     megatron_flag_name,
     megatron_refusal,
     refuse_megatron_passthrough,
-    row_for,
 )
+from benchmarks.e2e.passthrough import matches, row_for
 from benchmarks.e2e.registry import scenario_by_name
 from benchmarks.e2e.runner import reach_refusal
 from tests.engine_helpers import configured, run_spec

@@ -23,8 +23,8 @@ from benchmarks.artifacts.manifests import (
     _resume_mismatches,
     manifest_data,
 )
-from benchmarks.e2e.megatron_stock import profiling
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.megatron_stock.driver import profiling
+from benchmarks.e2e.engines.megatron_stock.flags import (
     BENCH_PROFILE,
     BENCH_PROFILE_SCHEDULE_FLAGS,
     stock_megatron_flags,

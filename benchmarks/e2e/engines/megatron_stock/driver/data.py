@@ -27,7 +27,7 @@ Three rules govern the iterator, and each answers a way a run can be wrong:
 
 **One microbatch is one packed sequence, never a batch of rows.** The
 iterator concatenates ``rows_per_sample`` titan rows into a single
-``(1, rows * seq_len)`` sample. ``benchmarks/e2e/megatron_stock/flags.py``'s
+``(1, rows * seq_len)`` sample. ``benchmarks/e2e/engines/megatron_stock/flags.py``'s
 ``microbatch_geometry`` gives the reason: Megatron flattens a ``(m, S)``
 microbatch to ``(1, m*S)`` and then allocates its pipeline receive buffer
 as ``(S, m, H)``, so a batched microbatch reaches the next stage permuted.

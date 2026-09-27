@@ -26,7 +26,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import logs_by_rank
-from benchmarks.e2e.megatron_stock import markers as stock_markers
+from benchmarks.e2e.engines.megatron_stock.driver import markers as stock_markers
 from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
@@ -40,14 +40,14 @@ from benchmarks.e2e.engines.torchtitan.validate import (
     TORCHTITAN_PROFILE,
     mesh_markers as titan_mesh_markers,
 )
-from benchmarks.e2e.validation import (
-    ALL_REDUCE_MARKER,
+from benchmarks.e2e.engines.megatron_stock.validate import (
     MEGATRON_STOCK_PROFILE,
     _megatron_stock_nan_guard_markers,
     _megatron_stock_p2p_markers,
     _megatron_stock_parallelism_markers,
     _megatron_stock_precision_markers,
 )
+from benchmarks.e2e.validation import ALL_REDUCE_MARKER
 from benchmarks.execution.launcher import LOG_RANK_TEMPLATE, launcher_environment
 from benchmarks.e2e.engines.api import Launch
 from tests.test_runner import (

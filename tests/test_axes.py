@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.manifests import AXIS_KEYS, manifest_data
 from benchmarks.cli.e2e import run_command
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.megatron_stock.flags import (
     DATA_PARALLEL_OPTIMIZERS,
     DATA_PARALLEL_WRAPPERS,
     SHARDING_FLAGS_BY_VALUE,
@@ -33,7 +33,7 @@ from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
     describe,
 )
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.megatron_stock.flags import (
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,

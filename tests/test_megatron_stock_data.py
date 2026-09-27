@@ -14,7 +14,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.e2e.megatron_stock.data import (
+from benchmarks.e2e.engines.megatron_stock.driver.data import (
     C4_TEST_PATH,
     TOKENIZER_PATH,
 )
@@ -23,7 +23,7 @@ from benchmarks.e2e.megatron_stock.data import (
 class PackingParityTests(unittest.TestCase):
     def test_streams_are_bitwise_identical(self) -> None:
         from benchmarks.e2e.engines.torchtitan.plugins.replay import PretokenizedReplayDataset
-        from benchmarks.e2e.megatron_stock.data import materialize_titan_samples
+        from benchmarks.e2e.engines.megatron_stock.driver.data import materialize_titan_samples
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
         from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
 
@@ -60,7 +60,7 @@ class PackingParityTests(unittest.TestCase):
             self.assertTrue(torch.equal(m_label, t_label))
 
     def _megatron_shard(self, *, dp_rank: int, dp_world_size: int, count: int):
-        from benchmarks.e2e.megatron_stock.data import materialize_titan_samples
+        from benchmarks.e2e.engines.megatron_stock.driver.data import materialize_titan_samples
 
         try:
             return materialize_titan_samples(
