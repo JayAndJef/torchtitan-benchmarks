@@ -113,7 +113,7 @@ class MegatronStockEngine(Engine):
             ),
             processes="per_rank",
             pin=True,
-            # Both engines start in one working directory, so a relative path names one file.
+            # The same working directory as the TorchTitan arms, so both engines start alike.
             cwd=TITAN_DIR,
         )
 

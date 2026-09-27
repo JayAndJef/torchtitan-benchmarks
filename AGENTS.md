@@ -361,8 +361,9 @@ the absence half, or an arm that silently compiled publishes as eager.
 
 Both engines check rules 5, 6 and 13 through one helper,
 `benchmarks.e2e.validation:trace_refusals`. Without the profile axis the arm
-writes no trace, so rules 5, 6 and 13 are skipped whole. The mesh fact then carries the data-parallel axis alone. Cite
-a data-parallel number from an unprofiled run as resting on that log line.
+writes no trace, so rules 5, 6 and 13 are skipped whole. The mesh fact then
+carries the data-parallel axis alone. Cite a data-parallel number from an
+unprofiled run as resting on that log line.
 
 Rule 13 matches the kernel name `ncclDevKernel_AllReduce`. Megatron issues
 its bucket reductions inside a coalescing manager, and a grouped NCCL launch
@@ -380,17 +381,18 @@ an arm cannot take one engine's argv and another engine's log rules.
 
 `run` always evaluates, and `evaluate <out_dir>` re-evaluates a finished
 directory. **Evaluation reads the logs alone.** Each engine prints every
-published figure on a step line, so a directory evaluates the same way under
-either profile value. The engine's `read_steps` turns the lines of one rank
-into step samples, and the evaluation reads the samples alone.
+published figure in its log once per rank and step, so a directory evaluates
+the same way under either profile value. The engine's `read_steps` turns the
+log of one rank into step samples, and the evaluation reads the samples
+alone.
 
 - TorchTitan prints its own step line. A pipeline rank that holds no loss
   prints the loss `-1`, and the reader reads it as no loss.
 - The stock Megatron driver prints one JSON step record per rank and step,
   after the prefix `bench-step: `. The reader also reads the text step line
   that the stored run directories hold.
-- A step line that does not parse fails the arm, and so does a step that
-  does not follow the previous step of its rank.
+- A step line or record that does not parse fails the arm. A step that
+  does not follow the previous step of its rank also fails the arm.
 - Every rank writes to one log, and a torn write can append the line of one
   rank to a step line of another rank. The readers read the step line and
   drop the appended line, so that step of the other rank is absent.
