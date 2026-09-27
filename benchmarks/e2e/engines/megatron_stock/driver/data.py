@@ -1,42 +1,11 @@
-"""The c4_test stream of TorchTitan's own dataset class, packed for Megatron's external dataloader."""
+"""The shared c4_test stream, packed for Megatron's external dataloader."""
 
 from __future__ import annotations
 
 import torch
 
-from benchmarks.execution.paths import TITAN_DIR
-
-C4_TEST_PATH = TITAN_DIR / "tests" / "assets" / "c4_test"
-TOKENIZER_PATH = TITAN_DIR / "tests" / "assets" / "tokenizer"
-
-
-def materialize_titan_samples(
-    *,
-    seq_len: int,
-    num_samples: int,
-    dp_rank: int = 0,
-    dp_world_size: int = 1,
-) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """The first ``num_samples`` (input, positions, label) triples of one data-parallel slice, as a TorchTitan arm reads them."""
-    from torchtitan.components.tokenizer import HuggingFaceTokenizer
-    from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
-
-    tokenizer = HuggingFaceTokenizer(tokenizer_path=str(TOKENIZER_PATH))
-    dataset = HuggingFaceTextDataset(
-        dataset_name="c4_test",
-        dataset_path=str(C4_TEST_PATH),
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=True,
-    )
-    iterator = iter(dataset)
-    samples = []
-    for _ in range(num_samples):
-        inputs, label = next(iterator)
-        samples.append((inputs["input"], inputs["positions"], label))
-    return samples
+from benchmarks.e2e.data.c4_replay import DATASET, Sample, materialize
+from benchmarks.e2e.engines.api import DataSpec
 
 
 MICROBATCH_KEYS: tuple[str, ...] = (
@@ -71,15 +40,15 @@ def document_offsets(positions: torch.Tensor, seq_len: int) -> torch.Tensor:
 
 
 def _microbatch(
-    rows: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    rows: list[Sample],
     *,
     packed_len: int,
     padded_documents: int,
 ) -> dict[str, torch.Tensor | None]:
     """One microbatch on the CPU: one packed row of ``packed_len`` tokens, with ``cu_seqlens`` padded to ``padded_documents``."""
-    tokens = torch.cat([row[0] for row in rows]).to(torch.int64)
-    positions = torch.cat([row[1] for row in rows]).to(torch.int64)
-    labels = torch.cat([row[2] for row in rows]).to(torch.int64)
+    tokens = torch.cat([inputs["input"] for inputs, _ in rows]).to(torch.int64)
+    positions = torch.cat([inputs["positions"] for inputs, _ in rows]).to(torch.int64)
+    labels = torch.cat([label for _, label in rows]).to(torch.int64)
     cu_seqlens = document_offsets(positions, packed_len)
     pad = padded_documents - cu_seqlens.numel()
     if pad < 0:
@@ -112,7 +81,7 @@ class StockReplayIterator:
 
     def __init__(
         self,
-        samples: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        samples: list[Sample],
         *,
         rows_per_sample: int,
         seq_len: int,
@@ -134,7 +103,8 @@ class StockReplayIterator:
         # No collective reads this width, so each rank can have its own.
         self._padded_documents = max(
             document_offsets(
-                torch.cat([row[1] for row in group]), self._packed_len
+                torch.cat([inputs["positions"] for inputs, _ in group]),
+                self._packed_len,
             ).numel()
             for group in groups
         )
@@ -179,23 +149,13 @@ class StockReplayIterator:
 
 
 def build_iterator(
-    *,
-    seq_len: int,
-    steps: int,
-    local_batch_size: int,
-    rows_per_sample: int,
-    dp_rank: int,
-    dp_world_size: int,
+    spec: DataSpec, *, rows_per_sample: int, dp_rank: int, dp_world_size: int
 ) -> StockReplayIterator:
-    """The stream of this rank: ``steps * local_batch_size`` rows of ``seq_len`` tokens, packed ``rows_per_sample`` to a microbatch."""
-    samples = materialize_titan_samples(
-        seq_len=seq_len,
-        num_samples=steps * local_batch_size,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-    )
+    """The stream of this rank, packed ``rows_per_sample`` rows to a microbatch."""
     return StockReplayIterator(
-        samples, rows_per_sample=rows_per_sample, seq_len=seq_len
+        materialize(spec, dp_rank, dp_world_size),
+        rows_per_sample=rows_per_sample,
+        seq_len=spec.seq_len,
     )
 
 
@@ -214,12 +174,16 @@ def train_valid_test_datasets_provider(
             f"where its own arguments say {args.data_parallel_size}; the "
             "token slice and the recorded mesh would disagree"
         )
+    spec = DataSpec(
+        dataset=DATASET,
+        # One TorchTitan row, because --seq-length is the packed sample.
+        seq_len=args.bench_seq_len,
+        local_batch_size=args.bench_local_batch_size,
+        steps=args.train_iters,
+    )
     return (
         build_iterator(
-            # One TorchTitan row, because --seq-length is the packed sample.
-            seq_len=args.bench_seq_len,
-            steps=args.train_iters,
-            local_batch_size=args.bench_local_batch_size,
+            spec,
             rows_per_sample=args.bench_rows_per_sample,
             dp_rank=mpu.get_data_parallel_rank(),
             dp_world_size=mpu.get_data_parallel_world_size(),

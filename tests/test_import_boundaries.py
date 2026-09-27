@@ -156,6 +156,8 @@ PARENT_SIDE_MODULES = (
     # process before its config_registry, so its ``__init__.py`` and every
     # parent package's ``__init__.py`` hold a docstring alone.
     "benchmarks.e2e.engines.torchtitan.plugins",
+    # The data package. Its ``__init__.py`` holds a docstring alone.
+    "benchmarks.e2e.data",
 )
 
 # Modules that import the ML stack at module scope. This is correct and
@@ -165,6 +167,8 @@ WORKER_SIDE_MODULES = (
     "benchmarks.e2e.engines.torchtitan.plugins.config_registry",
     "benchmarks.e2e.engines.torchtitan.plugins.parallelize",
     "benchmarks.e2e.engines.torchtitan.plugins.replay",
+    # The shared c4_test stream. Each engine's loader materializes it in the training process.
+    "benchmarks.e2e.data.c4_replay",
     "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu",
     "benchmarks.models.piper_qwen3.components.lm_head.losses",
     "benchmarks.models.piper_qwen3.components.lm_head.te_cross_entropy",

@@ -976,7 +976,7 @@ class TypingOverrideShimTest(unittest.TestCase):
 
 
 def synthetic_samples(count, seq_len, document_lengths):
-    """``(input, positions, label)`` triples with known document splits.
+    """Samples of the shared stream's form, with known document splits.
 
     ``document_lengths`` is one list per sample, and each must sum to
     ``seq_len``.
@@ -993,7 +993,7 @@ def synthetic_samples(count, seq_len, document_lengths):
             index * seq_len, (index + 1) * seq_len, dtype=torch.int64
         )
         labels = tokens + 1
-        samples.append((tokens, positions, labels))
+        samples.append(({"input": tokens, "positions": positions}, labels))
     return samples
 
 
@@ -1095,7 +1095,7 @@ class MicrobatchContractTest(unittest.TestCase):
             tokens = next(self.iterator)["tokens"][0]
             expected = torch.cat(
                 [
-                    self.samples[self.rows * index + row][0]
+                    self.samples[self.rows * index + row][0]["input"]
                     for row in range(self.rows)
                 ]
             )
