@@ -1098,8 +1098,7 @@ class BenchmarksNameShadowingTest(unittest.TestCase):
     """Guards a name collision that is invisible until it silently isn't.
 
     The **training** subprocess -- and only that one -- is exposed. It runs
-    with ``cwd=third_party/torchtitan`` (``benchmarks/e2e/runner.py``, the
-    ``process_runner(..., cwd=paths.titan_dir)`` call) and
+    with ``cwd=third_party/torchtitan`` (each engine's ``Launch.cwd``) and
     ``PYTHONPATH=<repo root>`` (``benchmarks/execution/environment.py``,
     ``runtime_environment``; the root itself is ``BENCH_DIR``, in
     ``benchmarks/execution/paths.py``). ``python -m`` puts the cwd at

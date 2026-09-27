@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 
 from benchmarks.e2e.engines.api import Launch
@@ -49,6 +50,8 @@ class LaunchedCommand:
     """The whole child environment."""
     cpu_pinning: str
     """The pinning prefix, the host's reason for no prefix, or ``PINNING_DECLINED``."""
+    cwd: Path | None
+    """The working directory of the processes; ``None`` keeps the working directory of the harness."""
 
 
 def torchrun_flags(world_size: int) -> tuple[str, ...]:
@@ -127,7 +130,7 @@ def build_command(
     pinning: CpuPinning,
     base_env: Mapping[str, str],
 ) -> LaunchedCommand:
-    """The command line and the child environment of one launch."""
+    """The command line, the child environment and the working directory of one launch."""
     argv = command_line(launch, world_size=world_size, pinning=pinning)
     inherited = {
         key: value for key, value in base_env.items() if key not in LAUNCHER_KEYS
@@ -138,4 +141,5 @@ def build_command(
             {**inherited, **environment_delta(launch, world_size=world_size, gpu=gpu)}
         ),
         cpu_pinning=pinning_record(launch, pinning),
+        cwd=launch.cwd,
     )

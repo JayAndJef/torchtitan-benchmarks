@@ -433,7 +433,7 @@ def execute_run(
                 log.flush()
                 completed = process_runner(
                     list(launched.argv),
-                    cwd=resolved.paths.titan_dir,
+                    cwd=launched.cwd,
                     env=dict(launched.env),
                     stdout=log,
                     stderr=subprocess.STDOUT,

@@ -24,6 +24,7 @@ from benchmarks.e2e.engines.torchtitan.mesh import SCHEDULES, execution_model
 from benchmarks.e2e.engines.torchtitan.evidence import read_evidence
 from benchmarks.e2e.engines.torchtitan.steps import read_steps
 from benchmarks.e2e.engines.torchtitan.validate import validate_outputs
+from benchmarks.execution.paths import TITAN_DIR
 
 
 ZERO2_AT_PP1 = (
@@ -71,6 +72,8 @@ class TorchTitanEngine(Engine):
             processes="per_rank",
             pin=True,
             host_compiler=arm.config.requires_gcc_toolset,
+            # The trainer reads its tokenizer from a path relative to the fork checkout.
+            cwd=TITAN_DIR,
         )
 
     def execution_model(self, run: RunSpec, arm: Arm) -> str:

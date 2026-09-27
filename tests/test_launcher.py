@@ -14,6 +14,7 @@ from benchmarks.e2e.engines.megatron_stock.engine import MegatronStockEngine
 from benchmarks.e2e.engines.registry import ENGINES
 from benchmarks.e2e.registry import ENGINES as ENGINES_SCENARIO
 from benchmarks.execution.affinity import CpuPinning
+from benchmarks.execution.paths import TITAN_DIR
 from benchmarks.execution.launcher import (
     LAUNCHER_KEYS,
     LOG_RANK_TEMPLATE,
@@ -169,6 +170,13 @@ class LaunchRecordTests(unittest.TestCase):
                 self.assertEqual(launch.processes, "per_rank")
                 self.assertTrue(launch.pin)
                 self.assertFalse(set(launch.env) & LAUNCHER_KEYS)
+                self.assertEqual(launch.cwd, TITAN_DIR)
+
+    def test_the_command_keeps_the_working_directory_of_the_launch(self) -> None:
+        for cwd in (None, Path("/tmp/work")):
+            with self.subTest(cwd=cwd):
+                launch = Launch(target=TARGET, processes="single", pin=False, cwd=cwd)
+                self.assertEqual(_build(launch).cwd, cwd)
 
 
 class RunnerRefusalTests(unittest.TestCase):
