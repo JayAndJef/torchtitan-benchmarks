@@ -235,7 +235,7 @@ WORKER_SIDE_DEFERRED_MODULES = (
     # The log lines that the driver prints. The parent validation states
     # each line again, and a test pins the two.
     "benchmarks.e2e.engines.megatron_stock.driver.markers",
-    # The step line and its training_log shim. Deferred: every torch and
+    # The step record shim of training_log. Deferred: every torch and
     # megatron import sits inside a function, as the driver's do.
     "benchmarks.e2e.engines.megatron_stock.driver.step_log",
     # The data-parallel line, from the wrapper Megatron built. Deferred
