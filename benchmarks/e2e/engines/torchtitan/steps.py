@@ -28,6 +28,10 @@ STEP_LINE = re.compile(
 """The fields of the step line, from ``step:`` to the end of the line."""
 
 STEP_NUMBER = re.compile(r"step:\s*(\d+)")
+"""The step of a step line; the marker holds its first digit."""
+
+LEADING_PREFIX = re.compile(rf"^{RANK_PREFIX}")
+"""The rank prefix that a log of one rank keeps at the start of each line."""
 
 NO_LOSS = -1.0
 """The loss that the fork logs on a pipeline rank that holds no loss."""
@@ -59,17 +63,17 @@ def read_steps(rank: int, text: str) -> StepRead:
         marker = STEP_MARKER.search(plain)
         if marker is None:
             continue
+        lead = LEADING_PREFIX.match(plain)
+        if holds_rank_prefix(plain[lead.end() if lead else 0 : marker.start()]):
+            # The step line belongs to a line that a torn write appended.
+            continue
         match = STEP_LINE.fullmatch(plain, marker.start())
         fields = plain[marker.start() :]
         if match is not None:
             samples.append(_step_sample(rank, match))
         elif holds_rank_prefix(fields):
-            step = STEP_NUMBER.match(fields)
-            dropped.append(
-                DroppedLine(
-                    rank=rank, line=number, step=int(step.group(1)) if step else None
-                )
-            )
+            step = int(STEP_NUMBER.match(fields).group(1))
+            dropped.append(DroppedLine(rank=rank, line=number, step=step))
         else:
             raise ValueError(
                 f"rank {rank} logs a TorchTitan step line that does not parse: "

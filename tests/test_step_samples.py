@@ -2,12 +2,14 @@
 
 import json
 import math
+import re
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.artifacts.layout import logs_by_rank
 from benchmarks.e2e.engines.api import DroppedLine, StepRead, StepSample
 from benchmarks.e2e.engines.megatron_stock import steps as megatron_steps
 from benchmarks.e2e.engines.registry import engine_named
@@ -77,6 +79,12 @@ class TorchTitanStepLineTests(unittest.TestCase):
         self.assertEqual([sample.step for sample in read.samples], [1, 3])
         self.assertEqual(read.dropped, (DroppedLine(rank=0, line=2, step=2),))
 
+    def test_a_step_line_in_an_appended_line_is_not_this_rank_step(self) -> None:
+        text = "[rank0]:INFO starting [rank1]:" + titan_step_line(5)
+        self.assertEqual(titan_steps.read_steps(0, text), StepRead(samples=()))
+        cut = "[rank0]:INFO starting [rank1]:step: 5  loss[rank2]:x\n"
+        self.assertEqual(titan_steps.read_steps(0, cut), StepRead(samples=()))
+
     def test_a_cut_step_line_raises(self) -> None:
         cut = titan_step_line(2)[:-40] + "\n"
         with self.assertRaisesRegex(ValueError, "rank 4 logs a TorchTitan step line"):
@@ -145,6 +153,10 @@ class MegatronStepRecordTests(unittest.TestCase):
         self.assertEqual([sample.step for sample in read.samples], [7])
         self.assertEqual(read.dropped, (DroppedLine(rank=1, line=1, step=7),))
 
+    def test_a_record_cut_before_its_step_drops_with_no_step(self) -> None:
+        read = megatron_steps.read_steps(0, megatron_steps.STEP_PREFIX + '{"st[rank2]:x')
+        self.assertEqual(read.dropped, (DroppedLine(rank=0, line=1, step=None),))
+
     def test_a_malformed_record_raises(self) -> None:
         line = megatron_steps.step_record(**RECORD_FIELDS)
         record = json.loads(line[len(megatron_steps.STEP_PREFIX) :])
@@ -209,10 +221,16 @@ class MegatronTextLineTests(unittest.TestCase):
             megatron_steps.read_steps(0, self.LINE[:-20])
 
 
-class GoldenStepLineTests(unittest.TestCase):
-    """Every step line of the stored run directories reads as one sample."""
+BASELINE_STEP_LINE = re.compile(
+    r"step:\s*(\d+).*?memory:\s*([0-9.]+)GiB.*?tps:\s*([0-9,]+)"
+)
+"""The step-line pattern of the baseline evaluation, before the engine readers."""
 
-    def test_each_golden_log_reads_every_step_line(self) -> None:
+
+class GoldenStepLineTests(unittest.TestCase):
+    """Each rank of the stored run directories reads the step lines that the baseline pattern read."""
+
+    def test_each_golden_rank_reads_every_step_line(self) -> None:
         engines = {
             "megatron_stock": engine_named("megatron_stock"),
             "titan_compiled": engine_named("torchtitan"),
@@ -221,19 +239,20 @@ class GoldenStepLineTests(unittest.TestCase):
         logs = sorted(GOLDEN_RUNS.glob("*/*.log"))
         self.assertEqual(len(logs), 10)
         for log in logs:
-            with self.subTest(log=f"{log.parent.name}/{log.name}"):
-                text = log.read_text(errors="replace")
-                samples = engines[log.stem].read_steps(0, text).samples
-                self.assertEqual(len(samples), text.count("tps: ") - _torn(text))
-
-
-def _torn(text: str) -> int:
-    """The step lines that a torn write put inside another line."""
-    return sum(
-        line.count("tps: ") - 1
-        for line in text.splitlines()
-        if line.count("tps: ") > 1
-    )
+            by_rank = logs_by_rank(log.read_text(errors="replace"))
+            for rank, text in by_rank.items():
+                with self.subTest(log=f"{log.parent.name}/{log.name}", rank=rank):
+                    read = engines[log.stem].read_steps(rank, text)
+                    baseline = [
+                        (int(match.group(1)), int(match.group(3).replace(",", "")))
+                        for line in text.splitlines()
+                        if (match := BASELINE_STEP_LINE.search(line))
+                    ]
+                    self.assertEqual(read.dropped, ())
+                    self.assertEqual(
+                        [(sample.step, sample.tokens_per_second) for sample in read.samples],
+                        baseline,
+                    )
 
 
 if __name__ == "__main__":

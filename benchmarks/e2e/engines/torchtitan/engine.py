@@ -12,7 +12,7 @@ from benchmarks.e2e.engines.api import (
     Launch,
     RankEvidence,
     RunSpec,
-    StepSample,
+    StepRead,
 )
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.flags import (
@@ -83,7 +83,7 @@ class TorchTitanEngine(Engine):
         spec = run.parallelism
         return [ZERO2_AT_PP1] if spec.zero == 1 and spec.pp == 1 else []
 
-    def read_steps(self, rank: int, text: str) -> list[StepSample]:
+    def read_steps(self, rank: int, text: str) -> StepRead:
         return read_steps(rank, text)
 
     def read_evidence(self, rank: int, text: str) -> RankEvidence:

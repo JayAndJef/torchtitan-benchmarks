@@ -120,7 +120,7 @@ def _log_line(text: str, rank: int, line: int) -> int:
     """The line number in the whole log of line ``line`` of the rank's text, as ``logs_by_rank`` splits it."""
     lines = text.replace("\x00", "").splitlines()
     prefixed = [
-        (number, int(match.group()[len("[rank") : -len("]:")]))
+        (number, int(re.search(r"\d+", match.group()).group()))
         for number, content in enumerate(lines, start=1)
         if (match := RANK_LINE.match(content))
     ]
@@ -139,8 +139,8 @@ def dropped_line_warnings(
     text = log_path.read_text(errors="replace")
     return [
         f"{arm}: rank {line.rank} step "
-        f"{'unknown' if line.step is None else line.step}: another rank's "
-        f"output cut the step line at line {_log_line(text, line.rank, line.line)} "
+        f"{'unknown' if line.step is None else line.step}: a rank prefix "
+        f"cut the step line at line {_log_line(text, line.rank, line.line)} "
         f"of {log_path.name}, so the evaluation drops that step"
         for line in dropped
     ]

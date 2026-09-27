@@ -391,10 +391,10 @@ alone.
 - The stock Megatron driver prints one JSON step record per rank and step,
   after the prefix `bench-step: `. The reader also reads the text step line
   that the stored run directories hold.
-- Every rank writes to one log, so a torn write can put the prefix and the
-  line of one rank inside a step line of another rank.
+- Every rank writes to one log, so a torn write can put a rank prefix and
+  its line inside a step line.
 - When the step line is whole before the prefix, the reader reads it and
-  drops the appended line. That step of the other rank is then absent.
+  drops the appended line. A step line in the appended line is then absent.
 - When the prefix cuts the step line, the reader drops the step line.
   `results.json` records a warning that names the arm, the rank, the step and
   the line of the log. Validation does not fail on a dropped line.

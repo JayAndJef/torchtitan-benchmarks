@@ -33,12 +33,19 @@ from benchmarks.e2e.engines.megatron_stock.driver.step_log import (  # noqa: E40
     tokens_per_second,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec  # noqa: E402
-from benchmarks.e2e.engines.api import Arm, CompileMode, RunSpec  # noqa: E402
+from benchmarks.e2e.engines.api import (  # noqa: E402
+    Arm,
+    CompileMode,
+    DroppedLine,
+    RunSpec,
+    StepRead,
+)
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig  # noqa: E402
 from benchmarks.e2e.registry import SCENARIOS, SEED  # noqa: E402
 from benchmarks.models.piper_qwen3.shape import PIPER_1B  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     arm_steps,
+    dropped_line_warnings,
     evaluate_run,
     pinning_warnings,
     loss_visible_rank,
@@ -531,11 +538,23 @@ class TornStepLineTests(unittest.TestCase):
             )
             result = evaluate_run(out_dir)
         self.assertIn(
-            "baseline: rank 1 step 3: another rank's output cut the step line "
+            "baseline: rank 1 step 3: a rank prefix cut the step line "
             "at line 4 of baseline.log, so the evaluation drops that step",
             result.warnings,
         )
         self.assertEqual(result.results["baseline"].per_rank[1].stable_sample_count, 2)
+
+    def test_a_step_that_the_cut_removed_reads_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "megatron_stock.log"
+            log.write_text("a\nb\n")
+            read = StepRead(samples=(), dropped=(DroppedLine(rank=0, line=2, step=None),))
+            (warning,) = dropped_line_warnings("megatron_stock", log, {0: read})
+        self.assertEqual(
+            warning,
+            "megatron_stock: rank 0 step unknown: a rank prefix cut the step "
+            "line at line 2 of megatron_stock.log, so the evaluation drops that step",
+        )
 
     def test_the_log_line_of_a_one_rank_log_is_its_own(self) -> None:
         cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"

@@ -23,11 +23,6 @@ LOG_RANK_TEMPLATE = "[rank${rank}]:"
 RANK_PREFIX = r"\[rank\d+\]:"
 """The regular expression of that prefix; a torn write can put one inside the line of another rank."""
 
-
-def holds_rank_prefix(text: str) -> bool:
-    """Whether ``text`` holds a rank prefix."""
-    return re.search(RANK_PREFIX, text) is not None
-
 ALLOCATOR_POLICY = "expandable_segments:True"
 """The CUDA allocator policy of every training process."""
 
@@ -45,6 +40,11 @@ LAUNCHER_KEYS = frozenset(
 
 PINNING_DECLINED = "declined by engine"
 """The pinning record of a launch whose engine refuses the CPU pinning prefix."""
+
+
+def holds_rank_prefix(text: str) -> bool:
+    """Whether ``text`` holds a rank prefix."""
+    return re.search(RANK_PREFIX, text) is not None
 
 
 @dataclass(frozen=True)
