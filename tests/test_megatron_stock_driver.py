@@ -1,7 +1,7 @@
 """The stock Megatron-LM driver package, checked without a GPU.
 
 Every test here runs on the CPU. The module imports torch, because
-``benchmarks/e2e/megatron_stock/data.py`` and ``profiling.py`` do, but it
+``benchmarks/e2e/engines/megatron_stock/driver/data.py`` and ``profiling.py`` do, but it
 allocates nothing on a device and it starts no training.
 
 The tests are grouped by the file they guard, and each group names the one
@@ -44,17 +44,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch  # noqa: E402
 
-from benchmarks.e2e.megatron_stock import (  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock import flags  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.driver import (  # noqa: E402
     bootstrap,
     data,
     dp_marker,
-    flags,
     markers,
     profiling,
     step_log,
     train,
 )
-from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.flags import (  # noqa: E402
     ALWAYS_OMITTED_FLAGS,
     BENCH_ARM_DIR,
     BENCH_BATCH_P2P_SYNC,
@@ -934,7 +934,7 @@ class TypingOverrideShimTest(unittest.TestCase):
             "import typing, sys;"
             "before = hasattr(typing, 'override');"
             "sys.path.insert(0, %r);"
-            "from benchmarks.e2e.megatron_stock import bootstrap;"
+            "from benchmarks.e2e.engines.megatron_stock.driver import bootstrap;"
             "added = bootstrap.install_typing_override();"
             "print(before, added, callable(typing.override))"
             % str(Path(__file__).resolve().parent.parent)
@@ -1612,7 +1612,7 @@ class MarkerStringTest(unittest.TestCase):
 
         A one-character difference fails a real run at arm rule 12.
         """
-        from benchmarks.e2e.validation import (
+        from benchmarks.e2e.engines.megatron_stock.validate import (
             _megatron_stock_parallelism_markers,
             _megatron_stock_precision_markers,
         )
@@ -2420,7 +2420,7 @@ class DataParallelMarkerTest(unittest.TestCase):
 
         This needs no megatron, because it reads the function alone.
         """
-        from benchmarks.e2e.megatron_stock.flags import (
+        from benchmarks.e2e.engines.megatron_stock.flags import (
             data_parallel_optimizer,
         )
 
@@ -2482,7 +2482,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         the wrapper at ``DistributedDataParallel``. So the two values share
         a wrapper name, and only the optimizer class tells them apart.
         """
-        from benchmarks.e2e.megatron_stock.flags import (
+        from benchmarks.e2e.engines.megatron_stock.flags import (
             DATA_PARALLEL_OPTIMIZERS,
             DATA_PARALLEL_WRAPPERS,
         )
@@ -2563,12 +2563,12 @@ class DataParallelMarkerTest(unittest.TestCase):
         ``ChainedOptimizer(optimizers)``, and this suite takes no other
         path.
         """
-        from benchmarks.e2e.megatron_stock.flags import (
+        from benchmarks.e2e.engines.megatron_stock.flags import (
             CHAINED_OPTIMIZER,
             DATA_PARALLEL_OPTIMIZERS,
             grad_reduce_in_fp32,
         )
-        from benchmarks.e2e.validation import (
+        from benchmarks.e2e.engines.megatron_stock.validate import (
             _megatron_stock_parallelism_markers,
             _megatron_stock_precision_markers,
         )
@@ -2866,7 +2866,7 @@ class ModelBuilderTest(unittest.TestCase):
         import importlib
 
         builder_cls, config_cls = self.megatron_symbols()
-        from benchmarks.e2e.megatron_stock import model_builder
+        from benchmarks.e2e.engines.megatron_stock.driver import model_builder
 
         module_path, _, class_name = (
             model_builder.BenchGPTModelConfig.builder.rpartition(".")

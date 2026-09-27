@@ -57,7 +57,7 @@ from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.megatron_stock.flags import (
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_PRECISION_MODES,
     MEGATRON_P2P_SYNC_MODES,

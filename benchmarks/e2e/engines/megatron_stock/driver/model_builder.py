@@ -42,7 +42,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.training import get_args
 from megatron.training.models.gpt import GPTModelBuilder, GPTModelConfig
 
-from benchmarks.e2e.megatron_stock.markers import (
+from benchmarks.e2e.engines.megatron_stock.driver.markers import (
     MODEL_SIZE_LINE,
     STAGE_SIZE_LINE,
 )
@@ -58,7 +58,7 @@ class BenchGPTModelConfig(GPTModelConfig):
     """
 
     builder: ClassVar[str] = (
-        "benchmarks.e2e.megatron_stock.model_builder.CountingGPTModelBuilder"
+        "benchmarks.e2e.engines.megatron_stock.driver.model_builder.CountingGPTModelBuilder"
     )
 
 

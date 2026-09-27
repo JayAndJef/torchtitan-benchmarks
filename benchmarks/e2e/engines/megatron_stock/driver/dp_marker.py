@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from benchmarks.e2e.megatron_stock.flags import NO_SHARD_STRATEGY
-from benchmarks.e2e.megatron_stock.markers import DATA_PARALLEL_LINE
+from benchmarks.e2e.engines.megatron_stock.flags import NO_SHARD_STRATEGY
+from benchmarks.e2e.engines.megatron_stock.driver.markers import DATA_PARALLEL_LINE
 
 
 CHAINED_OPTIMIZERS_ATTRIBUTE = "chained_optimizers"

@@ -37,7 +37,7 @@ from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.engine import MegatronStockEngine
 from benchmarks.e2e.engines.registry import ENGINES as ENGINE_RECORDS, engine_for
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
-from benchmarks.e2e.launch import (
+from benchmarks.e2e.engines.megatron_stock.engine import (
     STOCK_MEGATRON_DRIVER_MODULE,
     STOCK_MEGATRON_PP_SCHEDULE,
 )
@@ -49,7 +49,7 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.runner import _resolve_run
-from benchmarks.e2e.validation import (
+from benchmarks.e2e.engines.megatron_stock.validate import (
     MEGATRON_STOCK_PROFILE,
     _megatron_stock_nan_guard_markers,
     _megatron_stock_p2p_markers,
@@ -62,12 +62,10 @@ from benchmarks.models.piper_qwen3.shape import shape_by_name
 from tests.engine_helpers import command, configured, run_spec
 
 SCENARIO_NAME = "engines"
-STOCK_PACKAGE = "benchmarks.e2e.megatron_stock"
+STOCK_PACKAGE = "benchmarks.e2e.engines.megatron_stock"
 STOCK_FLAGS_MODULE = f"{STOCK_PACKAGE}.flags"
-# The driver itself, which prints the marker strings. It is a separate
-# gate from the flag module, because the package lands in more than one
-# commit and the flag module comes first.
-STOCK_DRIVER_MODULE = f"{STOCK_PACKAGE}.train"
+# The driver, which prints the marker strings.
+STOCK_DRIVER_MODULE = f"{STOCK_PACKAGE}.driver.train"
 
 # The mesh of the run matrix: two pipelines of four stages, eight GPUs.
 MESH = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", pp_microbatch_size=4)
@@ -420,7 +418,7 @@ class StockArgvTests(unittest.TestCase):
     """The stock argv, frozen as launcher plus module plus the flag list.
 
     The argv is not written out as one flat golden list, because every flag
-    in it belongs to ``benchmarks/e2e/megatron_stock/flags.py``, and that
+    in it belongs to ``benchmarks/e2e/engines/megatron_stock/flags.py``, and that
     module freezes its own output. What is frozen here is the composition:
     the launcher prefix, the ``python -m`` target, and then exactly what
     ``stock_megatron_flags`` returns for the same three values. A token
@@ -436,7 +434,7 @@ class StockArgvTests(unittest.TestCase):
         megatron_nan_guard="off",
         megatron_precision="stock",
     ):
-        from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
+        from benchmarks.e2e.engines.megatron_stock.flags import stock_megatron_flags
 
         data = scenario_by_name(SCENARIO_NAME).data
         if local_batch_size is not None:
@@ -1114,7 +1112,7 @@ STOCK_MESH_CASES = (
 
 
 def _geometry(data, spec):
-    from benchmarks.e2e.megatron_stock.flags import microbatch_geometry
+    from benchmarks.e2e.engines.megatron_stock.flags import microbatch_geometry
 
     return microbatch_geometry(data, spec)
 
@@ -1138,8 +1136,8 @@ def _driver_data_parallel_line(
     registered shape is a mixture of experts. ``grad_reduce_in_fp32``
     follows ``--megatron-precision``, and neither value is written here.
     """
-    from benchmarks.e2e.megatron_stock import markers
-    from benchmarks.e2e.megatron_stock.flags import (
+    from benchmarks.e2e.engines.megatron_stock.driver import markers
+    from benchmarks.e2e.engines.megatron_stock.flags import (
         DATA_PARALLEL_WRAPPERS,
         SHARDING_STRATEGIES,
         data_parallel_optimizer,
@@ -1160,7 +1158,7 @@ def _driver_data_parallel_line(
 
 def _driver_lines() -> list[str]:
     """Every line the driver prints that a marker fragment can live in."""
-    from benchmarks.e2e.megatron_stock import markers
+    from benchmarks.e2e.engines.megatron_stock.driver import markers
 
     spec = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B")
     return [
@@ -1258,7 +1256,7 @@ class StockMarkerContractTests(unittest.TestCase):
         ``parallelism_lines``, which is the function a real run calls, so
         this compares the two strings and not two descriptions of them.
         """
-        from benchmarks.e2e.megatron_stock import markers
+        from benchmarks.e2e.engines.megatron_stock.driver import markers
 
         profile = self.profile
         for spec, batch in STOCK_MESH_CASES:
@@ -1299,7 +1297,7 @@ class StockMarkerContractTests(unittest.TestCase):
         strategy is one Megatron overlaps. ``data_parallel_overlap`` gives
         the expected value.
         """
-        from benchmarks.e2e.megatron_stock import markers
+        from benchmarks.e2e.engines.megatron_stock.driver import markers
 
         for spec, batch in STOCK_MESH_CASES:
             if spec.dp == 1:
@@ -1327,7 +1325,7 @@ class StockMarkerContractTests(unittest.TestCase):
         overlap_p2p_comm`` and forces the overlap off for the
         non-interleaved schedule.
         """
-        from benchmarks.e2e.megatron_stock import markers
+        from benchmarks.e2e.engines.megatron_stock.driver import markers
 
         for value, sync in (("on", True), ("off", False)):
             with self.subTest(value=value):
@@ -1352,7 +1350,7 @@ class StockMarkerContractTests(unittest.TestCase):
         The driver formats Megatron's own bool, so the two tokens are
         ``True`` and ``False``.
         """
-        from benchmarks.e2e.megatron_stock import markers
+        from benchmarks.e2e.engines.megatron_stock.driver import markers
 
         for value, parsed in (("on", True), ("off", False)):
             with self.subTest(value=value):
@@ -1372,7 +1370,7 @@ class StockMarkerContractTests(unittest.TestCase):
         self,
     ) -> None:
         """The first precision marker is the prefix up to the bracket."""
-        from benchmarks.e2e.megatron_stock import markers
+        from benchmarks.e2e.engines.megatron_stock.driver import markers
 
         printed = markers.MODE_LINE.format(
             mode="default",
@@ -1397,7 +1395,7 @@ class StockMarkerContractTests(unittest.TestCase):
         so a run that lost the wrapper shim would pass the rule the shim
         exists to enforce.
         """
-        from benchmarks.e2e.megatron_stock import markers
+        from benchmarks.e2e.engines.megatron_stock.driver import markers
 
         spec = ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B")
         printed = markers.parallelism_lines(_StockArgs(spec), microbatches=8)
@@ -1421,7 +1419,7 @@ class StockMarkerContractTests(unittest.TestCase):
         assert spec is not None and spec.submodule_search_locations
         root = Path(list(spec.submodule_search_locations)[0])
         return "\n".join(
-            path.read_text() for path in sorted(root.glob("*.py"))
+            path.read_text() for path in sorted(root.rglob("*.py"))
         )
 
 

@@ -30,7 +30,7 @@ from benchmarks.e2e.parallelism import PP_SCHEDULES, ParallelismSpec
 from benchmarks.e2e.registry import SCENARIOS
 from benchmarks.e2e.engines.torchtitan.flags import TRAIN_MODULE, trainer_args
 from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
-from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
+from benchmarks.e2e.engines.megatron_stock.validate import MEGATRON_STOCK_PROFILE
 from tests.engine_helpers import run_spec
 
 

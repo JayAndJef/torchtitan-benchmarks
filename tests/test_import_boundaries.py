@@ -79,7 +79,6 @@ PARENT_SIDE_MODULES = (
     # registry is: it declares degrees, schedules and the rules that refuse
     # an illegal set, and it resolves none of them against a device.
     "benchmarks.e2e.parallelism",
-    "benchmarks.e2e.launch",
     # The passthrough tables. Parent-side: the refusal runs before launch.
     "benchmarks.e2e.passthrough",
     # The engines' parent side: the records, the configs, the engines and
@@ -93,13 +92,10 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.engines.torchtitan.validate",
     "benchmarks.e2e.engines.megatron_stock.config",
     "benchmarks.e2e.engines.megatron_stock.engine",
-    # The stock Megatron-LM command line, as data. ``launch.py``
-    # imports it to build one arm's argv, so it runs in the parent
-    # and must stay as torch-free as the shape registry it reads.
-    "benchmarks.e2e.megatron_stock.flags",
-    # The stock arm's log-line contract. Parent-side: the validator and
-    # its tests read these strings on a host with no Megatron-LM.
-    "benchmarks.e2e.megatron_stock.markers",
+    "benchmarks.e2e.engines.megatron_stock.validate",
+    # The stock Megatron-LM command line, as data. The engine builds one
+    # arm's argv from it in the parent, so it stays torch-free.
+    "benchmarks.e2e.engines.megatron_stock.flags",
     "benchmarks.e2e.runner",
     "benchmarks.e2e.results",
     "benchmarks.e2e.validation",
@@ -171,14 +167,14 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.megatron_weights",
     # The TorchTitan model config for a shape, and the in-process titan build.
     "benchmarks.models.piper_qwen3.titan_model",
-    "benchmarks.e2e.megatron_stock.data",
-    "benchmarks.e2e.megatron_stock.profiling",
+    "benchmarks.e2e.engines.megatron_stock.driver.data",
+    "benchmarks.e2e.engines.megatron_stock.driver.profiling",
     # The counting GPT builder. Megatron's own
     # ``ModelConfig.get_builder_cls`` imports it by dotted path,
     # inside the training process and after ``bootstrap.prepare()``
     # has put Megatron-LM on ``sys.path``, so a module-scope megatron
     # import is correct here.
-    "benchmarks.e2e.megatron_stock.model_builder",
+    "benchmarks.e2e.engines.megatron_stock.driver.model_builder",
     "benchmarks.kernel.operations.attention_core",
     "benchmarks.kernel.operations.attn_out_proj",
     "benchmarks.kernel.operations.attn_residual",
@@ -208,7 +204,7 @@ WORKER_SIDE_MODULES = (
 # module scope, because each defers its heavy imports into a function body.
 # That deferral is load-bearing rather than stylistic:
 #
-# * ``e2e.megatron_stock.train`` is a ``python -m`` entry point, so ``--help``
+# * ``megatron_stock.driver.train`` is a ``python -m`` entry point, so ``--help``
 #   must not pay for torch, exactly as ``kernel.worker`` does not; and
 # * ``models.piper_qwen3.megatron_model`` *cannot* import Megatron at module
 #   scope, because ``megatron_bootstrap`` has to put Megatron on ``sys.path``
@@ -221,17 +217,20 @@ WORKER_SIDE_MODULES = (
 # dynamic ML-free probe that the parent-side modules get -- the deferral is
 # the property worth locking.
 WORKER_SIDE_DEFERRED_MODULES = (
+    # The log lines that the driver prints. The parent validation states
+    # each line again, and a test pins the two.
+    "benchmarks.e2e.engines.megatron_stock.driver.markers",
     # The step line and its training_log shim. Deferred: every torch and
     # megatron import sits inside a function, as the driver's do.
-    "benchmarks.e2e.megatron_stock.step_log",
+    "benchmarks.e2e.engines.megatron_stock.driver.step_log",
     # The data-parallel line, from the wrapper Megatron built. Deferred
     # for the same reason as the step log.
-    "benchmarks.e2e.megatron_stock.dp_marker",
-    "benchmarks.e2e.megatron_stock.train",
+    "benchmarks.e2e.engines.megatron_stock.driver.dp_marker",
+    "benchmarks.e2e.engines.megatron_stock.driver.train",
     # The typing shim and the Megatron path setup. It runs in the
     # worker, it imports no ML stack, and it *cannot*: it is what
     # makes megatron importable at all on this interpreter.
-    "benchmarks.e2e.megatron_stock.bootstrap",
+    "benchmarks.e2e.engines.megatron_stock.driver.bootstrap",
     "benchmarks.models.piper_qwen3.megatron_model",
 )
 

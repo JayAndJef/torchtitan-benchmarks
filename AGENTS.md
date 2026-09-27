@@ -78,8 +78,8 @@ shares one pre-push hook.
 | path | contents |
 |---|---|
 | `benchmarks/cli/` | The Click CLI: `benchmarks/cli/e2e.py`, `benchmarks/cli/kernel.py`, and the group in `benchmarks/cli/main.py`. |
-| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/launch.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines/`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
-| `benchmarks/e2e/megatron_stock/` | The stock Megatron-LM driver and its command line. |
+| `benchmarks/e2e/` | The end-to-end system: `benchmarks/e2e/schema.py`, `benchmarks/e2e/axes.py`, `benchmarks/e2e/registry.py`, `benchmarks/e2e/parallelism.py`, `benchmarks/e2e/validation.py`, `benchmarks/e2e/engines/`, `benchmarks/e2e/runner.py`, `benchmarks/e2e/results.py`. |
+| `benchmarks/e2e/engines/megatron_stock/` | The stock Megatron-LM engine: its command line, its validation and, in `benchmarks/e2e/engines/megatron_stock/driver/`, the driver. |
 | `benchmarks/e2e/engines/torchtitan/plugins/` | The modules the TorchTitan trainer imports through `--module`: the config registry, the parallelize function and the pre-tokenized replay dataloader. |
 | `benchmarks/artifacts/` | `manifest.json`, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
@@ -179,7 +179,7 @@ harness flags, and both parsers keep the last value of a repeated flag.
 
 Each engine holds three flag tables. The TorchTitan tables are in
 `benchmarks/e2e/engines/torchtitan/flags.py`, and the Megatron tables are
-in `benchmarks/e2e/passthrough.py`. The owned table maps each harness
+in `benchmarks/e2e/engines/megatron_stock/flags.py`. The owned table maps each harness
 option to the flags it sets. The pinned table holds the flags that keep the
 two engines on the same work: the optimizer, the routing, the data, the step
 lines and the timed steps. The perf table holds the flags a passthrough may
@@ -393,20 +393,20 @@ not lift `MAX_PP` instead.
 
 ## 7. The stock Megatron arm
 
-`benchmarks/e2e/megatron_stock/` holds everything about Megatron. The
+`benchmarks/e2e/engines/megatron_stock/` holds everything about Megatron. The
 harness connects through the arm's `engine` name alone.
 
 | module | job |
 |---|---|
-| `benchmarks/e2e/megatron_stock/bootstrap.py` | Sets the process environment the driver needs before torch, adds `typing.override` for Python 3.10, then puts Megatron on `sys.path`. |
-| `benchmarks/e2e/megatron_stock/flags.py` | The whole Megatron command line, as data, plus the harness parser and the run refusals. Torch-free, so a CPU test reads it. |
-| `benchmarks/e2e/megatron_stock/markers.py` | The log lines this arm prints, and the functions that format one. |
-| `benchmarks/e2e/megatron_stock/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
-| `benchmarks/e2e/megatron_stock/model_builder.py` | Builds the stock GPT model and prints the parameter count rule 11 reads. |
-| `benchmarks/e2e/megatron_stock/dp_marker.py` | The data-parallel line, printed from the wrapper Megatron really built. |
-| `benchmarks/e2e/megatron_stock/step_log.py` | The step line the evaluation parses, and the shim that prints it. |
-| `benchmarks/e2e/megatron_stock/profiling.py` | Gives Megatron the profiler schedule and the trace path the harness reads. |
-| `benchmarks/e2e/megatron_stock/train.py` | Reproduces the stock training entry point and calls `pretrain`. |
+| `benchmarks/e2e/engines/megatron_stock/driver/bootstrap.py` | Sets the process environment the driver needs before torch, adds `typing.override` for Python 3.10, then puts Megatron on `sys.path`. |
+| `benchmarks/e2e/engines/megatron_stock/flags.py` | The whole Megatron command line, as data, plus the harness parser and the run refusals. Torch-free, so a CPU test reads it. |
+| `benchmarks/e2e/engines/megatron_stock/driver/markers.py` | The log lines this arm prints, and the functions that format one. |
+| `benchmarks/e2e/engines/megatron_stock/driver/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
+| `benchmarks/e2e/engines/megatron_stock/driver/model_builder.py` | Builds the stock GPT model and prints the parameter count rule 11 reads. |
+| `benchmarks/e2e/engines/megatron_stock/driver/dp_marker.py` | The data-parallel line, printed from the wrapper Megatron really built. |
+| `benchmarks/e2e/engines/megatron_stock/driver/step_log.py` | The step line the evaluation parses, and the shim that prints it. |
+| `benchmarks/e2e/engines/megatron_stock/driver/profiling.py` | Gives Megatron the profiler schedule and the trace path the harness reads. |
+| `benchmarks/e2e/engines/megatron_stock/driver/train.py` | Reproduces the stock training entry point and calls `pretrain`. |
 
 The driver substitutes **one** provider, the dataset provider. The model
 builder, the optimizer, the schedule, the distributed setup, the forward

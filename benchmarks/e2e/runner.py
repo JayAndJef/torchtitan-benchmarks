@@ -26,7 +26,7 @@ from benchmarks.e2e.axes import RunAxes, RunRequest
 from benchmarks.e2e.engines.registry import engine_for, engine_named
 from benchmarks.e2e.engines.api import Arm, DataSpec, Launch, RunSpec
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.megatron_stock.flags import (
     MEGATRON_NAN_GUARD_MODES,
     MEGATRON_P2P_SYNC_MODES,
     MEGATRON_PRECISION_MODES,

@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from benchmarks.e2e.megatron_stock.markers import (
+from benchmarks.e2e.engines.megatron_stock.driver.markers import (
     H100_CLASS_BF16_PEAK_FLOPS,
     STEP_LINE,
     STEP_LINE_NO_LOSS,

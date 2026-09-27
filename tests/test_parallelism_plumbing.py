@@ -174,7 +174,7 @@ class ExecutionOptionTests(unittest.TestCase):
         moved, and the argv would carry the opposite treatment under the
         same label.
         """
-        from benchmarks.e2e.megatron_stock.flags import (
+        from benchmarks.e2e.engines.megatron_stock.flags import (
             NO_CHECK_FOR_NAN_FLAG,
             _nan_guard_flags,
         )
