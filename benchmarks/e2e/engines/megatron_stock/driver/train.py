@@ -1,74 +1,16 @@
-"""Stock Megatron-LM, driven through its own ``pretrain`` entry point.
+"""The driver entry point: ``pretrain_gpt``'s main block with our dataset provider and four shims.
 
-``pretrain_gpt.py``'s ``__main__`` block calls ``parse_and_validate_args``,
-``gpt_config_from_args``, ``pretrain_cfg_container_from_args`` and then
-``pretrain``. Every one of those is importable, and every provider it hands
-to ``pretrain`` is a module-level function. This driver reproduces that
-block and substitutes **one** argument: the dataset provider, so that both
-engines read the same c4_test stream rank for rank.
-
-The model builder, the optimizer, the learning-rate schedule, the
-distributed setup, the forward step, the embedding-rank rule and the
-training loop all stay Megatron's. That is the point of the arm: the
-driver replicates none of the TorchTitan treatment.
-
-**No file of the Megatron-LM checkout is edited.** Four shims run in this
-process instead, each one in a module of its own:
-
-* ``bootstrap.install_typing_override`` adds one name Python 3.10 lacks;
-* ``profiling.install_profiler_shim`` gives Megatron the trace schedule and
-  the trace path the harness reads;
-* ``step_log.install_step_log_shim`` adds the step line
-  ``benchmarks/e2e/results.py`` parses; and
-* ``dp_marker.install_data_parallel_marker`` prints the wrapper Megatron
-  really built.
-
-**One upstream call is deliberately absent.** ``pretrain_gpt.py`` wraps
-``pretrain`` with ``inprocess_restart.maybe_wrap_for_inprocess_restart``
-and passes the resulting ``store``. A benchmark arm must fail rather than
-restart itself, because a restarted rank publishes a number nobody asked
-for.
-
-**One config field takes a value Megatron has no flag for.**
-``--bench-batch-p2p-sync off`` makes ``apply_p2p_sync`` set
-``args.batch_p2p_sync = False`` after Megatron has parsed its arguments.
-``core_transformer_config_from_args`` copies every ``args`` attribute whose
-name is a config field, so the value reaches ``TransformerConfig`` through
-Megatron's own path. The driver then prints a ``Megatron-LM stock p2p:``
-line from the config it really built, on every rank.
-
-**One Megatron field is printed back, so the log records the guard.**
-``--megatron-nan-guard off`` reaches this driver as Megatron's own
-``--no-check-for-nan-in-loss-and-grad``, and nothing here reads the harness
-value. ``nan_guard_line`` prints ``args.check_for_nan_in_loss_and_grad`` as
-Megatron PARSED it, on every rank, so a run whose argv lost the token, or
-whose Megatron turned the field off by itself, prints a value the requested
-one does not match. Arm rule 12 reads the line at every mesh.
-
-**This arm is not plain bf16.** ``--bf16`` alone keeps fp32 master
-parameters, fp32 optimizer moments and an fp32 gradient reduction, which is
-about 18 bytes of state per parameter against TorchTitan's 8. The arm keeps
-the stock defaults, because Piper ran them and a stock user gets them. The
-mode line prints those fields so every log records the difference, and
-the manifest's ``execution_model`` -- which is composed from the harness
-spec and says ``plain-bf16`` -- describes the TorchTitan arm and not this
-one.
-
-**Importing this module costs no torch and no megatron.** Every heavy
-import sits inside ``main``. That keeps the module readable from the
-parent, and it is what lets a test read the marker strings on a host with
-no Megatron-LM checkout. It does **not** make ``--help`` cheap: the parser
-is Megatron's own, so a help run pays for the ML stack like any other.
+This module imports no torch and no megatron until ``main`` runs.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from benchmarks.e2e.engines.megatron_stock.driver import bootstrap
-from benchmarks.e2e.engines.megatron_stock.driver.dp_marker import install_data_parallel_marker
-from benchmarks.e2e.engines.megatron_stock.flags import (
-    add_bench_args,
-    apply_p2p_sync,
-    refuse_unsupported_run,
+from benchmarks.e2e.engines.megatron_stock.driver.dp_marker import (
+    install_data_parallel_marker,
 )
 from benchmarks.e2e.engines.megatron_stock.driver.markers import (
     TRAINING_COMPLETED,
@@ -77,16 +19,130 @@ from benchmarks.e2e.engines.megatron_stock.driver.markers import (
     p2p_line,
     parallelism_lines,
 )
-from benchmarks.e2e.engines.megatron_stock.driver.step_log import install_step_log_shim
+from benchmarks.e2e.engines.megatron_stock.driver.step_log import (
+    install_step_log_shim,
+)
+from benchmarks.e2e.engines.megatron_stock.flags import (
+    BENCH_ARM_DIR,
+    BENCH_BATCH_P2P_SYNC,
+    BENCH_LOCAL_BATCH_SIZE,
+    BENCH_MIN_TRACE_WINDOWS,
+    BENCH_MODEL_SIZE,
+    BENCH_PP_SCHEDULE,
+    BENCH_PROFILE,
+    BENCH_PROFILE_FREQ,
+    BENCH_PROFILE_SCHEDULE_FLAGS,
+    BENCH_PROFILER_ACTIVE,
+    BENCH_PROFILER_WARMUP,
+    BENCH_ROWS_PER_SAMPLE,
+    BENCH_SEQ_LEN,
+    MEGATRON_P2P_SYNC_MODES,
+    PP_SCHEDULE,
+)
+
+
+def add_bench_args(parser: Any) -> Any:
+    """Add the harness flags to Megatron's own parser, so that Megatron refuses an unknown one."""
+    group = parser.add_argument_group(title="torchtitan-benchmarks harness")
+    group.add_argument(BENCH_ARM_DIR, type=Path, required=True)
+    group.add_argument(BENCH_MODEL_SIZE, type=str, required=True)
+    group.add_argument(BENCH_LOCAL_BATCH_SIZE, type=int, required=True)
+    group.add_argument(BENCH_PROFILE, action="store_true")
+    group.add_argument(BENCH_PROFILE_FREQ, type=int, default=None)
+    group.add_argument(BENCH_PROFILER_WARMUP, type=int, default=None)
+    group.add_argument(BENCH_PROFILER_ACTIVE, type=int, default=None)
+    group.add_argument(BENCH_PP_SCHEDULE, type=str, default=None)
+    group.add_argument(BENCH_SEQ_LEN, type=int, required=True)
+    group.add_argument(BENCH_ROWS_PER_SAMPLE, type=int, required=True)
+    group.add_argument(BENCH_MIN_TRACE_WINDOWS, type=int, default=None)
+    # Megatron's own default, so that an absent flag keeps it.
+    group.add_argument(
+        BENCH_BATCH_P2P_SYNC,
+        type=str,
+        choices=MEGATRON_P2P_SYNC_MODES,
+        default="on",
+    )
+    return parser
+
+
+def apply_p2p_sync(args: Any) -> Any:
+    """Set ``args.batch_p2p_sync`` to False under ``--bench-batch-p2p-sync off``, and return ``args``.
+
+    Megatron copies each ``args`` attribute that has the name of a config field into ``TransformerConfig``.
+    """
+    if args.bench_batch_p2p_sync == "off":
+        args.batch_p2p_sync = False
+    return args
+
+
+def refuse_unsupported_run(args: Any) -> None:
+    """Raise ``ValueError`` on parsed arguments that the driver cannot run as the manifest records them."""
+    schedule_given = {
+        flag: getattr(args, flag[2:].replace("-", "_"))
+        for flag in BENCH_PROFILE_SCHEDULE_FLAGS
+    }
+    if args.bench_profile:
+        missing = sorted(
+            flag for flag, value in schedule_given.items() if value is None
+        )
+        if missing:
+            raise ValueError(
+                f"{BENCH_PROFILE} needs the whole profiler schedule, and "
+                f"{', '.join(missing)} is absent; the shim cannot build a "
+                "schedule from a partial group"
+            )
+    else:
+        extra = sorted(
+            flag for flag, value in schedule_given.items() if value is not None
+        )
+        if extra:
+            raise ValueError(
+                f"{', '.join(extra)} was given without {BENCH_PROFILE}; the "
+                "run collects no trace, so a schedule would name a window "
+                "nothing writes"
+            )
+    pipeline_degree = args.pipeline_model_parallel_size
+    if pipeline_degree > 1:
+        if args.bench_pp_schedule != PP_SCHEDULE:
+            raise ValueError(
+                f"{BENCH_PP_SCHEDULE} {args.bench_pp_schedule!r} is not "
+                f"implemented by the stock driver; it runs "
+                f"{PP_SCHEDULE!r} alone"
+            )
+    elif args.bench_pp_schedule is not None:
+        raise ValueError(
+            f"{BENCH_PP_SCHEDULE} {args.bench_pp_schedule!r} was given at "
+            "pipeline degree 1, where there is no pipeline to schedule"
+        )
+    if pipeline_degree == 1 and args.bench_batch_p2p_sync == "off":
+        raise ValueError(
+            f"{BENCH_BATCH_P2P_SYNC} {args.bench_batch_p2p_sync!r} was given "
+            "at pipeline degree 1, where there is no pipeline message to "
+            "synchronize"
+        )
+    if args.virtual_pipeline_model_parallel_size is not None:
+        raise ValueError(
+            "the stock driver builds one model chunk per rank, so a virtual "
+            f"pipeline degree of {args.virtual_pipeline_model_parallel_size} "
+            "is refused; the parameter check compares a whole stage"
+        )
+    if args.micro_batch_size != 1:
+        raise ValueError(
+            f"--micro-batch-size {args.micro_batch_size} would send the next "
+            "pipeline stage a permuted activation; the stock arm packs its "
+            "rows itself and always runs a micro batch size of 1"
+        )
+    packed = args.bench_rows_per_sample * args.bench_seq_len
+    if packed != args.seq_length:
+        raise ValueError(
+            f"{args.bench_rows_per_sample} row(s) of {args.bench_seq_len} "
+            f"tokens is {packed}, not the --seq-length {args.seq_length} "
+            "Megatron will size its pipeline buffers from"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one stock Megatron-LM arm.
-
-    ``argv`` is accepted so a caller can drive the driver; Megatron's own
-    parser reads ``sys.argv`` when it is None, which is what ``python -m``
-    does.
-    """
+    """Run one stock Megatron-LM arm; ``None`` reads ``sys.argv``."""
     import sys
 
     if argv is not None:
@@ -94,7 +150,6 @@ def main(argv: list[str] | None = None) -> int:
 
     bootstrap.prepare()
 
-    # Deferred, so a --help run does not pay for the ML stack.
     from benchmarks.e2e.engines.megatron_stock.driver import data, profiling
 
     import pretrain_gpt
@@ -107,29 +162,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     from megatron.training.arguments import parse_and_validate_args
 
-    from benchmarks.e2e.engines.megatron_stock.driver.model_builder import BenchGPTModelConfig
+    from benchmarks.e2e.engines.megatron_stock.driver.model_builder import (
+        BenchGPTModelConfig,
+    )
     from benchmarks.models.piper_qwen3.shape import shape_by_name
 
-    # Every rank builds the data, as the stock entry point asks for.
+    # Every rank builds the data, as the stock entry point asks.
     setattr(data.train_valid_test_datasets_provider, "is_distributed", True)
 
     args = parse_and_validate_args(extra_args_provider=add_bench_args)
     refuse_unsupported_run(args)
-    # After the refusal, and before Megatron builds its config from args.
     apply_p2p_sync(args)
 
     shape = shape_by_name(args.bench_model_size)
-    # The engine's own count, never the harness's arithmetic.
     microbatches = get_num_microbatches()
     print(mode_line(args), flush=True)
-    # From the parsed value, on every rank. Arm rule 12 reads it at every
-    # mesh, against the requested --megatron-nan-guard value.
     print(nan_guard_line(args), flush=True)
     for line in parallelism_lines(args, microbatches=microbatches):
         print(line, flush=True)
 
-    # Only under --bench-profile: without it Megatron builds no profiler,
-    # and the window guard would refuse a run that asked for none.
     shim = (
         profiling.install_profiler_shim(
             arm_dir=args.bench_arm_dir,
@@ -142,8 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
     install_step_log_shim(
-        # The titan row length, not --seq-length: that one is the packed
-        # sample, and this rank reads local_batch_size rows per step.
+        # One TorchTitan row, because --seq-length is the packed sample.
         local_tokens_per_step=(
             args.bench_local_batch_size * args.bench_seq_len
         ),
@@ -158,7 +208,6 @@ def main(argv: list[str] | None = None) -> int:
     model_cfg = gpt_config_from_args(
         args, model_config_cls=BenchGPTModelConfig
     )
-    # From the built config, on every rank. Arm rule 12 reads it above pp 1.
     print(p2p_line(model_cfg), flush=True)
     full_config = pretrain_cfg_container_from_args(args, model_cfg)
     pretrain(
@@ -169,8 +218,6 @@ def main(argv: list[str] | None = None) -> int:
         get_embedding_ranks=pretrain_gpt.get_embedding_ranks,
     )
 
-    # The exact window count, floored by the workload's own requirement,
-    # so the guard never evaluates to "any count is acceptable".
     if shim is not None:
         expected_windows = max(
             args.bench_min_trace_windows,
@@ -179,8 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         profiling.assert_windows_written(
             shim, min_trace_windows=expected_windows
         )
-    # Every rank prints it: arm rule 1 runs per rank, and megatron's own
-    # completion line is rank 0 only.
+    # Megatron prints its own completion line on rank 0 alone.
     print(TRAINING_COMPLETED, flush=True)
     return 0
 

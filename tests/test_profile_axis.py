@@ -32,6 +32,7 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.axes import RunAxes
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
+from benchmarks.e2e.engines.megatron_stock.profiling import partial_cycle_refusal
 from benchmarks.e2e.registry import DEFAULT_PROFILE, ENGINES, scenario_by_name
 from benchmarks.e2e.runner import data_with_overrides
 from tests.engine_helpers import command, run_spec, validate
@@ -165,18 +166,12 @@ class StockArgvTests(unittest.TestCase):
 
     def test_an_unprofiled_run_accepts_a_partial_profiler_cycle(self) -> None:
         """The refusal guards a window, and there is no window."""
-        with self.assertRaisesRegex(ValueError, "whole number of profiler"):
-            stock_megatron_flags(
-                run_spec(profile=True, steps=12),
-                MegatronStockConfig(),
-                arm_dir="/tmp/arm",
-            )
-        flags = stock_megatron_flags(
-            run_spec(profile=False, steps=12),
-            MegatronStockConfig(),
-            arm_dir="/tmp/arm",
+        self.assertIsNotNone(
+            partial_cycle_refusal("megatron_stock", run_spec(profile=True, steps=12))
         )
-        self.assertIn("--train-iters", flags)
+        self.assertIsNone(
+            partial_cycle_refusal("megatron_stock", run_spec(profile=False, steps=12))
+        )
 
 
 class ValidationSkipsTheTraceRulesTests(unittest.TestCase):

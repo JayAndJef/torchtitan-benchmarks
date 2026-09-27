@@ -42,10 +42,10 @@ from benchmarks.e2e.engines.torchtitan.validate import (
 )
 from benchmarks.e2e.engines.megatron_stock.validate import (
     MEGATRON_STOCK_PROFILE,
-    _megatron_stock_nan_guard_markers,
-    _megatron_stock_p2p_markers,
-    _megatron_stock_parallelism_markers,
-    _megatron_stock_precision_markers,
+    mesh_markers as megatron_mesh_markers,
+    nan_guard_markers,
+    p2p_markers,
+    precision_markers,
 )
 from benchmarks.e2e.validation import ALL_REDUCE_MARKER
 from benchmarks.execution.launcher import LOG_RANK_TEMPLATE, launcher_environment
@@ -828,7 +828,7 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
         for spec in (TRIVIAL_SPEC, DP2):
             for value in ("on", "off"):
                 with self.subTest(spec=spec, value=value):
-                    self.assertEqual(_megatron_stock_p2p_markers(spec, value), ())
+                    self.assertEqual(p2p_markers(spec, value), ())
 
     def test_the_titan_engine_asks_for_the_mesh_lines_alone(self) -> None:
         """The option reaches the megatron command alone."""
@@ -872,10 +872,10 @@ def _stock_log(
         # The first marker is the driver's own line, and the four fields
         # after it are printed on that line, off the arguments Megatron
         # resolved.
-        ", ".join(_megatron_stock_precision_markers(megatron_precision)),
+        ", ".join(precision_markers(megatron_precision)),
         _SIZE_LINE.rstrip("\n"),
-        *_megatron_stock_parallelism_markers(spec, data, megatron_precision),
-        *_megatron_stock_p2p_markers(spec, "off"),
+        *megatron_mesh_markers(spec, data, megatron_precision, ()),
+        *p2p_markers(spec, "off"),
     ]
     if nan_guard_line is not None:
         lines.append(nan_guard_line)
@@ -901,7 +901,7 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
         profile = MEGATRON_STOCK_PROFILE
         for value, line in (("on", self.ON_LINE), ("off", self.OFF_LINE)):
             with self.subTest(value=value):
-                self.assertEqual(_megatron_stock_nan_guard_markers(value), (line,))
+                self.assertEqual(nan_guard_markers(value), (line,))
 
     def test_the_titan_engine_asks_for_no_line(self) -> None:
         """The option reaches the stock megatron command alone."""
@@ -987,7 +987,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         is the driver's own line, which rule 8 no longer holds."""
         profile = MEGATRON_STOCK_PROFILE
         self.assertEqual(
-            _megatron_stock_precision_markers("stock"),
+            precision_markers("stock"),
             (
                 "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=False",
@@ -997,7 +997,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            _megatron_stock_precision_markers("lean"),
+            precision_markers("lean"),
             (
                 "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=True",

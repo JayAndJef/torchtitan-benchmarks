@@ -671,8 +671,7 @@ def validate_parallelism(
 
     # 6. DELETED. Compile is an arm property, so _resolve_run asks it.
 
-    # 7. Every stage holds the same layer count, which assumes launch.py
-    #    sends both less-layers flags at every pp > 1.
+    # 7. Every stage holds the same layer count; TorchTitan gets both less-layers flags at 0.
     stages_per_rank = schedule.stages_per_rank if schedule is not None else 1
     total_stages = spec.pp * stages_per_rank
     if shape.n_layers % total_stages:

@@ -15,8 +15,7 @@ count: ``1b`` < ``large`` < ``9b`` < ``huge`` < ``giant`` < ``30b-a3b`` <
 
 ``1b``, ``9b``, ``30b-a3b`` and ``48b`` are real piper models, transcribed
 field for field from ``examples/models/qwen3.py`` in the piper checkout.
-That checkout's absolute path moves with the host, and the one
-``config_registry.py`` cites is stale. ``large``, ``huge`` and ``giant``
+That checkout's absolute path moves with the host. ``large``, ``huge`` and ``giant``
 are ours: each takes a dim and a layer count for a benchmark reason, and
 the piper-1B rules for everything else.
 
@@ -41,10 +40,10 @@ That second statement is deliberate: it is transcribed from the model
 config the shape claims to be, so a wrong derivation cannot pass both.
 
 A shape reaches TorchTitan as ``--config-arg size=<name>``, which
-``benchmarks/e2e/launch.py`` appends to the training command and the fork
-forwards as a keyword argument to the ``--config`` function.
-``benchmarks/models/piper_qwen3/config_registry.py`` resolves it back
-through ``shape_by_name``.
+``benchmarks/e2e/engines/torchtitan/flags.py`` appends to the training
+command and the fork forwards as a keyword argument to the ``--config``
+function. ``benchmarks/e2e/engines/torchtitan/plugins/config_registry.py``
+resolves it back through ``shape_by_name``.
 """
 
 from __future__ import annotations
@@ -570,7 +569,7 @@ WHAT THIS REGISTRATION DOES NOT CARRY. Piper declares ``max_seq_len``
 because every layer is MoE, as it is at every other shape here. The context
 length is not carried: ``max_seq_len`` stays 4096, which is the harness's
 sequence ceiling AND the size of the CosSinRoPE cache
-``config_registry.py`` builds from it. A run above seq 4096 needs that
+``titan_model.py`` builds from it. A run above seq 4096 needs that
 cache widened, and nothing here widens it. ``kernel-bench``'s
 ``--max-seq-len`` lifts the ceiling for the kernel side alone.
 

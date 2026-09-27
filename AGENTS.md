@@ -184,7 +184,8 @@ option to the flags it sets. The pinned table holds the flags that keep the
 two engines on the same work: the optimizer, the routing, the data, the step
 lines and the timed steps. The perf table holds the flags a passthrough may
 set. A passthrough flag in the owned or pinned table is refused, and the
-message names the owner.
+message names the owner. Each engine's check refuses it before any host
+probe.
 
 - An unlisted Megatron flag passes, so every fusion flag Megatron offers
   passes. §7 names the stock omissions a passthrough can add.
@@ -192,7 +193,8 @@ message names the owner.
   fails until someone classifies it.
 - `tests/test_passthrough.py` proves that no pattern sits in two rows, that
   each flag a builder emits has one class, that each owner is a real `run`
-  option, and that each TorchTitan config field has one class.
+  option, that each TorchTitan config field has one class, and that each
+  emitted Megatron flag exists in the pinned Megatron parser.
 
 A passthrough cannot turn off a store-true flag that a builder sends,
 unless the engine has a negative form of it.
@@ -398,15 +400,18 @@ harness connects through the arm's `engine` name alone.
 
 | module | job |
 |---|---|
+| `benchmarks/e2e/engines/megatron_stock/engine.py` | The engine record: the run refusals, the launch and the validation call. |
+| `benchmarks/e2e/engines/megatron_stock/flags.py` | The whole Megatron command line, as data, and the passthrough tables. Torch-free, so a CPU test reads it. |
+| `benchmarks/e2e/engines/megatron_stock/profiling.py` | The Megatron profiler flags and the partial-cycle refusal. |
+| `benchmarks/e2e/engines/megatron_stock/validate.py` | The log lines that prove the mesh and the three Megatron treatments. |
 | `benchmarks/e2e/engines/megatron_stock/driver/bootstrap.py` | Sets the process environment the driver needs before torch, adds `typing.override` for Python 3.10, then puts Megatron on `sys.path`. |
-| `benchmarks/e2e/engines/megatron_stock/flags.py` | The whole Megatron command line, as data, plus the harness parser and the run refusals. Torch-free, so a CPU test reads it. |
+| `benchmarks/e2e/engines/megatron_stock/driver/train.py` | Parses the harness flags, refuses a run it cannot honour, reproduces the stock training entry point and calls `pretrain`. |
 | `benchmarks/e2e/engines/megatron_stock/driver/markers.py` | The log lines this arm prints, and the functions that format one. |
 | `benchmarks/e2e/engines/megatron_stock/driver/data.py` | Drains TorchTitan's own c4_test dataset class and feeds it as an external dataloader. |
 | `benchmarks/e2e/engines/megatron_stock/driver/model_builder.py` | Builds the stock GPT model and prints the parameter count rule 11 reads. |
 | `benchmarks/e2e/engines/megatron_stock/driver/dp_marker.py` | The data-parallel line, printed from the wrapper Megatron really built. |
 | `benchmarks/e2e/engines/megatron_stock/driver/step_log.py` | The step line the evaluation parses, and the shim that prints it. |
 | `benchmarks/e2e/engines/megatron_stock/driver/profiling.py` | Gives Megatron the profiler schedule and the trace path the harness reads. |
-| `benchmarks/e2e/engines/megatron_stock/driver/train.py` | Reproduces the stock training entry point and calls `pretrain`. |
 
 The driver substitutes **one** provider, the dataset provider. The model
 builder, the optimizer, the schedule, the distributed setup, the forward
@@ -453,6 +458,50 @@ The three Megatron run axes are `--megatron-p2p-sync`,
 stock Megatron command alone, and each is refused parent-side when it
 reaches no arm of the selection. The sync value `on` also needs more than
 one pipeline rank, and the lean precision also needs `--zero 1`.
+
+The recipe follows Piper's stock command line, with three deliberate
+differences. It sends `--moe-router-dtype fp32`, because TorchTitan routes
+in fp32 too. It sends no attention-backend flag, so TransformerEngine
+selects the cuDNN kernel. It sends no distributed optimizer at `--zero 0`,
+so both engines replicate their parameters there. It keeps the deprecated
+`--use-mcore-models`, because Piper sends it. Nobody has checked whether
+Megatron decays the learning rate over the same steps as TorchTitan.
+Read `OptimizerParamScheduler` before you report a learning rate.
+
+Seven facts explain the driver:
+
+- **One sample is one packed sequence.** Megatron flattens an `(m, S)`
+  microbatch to `(1, m*S)`, but it sizes the pipeline receive buffer as
+  `(S, m, H)`. A microbatch of more than one row therefore reaches the
+  next stage permuted, and nothing raises. So the flag list sends
+  `--micro-batch-size 1`, and the driver packs the rows of one microbatch
+  into one sample. `cu_seqlens` marks every document, so the attention
+  does not change.
+- **The data key is the data-parallel rank.** The stages of one pipeline
+  read the same tokens, and every rank builds an iterator, because the
+  middle stages read `cu_seqlens` too. An exhausted stream raises.
+- **The p2p value has no Megatron flag.** `--bench-batch-p2p-sync off`
+  carries it, and the driver sets `args.batch_p2p_sync` before Megatron
+  builds its config. The driver prints the p2p line from the built
+  config.
+- **The data-parallel line comes from the built wrapper.** Rule 13 cannot
+  prove data parallelism, because Megatron all-reduces the loss over the
+  data-parallel group on every step. Both ZeRO levels build a
+  `DistributedDataParallel` wrapper, so the optimizer class separates
+  them. Megatron puts every optimizer in a `ChainedOptimizer`, so the line
+  names the members of the chain.
+- **The profiler schedule skips its first step.** Megatron steps the
+  profiler at the top of its loop and TorchTitan at the bottom.
+  `skip_first=1` puts both engines in the same profiler state on each
+  sampled step. Megatron also steps the profiler after it stops it, so the
+  engine refuses a profiled run that ends inside a profiler cycle.
+- **The driver builds Megatron's dataset helper.** Megatron's `make` runs
+  the system `python3`, which has no pybind11 on this host. The driver
+  compiles the helper against torch's pybind11 headers first, so `make`
+  finds a current target.
+- **Python 3.10 has no `typing.override`.** Megatron imports it, so the
+  driver adds it from `typing_extensions`. A move to Python 3.12 would
+  rebuild every wheel and make every published number incomparable.
 
 ## 8. Parallelism
 

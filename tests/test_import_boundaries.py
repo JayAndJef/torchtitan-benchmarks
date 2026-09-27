@@ -92,6 +92,7 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.engines.torchtitan.validate",
     "benchmarks.e2e.engines.megatron_stock.config",
     "benchmarks.e2e.engines.megatron_stock.engine",
+    "benchmarks.e2e.engines.megatron_stock.profiling",
     "benchmarks.e2e.engines.megatron_stock.validate",
     # The stock Megatron-LM command line, as data. The engine builds one
     # arm's argv from it in the parent, so it stays torch-free.

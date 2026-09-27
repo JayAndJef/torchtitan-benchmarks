@@ -55,6 +55,7 @@ LAYER_ORDER = (
     "benchmarks.e2e.axes",
     "benchmarks.e2e.registry",
     "benchmarks.e2e.passthrough",
+    "benchmarks.e2e.engines.megatron_stock.profiling",
     "benchmarks.e2e.engines.megatron_stock.flags",
     "benchmarks.e2e.engines.megatron_stock.driver.markers",
     "benchmarks.e2e.engines.megatron_stock.driver.step_log",

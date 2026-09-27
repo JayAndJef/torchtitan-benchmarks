@@ -175,12 +175,12 @@ class ExecutionOptionTests(unittest.TestCase):
         same label.
         """
         from benchmarks.e2e.engines.megatron_stock.flags import (
+            NAN_GUARD_FLAGS,
             NO_CHECK_FOR_NAN_FLAG,
-            _nan_guard_flags,
         )
 
-        self.assertEqual(_nan_guard_flags("on"), [])
-        self.assertEqual(_nan_guard_flags("off"), [NO_CHECK_FOR_NAN_FLAG])
+        self.assertEqual(NAN_GUARD_FLAGS["on"], ())
+        self.assertEqual(NAN_GUARD_FLAGS["off"], (NO_CHECK_FOR_NAN_FLAG,))
 
     def test_all_six_options_exist_on_both_execution_commands(self) -> None:
         parameters = self._parameters()

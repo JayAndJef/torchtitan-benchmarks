@@ -1,32 +1,4 @@
-"""Give stock Megatron the profiler layout the harness reads.
-
-Stock Megatron writes **one** window per rank, to
-``{args.tensorboard_dir}/../torch_profile/rank-<rank>.json.gz``. Its
-schedule carries ``repeat=1``.
-
-The harness reads
-``<arm_dir>/profiling/traces/iteration_*/rank<n>_trace.json.gz`` and arm
-rule 5 needs ``min_trace_windows`` files per rank, which is 2. Two windows
-are what every published figure in this repository rests on, so the repair
-is to give Megatron the right schedule and the right path, never to lower
-the rule.
-
-``training.py`` calls ``torch.profiler.profile`` by attribute at run time,
-so replacing that attribute before ``pretrain()`` reaches the call is
-enough. The replacement keeps every keyword the caller passed except
-``schedule`` and ``on_trace_ready``.
-
-**The shim is loud in both failure directions.** It counts its own calls,
-and ``assert_windows_written`` refuses a run whose call count is not 1 and a
-run that wrote fewer windows than the workload declares. A shim that did not
-install writes nothing under ``arm_dir`` and reports zero calls, so both
-guards fire.
-
-``record_shapes`` stays whatever Megatron asked for, which is
-``--pytorch-profiler-collect-shapes`` and therefore False. No metric in
-``benchmarks/traces/`` reads a shape. A diagnostic that needs one must ask
-Megatron for that flag itself.
-"""
+"""The shim that gives Megatron's profiler the schedule and the trace path that the harness reads."""
 
 from __future__ import annotations
 
@@ -37,16 +9,10 @@ from typing import Any, Callable
 import torch
 
 PROFILER_STEP_OFFSET = 1
-"""How many steps the megatron profiler shim skips.
-
-Megatron calls ``prof.step()`` at the top of its training loop and
-TorchTitan calls it at the bottom, so one training step runs under schedule
-indices that differ by one between the engines. This many skipped steps put
-them back on the same index. See ``install_profiler_shim``.
-"""
+"""The steps that the schedule skips first, because Megatron steps the profiler one step before TorchTitan does."""
 
 TRACE_SUBDIR = "profiling/traces"
-"""The trace layout both engines write and the artifact layout reads back."""
+"""The trace directory under the arm directory, as both engines write it."""
 
 WINDOW_DIR = "iteration_{step}"
 TRACE_NAME = "rank{rank}_trace.json.gz"
@@ -54,7 +20,7 @@ TRACE_NAME = "rank{rank}_trace.json.gz"
 
 @dataclass
 class ProfilerShim:
-    """What the shim replaced, what it built, and what it recorded."""
+    """The replaced ``torch.profiler.profile``, its replacement, and the calls and the windows that the replacement recorded."""
 
     replacement: Callable[..., Any]
     original: Callable[..., Any]
@@ -64,20 +30,11 @@ class ProfilerShim:
     windows: list[Path] = field(default_factory=list)
 
     def uninstall(self) -> None:
-        """Put the real ``torch.profiler.profile`` back.
-
-        The driver does not need this; a test does, because a replaced
-        attribute outlives the function that set it.
-        """
+        """Put the real ``torch.profiler.profile`` back."""
         torch.profiler.profile = self.original
 
     def written_windows(self) -> list[Path]:
-        """This rank's trace files, read from the disk.
-
-        Reads the disk rather than the recorded list, because the recorded
-        list says what the handler believes and the rule reads what the run
-        produced.
-        """
+        """The trace files of this rank, read from the disk."""
         return sorted(
             self.arm_dir.glob(
                 f"{TRACE_SUBDIR}/iteration_*/"
@@ -94,56 +51,9 @@ def install_profiler_shim(
     profiler_warmup: int,
     profiler_active: int,
 ) -> ProfilerShim:
-    """Replace ``torch.profiler.profile`` for the rest of this process.
+    """Replace ``torch.profiler.profile`` for the rest of this process with one that uses the harness schedule and trace path.
 
-    The schedule is the one both other engines run: ``wait`` fills the cycle
-    to ``profile_freq``, then ``profiler_warmup`` untimed steps and
-    ``profiler_active`` timed ones, repeating for the whole run
-    (``repeat=0``). Megatron calls ``prof.step()`` once per training
-    iteration, so a 40-step run at the default schedule writes two windows,
-    each holding ``profiler_active`` recorded steps.
-
-    **``skip_first=1`` aligns the two engines, and without it the published
-    throughput is biased.** The two engines call ``prof.step()`` at opposite
-    ends of the loop body. Megatron calls it **first**, at the top of its
-    training loop, so training step ``k`` runs under ``schedule(k)``.
-    TorchTitan calls it **last**, after its train step, so its step ``k``
-    runs under ``schedule(k-1)``. One step of offset.
-
-    That offset is not cosmetic. ``results.py``'s ``stable_tps`` samples
-    steps 2 to 10 of every 20-step cycle, and at the default schedule the
-    ``NONE -> WARMUP`` transition -- which runs torch's ``prepare_trace``,
-    and with it the CUPTI setup -- lands on step **10** for Megatron and on
-    step **11** for TorchTitan. So one sampled step per cycle carried
-    profiler setup on one engine only, and the cross-engine ratio this
-    scenario publishes was biased against Megatron by that much.
-    ``skip_first=1`` moves every Megatron action onto TorchTitan's step, so
-    the two engines are sampled in the same profiler state.
-
-    **The last window is then closed by ``prof.stop()``, not by a scheduled
-    boundary.** Under ``skip_first`` the cycle ends one step after the run
-    does, so the final ``RECORD_AND_SAVE`` is still in force when Megatron
-    stops the profiler at ``--profile-step-end``. torch's action map holds
-    ``(RECORD_AND_SAVE, None)`` and it runs ``stop_trace`` and
-    ``_trace_ready``, so the window is written and holds its full
-    ``profiler_active`` steps.
-
-    **That is safe only because ``flags.py`` refuses a partial profiler
-    cycle.** ``--profile-step-end`` is then ``--train-iters``, and no
-    iteration follows the stop. Megatron's loop steps the profiler at the
-    top of every pass and stops it at the bottom of one, so an iteration
-    after the stop transits a dead Kineto session -- which is a hazard the
-    offset widens and did not create. Read the refusal in
-    ``stock_megatron_flags`` before you change either one.
-
-    Verified against the pinned torch at 40, 60, 80, 100 and 200 steps:
-    every window holds 5 recorded steps, the count is
-    ``train_iters // profile_freq``, and no transit follows the stop.
-
-    A stop that does not fire costs the last window rather than corrupting
-    it, and ``assert_windows_written`` refuses that run.
-
-    Call this once per process, before ``pretrain()``.
+    Call this function once, before ``pretrain``.
     """
     wait = profile_freq - profiler_warmup - profiler_active
     if wait < 0:
@@ -157,11 +67,10 @@ def install_profiler_shim(
         warmup=profiler_warmup,
         active=profiler_active,
         repeat=0,
-        # The two engines step the profiler at opposite ends of the loop.
         skip_first=PROFILER_STEP_OFFSET,
     )
     shim = ProfilerShim(
-        replacement=lambda *a, **k: None,  # replaced below
+        replacement=lambda *a, **k: None,
         original=original,
         arm_dir=Path(arm_dir),
         rank=rank,
@@ -193,17 +102,7 @@ def install_profiler_shim(
 def assert_windows_written(
     shim: ProfilerShim, *, min_trace_windows: int
 ) -> list[Path]:
-    """Refuse a run that did not write the windows the workload declares.
-
-    Two failures reach this function, and each has its own message:
-
-    * the shim was not called exactly once, which means Megatron built no
-      profiler or built more than one; and
-    * this rank wrote fewer windows than ``min_trace_windows``, which is
-      what arm rule 5 needs and what the trace metrics rest on.
-
-    Returns the windows this rank wrote.
-    """
+    """Raise when the shim did not run once, or when this rank wrote fewer than ``min_trace_windows`` windows; return the windows."""
     if min_trace_windows < 1:
         raise ValueError(
             f"a window requirement of {min_trace_windows} accepts a run "

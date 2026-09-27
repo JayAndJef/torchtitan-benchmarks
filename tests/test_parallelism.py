@@ -913,7 +913,7 @@ class Rule02BudgetTest(unittest.TestCase):
 
     def test_the_pipeline_message_no_longer_claims_an_engine_reason(self):
         """The old message said the two engines count layers the same way
-        only at ``pp <= 2``. That was false: ``launch.py`` sends
+        only at ``pp <= 2``. That was false: the TorchTitan command line sends
         ``--parallelism.pipeline-parallel-first-stage-less-layers 0`` and its
         twin at every ``pp > 1``, which makes the two conventions agree at
         every degree. The cap is a plan, not an engine limit.

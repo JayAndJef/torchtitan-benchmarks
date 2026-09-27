@@ -1,34 +1,6 @@
-"""A stock GPT builder that counts its own parameters and prints the total.
+"""The stock GPT model builder, plus a check of the parameter count of each stage and the line that rule 11 reads.
 
-Arm rule 11 (``benchmarks/e2e/validation.py``) needs
-``size: <N> total parameters`` on every rank, with the shape's exact count
-and a thousands separator. Stock Megatron prints a per-stage count in its
-own format and no whole-model total, so the line has to come from
-first-party code.
-
-**The printed total is backed by a real count on the rank that prints it.**
-The builder counts the parameters the model on this rank actually holds,
-asserts that count against ``PiperShape.stage_param_count`` for this
-pipeline degree and this stage, and prints the total only after the
-assertion passes. A rank that built the wrong slice therefore fails the run
-instead of printing a total it did not verify.
-
-**No collective runs here.** An all-reduce inside a builder deadlocks if any
-rank ever builds a different number of model chunks. This builder declines
-the collective route, and pays for it with a per-stage identity rather than
-a measured sum. ``tests/test_model_shape.py`` already
-pins the arithmetic that the stage counts sum to ``param_count``.
-
-``GPTModelConfig.builder`` is a ``ClassVar[str]`` dotted path
-(Megatron's own GPT model provider), and
-``ModelConfig.get_builder_cls`` imports it. ``BenchGPTModelConfig`` changes
-that one string and adds no field, which is the same extension point
-``megatron.post_training``'s ``ModelOptModelConfig`` uses.
-
-This module imports megatron at module scope. That is legal here and only
-here: ``ModelConfig.get_builder_cls`` imports it inside the training
-process, where ``bootstrap.prepare()`` has already put Megatron-LM on
-``sys.path``.
+This module imports megatron, so only the training process imports it, through ``BenchGPTModelConfig.builder``.
 """
 
 from __future__ import annotations
@@ -51,11 +23,7 @@ from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 @dataclass(kw_only=True)
 class BenchGPTModelConfig(GPTModelConfig):
-    """``GPTModelConfig`` with one changed string: the builder path.
-
-    It adds no field, so ``gpt_config_from_args`` builds it from the same
-    argument derivation the stock path uses.
-    """
+    """``GPTModelConfig`` with ``CountingGPTModelBuilder`` as its builder."""
 
     builder: ClassVar[str] = (
         "benchmarks.e2e.engines.megatron_stock.driver.model_builder.CountingGPTModelBuilder"
@@ -72,12 +40,7 @@ class CountingGPTModelBuilder(GPTModelBuilder):
         post_process: bool | None = None,
         vp_stage: int | None = None,
     ) -> GPTModel:
-        """Build one stage, count it, check it, and print the two lines.
-
-        Refuses a virtual pipeline degree. ``stage_param_count`` describes
-        one chunk per rank, so a virtual pipeline would compare a chunk
-        against a whole stage and fail on an honest run.
-        """
+        """Build one stage, check its parameter count against the shape, and print the two parameter lines."""
         config = self._model_config
         if config.virtual_pipeline_model_parallel_size is not None:
             raise ValueError(
@@ -102,8 +65,6 @@ class CountingGPTModelBuilder(GPTModelBuilder):
         stages = args.pipeline_model_parallel_size
         stage = mpu.get_pipeline_model_parallel_rank()
         counted = sum(parameter.numel() for parameter in model.parameters())
-        # From the arguments, which the dp marker shim checks against the
-        # expert group Megatron built.
         expected = shape.stage_param_count(
             pipeline_degree=stages,
             stage_index=stage,

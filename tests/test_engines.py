@@ -9,7 +9,7 @@ builder and its own validation profile.
 
 import sys
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.e2e.engines.api import Arm, CompileMode, Engine, EngineConfig
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.engine import MegatronStockEngine
+from benchmarks.e2e.engines.megatron_stock.flags import (
+    DRIVER_MODULE,
+    stock_megatron_flags,
+)
 from benchmarks.e2e.engines.registry import (
     ENGINES,
     _registry,
@@ -36,7 +40,7 @@ from tests.engine_helpers import run_spec
 
 VALIDATOR = {
     "torchtitan": "benchmarks.e2e.engines.torchtitan.validate.validate_against_profile",
-    "megatron_stock": "benchmarks.e2e.engines.megatron_stock.engine.validate_against_profile",
+    "megatron_stock": "benchmarks.e2e.engines.megatron_stock.validate.validate_against_profile",
 }
 """Where each engine calls the shared log rules."""
 
@@ -181,17 +185,23 @@ class EngineDelegationTests(unittest.TestCase):
         )
         self.assertEqual((launch.processes, launch.pin), ("per_rank", True))
 
-    def test_the_megatron_engine_calls_its_own_builder_once(self):
-        arm = SCENARIOS["engines"].arm("megatron_stock")
+    def test_the_megatron_launch_runs_the_driver_with_the_passthrough_last(self):
+        arm = replace(
+            SCENARIOS["engines"].arm("megatron_stock"),
+            config=MegatronStockConfig(extra_flags=("--moe-permute-fusion",)),
+        )
         run = run_spec(ac_mode="none")
-        with mock.patch(
-            "benchmarks.e2e.engines.megatron_stock.engine.megatron_stock_launch",
-            return_value="built",
-        ) as built:
-            self.assertEqual(
-                engine_for(arm).launch(run, arm, Path("/tmp/arm")), "built"
-            )
-        built.assert_called_once_with(run, arm, Path("/tmp/arm"))
+        launch = engine_for(arm).launch(run, arm, Path("/tmp/arm"))
+        self.assertEqual(
+            launch.target,
+            (
+                "-m",
+                DRIVER_MODULE,
+                *stock_megatron_flags(run, arm.config, arm_dir="/tmp/arm"),
+                "--moe-permute-fusion",
+            ),
+        )
+        self.assertEqual((launch.processes, launch.pin), ("per_rank", True))
 
     def test_each_engine_validates_with_its_own_profile(self):
         scenario = SCENARIOS["engines"]
@@ -273,6 +283,75 @@ class EngineCheckTests(unittest.TestCase):
         )
         self.assertEqual(self._refusals("titan_eager", "ZBVZeroBubble"), [])
         self.assertEqual(self._refusals("titan_compiled", "Interleaved1F1B"), [])
+
+
+class MegatronCheckTests(unittest.TestCase):
+    """The stock Megatron engine refuses each run that its driver cannot honour."""
+
+    def _refusals(self, config=MegatronStockConfig(), **run_fields) -> str:
+        arm = replace(SCENARIOS["engines"].arm("megatron_stock"), config=config)
+        run = run_spec(**{"ac_mode": "none", **run_fields})
+        return " ".join(engine_for(arm).check(run, arm))
+
+    def test_the_default_arm_passes(self):
+        self.assertEqual(self._refusals(), "")
+
+    def test_p2p_sync_on_at_one_pipeline_rank_is_refused(self):
+        self.assertIn(
+            "no pipeline message", self._refusals(MegatronStockConfig(p2p_sync="on"))
+        )
+
+    def test_lean_precision_at_zero_0_is_refused(self):
+        self.assertIn(
+            "'lean' needs --zero 1",
+            self._refusals(MegatronStockConfig(precision="lean")),
+        )
+        self.assertEqual(
+            self._refusals(
+                MegatronStockConfig(precision="lean"),
+                parallelism=ParallelismSpec(dp=2, zero=1),
+            ),
+            "",
+        )
+
+    def test_parameter_gather_overlap_at_zero_0_is_refused(self):
+        self.assertIn(
+            "--overlap-param-gather needs --zero 1",
+            self._refusals(
+                MegatronStockConfig(extra_flags=("--overlap-param-gather",))
+            ),
+        )
+
+    def test_an_owned_passthrough_flag_is_refused(self):
+        self.assertIn(
+            "owned by --model-size",
+            self._refusals(MegatronStockConfig(extra_flags=("--num-layers=4",))),
+        )
+
+    def test_selective_recompute_is_refused(self):
+        self.assertIn("no Megatron parity", self._refusals(ac_mode="sac"))
+
+    def test_an_unseeded_run_is_refused(self):
+        self.assertIn("seeded workload", self._refusals(seed=None))
+
+    def test_a_partial_profiler_cycle_is_refused_under_the_profiler_alone(self):
+        self.assertIn(
+            "whole number of profiler cycles",
+            self._refusals(profile=True, steps=50),
+        )
+        self.assertEqual(self._refusals(profile=False, steps=50), "")
+
+    def test_an_unknown_value_is_refused_and_names_the_choices(self):
+        for field, label, choices in (
+            ("p2p_sync", "megatron p2p sync", "'on', 'off'"),
+            ("nan_guard", "megatron nan guard", "'on', 'off'"),
+            ("precision", "megatron precision", "'stock', 'lean'"),
+        ):
+            with self.subTest(field=field):
+                self.assertIn(
+                    f"{label} 'bogus' is not one of {choices}",
+                    self._refusals(MegatronStockConfig(**{field: "bogus"})),
+                )
 
 
 if __name__ == "__main__":
