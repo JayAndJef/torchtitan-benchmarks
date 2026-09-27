@@ -142,7 +142,7 @@ class StepSample:
 
 @dataclass(frozen=True)
 class DroppedLine:
-    """A step line that another rank's log prefix cut, which the reader drops."""
+    """A step line that a rank prefix cut, which the reader drops."""
 
     rank: int
     line: int
@@ -209,8 +209,8 @@ class Engine(ABC):
     def read_steps(self, rank: int, text: str) -> StepRead:
         """The step samples and the dropped step lines of one rank's log ``text``.
 
-        A torn write can put another rank's log prefix inside a step line.
-        The reader drops a step line that such a prefix cut, and it raises
+        A torn write can put a rank prefix inside a step line. The reader
+        drops a step line that such a prefix cut, and it raises
         ``ValueError`` for any other step line that does not parse.
         """
 

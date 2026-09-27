@@ -11,7 +11,7 @@ from benchmarks.e2e.engines.api import (
     Launch,
     RankEvidence,
     RunSpec,
-    StepSample,
+    StepRead,
 )
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.flags import (
@@ -128,7 +128,7 @@ class MegatronStockEngine(Engine):
             )
         )
 
-    def read_steps(self, rank: int, text: str) -> list[StepSample]:
+    def read_steps(self, rank: int, text: str) -> StepRead:
         return read_steps(rank, text)
 
     def read_evidence(self, rank: int, text: str) -> RankEvidence:
