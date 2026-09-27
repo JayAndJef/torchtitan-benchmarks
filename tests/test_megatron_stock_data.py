@@ -12,13 +12,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.e2e.data.c4_replay import (
-    C4_TEST_PATH,
-    DATASET,
-    TOKENIZER_PATH,
-    materialize,
-)
-from benchmarks.e2e.engines.api import DataSpec
+from benchmarks.e2e.data.c4_replay import C4_TEST_PATH, TOKENIZER_PATH, materialize
+from benchmarks.e2e.engines.api import REPLAY_DATASET, DataSpec
 
 SEQ_LEN = 1024
 BATCH = 4
@@ -26,7 +21,7 @@ BATCH = 4
 
 def _spec(steps: int) -> DataSpec:
     return DataSpec(
-        dataset=DATASET, seq_len=SEQ_LEN, local_batch_size=BATCH, steps=steps
+        dataset=REPLAY_DATASET, seq_len=SEQ_LEN, local_batch_size=BATCH, steps=steps
     )
 
 
@@ -158,9 +153,23 @@ class PackingParityTests(unittest.TestCase):
         self.assertEqual(matching, 0)
 
     def test_another_dataset_is_refused(self) -> None:
-        spec = DataSpec(dataset="c4", seq_len=SEQ_LEN, local_batch_size=1, steps=1)
         with self.assertRaisesRegex(ValueError, "'c4_test' alone"):
-            materialize(spec, 0, 1)
+            DataSpec(dataset="c4", seq_len=SEQ_LEN, local_batch_size=1, steps=1)
+
+    def test_a_dataset_path_is_refused(self) -> None:
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import (
+            PretokenizedReplayDataLoader,
+        )
+
+        with self.assertRaisesRegex(ValueError, "remove --dataloader.dataset-path"):
+            PretokenizedReplayDataLoader(
+                PretokenizedReplayDataLoader.Config(dataset_path="/tmp/c4"),
+                dp_world_size=1,
+                dp_rank=0,
+                tokenizer=None,
+                seq_len=SEQ_LEN,
+                local_batch_size=BATCH,
+            )
 
     def test_replay_exhaustion_is_loud(self) -> None:
         from benchmarks.e2e.engines.torchtitan.plugins.replay import (
