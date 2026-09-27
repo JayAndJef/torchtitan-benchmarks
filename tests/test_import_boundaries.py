@@ -88,6 +88,8 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.engines.registry",
     "benchmarks.e2e.engines.torchtitan.config",
     "benchmarks.e2e.engines.torchtitan.engine",
+    "benchmarks.e2e.engines.torchtitan.flags",
+    "benchmarks.e2e.engines.torchtitan.validate",
     "benchmarks.e2e.engines.megatron_stock.config",
     "benchmarks.e2e.engines.megatron_stock.engine",
     # The stock Megatron-LM command line, as data. ``launch.py``
@@ -142,20 +144,19 @@ PARENT_SIDE_MODULES = (
     # which is why the profile encodes its torch values as strings.
     "benchmarks.models.piper_qwen3.mcore_profiles",
     "benchmarks.models.piper_qwen3.megatron_bootstrap",
-    # The ``--module`` chain. TorchTitan resolves ``--module
-    # benchmarks.models.piper_qwen3`` inside the *training* subprocess, which
-    # executes ``benchmarks/__init__.py``, ``benchmarks/models/__init__.py``
-    # and this package's ``__init__.py`` before anything else. They are
-    # docstring-only by design; listing the package here is what asserts it.
-    "benchmarks.models.piper_qwen3",
+    # The ``--module`` package. TorchTitan imports it inside the training
+    # process before its config_registry, so its ``__init__.py`` and every
+    # parent package's ``__init__.py`` hold a docstring alone.
+    "benchmarks.e2e.engines.torchtitan.plugins",
 )
 
 # Modules that import the ML stack at module scope. This is correct and
 # expected -- they run inside the worker -- so the boundary is asserted from
 # the other side: no parent-side module may import them at module scope.
 WORKER_SIDE_MODULES = (
-    "benchmarks.models.piper_qwen3.config_registry",
-    "benchmarks.models.piper_qwen3.parallelize",
+    "benchmarks.e2e.engines.torchtitan.plugins.config_registry",
+    "benchmarks.e2e.engines.torchtitan.plugins.parallelize",
+    "benchmarks.e2e.engines.torchtitan.plugins.replay",
     "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu",
     "benchmarks.models.piper_qwen3.components.lm_head.losses",
     "benchmarks.models.piper_qwen3.components.lm_head.te_cross_entropy",
@@ -167,10 +168,8 @@ WORKER_SIDE_MODULES = (
     # module scope is what it is, not an oversight -- unlike mcore_profiles,
     # which describes the same model and stays parent-side.
     "benchmarks.models.piper_qwen3.megatron_weights",
-    # The in-process titan build. It imports config_registry, so it reaches
-    # torchtitan at module scope by construction.
+    # The TorchTitan model config for a shape, and the in-process titan build.
     "benchmarks.models.piper_qwen3.titan_model",
-    "benchmarks.e2e.data.piper_qwen3",
     "benchmarks.e2e.megatron_stock.data",
     "benchmarks.e2e.megatron_stock.profiling",
     # The counting GPT builder. Megatron's own
@@ -671,7 +670,7 @@ DECLARATION_MODULES = (
 #
 # The last two entries are first-party and reach the stack one step further
 # out, which is why they are named rather than left to the third-party roots
-# above. ``config_registry`` imports torchtitan at module scope (it is on
+# above. ``titan_model`` imports torchtitan at module scope (it is on
 # WORKER_SIDE_MODULES), and ``megatron_model`` puts Megatron on ``sys.path``
 # and builds a ``GPTModel``, so an operations module that imported either at
 # module scope would pay the same price under a first-party spelling. Naming
@@ -688,7 +687,7 @@ OPERATIONS_DEFERRED_IMPORTS = (
     "triton",
     "helion",
     "benchmarks.models.piper_qwen3.components",
-    "benchmarks.models.piper_qwen3.config_registry",
+    "benchmarks.models.piper_qwen3.titan_model",
     "benchmarks.models.piper_qwen3.megatron_model",
 )
 

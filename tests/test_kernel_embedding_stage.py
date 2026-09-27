@@ -350,7 +350,7 @@ class TitanArmTests(unittest.TestCase):
     """The titan arm, built by its own builder. It is eager, so this is it."""
 
     def test_the_module_is_the_node_the_production_config_carries(self) -> None:
-        from benchmarks.models.piper_qwen3.config_registry import (
+        from benchmarks.models.piper_qwen3.titan_model import (
             _piper_1b_model,
         )
 

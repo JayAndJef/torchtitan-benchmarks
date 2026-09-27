@@ -500,7 +500,7 @@ def titan_embedding_module(shape: PiperShape, device: torch.device):
     at ``normal`` and 7.0 GiB at ``huge``. The values are overwritten with the
     shared table immediately afterwards.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     node = _piper_1b_model(fuse_qkv=True, shape=shape).tok_embeddings
     previous_dtype = torch.get_default_dtype()

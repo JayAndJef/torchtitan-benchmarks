@@ -170,7 +170,7 @@ class TitanExtractionTests(unittest.TestCase):
     """The titan side needs no ``Trainer.Config``, and this pins that."""
 
     def test_the_module_is_the_node_the_production_config_carries(self) -> None:
-        from benchmarks.models.piper_qwen3.config_registry import (
+        from benchmarks.models.piper_qwen3.titan_model import (
             _piper_1b_model,
         )
 

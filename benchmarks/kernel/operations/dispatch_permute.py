@@ -788,7 +788,7 @@ def titan_dispatcher(shape: PiperShape):
     which this build never calls at all. ``_require_titan_dispatch_contract``
     asserts the state that branch reads.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     model_config = _piper_1b_model(fuse_qkv=True, shape=shape)
     block = model_config.layers[TITAN_LAYER]

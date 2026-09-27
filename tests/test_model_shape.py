@@ -1041,7 +1041,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
         """
         import inspect
 
-        import benchmarks.models.piper_qwen3.config_registry as registry
+        import benchmarks.e2e.engines.torchtitan.plugins.config_registry as registry
 
         for scenario in SCENARIOS.values():
             for arm in scenario.arms:
@@ -1107,10 +1107,8 @@ class ConfigSizeClosureTests(unittest.TestCase):
         """
         import inspect
 
-        from benchmarks.models.piper_qwen3.config_registry import (
-            _piper_1b_model,
-            _piper_1b_trainer,
-        )
+        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import _piper_1b_trainer
+        from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
         for builder in (_piper_1b_model, _piper_1b_trainer):
             with self.subTest(builder=builder.__name__):
@@ -1142,7 +1140,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
         self.assertIs(parameter.default, inspect.Parameter.empty)
 
     def test_size_round_trips_through_the_config_argument(self) -> None:
-        from benchmarks.models.piper_qwen3.config_registry import qwen3_piper_1b
+        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import qwen3_piper_1b
 
         self.assertEqual(qwen3_piper_1b(size="huge").model_spec.model.dim, 12288)
         self.assertEqual(qwen3_piper_1b(size="normal").model_spec.model.dim, 1024)
@@ -1153,7 +1151,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
             qwen3_piper_1b(size="enormous")
 
     def test_built_models_carry_the_requested_shape(self) -> None:
-        from benchmarks.models.piper_qwen3.config_registry import qwen3_piper_1b
+        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import qwen3_piper_1b
 
         normal = qwen3_piper_1b().model_spec.model
         self.assertEqual(normal.dim, PIPER_1B.dim)
@@ -1167,7 +1165,7 @@ class ConfigSizeClosureTests(unittest.TestCase):
         self.assertIsNone(huge.layers[0].moe.load_balance_coeff)
 
     def test_pretokenized_configs_pass_the_size_down_to_their_delegate(self) -> None:
-        from benchmarks.models.piper_qwen3.config_registry import (
+        from benchmarks.e2e.engines.torchtitan.plugins.config_registry import (
             qwen3_piper_1b_pretokenized,
         )
 

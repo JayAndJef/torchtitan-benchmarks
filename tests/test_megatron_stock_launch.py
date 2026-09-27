@@ -49,9 +49,9 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.runner import _resolve_run
+from benchmarks.e2e.engines.torchtitan.validate import TORCHTITAN_PROFILE
 from benchmarks.e2e.validation import (
     MEGATRON_STOCK_PROFILE,
-    TORCHTITAN_PROFILE,
     _megatron_stock_parallelism_markers,
 )
 from benchmarks.execution.affinity import CpuPinning

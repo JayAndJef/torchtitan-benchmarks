@@ -81,7 +81,7 @@ class SharedEpsilonTests(unittest.TestCase):
         """
         from torchtitan.models.qwen3 import _qwen3_norm
 
-        from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+        from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
         expected = _qwen3_norm(TINY.dim)
         config = _piper_1b_model(fuse_qkv=True, shape=TINY)

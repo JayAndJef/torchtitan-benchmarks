@@ -734,7 +734,7 @@ def build_moe_router_titan(
     mcore arms are eager, because megatron compiles no whole layer; the ratio
     between them is a comparison of two treatments, and every table says so.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     moe_config = _piper_1b_model(fuse_qkv=True, shape=shape).layers[LAYER].moe
     if moe_config.load_balance_coeff is not None:

@@ -824,7 +824,7 @@ class PinnedSourceTests(unittest.TestCase):
         """So the arm holds the class this model actually builds."""
         registry = (
             Path(__file__).resolve().parent.parent
-            / "benchmarks/models/piper_qwen3/config_registry.py"
+            / "benchmarks/models/piper_qwen3/titan_model.py"
         )
         self.assertIn(
             f'moe_comm_backend="{TITAN_COMM_BACKEND}"', registry.read_text()

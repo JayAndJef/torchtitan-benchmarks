@@ -22,7 +22,7 @@ from benchmarks.e2e.megatron_stock.data import (
 
 class PackingParityTests(unittest.TestCase):
     def test_streams_are_bitwise_identical(self) -> None:
-        from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataset
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import PretokenizedReplayDataset
         from benchmarks.e2e.megatron_stock.data import materialize_titan_samples
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
         from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
@@ -99,7 +99,7 @@ class PackingParityTests(unittest.TestCase):
         Both sides call the same dataset class with the same ``dp_rank`` and
         ``dp_world_size``, so the split is torchtitan's own on both.
         """
-        from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataset
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import PretokenizedReplayDataset
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
         from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
 
@@ -135,7 +135,7 @@ class PackingParityTests(unittest.TestCase):
                     self.assertTrue(torch.equal(m_label, t_label))
 
     def test_replay_exhaustion_is_loud(self) -> None:
-        from benchmarks.e2e.data.piper_qwen3 import PretokenizedReplayDataset
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import PretokenizedReplayDataset
 
         class TwoSamples:
             def __iter__(self):
