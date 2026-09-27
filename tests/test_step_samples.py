@@ -79,6 +79,19 @@ class TorchTitanStepLineTests(unittest.TestCase):
         self.assertEqual([sample.step for sample in read.samples], [1, 3])
         self.assertEqual(read.dropped, (DroppedLine(rank=0, line=2, step=2),))
 
+    def test_a_line_of_another_rank_is_not_this_rank_step(self) -> None:
+        self.assertEqual(
+            titan_steps.read_steps(0, "[rank1]:" + titan_step_line(5)),
+            StepRead(samples=()),
+        )
+        record = megatron_steps.step_record(**RECORD_FIELDS)
+        text_line = MegatronTextLineTests.LINE
+        for line in (record, text_line):
+            with self.subTest(line=line[:12]):
+                self.assertEqual(
+                    megatron_steps.read_steps(0, "[rank1]:" + line), StepRead(samples=())
+                )
+
     def test_a_step_line_in_an_appended_line_is_not_this_rank_step(self) -> None:
         text = "[rank0]:INFO starting [rank1]:" + titan_step_line(5)
         self.assertEqual(titan_steps.read_steps(0, text), StepRead(samples=()))

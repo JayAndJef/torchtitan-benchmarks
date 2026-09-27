@@ -12,14 +12,14 @@ from types import MappingProxyType
 from typing import Any
 
 from benchmarks.e2e.engines.api import DroppedLine, StepRead, StepSample
-from benchmarks.execution.launcher import RANK_PREFIX, holds_rank_prefix
+from benchmarks.execution.launcher import RANK_PREFIX, holds_rank_prefix, own_line
 
 
 STEP_PREFIX = "bench-step: "
 """The start of the step record; a JSON object follows it."""
 
-STEP_RECORD = re.compile(rf"^(?:{RANK_PREFIX})?{re.escape(STEP_PREFIX)}(.*)$")
-"""The step record, after the rank prefix that a log of one rank keeps."""
+STEP_RECORD = re.compile(rf"^{re.escape(STEP_PREFIX)}(.*)$")
+"""The step record."""
 
 TORN_TAIL = re.compile(rf"\s*(?:{RANK_PREFIX}.*)?")
 """The text that may follow a step line: another rank's line, which a torn write appended."""
@@ -29,7 +29,7 @@ RECORD_KEYS = frozenset(
 )
 """The keys of the step record."""
 
-TEXT_MARKER = re.compile(rf"^(?:{RANK_PREFIX})?step:")
+TEXT_MARKER = re.compile(r"^step:")
 """The start of the text step line."""
 
 RECORD_STEP = re.compile(r'^\{"step": (\d+)')
@@ -41,7 +41,7 @@ TEXT_STEP = re.compile(r"\s*(\d+)")
 _NUMBER = r"(nan|-?inf|-?[0-9.]+)"
 
 TEXT_LINE = re.compile(
-    rf"^(?:{RANK_PREFIX})?step:\s*(\d+)\s+(?:loss:\s*{_NUMBER}\s+)?"
+    rf"^step:\s*(\d+)\s+(?:loss:\s*{_NUMBER}\s+)?"
     rf"grad_norm:\s*{_NUMBER}\s+memory:\s*([0-9.]+)GiB\([0-9.]+%\)\s+"
     rf"tps:\s*([0-9,]+)\s+tflops:\s*([0-9,.]+)\s+mfu:\s*([0-9.]+)%{TORN_TAIL.pattern}$"
 )
@@ -155,6 +155,7 @@ def read_steps(rank: int, text: str) -> StepRead:
     samples = []
     dropped = []
     for number, line in enumerate(text.splitlines(), start=1):
+        line = own_line(rank, line)
         record = STEP_RECORD.match(line)
         marker = TEXT_MARKER.match(line)
         if record is not None:
