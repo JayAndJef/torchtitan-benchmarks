@@ -8,13 +8,16 @@ golden record before the comparison.
 
 ``launch/<case>.json`` holds, per arm, the argv, the child environment and
 the working directory that ``execute_run`` hands to the process runner, and
-the manifest that the run writes. ``runs/<name>/`` holds a run directory and
+the schema 18 manifest that the run wrote. The test reads that manifest
+through ``upgrade_v18`` and compares it with the schema 19 manifest of the
+current code. ``runs/<name>/`` holds a run directory and
 ``expected_results.json``, which is the evaluation of that directory.
 """
 
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 import tempfile
 import unittest
@@ -26,7 +29,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.artifacts.manifest_v18 import upgrade_v18
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
+from benchmarks.e2e.overrides import parse_override
 from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.results import evaluate_run
 from benchmarks.e2e.runner import execute_run
@@ -147,27 +152,43 @@ LAUNCH_CASES: dict[str, dict[str, Any]] = {
 """Every golden launch, as the operator asks for it; each one runs every arm."""
 
 
+CASE_OVERRIDES = {
+    "torchtitan_args": (
+        "titan_compiled.extra_flags+={}",
+        "titan_eager.extra_flags+={}",
+    ),
+    "megatron_args": ("megatron_stock.extra_flags+={}",),
+    "megatron_p2p_sync": ("megatron_stock.p2p_sync={}",),
+    "megatron_nan_guard": ("megatron_stock.nan_guard={}",),
+    "megatron_precision": ("megatron_stock.precision={}",),
+}
+"""The ``--set`` values that replace each master option a golden case names."""
+
+
 def _request(case: dict[str, Any], out_dir: Path) -> RunRequest:
     """The run request of one golden case."""
     parallelism = case.get("parallelism")
-    torchtitan_args = case.get("torchtitan_args")
-    megatron_args = case.get("megatron_args")
+    overrides = []
+    for key, templates in CASE_OVERRIDES.items():
+        value = case.get(key)
+        if value is None:
+            continue
+        text = shlex.join(value) if isinstance(value, list) else value
+        overrides.extend(
+            parse_override(template.format(text)) for template in templates
+        )
     return RunRequest(
         gpu=case["gpu"],
         scenario_name="engines",
         out_dir=out_dir,
         batch=case.get("batch"),
-        torchtitan_args=None if torchtitan_args is None else tuple(torchtitan_args),
-        megatron_args=None if megatron_args is None else tuple(megatron_args),
+        overrides=tuple(overrides),
         axes=RequestedAxes(
             model_size=case["model_size"],
             profile=case["profile"],
             parallelism=None
             if parallelism is None
             else ParallelismSpec(**parallelism),
-            megatron_p2p_sync=case.get("megatron_p2p_sync"),
-            megatron_nan_guard=case.get("megatron_nan_guard"),
-            megatron_precision=case.get("megatron_precision"),
         ),
     )
 
@@ -311,6 +332,24 @@ def _megatron_driver_moves_into_the_engine_package(record: dict[str, Any]) -> No
             argv[argv.index(OLD_MEGATRON_DRIVER)] = MEGATRON_DRIVER
 
 
+EXECUTION_MODEL_SENTENCES = (
+    " The manifest's execution_model reads plain-bf16 because it is "
+    "composed from the parallelism spec; it describes the TorchTitan arms "
+    "and not the Megatron one.",
+    ". The manifest's execution_model says plain-bf16 and describes the "
+    "other arms",
+)
+"""The description sentences that named the top-level execution model of schema 18."""
+
+
+def _descriptions_drop_the_execution_model(record: dict[str, Any]) -> None:
+    manifest = record["manifest"]
+    for sentence in EXECUTION_MODEL_SENTENCES:
+        manifest["description"] = manifest["description"].replace(sentence, "")
+        for arm in manifest["arms"]:
+            arm["description"] = arm["description"].replace(sentence, "")
+
+
 OLD_MEGATRON_DRIVER = "benchmarks.e2e.megatron_stock.train"
 MEGATRON_DRIVER = "benchmarks.e2e.engines.megatron_stock.driver.train"
 OLD_TITAN_MODULE = "benchmarks.models.piper_qwen3"
@@ -382,8 +421,42 @@ ACCEPTED_DIFFERENCES = (
         "benchmarks.e2e.engines.megatron_stock.driver.train.",
         _megatron_driver_moves_into_the_engine_package,
     ),
+    AcceptedDifference(
+        "Plan 2.9, refined in section C: each arm records its own execution "
+        "model, so the scenario description and the Megatron arm description "
+        "drop the sentence about the top-level execution model.",
+        _descriptions_drop_the_execution_model,
+    ),
 )
 """The changes from the baseline that the plan names or that the review accepted."""
+
+
+def _schema_19_facts(
+    expected: dict[str, Any], actual: dict[str, Any], launched: dict[str, Any]
+) -> None:
+    """Copy into ``expected`` the two arm facts that schema 18 did not record.
+
+    Plan 2.9 adds ``env_delta``, and each of its keys must hold the value
+    that the golden launch gave the child. Section C gives every arm an
+    execution model, and schema 18 recorded one for the TorchTitan arms
+    alone; ``tests/test_engines.py`` pins the Megatron strings.
+    """
+    actual_arms = {arm["name"]: arm for arm in actual["arms"]}
+    for arm in expected["arms"]:
+        found = actual_arms.get(arm["name"])
+        if found is None:
+            continue
+        delta = found["env_delta"]
+        env = launched[arm["name"]]["env"]
+        wrong = {key: value for key, value in delta.items() if env.get(key) != value}
+        if wrong:
+            raise AssertionError(
+                f"{arm['name']}: env_delta holds {wrong}, which the golden "
+                "launch did not give the child"
+            )
+        arm["env_delta"] = delta
+        if arm["execution_model"] is None:
+            arm["execution_model"] = found["execution_model"]
 
 
 def expected_launch(name: str) -> dict[str, Any]:
@@ -425,7 +498,9 @@ class GoldenLaunchTest(unittest.TestCase):
                     with self.subTest(case=name, arm=arm, part=part):
                         self.assertEqual(actual["arms"][arm][part], launched[part])
             with self.subTest(case=name, part="manifest"):
-                self.assertEqual(actual["manifest"], expected["manifest"])
+                manifest = upgrade_v18(expected["manifest"])
+                _schema_19_facts(manifest, actual["manifest"], expected["arms"])
+                self.assertEqual(actual["manifest"], manifest)
 
 
 class GoldenEvaluationTest(unittest.TestCase):

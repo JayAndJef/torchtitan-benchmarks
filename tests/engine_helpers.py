@@ -5,12 +5,17 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from benchmarks.artifacts.manifests import ArmRecord, write_manifest
 from benchmarks.e2e.engines.api import Arm, DataSpec, ProfileWindow, RunSpec
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
 from benchmarks.e2e.registry import DEFAULT_WARMUP_STEPS, ENGINES, SEED
 from benchmarks.execution.affinity import CpuPinning
-from benchmarks.execution.launcher import command_line
+from benchmarks.execution.launcher import (
+    command_line,
+    environment_delta,
+    pinning_record,
+)
 from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 
@@ -65,3 +70,47 @@ def validate(
 ) -> None:
     """Validate one arm through its engine."""
     engine_for(arm).validate(run, arm, Path(arm_dir), Path(log_path))
+
+
+TEST_METADATA = {
+    "requested_gpu": "0",
+    "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+    "torch_version": "test",
+    "torchtitan_git_rev": "titan-rev",
+    "benchmarks_git_rev": "bench-rev",
+    "megatron_git_rev": "megatron-rev",
+    "cpu_pinning": UNPINNED.description,
+}
+"""A provenance block for a manifest that no host probe wrote."""
+
+
+def write_run_manifest(
+    out_dir: Path,
+    run: RunSpec,
+    arms: tuple[Arm, ...],
+    *,
+    pinning: CpuPinning = UNPINNED,
+) -> None:
+    """Write the schema 19 manifest that the runner writes for ``arms`` of the ``engines`` scenario."""
+    world_size = run.parallelism.world_size
+    records = []
+    for arm in arms:
+        launch = engine_for(arm).launch(run, arm, out_dir / arm.name)
+        records.append(
+            ArmRecord(
+                arm=arm,
+                command=command_line(launch, world_size=world_size, pinning=pinning),
+                env_delta=environment_delta(launch, world_size=world_size, gpu="0"),
+                cpu_pinning=pinning_record(launch, pinning),
+                execution_model=engine_for(arm).execution_model(run, arm),
+            )
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_manifest(
+        out_dir,
+        scenario=ENGINES,
+        hardware="test-gpu",
+        metadata={**TEST_METADATA, "cpu_pinning": pinning.description},
+        run=run,
+        arms=tuple(records),
+    )

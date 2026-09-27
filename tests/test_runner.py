@@ -13,8 +13,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files
-from benchmarks.artifacts.manifests import write_manifest
-from benchmarks.e2e.axes import RequestedAxes, RunAxes, RunRequest
+from benchmarks.e2e.axes import RequestedAxes, RunRequest
+from benchmarks.e2e.checks import check_run
+from benchmarks.e2e.overrides import parse_override
 from benchmarks.e2e.engines.api import Arm, CompileMode
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
@@ -28,6 +29,7 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from tests.engine_helpers import command, configured, run_spec, validate
+from benchmarks.e2e.engines.api import ProfileWindow
 from benchmarks.e2e.results import stable_tps, training_metrics
 from benchmarks.e2e.runner import (
     _resolve_run,
@@ -327,16 +329,14 @@ class SelectedArmTests(unittest.TestCase):
             state = json.loads((out_dir / "run_state.json").read_text())
             self.assertEqual(launched, ["titan_eager", "titan_compiled"])
             self.assertEqual(
-                manifest["selected_arms"], ["titan_eager", "titan_compiled"]
-            )
-            self.assertEqual(
-                list(manifest["commands"]), ["titan_eager", "titan_compiled"]
+                [arm["name"] for arm in manifest["arms"]],
+                ["titan_eager", "titan_compiled"],
             )
             self.assertEqual(
                 list(state["arms"]), ["titan_eager", "titan_compiled"]
             )
 
-            with self.assertRaisesRegex(ValueError, "selected_arms"):
+            with self.assertRaisesRegex(ValueError, "existing manifest: arms$"):
                 execute_run(
                     RunRequest(
                         gpu="0",
@@ -351,771 +351,330 @@ class SelectedArmTests(unittest.TestCase):
 def _p2p_flags(command: list[str]) -> list[str]:
     """The flag tokens of ``command`` that name the p2p sync.
 
-    Flags only: a path in the argv can carry the substring too, and the
-    interpreter's own path does on a checkout named after this option.
+    Flags only: a path in the argv can carry the substring too.
     """
     return [
         token for token in command if token.startswith("--") and "p2p" in token
     ]
 
 
-class MegatronP2pSyncResolutionTests(unittest.TestCase):
-    """What ``_resolve_run`` does with ``--megatron-p2p-sync``.
-
-    Both refusals are parent-side and land before any host probe, so a
-    refused request claims no GPU. The value reaches the megatron commands
-    alone; a TorchTitan argv is untouched under either value.
-    """
-
-    PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
-
-    def setUp(self) -> None:
-        self.metadata = {
-            "requested_gpu": "0",
-            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
-            "torch_version": "test",
-            "torchtitan_git_rev": "titan-rev",
-            "benchmarks_git_rev": "bench-rev",
-            "megatron_git_rev": "mcore-rev",
-        }
-
-    def _resolve(
-        self,
-        names: tuple[str, ...],
-        *,
-        gpu: str = "0,1",
-        parallelism: ParallelismSpec | None = None,
-        megatron_p2p_sync: str | None = "off",
-        scenario_name: str = "engines",
-    ):
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ):
-            return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
-                        parallelism=self.PP2 if parallelism is None else parallelism,
-                        megatron_p2p_sync=megatron_p2p_sync,
-                    ),
-                    gpu=gpu,
-                    scenario_name=scenario_name,
-                    arm_names=names,
-                    out_dir=Path("/tmp/p2p-sync-test"),
-                ),
-                {"PATH": os.environ["PATH"]},
-            )
-
-    def _refused_before_any_probe(self, pattern: str, **keywords) -> None:
-        def never(*args, **kwargs):
-            raise AssertionError("a host probe ran for a refused request")
-
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
-        ):
-            with self.assertRaisesRegex(ValueError, pattern):
-                _resolve_run(
-                    _request_with_axes(
-                        scenario_name="engines",
-                        out_dir=Path("/tmp/p2p-sync-test"),
-                        ac_mode="none",
-                        **keywords,
-                    ),
-                    {"PATH": os.environ["PATH"]},
-                )
-
-    def test_on_at_pp_one_is_refused_before_any_host_probe(self) -> None:
-        """No pipeline message exists, so the manifest would record a
-        treatment the run did not have."""
-        self._refused_before_any_probe(
-            "no pipeline message",
-            gpu="0",
-            arm_names=("megatron_stock",),
-            megatron_p2p_sync="on",
-        )
-
-    def test_on_without_a_megatron_arm_is_refused_before_any_host_probe(
-        self,
-    ) -> None:
-        """The value needs at least one arm that is not TorchTitan.
-
-        TorchTitan sends no pipeline message through Megatron, so the
-        value would reach nothing.
-        """
-        self._refused_before_any_probe(
-            "reaches no arm",
-            gpu="0,1",
-            arm_names=("titan_compiled",),
-            parallelism=self.PP2,
-            megatron_p2p_sync="on",
-        )
-
-    def test_an_unknown_value_is_refused(self) -> None:
-        self._refused_before_any_probe(
-            "unknown megatron p2p sync",
-            gpu="0,1",
-            arm_names=("megatron_stock",),
-            parallelism=self.PP2,
-            megatron_p2p_sync="false",
-        )
-
-    def test_off_reaches_the_megatron_command_and_not_the_titan_one(
-        self,
-    ) -> None:
-        """``run --arm`` narrows the engine set, and a mixed selection is
-        legal: the megatron arm gets the flag and the titan arm gets
-        nothing."""
-        resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
-        commands = resolved.commands
-        megatron = commands["megatron_stock"]
-        self.assertEqual(megatron[-2:], ["--bench-batch-p2p-sync", "off"])
-        self.assertEqual(_p2p_flags(commands["titan_compiled"]), [])
-
-    def test_a_megatron_only_subset_passes(self) -> None:
-        resolved = self._resolve(("megatron_stock",))
-        self.assertEqual([arm.name for arm in resolved.arms], ["megatron_stock"])
-        self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
-
-    def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
-        for requested in (None, "off"):
-            with self.subTest(requested=requested):
-                resolved = self._resolve(
-                    ("megatron_stock", "titan_compiled"), megatron_p2p_sync=requested
-                )
-                self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
-                commands = resolved.commands
-                self.assertEqual(
-                    _p2p_flags(commands["megatron_stock"]),
-                    ["--bench-batch-p2p-sync"],
-                )
-                self.assertEqual(_p2p_flags(commands["titan_compiled"]), [])
-
-    def test_on_adds_no_token_to_any_command(self) -> None:
-        resolved = self._resolve(
-            ("megatron_stock", "titan_compiled"), megatron_p2p_sync="on"
-        )
-        self.assertEqual(resolved.axes.megatron_p2p_sync, "on")
-        for name, command in resolved.commands.items():
-            self.assertEqual(_p2p_flags(command), [], name)
-
-    def test_the_stock_scenario_takes_the_value_too(self) -> None:
-        resolved = self._resolve(
-            ("megatron_stock",), scenario_name="engines"
-        )
-        command = resolved.commands["megatron_stock"]
-        self.assertEqual(command[-2:], ["--bench-batch-p2p-sync", "off"])
-
-    def _write_manifest(self, out_dir: Path, megatron_p2p_sync: str) -> None:
-        scenario = scenario_by_name("engines")
-        write_manifest(
-            out_dir,
-            scenario,
-            run_spec(ac_mode="none", profile=False, parallelism=self.PP2),
-            (scenario.arm("megatron_stock"),),
-            {"megatron_stock": ["cmd"]},
-            "test-gpu",
-            {**self.metadata, "cpu_pinning": "none: test"},
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=self.PP2,
-                megatron_p2p_sync=megatron_p2p_sync,
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def _resume(self, out_dir: Path, megatron_p2p_sync: str | None):
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ):
-            return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        parallelism=self.PP2,
-                        megatron_p2p_sync=megatron_p2p_sync,
-                    ),
-                    gpu="0,1",
-                    scenario_name=None,
-                    arm_names=("megatron_stock",),
-                    resume_dir=out_dir,
-                ),
-                {"PATH": os.environ["PATH"]},
-            )
-
-    def test_a_resume_inherits_the_recorded_value_and_refuses_another(
-        self,
-    ) -> None:
-        """The gate reads like --ac's: an omitted value inherits
-        the recorded one and rebuilds the same argv, a different value is
-        refused, and the refusal names the field."""
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary) / "run"
-            out_dir.mkdir()
-            self._write_manifest(out_dir, "off")
-            resolved = self._resume(out_dir, megatron_p2p_sync=None)
-            self.assertEqual(resolved.axes.megatron_p2p_sync, "off")
-            self.assertTrue(resolved.resumed)
-            self.assertEqual(
-                resolved.commands["megatron_stock"][-2:],
-                ["--bench-batch-p2p-sync", "off"],
-            )
-            with self.assertRaisesRegex(ValueError, "megatron_p2p_sync"):
-                self._resume(out_dir, megatron_p2p_sync="on")
-
-    def test_execute_run_hands_the_value_to_validate_arm(self) -> None:
-        """The value the run resolved is the value the gate reads."""
-
-        def fake_process(command, **kwargs):
-            kwargs["stdout"].write("Training completed\n")
-            return SimpleNamespace(returncode=0)
-
-        with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
-            execute_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
-                        parallelism=self.PP2,
-                        megatron_p2p_sync="off",
-                    ),
-                    gpu="0,1",
-                    scenario_name="engines",
-                    arm_names=("megatron_stock",),
-                    out_dir=Path(temporary) / "run",
-                ),
-                process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
-            )
-        self.assertEqual(validate.call_count, 1)
-        run, arm = validate.call_args.args[:2]
-        self.assertEqual(arm.config.p2p_sync, "off")
-        self.assertEqual(run.parallelism, self.PP2)
-
-    def test_the_banner_names_the_value(self) -> None:
-        """The banner names every comparability boundary the manifest
-        gates, and this value is one."""
-        events: list[str] = []
-
-        def failing_process(command, **kwargs):
-            kwargs["stdout"].write("nothing trained\n")
-            return SimpleNamespace(returncode=1)
-
-        with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ):
-            with self.assertRaises(RuntimeError):
-                execute_run(
-                    RunRequest(
-                        axes=RequestedAxes(
-                            ac_mode="none",
-                            parallelism=self.PP2,
-                            megatron_p2p_sync="off",
-                        ),
-                        gpu="0,1",
-                        scenario_name="engines",
-                        arm_names=("megatron_stock",),
-                        out_dir=Path(temporary) / "run",
-                    ),
-                    event_handler=lambda event: events.append(
-                        event.message if event.kind == "summary" else ""
-                    ),
-                    process_runner=failing_process,
-                    environment={"PATH": os.environ["PATH"]},
-                )
-        self.assertIn("megatron p2p sync: off", events)
-
-
 NO_NAN_CHECK = "--no-check-for-nan-in-loss-and-grad"
 
+LEAN_FLAGS = (
+    "--use-precision-aware-optimizer",
+    "--main-grads-dtype",
+    "--exp-avg-dtype",
+    "--exp-avg-sq-dtype",
+)
 
-class MegatronNanGuardResolutionTests(unittest.TestCase):
-    """What ``_resolve_run`` does with ``--megatron-nan-guard``.
+_METADATA = {
+    "requested_gpu": "0",
+    "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
+    "torch_version": "test",
+    "torchtitan_git_rev": "titan-rev",
+    "benchmarks_git_rev": "bench-rev",
+    "megatron_git_rev": "mcore-rev",
+}
 
-    Both refusals are parent-side and land before any host probe. The value
-    reaches the stock megatron command alone, and a TorchTitan argv is
-    untouched under either value.
-    Legal at every mesh, so every case here is the trivial spec.
-    """
+PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
 
-    def setUp(self) -> None:
-        self.metadata = {
-            "requested_gpu": "0",
-            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
-            "torch_version": "test",
-            "torchtitan_git_rev": "titan-rev",
-            "benchmarks_git_rev": "bench-rev",
-            "megatron_git_rev": "mcore-rev",
-        }
 
-    def _resolve(
-        self,
-        names: tuple[str, ...],
-        *,
-        megatron_nan_guard: str | None = "off",
-        scenario_name: str = "engines",
+def _overrides(*texts: str) -> tuple:
+    return tuple(parse_override(text) for text in texts)
+
+
+def _resolve(
+    names: tuple[str, ...],
+    *overrides: str,
+    gpu: str = "0",
+    parallelism: ParallelismSpec | None = None,
+    resume_dir: Path | None = None,
+):
+    """Resolve one ``engines`` request with stubbed host probes."""
+    with mock.patch(
+        "benchmarks.e2e.runner.hardware_metadata",
+        return_value=("test-gpu", _METADATA),
+    ), mock.patch(
+        "benchmarks.e2e.runner.resolve_cpu_pinning",
+        return_value=CpuPinning((), "none: test"),
     ):
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ):
-            return _resolve_run(
+        return _resolve_run(
+            RunRequest(
+                axes=RequestedAxes(
+                    ac_mode=None if resume_dir else "none",
+                    parallelism=parallelism,
+                ),
+                gpu=gpu,
+                scenario_name=None if resume_dir else "engines",
+                arm_names=names,
+                out_dir=None if resume_dir else Path("/tmp/override-test"),
+                resume_dir=resume_dir,
+                overrides=_overrides(*overrides),
+            ),
+            {"PATH": os.environ["PATH"]},
+        )
+
+
+def _refused_before_any_probe(
+    test: unittest.TestCase, pattern: str, names: tuple[str, ...], *overrides: str, **keywords
+) -> None:
+    def never(*args, **kwargs):
+        raise AssertionError("a host probe ran for a refused request")
+
+    with mock.patch(
+        "benchmarks.e2e.runner.hardware_metadata", side_effect=never
+    ), mock.patch(
+        "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
+    ):
+        with test.assertRaisesRegex(ValueError, pattern):
+            _resolve_run(
                 RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
-                        megatron_nan_guard=megatron_nan_guard,
-                    ),
-                    gpu="0",
-                    scenario_name=scenario_name,
+                    axes=RequestedAxes(ac_mode="none", **keywords),
+                    gpu="0,1" if keywords.get("parallelism") else "0",
+                    scenario_name="engines",
                     arm_names=names,
-                    out_dir=Path("/tmp/nan-guard-test"),
+                    out_dir=Path("/tmp/override-test"),
+                    overrides=_overrides(*overrides),
                 ),
                 {"PATH": os.environ["PATH"]},
             )
 
-    def _refused_before_any_probe(
-        self, pattern: str, scenario_name: str, **keywords
-    ) -> None:
-        def never(*args, **kwargs):
-            raise AssertionError("a host probe ran for a refused request")
 
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
-        ):
-            with self.assertRaisesRegex(ValueError, pattern):
-                _resolve_run(
-                    _request_with_axes(
-                        gpu="0",
-                        scenario_name=scenario_name,
-                        out_dir=Path("/tmp/nan-guard-test"),
-                        ac_mode="none",
-                        **keywords,
-                    ),
-                    {"PATH": os.environ["PATH"]},
-                )
+class OverrideResolutionTests(unittest.TestCase):
+    """What ``_resolve_run`` does with ``--set``.
 
-    def test_on_without_a_stock_megatron_arm_is_refused_before_any_probe(
-        self,
-    ) -> None:
-        """A TorchTitan-only run gives the value nothing to reach."""
-        self._refused_before_any_probe(
-            "reaches no arm",
-            "engines",
-            arm_names=("titan_compiled",),
-            megatron_nan_guard="on",
-        )
+    Each refusal lands before any host probe. A value reaches the arm that
+    the override names, and no other arm.
+    """
 
-    def test_an_unknown_value_is_refused(self) -> None:
-        self._refused_before_any_probe(
-            "unknown megatron nan guard",
-            "engines",
-            arm_names=("megatron_stock",),
-            megatron_nan_guard="false",
-        )
-
-    def test_off_reaches_the_stock_command_and_not_the_titan_one(self) -> None:
-        """A mixed selection is legal: the stock arm gets Megatron's own
-        token, once, ahead of the harness group, and the titan arm gets
-        nothing."""
-        resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved.axes.megatron_nan_guard, "off")
-        commands = resolved.commands
-        stock = commands["megatron_stock"]
+    def test_the_megatron_defaults_reach_the_stock_command(self) -> None:
+        resolved = _resolve(("megatron_stock", "titan_compiled"), gpu="0,1", parallelism=PP2)
+        stock = resolved.commands["megatron_stock"]
+        self.assertEqual(stock[-2:], ["--bench-batch-p2p-sync", "off"])
         self.assertEqual(stock.count(NO_NAN_CHECK), 1)
         self.assertLess(stock.index(NO_NAN_CHECK), stock.index("--bench-arm-dir"))
-        self.assertNotIn(NO_NAN_CHECK, commands["titan_compiled"])
+        titan = resolved.commands["titan_compiled"]
+        self.assertEqual(_p2p_flags(titan), [])
+        self.assertNotIn(NO_NAN_CHECK, titan)
 
-    def test_a_stock_only_subset_passes(self) -> None:
-        resolved = self._resolve(("megatron_stock",))
-        self.assertEqual([arm.name for arm in resolved.arms], ["megatron_stock"])
-        self.assertEqual(resolved.axes.megatron_nan_guard, "off")
-
-    def test_the_default_resolves_to_off_and_adds_the_token(self) -> None:
-        for requested in (None, "off"):
-            with self.subTest(requested=requested):
-                resolved = self._resolve(
-                    ("megatron_stock", "titan_compiled"), megatron_nan_guard=requested
-                )
-                self.assertEqual(resolved.axes.megatron_nan_guard, "off")
-                commands = resolved.commands
-                self.assertIn(NO_NAN_CHECK, commands["megatron_stock"])
-                self.assertNotIn(NO_NAN_CHECK, commands["titan_compiled"])
-
-    def test_on_adds_no_token_to_any_command(self) -> None:
-        resolved = self._resolve(
-            ("megatron_stock", "titan_compiled"), megatron_nan_guard="on"
+    def test_on_values_remove_the_stock_tokens(self) -> None:
+        resolved = _resolve(
+            ("megatron_stock",),
+            "megatron_stock.p2p_sync=on",
+            "megatron_stock.nan_guard=on",
+            gpu="0,1",
+            parallelism=PP2,
         )
-        self.assertEqual(resolved.axes.megatron_nan_guard, "on")
-        for name, command in resolved.commands.items():
-            self.assertNotIn(NO_NAN_CHECK, command, name)
+        (arm,) = resolved.arms
+        self.assertEqual((arm.config.p2p_sync, arm.config.nan_guard), ("on", "on"))
+        command = resolved.commands["megatron_stock"]
+        self.assertEqual(_p2p_flags(command), [])
+        self.assertNotIn(NO_NAN_CHECK, command)
 
-    def test_the_banner_names_the_value(self) -> None:
-        """The banner names every comparability boundary, and this value
-        is one."""
-        events: list[str] = []
+    def test_lean_reaches_the_stock_command_and_not_the_titan_one(self) -> None:
+        resolved = _resolve(
+            ("megatron_stock", "titan_compiled"),
+            "megatron_stock.precision=lean",
+            parallelism=ParallelismSpec(zero=1),
+        )
+        for flag in LEAN_FLAGS:
+            with self.subTest(flag=flag):
+                self.assertEqual(resolved.commands["megatron_stock"].count(flag), 1)
+                self.assertNotIn(flag, resolved.commands["titan_compiled"])
 
-        def failing_process(command, **kwargs):
-            kwargs["stdout"].write("nothing trained\n")
-            return SimpleNamespace(returncode=1)
+    def test_extra_flags_reach_the_named_arm_alone(self) -> None:
+        resolved = _resolve(
+            ("titan_compiled", "titan_eager"),
+            "titan_eager.extra_flags+=--training.gc-freq 7",
+        )
+        self.assertIn("--training.gc-freq", resolved.commands["titan_eager"])
+        self.assertNotIn("--training.gc-freq", resolved.commands["titan_compiled"])
 
-        with tempfile.TemporaryDirectory() as temporary, mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
+    def test_a_set_on_an_unselected_arm_is_refused_before_any_probe(self) -> None:
+        _refused_before_any_probe(
+            self,
+            "'megatron_stock' is not a selected arm. Available: titan_compiled",
+            ("titan_compiled",),
+            "megatron_stock.nan_guard=on",
+        )
+
+    def test_an_unknown_value_is_refused_and_names_the_choices(self) -> None:
+        _refused_before_any_probe(
+            self,
+            "'false' is not one of on, off",
+            ("megatron_stock",),
+            "megatron_stock.p2p_sync=false",
+        )
+
+    def test_the_engine_check_refuses_each_run_it_cannot_honour(self) -> None:
+        _refused_before_any_probe(
+            self,
+            "no pipeline message.*'lean' needs --zero 1",
+            ("megatron_stock",),
+            "megatron_stock.p2p_sync=on",
+            "megatron_stock.precision=lean",
+        )
+
+    def test_one_error_lists_the_shared_and_the_engine_refusals(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            check_run(
+                run_spec(ac_mode="sac", profile=False, warmup_steps=40),
+                ENGINES,
+                (configured(ENGINES.arm("megatron_stock"), precision="lean"),),
+                device_count=2,
+                resumed=None,
+            )
+        message = str(caught.exception)
+        for part in (
+            "does not match",
+            "more than the 40 warmup step(s)",
+            "does not support ac mode 'sac'",
+            "'lean' needs --zero 1",
         ):
-            with self.assertRaises(RuntimeError):
-                execute_run(
-                    RunRequest(
-                        axes=RequestedAxes(
-                            ac_mode="none",
-                            megatron_nan_guard="off",
-                        ),
-                        gpu="0",
-                        scenario_name="engines",
-                        arm_names=("megatron_stock",),
-                        out_dir=Path(temporary) / "run",
-                    ),
-                    event_handler=lambda event: events.append(
-                        event.message if event.kind == "summary" else ""
-                    ),
-                    process_runner=failing_process,
-                    environment={"PATH": os.environ["PATH"]},
-                )
-        self.assertIn("megatron nan guard: off", events)
+            with self.subTest(part=part):
+                self.assertIn(part, message)
 
-    def test_execute_run_hands_the_value_to_validate_arm(self) -> None:
-        """The value the run resolved is the value the gate reads."""
-
+    def test_execute_run_hands_the_config_to_validate_arm(self) -> None:
         def fake_process(command, **kwargs):
             kwargs["stdout"].write("Training completed\n")
             return SimpleNamespace(returncode=0)
 
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
+            return_value=("test-gpu", _METADATA),
         ), mock.patch(
             "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
         ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
             execute_run(
                 RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
-                        megatron_nan_guard="off",
-                    ),
+                    axes=RequestedAxes(ac_mode="none"),
                     gpu="0",
                     scenario_name="engines",
                     arm_names=("megatron_stock",),
                     out_dir=Path(temporary) / "run",
+                    overrides=_overrides("megatron_stock.nan_guard=on"),
                 ),
                 process_runner=fake_process,
                 environment={"PATH": os.environ["PATH"]},
             )
         self.assertEqual(validate.call_count, 1)
         arm = validate.call_args.args[1]
-        self.assertEqual(arm.config.nan_guard, "off")
+        self.assertEqual(arm.config.nan_guard, "on")
         self.assertEqual(arm.config.p2p_sync, "off")
 
-    def _write_manifest(self, out_dir: Path, megatron_nan_guard: str) -> None:
-        scenario = scenario_by_name("engines")
-        write_manifest(
-            out_dir,
-            scenario,
-            run_spec(ac_mode="none", profile=False, parallelism=TRIVIAL_SPEC),
-            (scenario.arm("megatron_stock"),),
-            {"megatron_stock": ["cmd"]},
-            "test-gpu",
-            {**self.metadata, "cpu_pinning": "none: test"},
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="off",
-                megatron_nan_guard=megatron_nan_guard,
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
+    def test_the_banner_names_each_arm_config(self) -> None:
+        events: list[str] = []
 
-    def _resume(self, out_dir: Path, megatron_nan_guard: str | None):
-        with mock.patch(
+        def failing_process(command, **kwargs):
+            kwargs["stdout"].write("nothing trained\n")
+            return SimpleNamespace(returncode=1)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
+            return_value=("test-gpu", _METADATA),
         ), mock.patch(
             "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
         ):
-            return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        megatron_nan_guard=megatron_nan_guard,
-                    ),
-                    gpu="0",
-                    scenario_name=None,
-                    arm_names=("megatron_stock",),
-                    resume_dir=out_dir,
-                ),
-                {"PATH": os.environ["PATH"]},
-            )
-
-    def test_a_resume_inherits_the_recorded_value_and_refuses_another(
-        self,
-    ) -> None:
-        """An omitted value inherits the recorded one and rebuilds the same
-        argv; a different value is refused, and the refusal names the
-        field."""
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary) / "run"
-            out_dir.mkdir()
-            self._write_manifest(out_dir, "off")
-            resolved = self._resume(out_dir, megatron_nan_guard=None)
-            self.assertEqual(resolved.axes.megatron_nan_guard, "off")
-            self.assertTrue(resolved.resumed)
-            self.assertIn(NO_NAN_CHECK, resolved.commands["megatron_stock"])
-            with self.assertRaisesRegex(ValueError, "megatron_nan_guard"):
-                self._resume(out_dir, megatron_nan_guard="on")
-
-
-class MegatronPrecisionResolutionTests(unittest.TestCase):
-    """What ``_resolve_run`` does with ``--megatron-precision``.
-
-    The refusals are parent-side and land before any host probe.
-    The value reaches the stock megatron command alone. And ``lean`` needs
-    a sharded dense value, because Megatron asserts the distributed
-    optimizer under the precision-aware optimizer.
-    """
-
-    LEAN_FLAGS = (
-        "--use-precision-aware-optimizer",
-        "--main-grads-dtype",
-        "--exp-avg-dtype",
-        "--exp-avg-sq-dtype",
-    )
-
-    def setUp(self) -> None:
-        self.metadata = {
-            "requested_gpu": "0",
-            "nvidia_smi": "0, Test GPU, GPU-uuid, driver",
-            "torch_version": "test",
-            "torchtitan_git_rev": "titan-rev",
-            "benchmarks_git_rev": "bench-rev",
-            "megatron_git_rev": "mcore-rev",
-        }
-
-    def _resolve(
-        self,
-        names: tuple[str, ...],
-        *,
-        megatron_precision: str | None = "lean",
-        zero: str = 1,
-        scenario_name: str = "engines",
-    ):
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning",
-            return_value=CpuPinning((), "none: test"),
-        ):
-            return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
-                        parallelism=ParallelismSpec(
-                        dp=1, zero=zero
-                    ),
-                        megatron_precision=megatron_precision,
-                    ),
-                    gpu="0",
-                    scenario_name=scenario_name,
-                    arm_names=names,
-                    out_dir=Path("/tmp/precision-test"),
-                ),
-                {"PATH": os.environ["PATH"]},
-            )
-
-    def _refused_before_any_probe(
-        self, pattern: str, scenario_name: str, **keywords
-    ) -> None:
-        def never(*args, **kwargs):
-            raise AssertionError("a host probe ran for a refused request")
-
-        with mock.patch(
-            "benchmarks.e2e.runner.hardware_metadata", side_effect=never
-        ), mock.patch(
-            "benchmarks.e2e.runner.resolve_cpu_pinning", side_effect=never
-        ):
-            with self.assertRaisesRegex(ValueError, pattern):
-                _resolve_run(
-                    _request_with_axes(
+            with self.assertRaises(RuntimeError):
+                execute_run(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none"),
                         gpu="0",
-                        scenario_name=scenario_name,
-                        out_dir=Path("/tmp/precision-test"),
-                        ac_mode="none",
-                        **keywords,
+                        scenario_name="engines",
+                        arm_names=("megatron_stock",),
+                        out_dir=Path(temporary) / "run",
                     ),
-                    {"PATH": os.environ["PATH"]},
+                    event_handler=lambda event: events.append(
+                        event.message if event.kind == "summary" else ""
+                    ),
+                    process_runner=failing_process,
+                    environment={"PATH": os.environ["PATH"]},
                 )
+        (line,) = [event for event in events if event.startswith("config ")]
+        self.assertIn("config megatron_stock: megatron_stock {", line)
+        self.assertIn('"nan_guard": "off"', line)
 
-    def test_lean_without_a_stock_arm_is_refused_before_any_probe(self) -> None:
-        """TorchTitan holds its own bf16 optimizer states, so a titan-only
-        run gives the value nothing to reach."""
-        for names in (("titan_compiled",), ("titan_compiled", "titan_eager")):
-            with self.subTest(arms=names):
-                self._refused_before_any_probe(
-                    "reaches no arm",
-                    "engines",
-                    arm_names=names,
-                    megatron_precision="lean",
-                )
 
-    def test_an_unknown_value_is_refused(self) -> None:
-        self._refused_before_any_probe(
-            "unknown megatron precision",
-            "engines",
-            arm_names=("megatron_stock",),
-            megatron_precision="bf16",
-        )
+class OverrideResumeTests(unittest.TestCase):
+    """A resume inherits each recorded config field and refuses a changed one."""
 
-    def test_lean_reaches_the_stock_command_and_not_the_titan_one(self) -> None:
-        """A mixed selection is legal: the stock arm gets the four flags
-        and the titan arm gets none of them."""
-        resolved = self._resolve(("megatron_stock", "titan_compiled"))
-        self.assertEqual(resolved.axes.megatron_precision, "lean")
-        commands = resolved.commands
-        stock = commands["megatron_stock"]
-        for flag in self.LEAN_FLAGS:
-            with self.subTest(flag=flag):
-                self.assertEqual(stock.count(flag), 1)
-                self.assertNotIn(flag, commands["titan_compiled"])
-
-    def test_the_default_resolves_to_stock_and_adds_no_flag(self) -> None:
-        for requested in (None, "stock"):
-            with self.subTest(requested=requested):
-                resolved = self._resolve(
-                    ("megatron_stock", "titan_compiled"), megatron_precision=requested
-                )
-                self.assertEqual(resolved.axes.megatron_precision, "stock")
-                for name, command in resolved.commands.items():
-                    for flag in self.LEAN_FLAGS:
-                        self.assertNotIn(flag, command, name)
-
-    def _write_manifest(
-        self,
-        out_dir: Path,
-        *,
-        megatron_precision: str,
-        parallelism: ParallelismSpec = TRIVIAL_SPEC,
-    ) -> None:
-        scenario = scenario_by_name("engines")
-        write_manifest(
-            out_dir,
-            scenario,
-            run_spec(ac_mode="none", profile=False, parallelism=parallelism),
-            (scenario.arm("megatron_stock"),),
-            {"megatron_stock": ["cmd"]},
-            "test-gpu",
-            {**self.metadata, "cpu_pinning": "none: test"},
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=parallelism,
-                megatron_p2p_sync="off",
-                megatron_nan_guard="off",
-                megatron_precision=megatron_precision,
-                profile=False,
-                warmup_steps=10,
-            ),
-        )
-
-    def _resume(
-        self,
-        out_dir: Path,
-        *,
-        megatron_precision: str | None = None,
-        parallelism: ParallelismSpec | None = None,
-    ):
+    def _record(self, out_dir: Path, *overrides: str, parallelism=None) -> None:
         with mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
-            return_value=("test-gpu", self.metadata),
+            return_value=("test-gpu", _METADATA),
         ), mock.patch(
             "benchmarks.e2e.runner.resolve_cpu_pinning",
             return_value=CpuPinning((), "none: test"),
-        ):
-            return _resolve_run(
+        ), mock.patch("benchmarks.e2e.runner.validate_arm"):
+            execute_run(
                 RunRequest(
-                    axes=RequestedAxes(
-                        parallelism=parallelism,
-                        megatron_precision=megatron_precision,
-                    ),
+                    axes=RequestedAxes(ac_mode="none", parallelism=parallelism),
                     gpu="0",
-                    scenario_name=None,
+                    scenario_name="engines",
                     arm_names=("megatron_stock",),
-                    resume_dir=out_dir,
+                    out_dir=out_dir,
+                    overrides=_overrides(*overrides),
                 ),
-                {"PATH": os.environ["PATH"]},
+                process_runner=lambda command, **kwargs: SimpleNamespace(returncode=0),
+                environment={"PATH": os.environ["PATH"]},
             )
 
-    def test_a_resume_inherits_the_recorded_precision(self) -> None:
-        """Schema 16 records the value, so an omitted one reads back and
-        rebuilds the same argv; a different one is refused, and the
-        refusal names the field.
-
-        The recorded mesh is sharded, because an inherited ``lean`` under
-        ``zero 0`` would meet the parent-side refusal before this gate.
-        """
-        spec = ParallelismSpec(dp=1, zero=1)
+    def test_an_omitted_field_inherits_the_recorded_value(self) -> None:
+        spec = ParallelismSpec(zero=1)
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary) / "run"
-            out_dir.mkdir()
-            self._write_manifest(
-                out_dir, megatron_precision="lean", parallelism=spec
+            self._record(
+                out_dir,
+                "megatron_stock.precision=lean",
+                "megatron_stock.nan_guard=on",
+                parallelism=spec,
             )
-            resolved = self._resume(out_dir, parallelism=spec)
-            self.assertEqual(resolved.axes.megatron_precision, "lean")
+            resolved = _resolve(("megatron_stock",), resume_dir=out_dir, parallelism=spec)
+            (arm,) = resolved.arms
+            self.assertEqual((arm.config.precision, arm.config.nan_guard), ("lean", "on"))
+            self.assertTrue(resolved.resumed)
             self.assertIn(
                 "--use-precision-aware-optimizer", resolved.commands["megatron_stock"]
             )
-            with self.assertRaisesRegex(ValueError, "megatron_precision"):
-                self._resume(
-                    out_dir, megatron_precision="stock", parallelism=spec
+            resolved = _resolve(
+                ("megatron_stock",),
+                "megatron_stock.nan_guard=on",
+                resume_dir=out_dir,
+                parallelism=spec,
+            )
+            self.assertEqual(resolved.arms[0].config.precision, "lean")
+
+    def test_a_changed_field_is_refused_and_named(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary) / "run"
+            self._record(out_dir)
+            with self.assertRaisesRegex(
+                ValueError, "existing manifest: megatron_stock.config.nan_guard$"
+            ):
+                _resolve(
+                    ("megatron_stock",),
+                    "megatron_stock.nan_guard=on",
+                    resume_dir=out_dir,
                 )
+            with self.assertRaisesRegex(
+                ValueError, "megatron_stock.config.extra_flags"
+            ):
+                _resolve(
+                    ("megatron_stock",),
+                    "megatron_stock.extra_flags+=--moe-permute-fusion",
+                    resume_dir=out_dir,
+                )
+
+    def test_a_schema_18_manifest_is_refused_by_name(self) -> None:
+        golden = (
+            Path(__file__).resolve().parent
+            / "fixtures/golden/runs/dp1-1b"
+        )
+        with self.assertRaisesRegex(ValueError, "records manifest schema 18"):
+            _resolve(("megatron_stock",), resume_dir=golden)
+
 
 class ParallelizeTests(unittest.TestCase):
     def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
@@ -1651,63 +1210,62 @@ class CpuPinningTests(unittest.TestCase):
 
 class ManifestTests(unittest.TestCase):
     def test_manifest_records_run_configuration(self) -> None:
-        scenario = scenario_by_name("engines")
-        selected = (scenario.arm("titan_eager"),)
-        extra_args = ["--training.gc-freq", "7"]
-        with tempfile.TemporaryDirectory() as temporary:
-            out_dir = Path(temporary)
-            run = run_spec(profile=False)
-            commands = {
-                arm.name: command(
-                    run,
-                    configured(arm, extra_flags=tuple(extra_args)),
-                    out_dir / arm.name,
-                )
-                for arm in selected
-            }
-            metadata = {"requested_gpu": "3", "nvidia_smi": "3, RTX A6000, uuid, 550"}
-            write_manifest(
-                out_dir,
-                scenario,
-                run,
-                selected,
-                commands,
-                "rtx-a6000",
-                metadata,
-                torchtitan_args=extra_args,
-                megatron_args=(),
-                axes=RunAxes(
-                    ac_mode="none",
-                    model_size="1b",
-                    parallelism=TRIVIAL_SPEC,
-                    megatron_p2p_sync="on",
-                    megatron_nan_guard="on",
-                    megatron_precision="stock",
-                    profile=False,
-                    warmup_steps=10,
+        extra = "--training.gc-freq 7"
+        metadata = {**_METADATA, "requested_gpu": "3"}
+        with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.e2e.runner.hardware_metadata",
+            return_value=("rtx-a6000", metadata),
+        ), mock.patch(
+            "benchmarks.e2e.runner.resolve_cpu_pinning",
+            return_value=CpuPinning(("numactl", "--cpunodebind=0", "--membind=0"), "numactl --cpunodebind=0 --membind=0"),
+        ), mock.patch("benchmarks.e2e.runner.validate_arm"):
+            out_dir = Path(temporary) / "run"
+            execute_run(
+                RunRequest(
+                    axes=RequestedAxes(ac_mode="none", model_size="1b"),
+                    gpu="3",
+                    scenario_name="engines",
+                    arm_names=("titan_eager",),
+                    out_dir=out_dir,
+                    overrides=_overrides(f"titan_eager.extra_flags+={extra}"),
                 ),
+                process_runner=lambda command, **kwargs: SimpleNamespace(returncode=0),
+                environment={"PATH": os.environ["PATH"]},
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 18)
-        self.assertEqual(manifest["ac_mode"], "none")
-        self.assertEqual(manifest["model_size"], "1b")
-        self.assertEqual(manifest["megatron_p2p_sync"], "on")
-        self.assertEqual(manifest["megatron_nan_guard"], "on")
-        self.assertEqual(manifest["model_shape"], PIPER_1B.describe(seq_len=4096))
-        self.assertEqual(
-            manifest["execution_model"], "single-gpu-plain-bf16-no-fsdp"
-        )
+        self.assertEqual(manifest["schema_version"], 19)
         self.assertEqual(manifest["scenario"], "engines")
         self.assertEqual(manifest["hardware"], "rtx-a6000")
-        self.assertEqual(manifest["hardware_metadata"], metadata)
-        self.assertEqual(manifest["workload"]["local_batch_size"], 4)
-        self.assertEqual(manifest["workload"]["seq_len"], 4096)
-        self.assertEqual(manifest["selected_arms"], ["titan_eager"])
-        self.assertEqual(manifest["extra_torchtitan_args"], extra_args)
-        titan_command = manifest["commands"]["titan_eager"]
-        self.assertIn("--training.gc-freq", titan_command)
-        self.assertEqual(titan_command[-2], "--dump-folder")
+        self.assertEqual(
+            manifest["hardware_metadata"],
+            {**metadata, "cpu_pinning": "numactl --cpunodebind=0 --membind=0"},
+        )
+        self.assertEqual(manifest["run"]["ac_mode"], "none")
+        self.assertEqual(manifest["run"]["shape"], PIPER_1B.describe(seq_len=4096))
+        self.assertEqual(manifest["run"]["data"]["local_batch_size"], 4)
+        for key in (
+            "model_size",
+            "megatron_p2p_sync",
+            "extra_torchtitan_args",
+            "extra_megatron_args",
+            "execution_model",
+            "selected_arms",
+            "commands",
+        ):
+            self.assertNotIn(key, manifest)
+        (arm,) = manifest["arms"]
+        self.assertEqual(arm["name"], "titan_eager")
+        self.assertEqual(arm["engine"], "torchtitan")
+        self.assertEqual(arm["config_type"], "TorchTitanConfig")
+        self.assertEqual(arm["config"]["compile"], "none")
+        self.assertEqual(arm["config"]["extra_flags"], ["--training.gc-freq", "7"])
+        self.assertEqual(arm["execution_model"], "single-gpu-plain-bf16-no-fsdp")
+        self.assertEqual(arm["cpu_pinning"], "numactl --cpunodebind=0 --membind=0")
+        self.assertEqual(arm["env_delta"]["CUDA_VISIBLE_DEVICES"], "3")
+        self.assertIn("--training.gc-freq", arm["command"])
+        self.assertEqual(arm["command"][:3], ["numactl", "--cpunodebind=0", "--membind=0"])
+        self.assertEqual(arm["command"][-3], "--dump-folder")
 
 
 class EagerArmTests(unittest.TestCase):
@@ -1763,22 +1321,16 @@ class EagerArmTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 18)
-        self.assertNotIn("--compile.enable", manifest["commands"]["titan_eager"])
+        self.assertEqual(manifest["schema_version"], 19)
+        (arm,) = manifest["arms"]
+        self.assertNotIn("--compile.enable", arm["command"])
 
-    def test_the_manifest_records_each_arm_compile_treatment(self) -> None:
+    def test_the_manifest_records_the_arm_compile_treatment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        recorded = {arm["name"]: arm["compile"] for arm in manifest["arms"]}
-        self.assertEqual(
-            recorded,
-            {
-                "titan_compiled": "torch",
-                "titan_eager": "none",
-                "megatron_stock": "none",
-            },
-        )
+        recorded = {arm["name"]: arm["config"]["compile"] for arm in manifest["arms"]}
+        self.assertEqual(recorded, {"titan_eager": "none"})
 
 
 def _compiled_line(torch_mode: str) -> str:
@@ -1919,14 +1471,7 @@ class TrainingMetricsTests(unittest.TestCase):
             rows = training_metrics(log)
 
         self.assertEqual(
-            stable_tps(
-                rows,
-                {
-                    "profile_freq": 20,
-                    "profiler_warmup": 5,
-                    "profiler_active": 5,
-                },
-            ),
+            stable_tps(rows, ProfileWindow(freq=20, warmup=5, active=5)),
             [9900, 10100, 10000],
         )
 
@@ -2021,7 +1566,7 @@ class ResumeTests(unittest.TestCase):
                 seq_len=512,
                 steps=60,
                 batch=2,
-                torchtitan_args=("--debug.deterministic",),
+                overrides=_overrides("titan_compiled.extra_flags+=--debug.deterministic"),
             )
             execute_run(
                 request,
@@ -2080,7 +1625,7 @@ class ResumeTests(unittest.TestCase):
                 resume_dir=out_dir,
                 steps=80,
             )
-            with self.assertRaisesRegex(ValueError, "conflicts with the recorded"):
+            with self.assertRaisesRegex(ValueError, "existing manifest: run.data$"):
                 execute_run(
                     incompatible,
                     process_runner=fake_process,
@@ -2092,9 +1637,11 @@ class ResumeTests(unittest.TestCase):
                 scenario_name=None,
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
-                torchtitan_args=("--training.gc-freq", "9"),
+                overrides=_overrides("titan_compiled.extra_flags+=--training.gc-freq 9"),
             )
-            with self.assertRaisesRegex(ValueError, "extra_torchtitan_args"):
+            with self.assertRaisesRegex(
+                ValueError, "existing manifest: titan_compiled.config.extra_flags$"
+            ):
                 execute_run(
                     conflicting_args,
                     process_runner=fake_process,
@@ -2110,7 +1657,7 @@ class ResumeTests(unittest.TestCase):
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
             )
-            with self.assertRaisesRegex(ValueError, "model_size"):
+            with self.assertRaisesRegex(ValueError, "existing manifest: run.shape$"):
                 execute_run(
                     conflicting_size,
                     process_runner=fake_process,
@@ -2125,7 +1672,9 @@ class ResumeTests(unittest.TestCase):
                 resume_dir=out_dir,
             )
             with self.assertRaisesRegex(
-                ValueError, "does not match the existing manifest: profile$"
+                ValueError,
+                "does not match the existing manifest: run.profile, "
+                "run.warmup_steps$",
             ):
                 execute_run(
                     conflicting_profile,
@@ -2139,11 +1688,12 @@ class ResumeTests(unittest.TestCase):
                 scenario_name=None,
                 arm_names=("titan_compiled",),
                 resume_dir=out_dir,
-                torchtitan_args=("--training.gc-freq", "9"),
+                overrides=_overrides("titan_compiled.extra_flags+=--training.gc-freq 9"),
             )
             with self.assertRaisesRegex(
                 ValueError,
-                "does not match the existing manifest: extra_torchtitan_args, profile$",
+                "does not match the existing manifest: run.profile, "
+                "run.warmup_steps, titan_compiled.config.extra_flags$",
             ):
                 execute_run(
                     conflicting_profile_and_args,
@@ -2153,10 +1703,10 @@ class ResumeTests(unittest.TestCase):
 
             manifest_path = out_dir / "manifest.json"
             manifest = json.loads(manifest_path.read_text())
-            manifest["profile"] = True
+            manifest["run"]["profile"] = True
             manifest_path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(
-                ValueError, "records profile True with warmup_steps 10"
+                ValueError, "warmup_steps 10 does not match profile True"
             ):
                 execute_run(
                     resumed,
@@ -2205,7 +1755,7 @@ class ResumeTests(unittest.TestCase):
                 environment=environment,
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
-            self.assertEqual(manifest["ac_mode"], mode)
+            self.assertEqual(manifest["run"]["ac_mode"], mode)
 
             (out_dir / "titan_eager.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)

@@ -26,7 +26,6 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
 from benchmarks.e2e.passthrough import matches, row_for
 from benchmarks.e2e.registry import scenario_by_name
-from benchmarks.e2e.runner import reach_refusal
 from tests.engine_helpers import configured, run_spec
 
 PARALLEL_SPEC = ParallelismSpec(dp=2, pp=2, ep=2, zero=1, pp_schedule="1F1B")
@@ -200,7 +199,7 @@ class MegatronTableTests(unittest.TestCase):
         for tokens, reason in (
             (("--num-layers=4",), "owned by --model-size"),
             (("--bench-seq-len", "8"), "pinned by the harness driver"),
-            (("--fp8-format", "hybrid"), "owned by --megatron-precision"),
+            (("--fp8-format", "hybrid"), "owned by the arm's precision value"),
             (("--recompute-granularity", "full"), "owned by --ac"),
         ):
             with self.subTest(tokens=tokens):
@@ -351,25 +350,12 @@ class TitanTableTests(unittest.TestCase):
             TITAN_ARM.name, ("--training.new-field",)
         )
         self.assertIn("not classified", refusal)
-        self.assertIn("cannot pass through --torchtitan-arg", refusal)
+        self.assertIn("cannot pass through titan_eager.extra_flags", refusal)
 
     def test_the_engine_check_refuses_an_unlisted_flag(self) -> None:
         arm = configured(TITAN_ARM, extra_flags=("--training.new-field",))
         (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
         self.assertIn("--training.new-field (not classified", refusal)
-
-
-class ReachTests(unittest.TestCase):
-    def test_a_list_must_reach_an_arm_of_its_engine(self) -> None:
-        self.assertIsNone(reach_refusal(ENGINES.arms, ("--a",), ("--b",)))
-        self.assertIn(
-            "--megatron-arg reaches no arm",
-            reach_refusal((TITAN_ARM,), (), ("--moe-permute-fusion",)),
-        )
-        self.assertIn(
-            "--torchtitan-arg reaches no arm",
-            reach_refusal((MEGATRON_ARM,), ("--compile.mode",), ()),
-        )
 
 
 if __name__ == "__main__":

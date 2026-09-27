@@ -45,7 +45,6 @@ from benchmarks.e2e.registry import (
     ENGINES,
 )
 from benchmarks.e2e.parallelism import DEFAULT_ZERO, ParallelismSpec
-from benchmarks.e2e.runner import MEGATRON_DEFAULTS
 
 DOCS = ("AGENTS.md", "README.md")
 
@@ -213,7 +212,7 @@ def _documented_defaults() -> dict[str, str]:
 
 
 def _expected_defaults() -> dict[str, str]:
-    """The default of every ``run`` option, read from the code."""
+    """The default of every visible ``run`` option, read from the code."""
     data = ENGINES.data
     trivial = ParallelismSpec()
     resolved = {
@@ -228,14 +227,13 @@ def _expected_defaults() -> dict[str, str]:
         "--pp-schedule": "--" if trivial.pp_schedule is None else trivial.pp_schedule,
         "--pp-microbatch-size": str(trivial.pp_microbatch_size),
         "--zero": str(DEFAULT_ZERO),
-        "--megatron-p2p-sync": MEGATRON_DEFAULTS.p2p_sync,
-        "--megatron-nan-guard": MEGATRON_DEFAULTS.nan_guard,
-        "--megatron-precision": MEGATRON_DEFAULTS.precision,
         "--profile": "on" if DEFAULT_PROFILE else "off",
         "--warmup-steps": str(DEFAULT_WARMUP_STEPS),
     }
     expected = {}
     for option in _options_of(run_command):
+        if option.hidden:
+            continue
         flag = option.opts[0]
         if flag in resolved:
             expected[flag] = resolved[flag]

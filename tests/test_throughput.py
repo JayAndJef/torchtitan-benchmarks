@@ -17,6 +17,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,14 +25,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarks.artifacts.manifests import (  # noqa: E402
     MANIFEST_SCHEMA_VERSION,
     THROUGHPUT_DEFINITION,
+    ArmRecord,
     manifest_data,
+    write_manifest,
 )
 from benchmarks.e2e.engines.megatron_stock.driver.step_log import (  # noqa: E402
     tokens_per_second,
 )
-from benchmarks.e2e.parallelism import TRIVIAL_SPEC  # noqa: E402
-from benchmarks.e2e.axes import RunAxes  # noqa: E402
-from benchmarks.e2e.engines.api import RunSpec  # noqa: E402
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec  # noqa: E402
+from benchmarks.e2e.engines.api import Arm, CompileMode, RunSpec  # noqa: E402
+from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig  # noqa: E402
 from benchmarks.e2e.registry import SCENARIOS, SEED  # noqa: E402
 from benchmarks.models.piper_qwen3.shape import PIPER_1B  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
@@ -47,13 +50,11 @@ from benchmarks.e2e.results import (  # noqa: E402
 )
 
 
-WORKLOAD = {
-    "profile_freq": 20,
-    "profiler_warmup": 5,
-    "profiler_active": 5,
-    "local_batch_size": 4,
-    "seq_len": 1024,
-}
+from tests.engine_helpers import TEST_METADATA, run_spec  # noqa: E402
+
+
+FIXTURE_RUN = run_spec(seq_len=1024, local_batch_size=4)
+"""A profiled run at sequence length 1024 and local batch 4."""
 
 
 def _step_lines(*, tps: int, first_step: int = 2, count: int = 4) -> str:
@@ -105,23 +106,18 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
             seed=SEED,
         )
         return manifest_data(
-            scenario,
-            run,
-            [scenario.arms[0]],
-            {scenario.arms[0].name: ["python", "-m", "x"]},
-            "test-gpu",
-            {"requested_gpu": "0"},
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
+            scenario=scenario,
+            hardware="test-gpu",
+            metadata={"requested_gpu": "0"},
+            run=run,
+            arms=(
+                ArmRecord(
+                    arm=scenario.arms[0],
+                    command=("python", "-m", "x"),
+                    env_delta={},
+                    cpu_pinning="none: test",
+                    execution_model="test",
+                ),
             ),
         )
 
@@ -132,8 +128,8 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
         self.assertEqual(THROUGHPUT_DEFINITION, "tokens_per_second_per_device")
 
     def test_the_schema_moved_with_the_new_key(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
-        self.assertEqual(self._manifest()["schema_version"], 18)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 19)
+        self.assertEqual(self._manifest()["schema_version"], 19)
 
 
 class PerRankLogParsingTests(unittest.TestCase):
@@ -187,10 +183,7 @@ class LossVisibleRankTests(unittest.TestCase):
 
 
 class _RunFixture:
-    """A minimal output directory: a manifest and one log per arm.
-
-    Evaluation reads the logs alone, so a fixture needs no trace.
-    """
+    """A minimal output directory: a manifest and one log per arm."""
 
     @staticmethod
     def build(
@@ -198,24 +191,36 @@ class _RunFixture:
         logs: dict[str, str],
         parallelism: dict | None,
     ) -> None:
-        manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "profile": True,
-            "scenario": "synthetic",
-            "hardware": "test-gpu",
-            "workload": WORKLOAD,
-            "selected_arms": sorted(logs),
-            "arms": [
-                {"name": arm, "engine": "torchtitan"}
-                for arm in sorted(logs)
-            ],
-        }
-        manifest["parallelism"] = (
-            {"world_size": 1, "dp": 1, "pp": 1, "ep": 1}
-            if parallelism is None
-            else parallelism
+        spec = ParallelismSpec(
+            **{
+                key: value
+                for key, value in (parallelism or {}).items()
+                if key != "world_size"
+            }
         )
-        (out_dir / "manifest.json").write_text(json.dumps(manifest))
+        if spec.pp > 1:
+            spec = ParallelismSpec(
+                dp=spec.dp, pp=spec.pp, ep=spec.ep, zero=spec.zero,
+                pp_schedule="1F1B",
+            )
+        arms = tuple(
+            ArmRecord(
+                arm=Arm(name=name, description=name, config=TorchTitanConfig(compile=CompileMode.NONE)),
+                command=("python",),
+                env_delta={},
+                cpu_pinning="none: test",
+                execution_model="test",
+            )
+            for name in sorted(logs)
+        )
+        write_manifest(
+            out_dir,
+            scenario=SCENARIOS["engines"],
+            hardware="test-gpu",
+            metadata=TEST_METADATA,
+            run=replace(FIXTURE_RUN, parallelism=spec),
+            arms=arms,
+        )
         for arm, text in logs.items():
             (out_dir / f"{arm}.log").write_text(text)
 

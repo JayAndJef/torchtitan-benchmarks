@@ -20,6 +20,7 @@ from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.engine import MegatronStockEngine
 from benchmarks.e2e.engines.megatron_stock.flags import (
     DRIVER_MODULE,
+    MEGATRON_LM_SCHEDULES,
     stock_megatron_flags,
 )
 from benchmarks.e2e.engines.registry import (
@@ -30,6 +31,7 @@ from benchmarks.e2e.engines.registry import (
 )
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.engine import TorchTitanEngine
+from benchmarks.e2e.engines.torchtitan.mesh import SCHEDULES as TITAN_SCHEDULES
 from benchmarks.e2e.parallelism import PP_SCHEDULES, ParallelismSpec
 from benchmarks.e2e.registry import SCENARIOS
 from benchmarks.e2e.engines.torchtitan.flags import TRAIN_MODULE, trainer_args
@@ -267,7 +269,7 @@ class EngineCheckTests(unittest.TestCase):
 
     def test_megatron_refuses_a_schedule_its_driver_does_not_run(self):
         """Megatron-LM implements Interleaved1F1B, and the stock driver runs 1F1B alone."""
-        self.assertTrue(PP_SCHEDULES["Interleaved1F1B"].megatron_supported)
+        self.assertIn("Interleaved1F1B", MEGATRON_LM_SCHEDULES)
         self.assertRegex(
             " ".join(self._refusals("megatron_stock", "Interleaved1F1B")),
             "implements '1F1B' alone.*choose --pp-schedule 1F1B",
@@ -283,6 +285,91 @@ class EngineCheckTests(unittest.TestCase):
         )
         self.assertEqual(self._refusals("titan_eager", "ZBVZeroBubble"), [])
         self.assertEqual(self._refusals("titan_compiled", "Interleaved1F1B"), [])
+
+    def test_each_engine_declares_every_schedule_it_runs_by_a_shared_name(self):
+        self.assertLessEqual(set(TITAN_SCHEDULES), set(PP_SCHEDULES))
+        self.assertLessEqual(set(MEGATRON_LM_SCHEDULES), set(PP_SCHEDULES))
+
+    def test_an_engine_refuses_a_schedule_it_does_not_declare(self):
+        arm = SCENARIOS["engines"].arm("titan_eager")
+        run = run_spec(
+            ac_mode="none",
+            parallelism=ParallelismSpec(pp=2, pp_schedule="NoSuchSchedule"),
+            local_batch_size=8,
+        )
+        self.assertRegex(
+            " ".join(engine_for(arm).check(run, arm)),
+            "TorchTitan runs no pipeline schedule 'NoSuchSchedule'; choose one of 1F1B",
+        )
+
+
+class ExecutionModelTests(unittest.TestCase):
+    """Each engine states how its arm holds the model state."""
+
+    def _model(self, arm_name: str, spec: ParallelismSpec, **config) -> str:
+        arm = SCENARIOS["engines"].arm(arm_name)
+        arm = replace(arm, config=replace(arm.config, **config))
+        return engine_for(arm).execution_model(run_spec(parallelism=spec), arm)
+
+    def test_torchtitan_keeps_the_strings_that_schema_18_recorded(self):
+        for spec, expected in (
+            (ParallelismSpec(), "single-gpu-plain-bf16-no-fsdp"),
+            (ParallelismSpec(pp=2, pp_schedule="1F1B"), "2-gpu-plain-bf16-no-fsdp-pp2-1F1B"),
+            (ParallelismSpec(dp=2), "2-gpu-plain-bf16-dp2"),
+            (ParallelismSpec(dp=4, ep=4, zero=1), "4-gpu-plain-bf16-dp4-zero1-ep4"),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(self._model("titan_eager", spec), expected)
+
+    def test_megatron_names_its_fp32_master_state(self):
+        for spec, precision, expected in (
+            (
+                ParallelismSpec(),
+                "stock",
+                "single-gpu-bf16-fp32-master-fp32-grads-fp32-moments-dp1",
+            ),
+            (
+                ParallelismSpec(dp=2, pp=2, pp_schedule="1F1B"),
+                "stock",
+                "4-gpu-bf16-fp32-master-fp32-grads-fp32-moments-dp2-pp2-1F1B",
+            ),
+            (
+                ParallelismSpec(dp=4, ep=4, zero=1),
+                "lean",
+                "4-gpu-bf16-fp32-master-bf16-grads-bf16-moments-dp4-zero1-ep4",
+            ),
+        ):
+            with self.subTest(spec=spec, precision=precision):
+                self.assertEqual(
+                    self._model("megatron_stock", spec, precision=precision),
+                    expected,
+                )
+
+
+class EngineWarningTests(unittest.TestCase):
+    """TorchTitan warns that its arms hold ZeRO-2 at one pipeline rank."""
+
+    def _warnings(self, arm_name: str, spec: ParallelismSpec) -> list[str]:
+        arm = SCENARIOS["engines"].arm(arm_name)
+        return engine_for(arm).warnings(run_spec(parallelism=spec), arm)
+
+    def test_torchtitan_warns_at_zero_1_and_one_pipeline_rank(self):
+        (warning,) = self._warnings("titan_eager", ParallelismSpec(dp=8, zero=1))
+        self.assertIn("ZeRO-2", warning)
+        self.assertIn("Megatron holds ZeRO-1", warning)
+
+    def test_torchtitan_is_silent_under_a_pipeline_or_at_zero_0(self):
+        for spec in (
+            ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", zero=1),
+            ParallelismSpec(dp=8),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(self._warnings("titan_eager", spec), [])
+
+    def test_megatron_never_warns(self):
+        self.assertEqual(
+            self._warnings("megatron_stock", ParallelismSpec(dp=8, zero=1)), []
+        )
 
 
 class MegatronCheckTests(unittest.TestCase):

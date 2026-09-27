@@ -28,26 +28,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.e2e.engines.torchtitan.mesh import (
+    SCHEDULES as TITAN_SCHEDULES,
+    execution_model,
+    reshard_after_forward as titan_reshard_after_forward,
+    skip_dp,
+    titan_mesh,
+)
 from benchmarks.e2e.parallelism import (
     DEFAULT_ZERO,
     ParallelismSpec,
     PipelineSchedule,
     ZERO_MODES,
     zero_warnings,
-    titan_reshard_after_forward,
     MAX_PP,
     MAX_WORLD_SIZE,
     PP_SCHEDULE_CHOICES,
     PP_SCHEDULES,
     TRIVIAL_SPEC,
     describe,
-    execution_model,
     n_microbatches,
-    skip_dp,
-    titan_mesh,
-    validate_parallelism,
+    parallelism_refusals,
 )
-from benchmarks.e2e.registry import EXECUTION_MODEL
 from benchmarks.models.piper_qwen3.shape import (
     PIPER_SHAPES,
     PiperShape,
@@ -69,17 +71,19 @@ def check(
     batch: int = 4,
     device_count: int | None = None,
 ) -> None:
-    """Validate ``spec``; ``device_count`` defaults to its own world size.
+    """Raise the refusals of ``spec``; ``device_count`` defaults to its own world size.
 
     Defaulting the device count is what lets every rule other than rule 1 be
     tested without rule 1 firing first.
     """
-    validate_parallelism(
+    refusals = parallelism_refusals(
         spec,
         shape=shape,
         local_batch_size=batch,
         device_count=spec.world_size if device_count is None else device_count,
     )
+    if refusals:
+        raise ValueError("; ".join(refusals))
 
 
 PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
@@ -192,23 +196,32 @@ class ParallelismSpecTest(unittest.TestCase):
 
 
 class PipelineScheduleRegistryTest(unittest.TestCase):
-    def test_the_five_declared_schedules_and_their_flags(self):
+    def test_the_five_declared_schedules_and_their_stage_counts(self):
         expected = {
-            "1F1B": (True, 1, False),
-            "Interleaved1F1B": (True, 2, False),
-            "InterleavedZeroBubble": (False, 2, True),
-            "ZBVZeroBubble": (False, 2, True),
-            "DualPipeV": (False, 2, True),
+            "1F1B": 1,
+            "Interleaved1F1B": 2,
+            "InterleavedZeroBubble": 2,
+            "ZBVZeroBubble": 2,
+            "DualPipeV": 2,
         }
         self.assertEqual(set(PP_SCHEDULES), set(expected))
-        for name, (supported, stages, uncompiled) in expected.items():
+        for name, stages in expected.items():
             with self.subTest(schedule=name):
                 schedule = PP_SCHEDULES[name]
                 self.assertIsInstance(schedule, PipelineSchedule)
                 self.assertEqual(schedule.name, name)
-                self.assertEqual(schedule.megatron_supported, supported)
                 self.assertEqual(schedule.stages_per_rank, stages)
-                self.assertEqual(schedule.requires_uncompiled, uncompiled)
+
+    def test_torchtitan_runs_every_schedule_and_three_refuse_compile(self):
+        self.assertEqual(set(TITAN_SCHEDULES), set(PP_SCHEDULES))
+        self.assertEqual(
+            {
+                name
+                for name, schedule in TITAN_SCHEDULES.items()
+                if schedule.requires_uncompiled
+            },
+            {"InterleavedZeroBubble", "ZBVZeroBubble", "DualPipeV"},
+        )
 
     def test_every_schedule_carries_a_description(self):
         for name, schedule in PP_SCHEDULES.items():
@@ -273,22 +286,22 @@ class ScheduleNamesMatchPyTorchTest(unittest.TestCase):
         so calling it would accept ``1f1b`` and prove nothing about the
         spelling a manifest records."""
         source = inspect.getsource(torch_schedules.get_schedule_class)
-        for name, schedule in PP_SCHEDULES.items():
+        for name, schedule in TITAN_SCHEDULES.items():
             with self.subTest(schedule=name):
                 self.assertIn(f'"{schedule.titan_name}":', source)
 
     def test_stages_per_rank_matches_pytorchs_single_stage_classification(self):
         """TorchTitan derives the same value: ``stages_per_rank = 1 if
         is_single_stage_schedule else 2`` (``pipeline_parallel.py``)."""
-        for name, schedule in PP_SCHEDULES.items():
+        for name, schedule in TITAN_SCHEDULES.items():
             with self.subTest(schedule=name):
                 cls = torch_schedules.get_schedule_class(schedule.titan_name)
                 single = issubclass(cls, torch_schedules.PipelineScheduleSingle)
-                self.assertEqual(schedule.stages_per_rank, 1 if single else 2)
+                self.assertEqual(PP_SCHEDULES[name].stages_per_rank, 1 if single else 2)
 
     def test_requires_uncompiled_matches_the_classes_that_check_compilation(self):
         """Exactly the classes calling ``_check_torch_compile_compatibility``."""
-        for name, schedule in PP_SCHEDULES.items():
+        for name, schedule in TITAN_SCHEDULES.items():
             with self.subTest(schedule=name):
                 cls = torch_schedules.get_schedule_class(schedule.titan_name)
                 checks = "_check_torch_compile_compatibility" in inspect.getsource(cls)
@@ -478,88 +491,36 @@ class TitanReshardAfterForwardTest(unittest.TestCase):
 
 
 class ZeroWarningsTest(unittest.TestCase):
-    """What a reader must not conclude from a spec's own mesh.
+    """The shared warning: a sharded level at one data-parallel rank shards nothing.
 
-    Both cases are legal and neither refuses anything. Each names a cell
-    whose recorded level describes a mechanism the run does not have.
-
-    ``engines`` names ``torchtitan`` wherever the second warning is under
-    test, because that warning is about TorchTitan's FSDP2 alone.
+    ``tests/test_engines.py`` holds TorchTitan's own ZeRO-2 warning.
     """
 
     def test_a_sharded_value_at_dp_one_warns(self):
-        """The shard degree is 1 there whatever the value says."""
-        for mode in (1,):
-            with self.subTest(zero=mode):
-                warnings = zero_warnings(
-                    ParallelismSpec(
-                        dp=1, pp=8, pp_schedule="1F1B", zero=mode
-                    ),
-                    engines=["torchtitan"],
-                )
-                self.assertEqual(len(warnings), 1)
-                self.assertIn("at dp 1", warnings[0])
-                self.assertIn(f"--zero {mode}", warnings[0])
-                self.assertIn(
-                    "Do not read this cell as a measurement", warnings[0]
-                )
-
-    def test_zero1_at_pp_one_warns_that_titan_holds_zero2(self):
-        """One microbatch puts the reduce-scatter inside the only backward
-        pass, so the TorchTitan arm holds ZeRO-2 and the Megatron arm holds
-        ZeRO-1. The two arms are then not one ZeRO level."""
         warnings = zero_warnings(
-            ParallelismSpec(dp=8, pp=1, zero=1), engines=["torchtitan"]
+            ParallelismSpec(dp=1, pp=8, pp_schedule="1F1B", zero=1)
         )
         self.assertEqual(len(warnings), 1)
-        self.assertIn("ZeRO-2", warnings[0])
-        self.assertIn("Megatron holds ZeRO-1", warnings[0])
+        self.assertIn("at dp 1", warnings[0])
+        self.assertIn("--zero 1", warnings[0])
+        self.assertIn("Do not read this cell as a measurement", warnings[0])
 
-    def test_a_megatron_only_run_does_not_get_the_pp_one_warning(self):
-        """Megatron builds a DistributedOptimizer and holds ZeRO-1 exactly,
-        so the warning would describe no arm of such a run."""
-        self.assertEqual(
-            zero_warnings(
-                ParallelismSpec(dp=8, pp=1, zero=1),
-                engines=["megatron_stock"],
-            ),
-            (),
-        )
-
-    def test_the_two_warnings_are_independent(self):
-        """``dp 1`` and ``pp 1`` together earn both."""
-        self.assertEqual(
-            len(
-                zero_warnings(
-                    ParallelismSpec(dp=1, pp=1, zero=1),
-                    engines=["torchtitan"],
-                )
-            ),
-            2,
-        )
-
-    def test_the_intended_cell_is_silent(self):
-        """A warning that fired on the configuration this axis exists to
-        run would teach an operator to ignore warnings."""
-        self.assertEqual(
-            zero_warnings(
-                ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", zero=1),
-                engines=["torchtitan"],
-            ),
-            (),
-        )
+    def test_a_sharded_value_above_dp_one_is_silent(self):
+        for spec in (
+            ParallelismSpec(dp=8, pp=1, zero=1),
+            ParallelismSpec(dp=2, pp=4, pp_schedule="1F1B", zero=1),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(zero_warnings(spec), ())
 
     def test_the_replicated_parity_never_warns(self):
-        """Neither warning is about replication, at any mesh."""
         for spec in (
             TRIVIAL_SPEC,
             ParallelismSpec(dp=1, pp=8, pp_schedule="1F1B"),
             ParallelismSpec(dp=8),
         ):
             with self.subTest(spec=spec):
-                self.assertEqual(
-                    zero_warnings(spec, engines=["torchtitan"]), ()
-                )
+                self.assertEqual(zero_warnings(spec), ())
 
 
 class SkipDpTest(unittest.TestCase):
@@ -589,10 +550,6 @@ class ExecutionModelTest(unittest.TestCase):
         self.assertEqual(
             execution_model(TRIVIAL_SPEC), "single-gpu-plain-bf16-no-fsdp"
         )
-
-    def test_the_trivial_string_agrees_with_the_registry_constant(self):
-        """The other half of the same fact: the constant in use today."""
-        self.assertEqual(execution_model(TRIVIAL_SPEC), EXECUTION_MODEL)
 
     def test_a_parallel_spec_names_its_axes(self):
         self.assertEqual(
@@ -725,8 +682,6 @@ class DescribeTest(unittest.TestCase):
                 "pp_microbatch_size": 1,
                 "zero": 0,
                 "world_size": 1,
-                "dp_replicate": 1,
-                "dp_shard": 1,
                 "n_microbatches": 4,
             },
         )
@@ -742,29 +697,16 @@ class DescribeTest(unittest.TestCase):
                 "pp_microbatch_size": 1,
                 "zero": 0,
                 "world_size": 2,
-                "dp_replicate": 1,
-                "dp_shard": 1,
                 "n_microbatches": 4,
             },
         )
 
-    def test_a_sharded_record_carries_the_parity_and_the_mesh_it_resolves_to(
-        self,
-    ):
-        """Two facts, not one. The parity is what the operator asked for and
-        the mesh is what TorchTitan builds from it; neither derives the other
-        for a reader who does not hold this module."""
-        spec = ParallelismSpec(dp=4, ep=2, zero=1)
-        record = describe(spec, local_batch_size=8)
+    def test_the_record_names_no_engine_mesh(self):
+        """TorchTitan's replicate and shard degrees belong to the TorchTitan engine."""
+        record = describe(ParallelismSpec(dp=4, ep=2, zero=1), local_batch_size=8)
         self.assertEqual(record["zero"], 1)
-        self.assertEqual(record["dp_replicate"], 1)
-        self.assertEqual(record["dp_shard"], 4)
-        replicated = describe(
-            ParallelismSpec(dp=4, ep=2), local_batch_size=8
-        )
-        self.assertEqual(replicated["zero"], 0)
-        self.assertEqual(replicated["dp_replicate"], 4)
-        self.assertEqual(replicated["dp_shard"], 1)
+        self.assertNotIn("dp_replicate", record)
+        self.assertNotIn("dp_shard", record)
 
     def test_the_record_is_json_safe(self):
         for spec in (
@@ -1460,8 +1402,6 @@ class TheEightGpuCellTest(unittest.TestCase):
                 "pp_microbatch_size": 4,
                 "zero": 0,
                 "world_size": 8,
-                "dp_replicate": 2,
-                "dp_shard": 1,
                 "n_microbatches": 8,
             },
         )
@@ -1587,15 +1527,27 @@ class TheSingleGpuRunStaysLegalTest(unittest.TestCase):
 
 
 class ValidatorInterfaceTest(unittest.TestCase):
-    def test_a_valid_spec_returns_none(self):
-        self.assertIsNone(
-            validate_parallelism(
+    def test_a_valid_spec_has_no_refusal(self):
+        self.assertEqual(
+            parallelism_refusals(
                 PP2,
                 shape=SHAPE_1B,
                 local_batch_size=4,
                 device_count=2,
-            )
+            ),
+            [],
         )
+
+    def test_every_broken_rule_is_listed(self):
+        refusals = parallelism_refusals(
+            ParallelismSpec(dp=2, ep=2),
+            shape=SHAPE_1B,
+            local_batch_size=4,
+            device_count=1,
+        )
+        self.assertEqual(len(refusals), 2)
+        self.assertIn("does not match the 1 device(s)", refusals[0])
+        self.assertIn("needs --zero 1", refusals[1])
 
 
 # --------------------------------------------------------------------------

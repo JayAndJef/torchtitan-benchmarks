@@ -6,11 +6,11 @@ import re
 from pathlib import Path
 
 from benchmarks.e2e.engines.api import Arm, DataSpec, RunSpec
+from benchmarks.e2e.engines.torchtitan.mesh import SCHEDULES, titan_mesh
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
     ParallelismSpec,
     n_microbatches,
-    titan_mesh,
 )
 from benchmarks.e2e.validation import ValidationProfile, validate_against_profile
 
@@ -50,8 +50,8 @@ def mesh_markers(spec: ParallelismSpec, data: DataSpec) -> tuple[str, ...]:
             spec, local_batch_size=data.local_batch_size
         )
         markers.append(
-            f"Using pipeline schedule {schedule.titan_name} with "
-            f"{microbatches} microbatches and "
+            f"Using pipeline schedule {SCHEDULES[spec.pp_schedule].titan_name} "
+            f"with {microbatches} microbatches and "
             f"{spec.pp * schedule.stages_per_rank} stages"
         )
     return tuple(markers)

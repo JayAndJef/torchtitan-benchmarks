@@ -1,25 +1,4 @@
-"""Extraction and rendering of end-to-end run metrics.
-
-Everything an evaluated output directory turns into: the log-derived
-throughput and trajectory series, the machine-readable ``results.json``
-payload, and the human-readable report the CLI prints.
-
-**Evaluation reads the logs alone.** Both engines print every figure this
-module publishes on a step line, under ``--profile`` and without it, so a
-directory evaluates the same way in both modes. The traces stay a
-validation input; no number here comes from one.
-
-**How a run with more than one rank becomes one published number.** The
-headline tokens/s is the **minimum** over ranks, never the mean: a parallel
-schedule locks the ranks together at every step boundary, so the mesh runs
-at the pace of its slowest rank and a mean would report a rate nobody
-reached. ``published_rank`` names the rank the headline came from, and
-``per_rank`` carries every rank's own figures beside it.
-
-**Each arm reports absolute numbers.** No arm is a baseline and nothing is
-a ratio: the three engine arms share no implementation, so a reader
-compares two absolute rows rather than one derived number.
-"""
+"""The end-to-end evaluation: the figures that the step lines give, ``results.json`` and the printed report."""
 
 from __future__ import annotations
 
@@ -31,22 +10,18 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.artifacts.layout import atomic_write_json, logs_by_rank
-from benchmarks.artifacts.manifests import load_run
+from benchmarks.artifacts.manifests import ArmRecord, load_run_record
 from benchmarks.artifacts.summaries import _value
-from benchmarks.e2e.parallelism import DEFAULT_ZERO, ParallelismSpec, zero_warnings
+from benchmarks.e2e.checks import run_warnings
+from benchmarks.e2e.engines.api import ProfileWindow
+from benchmarks.execution.affinity import is_pinned
 
 
 STEP_METRICS = re.compile(
     r"step:\s*(\d+).*?memory:\s*([0-9.]+)GiB.*?tps:\s*([0-9,]+)"
 )
 LOSS_METRIC = re.compile(r"step:\s*(\d+).*?loss:\s*(nan|-?inf|[0-9.eE+-]+)")
-"""The loss trajectory pattern.
-
-The words come before the digits, because the alternation is
-leftmost-first: the digit class alone reads ``-inf`` as ``-``, and
-``float`` then raises where ``refuse_non_finite_trajectories`` should name
-the step.
-"""
+"""The loss pattern; the words come before the digits, because the digit class alone reads ``-inf`` as ``-``."""
 GRAD_NORM_METRIC = re.compile(
     r"step:\s*(\d+).*?grad_norm:\s*(nan|-?inf|[0-9.eE+-]+)"
 )
@@ -54,17 +29,7 @@ GRAD_NORM_METRIC = re.compile(
 
 @dataclass(frozen=True)
 class StepMs:
-    """How long one training step took, in milliseconds.
-
-    Derived from the throughput samples rather than measured beside them:
-    a step line carries tokens per second, and one step moves a known
-    number of tokens. ``series`` holds one value per sample, in step order,
-    so a reader can see the spread the three statistics summarize.
-
-    ``p95`` uses the **nearest-rank** method: the series is sorted and the
-    value at 1-based index ``ceil(0.95 * n)`` is taken. It is therefore
-    always a measured step and never an interpolation between two.
-    """
+    """The step cost of one rank, in milliseconds; ``p95`` is a nearest-rank value, so it is always a measured step."""
 
     mean: float | None
     median: float | None
@@ -84,16 +49,7 @@ class RankThroughput:
 
 @dataclass(frozen=True)
 class ArmResult:
-    """One arm's published figures.
-
-    ``stable_tokens_per_second`` is the **minimum** over ranks, and
-    ``step_ms`` is that same rank's step cost. See this module's docstring
-    for why the reduction is a minimum and not a mean. At one rank it is
-    that rank's own median.
-
-    ``peak_memory_gib`` is the maximum over every rank, which needs no
-    reduction rule: it is the most memory any device in the mesh held.
-    """
+    """One arm's published figures: the slowest rank's throughput and step cost, and the peak memory of every rank."""
 
     stable_tokens_per_second: float | None
     stable_sample_count: int
@@ -141,13 +97,7 @@ class EvaluationResult:
 
 
 def _json_safe(value: Any) -> Any:
-    """Replace non-finite floats with null so results are strict JSON.
-
-    Tuples become lists on the way through. ``asdict`` keeps a dataclass
-    field's container type, so ``ranks`` and ``per_rank`` arrive here as
-    tuples; leaving them that way would make ``to_dict()`` disagree with the
-    file it writes, and a test comparing the two would have to know which.
-    """
+    """``value`` as strict JSON: a non-finite float becomes null and a tuple becomes a list."""
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, dict):
@@ -174,45 +124,7 @@ def _trajectory(text: str, pattern: re.Pattern[str]) -> list[tuple[int, float]]:
 
 
 def loss_visible_rank(*, world_size: int, pp: int) -> int:
-    """The rank whose step line carries the run's real loss.
-
-    TorchTitan computes the loss on the last pipeline stage and every rank
-    calls ``MetricsProcessor.log``. A rank without that stage does not print
-    a smaller or noisier loss -- it prints a **sentinel**: ``trainer.py``
-    sets ``loss = torch.tensor([-1.0])`` there, and at ``dp 1`` that reaches
-    the step line unreduced, so rank 0 of a pp2 run logs ``loss: -1.00000``.
-    Pooling that with the real trajectory would not add noise, it would add
-    a constant that is not a loss at all.
-
-    **Above ``dp`` 1 the sentinel is not ``-1.0`` any more, and it is still
-    not a loss.** ``trainer.py`` sums the loss over its ``loss`` mesh, which
-    holds the data-parallel ranks of one pipeline column, so a rank without
-    the last stage prints ``-dp``. The ranks that hold the last stage sum
-    their own halves and print the true global average. So the rank this
-    function names carries a real loss at every degree, and no other rank
-    does.
-
-    This is TorchTitan's own ``_get_metrics_rank`` arithmetic. The megatron
-    driver satisfies it too, by a different route: it broadcasts the last
-    stage's loss over the pipeline group and takes the mean over the
-    data-parallel group, so every rank prints the real one and this rank is
-    one of them.
-
-    **Both engines' rank layouts were read, and the arithmetic holds on
-    each.** TorchTitan unflattens its mesh as ``(pp, batch, cp, tp)``, so
-    ``pp`` is the outermost axis. Megatron's ``RankGenerator`` runs
-    ``order="tp-cp-ep-dp-pp"``, which puts ``pp`` outermost too: at ``dp 2,
-    pp 2`` its pipeline groups are ``[[0, 2], [1, 3]]`` and its
-    data-parallel groups are ``[[0, 1], [2, 3]]``, so rank 2 is the first
-    rank of the last stage on both engines.
-
-    At the trivial spec it is 0, which is the rank a single-GPU run has.
-
-    **It is right for the two schedules this repo runs and not for every
-    schedule.** ``ZBVZeroBubble`` returns the loss on rank 0, and TorchTitan
-    special-cases it. The Megatron engine's check refuses that schedule,
-    and no run has used it, so the case is recorded and not handled.
-    """
+    """The rank whose step line carries the run's real loss, for the ``1F1B`` and ``Interleaved1F1B`` schedules."""
     return (world_size // pp) * (pp - 1)
 
 
@@ -228,35 +140,7 @@ _TRAJECTORY_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 
 def refuse_non_finite_trajectories(arm: str, log_path: Path) -> None:
-    """Fail an arm whose step lines carry a ``nan`` or an ``inf``.
-
-    ``LOSS_METRIC`` and ``GRAD_NORM_METRIC`` accept both words on purpose,
-    so a diverged run is read rather than dropped. Reading it is not
-    publishing it: a tokens/s figure taken over steps whose loss is not a
-    number is the throughput of a run that trained nothing, and every other
-    figure in ``results.json`` would then sit under a healthy label.
-
-    Every rank is read, not only the rank whose trajectory is published.
-    No rank prints a non-finite value on purpose: TorchTitan's rank without
-    the loss prints the ``-1.0`` sentinel, and the stock megatron driver
-    omits the field. So a ``nan`` on any rank is a process that diverged,
-    and the rule reads per rank the way the validation rules do.
-
-    One printed ``nan`` is deliberate and still refused, and that is the
-    safe direction. The stock driver's step shim prints ``grad_norm: nan``
-    on a step Megatron skipped, which is a step that applied no update. No
-    honest run here reaches it: the arm runs ``--bf16`` with no
-    ``--loss-scale``, so ``get_megatron_optimizer`` builds no grad scaler,
-    ``prepare_grads`` returns False, and ``train_step`` never sets
-    ``skipped_iter``. A run that did skip a step trained fewer steps than
-    it claims, and its throughput is not the throughput of the workload.
-
-    This is the one non-finite check the harness owns. Stock Megatron
-    carries its own, ``check_for_nan_in_loss_and_grad``, and it is
-    Megatron's to turn off; TorchTitan carries none. The check therefore
-    runs on every arm, whatever the engine's own
-    guard did, and it names the rank and the first step that failed.
-    """
+    """Fail an arm when any rank's step lines carry a ``nan`` or an ``inf``."""
     for rank, text in sorted(_log_by_rank(log_path).items()):
         for metric, pattern in _TRAJECTORY_METRICS:
             for step, value in _trajectory(text, pattern):
@@ -291,26 +175,14 @@ def _rows(text: str) -> list[tuple[int, float, int]]:
 def per_rank_training_metrics(
     log_path: Path,
 ) -> dict[int, list[tuple[int, float, int]]]:
-    """(step, peak-memory-GiB, tokens/s) rows, per the rank that printed them.
-
-    Both engines print a step line on every rank, each carrying that rank's
-    own throughput, so a run with two ranks writes two rows per step into one
-    file. Pooling them would take a median over twice as many samples as the
-    run has steps, and it would hide the case this split exists to show: one
-    rank running slower than the rest.
-    """
+    """The (step, peak memory GiB, tokens/s) rows of each rank."""
     return {
         rank: _rows(text) for rank, text in _log_by_rank(log_path).items()
     }
 
 
 def training_metrics(log_path: Path) -> list[tuple[int, float, int]]:
-    """Every rank's rows, pooled in rank order.
-
-    Correct as a *memory* input, where the answer is a maximum over the
-    whole mesh. **Not correct as a throughput input on more than one rank**:
-    see ``per_rank_training_metrics``.
-    """
+    """Every rank's rows, pooled in rank order; a memory input and not a throughput input."""
     return [
         row
         for _, rows in sorted(per_rank_training_metrics(log_path).items())
@@ -319,44 +191,26 @@ def training_metrics(log_path: Path) -> list[tuple[int, float, int]]:
 
 
 def stable_tps(
-    rows: list[tuple[int, float, int]], workload: dict[str, Any]
+    rows: list[tuple[int, float, int]], window: ProfileWindow
 ) -> list[int]:
-    """Select post-compile steps before each profiler warmup begins.
-
-    The sample rule of a profiled run, and a different figure from
-    ``measured_tps``.
-    """
-    profile_freq = int(workload.get("profile_freq", 20))
-    wait = profile_freq - int(workload.get("profiler_warmup", 5)) - int(
-        workload.get("profiler_active", 5)
-    )
+    """The tokens/s samples of a profiled run: the steps of each profiler cycle that carry no profiler cost."""
+    wait = window.freq - window.warmup - window.active
     return [
         tps
         for step, _, tps in rows
-        if 2 <= ((step - 1) % profile_freq) + 1 <= wait
+        if 2 <= ((step - 1) % window.freq) + 1 <= wait
     ]
 
 
 def measured_tps(
     rows: list[tuple[int, float, int]], warmup_steps: int
 ) -> list[int]:
-    """Select every step after the warmup.
-
-    The sample rule of an unprofiled run, and a different figure from
-    ``stable_tps``. Numbers are comparable within one ``--profile`` value
-    and one ``--warmup-steps``.
-    """
+    """The tokens/s samples of an unprofiled run: every step after the warmup."""
     return [tps for step, _, tps in rows if step > warmup_steps]
 
 
 def _slowest_rank(per_rank: dict[int, float | None]) -> int:
-    """The rank with the lowest throughput; ties and empties go to the lowest.
-
-    The throughput twin of ``busiest_rank``: a schedule that locks the ranks
-    together runs at the pace of its slowest participant. A rank whose log
-    holds no stable sample sorts last rather than winning as a zero, because
-    "no sample" is a measurement that did not happen and not a slow rank.
-    """
+    """The rank with the lowest throughput; a tie goes to the lower rank, and a rank with no sample sorts last."""
     if not per_rank:
         return 0
     measured = {
@@ -392,17 +246,7 @@ def _nearest_rank_percentile(values: list[float], fraction: float) -> float:
 def step_ms(
     samples: list[int], *, tokens_per_step: int, pp: int
 ) -> StepMs:
-    """Turn one rank's throughput samples into its step costs.
-
-    A sample says how many tokens per second the rank moved, and one step
-    moves ``tokens_per_step`` of them, so the step took
-    ``1000 * tokens_per_step / (tps * pp)`` milliseconds. The pipeline
-    degree divides it because a pipeline stage holds a slice of the model
-    and the step line counts the whole batch's tokens against it.
-
-    A sample of zero is dropped rather than published. It describes a step
-    with no measured rate, and its step cost is not a number.
-    """
+    """The step costs of one rank's tokens/s samples; a sample of zero has no cost and is dropped."""
     series = tuple(
         1000.0 * tokens_per_step / (tps * pp) for tps in samples if tps > 0
     )
@@ -416,47 +260,44 @@ def step_ms(
     )
 
 
+def pinning_warnings(records: list[ArmRecord]) -> list[str]:
+    """A warning when some arms run pinned and others run unpinned."""
+    pinned = [record for record in records if is_pinned(record.cpu_pinning)]
+    unpinned = [record for record in records if not is_pinned(record.cpu_pinning)]
+    if not pinned or not unpinned:
+        return []
+    return [
+        "the arms mix CPU pinning, so their numbers are not comparable: "
+        + "; ".join(
+            f"{record.arm.name}: {record.cpu_pinning}" for record in records
+        )
+    ]
+
+
 def evaluate_run(
     out_dir: Path, arms_override: list[str] | tuple[str, ...] | None = None
 ) -> EvaluationResult:
     """Evaluate the end-to-end metrics of the selected arms."""
     out_dir = out_dir.resolve()
-    manifest, arms = load_run(out_dir, arms_override)
-    warnings: list[str] = []
-
-    # The run axis, which picks the sample rule and nothing else.
-    profile = bool(manifest["profile"])
-
-    workload = manifest["workload"]
-    # The declared mesh, read back from the manifest.
-    recorded_parallelism = manifest["parallelism"]
-    world_size = int(recorded_parallelism.get("world_size", 1))
-    # The two ZeRO-level warnings reach the file too, because a reader of
-    # results.json did not see the console.
-    warnings.extend(
-        zero_warnings(
-            ParallelismSpec(
-                dp=int(recorded_parallelism.get("dp", 1)),
-                pp=int(recorded_parallelism.get("pp", 1)),
-                ep=int(recorded_parallelism.get("ep", 1)),
-                zero=int(recorded_parallelism.get("zero", DEFAULT_ZERO)),
-            ),
-            engines=[
-                str(record.get("engine", ""))
-                for record in manifest.get("arms", ())
-                if record.get("name") in set(arms)
-            ],
-        )
-    )
+    record = load_run_record(out_dir)
+    run = record.run
+    arms = list(arms_override or [each.arm.name for each in record.arms])
+    selected = [record.arm(name) for name in arms]
+    warnings = [
+        *run_warnings(run, tuple(each.arm for each in selected)),
+        *pinning_warnings(selected),
+    ]
+    profile = run.profile
+    world_size = run.parallelism.world_size
     raw_training = {
         arm: per_rank_training_metrics(out_dir / f"{arm}.log") for arm in arms
     }
     # The sample rule follows the axis the run was measured under.
     if profile:
         def _samples(rows: list[tuple[int, float, int]]) -> list[int]:
-            return stable_tps(rows, workload)
+            return stable_tps(rows, run.window)
     else:
-        warmup_steps = int(manifest["warmup_steps"])
+        warmup_steps = run.warmup_steps
 
         def _samples(rows: list[tuple[int, float, int]]) -> list[int]:
             return measured_tps(rows, warmup_steps)
@@ -476,10 +317,8 @@ def evaluate_run(
         arm: _slowest_rank(by_rank) for arm, by_rank in throughput.items()
     }
     # One step's tokens, and the degree that divides its cost.
-    tokens_per_step = int(workload["local_batch_size"]) * int(
-        workload["seq_len"]
-    )
-    pp = int(recorded_parallelism.get("pp", 1))
+    tokens_per_step = run.data.local_batch_size * run.data.seq_len
+    pp = run.parallelism.pp
     rank_step_ms = {
         arm: {
             rank: step_ms(samples, tokens_per_step=tokens_per_step, pp=pp)
@@ -529,14 +368,13 @@ def evaluate_run(
 
     # One rank's trajectory: under a pipeline split only one rank holds it.
     trajectory_rank = loss_visible_rank(world_size=world_size, pp=pp)
-    # Before anything is published. Every rank's lines, not only the
-    # published rank's; see refuse_non_finite_trajectories.
+    # Refuse a diverged rank before anything is published.
     for arm in arms:
         refuse_non_finite_trajectories(arm, out_dir / f"{arm}.log")
     return EvaluationResult(
         output_dir=str(out_dir),
-        scenario=manifest.get("scenario", "unknown"),
-        hardware=manifest.get("hardware", "unknown"),
+        scenario=record.scenario,
+        hardware=record.hardware,
         arms=tuple(arms),
         results=results,
         losses={
@@ -562,20 +400,14 @@ def _render_trajectory(values: list[tuple[int, float]], nonfinite_label: str) ->
         return "(no log)"
     picks = [values[0]] + [values[i] for i in (9, 19, 29, 39) if i < len(values)]
     rendered = "  ".join(f"s{step}:{value:.5f}" for step, value in picks)
-    # evaluate_run refuses a non-finite trajectory before it builds a
-    # result, so this label is reached only by a result built by hand.
+    # Only a result that evaluate_run did not build reaches this label.
     if not all(math.isfinite(value) for _, value in values):
         rendered += f"   NON-FINITE {nonfinite_label}"
     return rendered
 
 
 def render_evaluation(result: EvaluationResult) -> str:
-    """Render one scenario's table, its trajectories and its warnings.
-
-    One row per arm, and every figure is absolute. The arms of the
-    ``engines`` scenario share no implementation, so a ratio between two of
-    them would name a difference no component of either arm owns.
-    """
+    """The printed report of one evaluation: one row of absolute figures per arm, the trajectories and the warnings."""
     lines = [
         f"== {result.output_dir} ==",
         f"scenario: {result.scenario}   hardware: {result.hardware}",

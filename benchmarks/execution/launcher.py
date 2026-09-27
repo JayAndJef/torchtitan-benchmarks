@@ -101,6 +101,21 @@ def launcher_environment(
     return result
 
 
+def environment_delta(
+    launch: Launch, *, world_size: int, gpu: str
+) -> dict[str, str]:
+    """The keys that the launcher and the engine set on top of the inherited environment."""
+    return {
+        **launcher_environment(launch, world_size=world_size, gpu=gpu),
+        **launch.env,
+    }
+
+
+def pinning_record(launch: Launch, pinning: CpuPinning) -> str:
+    """The pinning of one launch: the host's description, or ``PINNING_DECLINED``."""
+    return pinning.description if launch.pin else PINNING_DECLINED
+
+
 def build_command(
     launch: Launch,
     *,
@@ -111,12 +126,13 @@ def build_command(
 ) -> LaunchedCommand:
     """The command line and the child environment of one launch."""
     argv = command_line(launch, world_size=world_size, pinning=pinning)
-    owned = launcher_environment(launch, world_size=world_size, gpu=gpu)
     inherited = {
         key: value for key, value in base_env.items() if key not in LAUNCHER_KEYS
     }
     return LaunchedCommand(
         argv=argv,
-        env=MappingProxyType({**inherited, **owned, **launch.env}),
-        cpu_pinning=pinning.description if launch.pin else PINNING_DECLINED,
+        env=MappingProxyType(
+            {**inherited, **environment_delta(launch, world_size=world_size, gpu=gpu)}
+        ),
+        cpu_pinning=pinning_record(launch, pinning),
     )

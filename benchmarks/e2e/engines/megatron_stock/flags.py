@@ -19,6 +19,9 @@ DRIVER_MODULE = "benchmarks.e2e.engines.megatron_stock.driver.train"
 PP_SCHEDULE = "1F1B"
 """The one pipeline schedule that the driver runs."""
 
+MEGATRON_LM_SCHEDULES: tuple[str, ...] = ("1F1B", "Interleaved1F1B")
+"""The shared schedule names that Megatron-LM implements."""
+
 MEGATRON_P2P_SYNC_MODES = ("on", "off")
 """The values of ``MegatronStockConfig.p2p_sync``."""
 
@@ -61,6 +64,12 @@ PRECISION_FLAGS: dict[str, tuple[str, ...]] = {
 
 MEGATRON_PRECISION_MODES = tuple(PRECISION_FLAGS)
 """The values of ``MegatronStockConfig.precision``."""
+
+PRECISION_STATES: dict[str, str] = {
+    "stock": "bf16-fp32-master-fp32-grads-fp32-moments",
+    "lean": "bf16-fp32-master-bf16-grads-bf16-moments",
+}
+"""The model state that each precision holds, as one execution-model term."""
 
 MAIN_GRADS_DTYPES: dict[str, str] = {
     "stock": "fp32",
@@ -493,7 +502,7 @@ OWNED_FLAGS: dict[str, tuple[str, ...]] = {
         "--recompute-num-layers",
         "--recompute-modules",
     ),
-    "--megatron-precision": (
+    "the arm's precision value": (
         *LEAN_PRECISION_FLAGS,
         "--main-params-dtype",
         "--grad-reduce-in-bf16",
@@ -508,7 +517,7 @@ OWNED_FLAGS: dict[str, tuple[str, ...]] = {
         "--num-layers-at-start-in-bf16",
         "--num-layers-at-end-in-bf16",
     ),
-    "--megatron-nan-guard": (NO_CHECK_FOR_NAN_FLAG, "--rerun-mode"),
+    "the arm's nan_guard value": (NO_CHECK_FOR_NAN_FLAG, "--rerun-mode"),
     "--profile": (
         "--profile",
         "--use-pytorch-profiler",
@@ -520,7 +529,7 @@ OWNED_FLAGS: dict[str, tuple[str, ...]] = {
         "--pytorch-profiler-collect-chakra",
     ),
 }
-"""The Megatron flags that each harness option sets."""
+"""The Megatron flags that each harness option, or arm setting, sets."""
 
 PINNED_FLAGS: dict[str, tuple[str, ...]] = {
     "the harness driver": ("--bench-*",),
@@ -601,7 +610,7 @@ def passthrough_refusals(
     if offenders:
         refusals.append(
             f"{arm_name}: {', '.join(offenders)} cannot pass through "
-            "--megatron-arg; set the owning harness option instead"
+            f"{arm_name}.extra_flags; set the owning harness option instead"
         )
     names = {flag_name(token) for token in tokens}
     if "--overlap-param-gather" in names and zero == 0:

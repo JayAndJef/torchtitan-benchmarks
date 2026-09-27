@@ -75,7 +75,7 @@ from benchmarks.e2e.engines.megatron_stock.flags import (  # noqa: E402
 )
 from benchmarks.e2e.engines.registry import engine_named  # noqa: E402
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.parallelism import TRIVIAL_SPEC, validate_parallelism
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC, parallelism_refusals
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig  # noqa: E402
 from benchmarks.e2e.registry import C4_REPLAY_DATA, ENGINES, SEED  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
@@ -497,13 +497,13 @@ class FlagListTest(unittest.TestCase):
         A replicated expert row would compare two memory strategies, which
         is two changes rather than one.
         """
-        with self.assertRaisesRegex(ValueError, "--zero 1"):
-            validate_parallelism(
-                dataclasses.replace(PP4_SPEC, ep=2),
-                shape=shape_by_name("1b"),
-                local_batch_size=32,
-                device_count=8,
-            )
+        refusals = parallelism_refusals(
+            dataclasses.replace(PP4_SPEC, ep=2),
+            shape=shape_by_name("1b"),
+            local_batch_size=32,
+            device_count=8,
+        )
+        self.assertTrue(any("--zero 1" in refusal for refusal in refusals))
 
     def test_an_unknown_zero_value_is_refused(self) -> None:
         """``ParallelismSpec`` refuses the level, so no argv is built.
@@ -1891,7 +1891,7 @@ class P2pSyncMappingTest(unittest.TestCase):
 class NanGuardLineTest(unittest.TestCase):
     """The driver prints Megatron's PARSED value, and nothing sets it here.
 
-    ``--megatron-nan-guard off`` reaches the argv as Megatron's own
+    ``megatron_stock.nan_guard=off`` reaches the argv as Megatron's own
     ``--no-check-for-nan-in-loss-and-grad``. The driver reads no harness
     value for it; the line is an observation of what Megatron resolved.
     """

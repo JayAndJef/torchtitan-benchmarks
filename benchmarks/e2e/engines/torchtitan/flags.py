@@ -8,12 +8,12 @@ from pathlib import Path
 from benchmarks.e2e.engines.api import CompileMode, RunSpec
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.profiling import profiler_args
-from benchmarks.e2e.parallelism import (
-    PP_SCHEDULES,
-    ParallelismSpec,
+from benchmarks.e2e.engines.torchtitan.mesh import (
+    SCHEDULES,
+    reshard_after_forward,
     titan_mesh,
-    titan_reshard_after_forward,
 )
+from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.passthrough import matches, ownership
 
 
@@ -25,7 +25,7 @@ def parallelism_args(spec: ParallelismSpec) -> tuple[str, ...]:
     """The ``--parallelism.*`` arguments of ``spec``; the single-GPU spec has none."""
     args: list[str] = []
     if spec.pp > 1:
-        schedule = PP_SCHEDULES[spec.pp_schedule]
+        schedule = SCHEDULES[spec.pp_schedule]
         args.extend(
             (
                 "--parallelism.pipeline-parallel-degree",
@@ -53,7 +53,7 @@ def parallelism_args(spec: ParallelismSpec) -> tuple[str, ...]:
             )
         )
     # ZeRO level 1 keeps whole parameters through the step.
-    policy = titan_reshard_after_forward(spec)
+    policy = reshard_after_forward(spec)
     if policy is not None:
         args.extend(("--parallelism.fsdp-reshard-after-forward", policy))
     if spec.ep > 1:
@@ -181,11 +181,7 @@ _SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)*:[A-Za-z0-9_-]+")
 
 
 def flag_name(token: str) -> str | None:
-    """The canonical flag name in ``token``, or ``None`` for a value.
-
-    tyro accepts ``_`` and ``-`` alike and spells a false boolean as
-    ``--section.no-field``, so the name is normalized first.
-    """
+    """The flag name in ``token`` as tyro reads it, with ``_`` read as ``-`` and a ``no-`` field prefix removed, or ``None`` for a value."""
     if not token.startswith("--") and not _SUBCOMMAND.fullmatch(token):
         return None
     name = token.split("=", 1)[0].replace("_", "-")
@@ -219,5 +215,5 @@ def passthrough_refusals(arm_name: str, tokens: tuple[str, ...]) -> list[str]:
         return []
     return [
         f"{arm_name}: {', '.join(offenders)} cannot pass through "
-        "--torchtitan-arg; set the owning harness option instead"
+        f"{arm_name}.extra_flags; set the owning harness option instead"
     ]

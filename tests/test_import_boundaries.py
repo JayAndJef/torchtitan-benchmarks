@@ -81,6 +81,9 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.parallelism",
     # The passthrough tables. Parent-side: the refusal runs before launch.
     "benchmarks.e2e.passthrough",
+    # The --set overrides and the checks that run before any host probe.
+    "benchmarks.e2e.overrides",
+    "benchmarks.e2e.checks",
     # The engines' parent side: the records, the configs, the engines and
     # the registry. The parent builds the command lines and validates.
     "benchmarks.e2e.engines.api",
@@ -88,6 +91,7 @@ PARENT_SIDE_MODULES = (
     "benchmarks.e2e.engines.torchtitan.config",
     "benchmarks.e2e.engines.torchtitan.engine",
     "benchmarks.e2e.engines.torchtitan.flags",
+    "benchmarks.e2e.engines.torchtitan.mesh",
     "benchmarks.e2e.engines.torchtitan.profiling",
     "benchmarks.e2e.engines.torchtitan.validate",
     "benchmarks.e2e.engines.megatron_stock.config",
@@ -103,6 +107,7 @@ PARENT_SIDE_MODULES = (
     "benchmarks.traces.extraction",
     "benchmarks.artifacts.layout",
     "benchmarks.artifacts.manifests",
+    "benchmarks.artifacts.manifest_v18",
     "benchmarks.artifacts.run_state",
     "benchmarks.artifacts.summaries",
     "benchmarks.execution.affinity",

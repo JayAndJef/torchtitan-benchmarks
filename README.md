@@ -58,11 +58,11 @@ Read these points before you publish a number:
   unfused kernels. `AGENTS.md` lists the four differences. State them
   beside each cross-engine number.
 - **Compare like with like.** Two runs are comparable only when their
-  `manifest.json` files agree on every axis, passthrough list and source
-  revision.
-- **Engine flags pass through by engine.** Use `--torchtitan-arg` and
-  `--megatron-arg`. A perf flag passes. A flag that a harness option owns is
-  refused.
+  `manifest.json` files agree on the `run` block, every arm config and every
+  source revision.
+- **Set an arm's config with `--set`.** Use `--set <arm>.<field>=<value>`,
+  or `--set <arm>.extra_flags+=<flags>` for engine flags. A perf flag
+  passes. A flag that a harness option owns is refused.
 
 `./run_bench.sh run --help` shows every option.
 
@@ -70,7 +70,7 @@ Read these points before you publish a number:
 
 ```text
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # workload, axes, commands, revisions, hardware
+  manifest.json     # run block, arm configs, commands, revisions, hardware
   run_state.json    # resumable status
   results.json      # tokens/s, step time, peak memory, trajectories
   <arm>.log         # training output, every rank
