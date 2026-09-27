@@ -17,7 +17,7 @@ from benchmarks.e2e.engines.api import Arm, CompileMode
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
-from benchmarks.e2e.launch import megatron_stock_command, titan_command
+from benchmarks.e2e.launch import megatron_stock_launch, titan_launch
 from benchmarks.e2e.megatron_stock.flags import (
     ALWAYS_OMITTED_FLAGS,
     stock_megatron_flags,
@@ -114,7 +114,7 @@ def _titan_argvs() -> list[list[str]]:
                 ac_mode=ac_mode,
                 local_batch_size=8,
             )
-            argvs.append(titan_command(run, arm, Path("/x")))
+            argvs.append(list(titan_launch(run, arm, Path("/x")).target[2:]))
     return argvs
 
 
@@ -196,7 +196,7 @@ class MegatronTableTests(unittest.TestCase):
             )
 
     def test_the_passthrough_lands_last(self) -> None:
-        command = megatron_stock_command(
+        command = megatron_stock_launch(
             run_spec(ac_mode="none", profile=False),
             configured(
                 MEGATRON_ARM,
@@ -207,10 +207,10 @@ class MegatronTableTests(unittest.TestCase):
                 ),
             ),
             Path("/x"),
-        )
+        ).target
         self.assertEqual(
             command[-3:],
-            ["--moe-token-dispatcher-type", "flex", "--moe-permute-fusion"],
+            ("--moe-token-dispatcher-type", "flex", "--moe-permute-fusion"),
         )
 
     @unittest.skipUnless(
@@ -247,7 +247,7 @@ class MegatronTableTests(unittest.TestCase):
 class TitanTableTests(unittest.TestCase):
     def test_every_emitted_flag_is_owned_or_pinned(self) -> None:
         for argv in _titan_argvs():
-            for token in argv[1:]:
+            for token in argv:
                 name = flag_name("torchtitan", token)
                 if name is None:
                     continue

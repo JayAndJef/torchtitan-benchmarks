@@ -18,6 +18,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -228,15 +229,133 @@ def capture_launch(case: dict[str, Any]) -> dict[str, Any]:
         )
 
 
-ACCEPTED_DIFFERENCES: tuple[Callable[[str, dict[str, Any]], None], ...] = ()
-"""The changes the plan names, each applied in place to a golden launch record."""
+def _world_size(record: dict[str, Any]) -> int:
+    """The rank count of one golden launch."""
+    return len(record["request"]["gpu"].split(","))
+
+
+def _torchrun(world_size: int) -> list[str]:
+    """The torchrun head that master gave a Megatron arm above one rank."""
+    return [
+        "<PYTHON_BIN>/python",
+        "-m",
+        "torch.distributed.run",
+        f"--nproc-per-node={world_size}",
+        "--rdzv-backend",
+        "c10d",
+        "--rdzv-endpoint",
+        "localhost:0",
+        "--local-ranks-filter",
+        ",".join(str(rank) for rank in range(world_size)),
+        "--role",
+        "rank",
+        "--tee",
+        "3",
+    ]
+
+
+def _argvs(record: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """Every argv of one golden launch, per arm and in the manifest."""
+    return [
+        *((arm, launched["argv"]) for arm, launched in record["arms"].items()),
+        *record["manifest"]["commands"].items(),
+    ]
+
+
+def _titan_leaves_run_train_sh(record: dict[str, Any]) -> None:
+    for _, argv in _argvs(record):
+        if "./run_train.sh" in argv:
+            at = argv.index("./run_train.sh")
+            argv[at : at + 1] = [
+                *_torchrun(_world_size(record)),
+                "-m",
+                "torchtitan.train",
+            ]
+
+
+def _megatron_uses_torchrun_at_one_rank(record: dict[str, Any]) -> None:
+    if _world_size(record) != 1:
+        return
+    for _, argv in _argvs(record):
+        if "benchmarks.e2e.megatron_stock.train" in argv:
+            at = argv.index("<PYTHON_BIN>/python")
+            argv[at : at + 1] = _torchrun(1)
+
+
+def _launcher_sets_the_allocator_policy(record: dict[str, Any]) -> None:
+    for launched in record["arms"].values():
+        launched["env"]["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
+
+def _launcher_sets_rank_logging_at_one_rank(record: dict[str, Any]) -> None:
+    if _world_size(record) != 1:
+        return
+    for launched in record["arms"].values():
+        launched["env"]["LOG_RANK"] = "0"
+        launched["env"]["TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE"] = "[rank${rank}]:"
+
+
+@dataclass(frozen=True)
+class AcceptedDifference:
+    """One change from the baseline that the plan names, and its reason."""
+
+    reason: str
+    apply: Callable[[dict[str, Any]], None] | None
+    """Changes a golden launch record in place; ``None`` when the record cannot show it."""
+
+
+ACCEPTED_DIFFERENCES = (
+    AcceptedDifference(
+        "Plan 2.6: a TorchTitan arm starts torchrun with the Megatron flags, "
+        "then '-m torchtitan.train', in place of './run_train.sh'. The "
+        "trainer arguments after it do not change. The shell trace of "
+        "run_train.sh leaves the log.",
+        _titan_leaves_run_train_sh,
+    ),
+    AcceptedDifference(
+        "Plan 2.6: a per_rank launch uses torchrun at every world size, so "
+        "the Megatron arm at one rank gains torchrun and the '[rank0]:' log "
+        "prefix.",
+        _megatron_uses_torchrun_at_one_rank,
+    ),
+    AcceptedDifference(
+        "The launcher sets PYTORCH_ALLOC_CONF for every arm. run_train.sh "
+        "set the same value for TorchTitan, and the Megatron bootstrap set "
+        "it only when the host had no value; the launcher value now "
+        "replaces a host value for Megatron too.",
+        _launcher_sets_the_allocator_policy,
+    ),
+    AcceptedDifference(
+        "The launcher sets LOG_RANK and the torchrun prefix template with "
+        "torchrun at every world size. At one rank LOG_RANK is 0, which "
+        "run_train.sh exported to the TorchTitan trainer, and the template "
+        "gives the '[rank0]:' prefix that torchrun gave by default.",
+        _launcher_sets_rank_logging_at_one_rank,
+    ),
+    AcceptedDifference(
+        "run_train.sh exported TORCHFT_LIGHTHOUSE to the TorchTitan trainer. "
+        "Only run_train.sh names it in the fork, and torchft is not "
+        "installed, so no process reads it.",
+        None,
+    ),
+    AcceptedDifference(
+        "run_train.sh put '--module llama3 --config llama3_debugmodel' in "
+        "front of the harness arguments. The fork's ConfigManager._load_config "
+        "keeps the last --module and --config, and it imports the module "
+        "only after the loop, so the harness values always won and "
+        "llama3 was never loaded.",
+        None,
+    ),
+)
+"""The changes from the baseline that the plan names or that the review accepted."""
 
 
 def expected_launch(name: str) -> dict[str, Any]:
     """The golden record of one case, with every accepted difference applied."""
     record = json.loads((LAUNCH_DIR / f"{name}.json").read_text())
     for difference in ACCEPTED_DIFFERENCES:
-        difference(name, record)
+        if difference.apply is not None:
+            difference.apply(record)
     return record
 
 

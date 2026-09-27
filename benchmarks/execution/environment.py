@@ -1,49 +1,11 @@
-"""The environment a training or kernel-worker subprocess is launched with.
+"""The environment of a training or kernel-worker subprocess.
 
-Two builders, in the order the runners call them.
-
-``runtime_environment`` constructs the isolated environment every arm of a
-run shares. Four of its entries are load-bearing rather than cosmetic:
-``CUDA_DEVICE_ORDER=PCI_BUS_ID`` with ``CUDA_VISIBLE_DEVICES`` is what makes
-the CLI's ``<gpu>`` argument a stable PCI index rather than a
-driver-enumeration accident; ``NGPU`` states how many ranks the run starts;
-``LOG_RANK`` decides whose output reaches the log at all, and above one rank
-it names every rank rather than TorchTitan's default of only the first;
-and ``PYTHONPATH`` gets the repository root prepended, which is how the
-training subprocess resolves ``--module benchmarks.models.piper_qwen3`` and
-every ``--override.imports`` path. (Prepended, not replaced -- an inherited
-``PYTHONPATH`` survives behind it.) The three build-cache directories are
-set from ``RuntimePaths.cache_root`` only if the caller has not already set
-them, so ``--cache-root`` is a default and not an override.
-
-``world_size`` defaults to 1, which is the value every published number was
-taken at and the only value ``kernel-bench`` ever asks for: a kernel worker
-holds one arm in one process. The end-to-end runner passes
-``ParallelismSpec.world_size`` instead, so ``NGPU`` follows the requested
-mesh rather than the device count -- the two agree, because rule 1 of
-``benchmarks/e2e/parallelism.py`` refuses a spec that does not fill the
-device list. The parameter is an ``int`` rather than the spec, so this
-module stays free of the end-to-end axis.
-
-That ``PYTHONPATH`` line is one half of the ``benchmarks`` name-shadowing
-hazard: the training subprocess also runs with ``cwd`` inside the torchtitan
-submodule, which ``python -m`` puts at ``sys.path[0]`` *ahead* of anything
-here. ``tests/test_import_boundaries.py`` names this module for that reason;
-see its ``BenchmarksNameShadowingTest``.
-
-``add_compiler_environment`` then layers a sourced shell script on top for
-the arms whose CUDA extension needs a C++20 host compiler. It sources the
-script in a real ``bash`` and reads back ``env -0``, because the toolset
-scripts are shell, not a key/value file. It is applied per arm (``e2e``) or
-per scenario (``kernel-bench``) rather than to the base environment, so a
-toolset that rewrites ``PATH`` or ``LD_LIBRARY_PATH`` cannot silently alter
-an arm that never asked for it. A missing script raises: the alternative is
-an arm that reports a JIT-build failure forty seconds into a run.
-
-Neither function knows what a scenario is, and neither records anything --
-the manifest's provenance block is ``provenance.py``, the ``numactl`` prefix
-is ``affinity.py``, and the locations both of those and this one consume are
-``paths.py``.
+``PYTHONPATH`` gets the repository root prepended, and the training
+subprocess resolves ``--module benchmarks.models.piper_qwen3`` and every
+``--override.imports`` path through it. The subprocess also runs with its
+working directory inside the torchtitan submodule, which ``python -m`` puts
+first on ``sys.path``; ``tests/test_import_boundaries.py`` names this module
+for that reason.
 """
 
 from __future__ import annotations
@@ -57,35 +19,30 @@ from typing import Mapping
 from benchmarks.execution.paths import RuntimePaths
 
 
-LOG_RANK_TEMPLATE = "[rank${rank}]:"
-"""The rank identifier a multi-rank run puts on every log line."""
-
-
-def _rank_logging(world_size: int) -> dict[str, str]:
-    if world_size == 1:
-        return {}
+def device_environment(gpu: str, *, world_size: int) -> dict[str, str]:
+    """The keys that make ``gpu`` a stable PCI index and state the rank count."""
+    if world_size < 1:
+        raise ValueError(f"world size {world_size} must be >= 1")
     return {
-        "LOG_RANK": ",".join(str(rank) for rank in range(world_size)),
-        "TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE": LOG_RANK_TEMPLATE,
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "CUDA_VISIBLE_DEVICES": gpu,
+        "NGPU": str(world_size),
     }
 
 
 def runtime_environment(
     paths: RuntimePaths,
-    gpu: str,
     *,
     environment: Mapping[str, str] | None = None,
-    world_size: int = 1,
 ) -> dict[str, str]:
-    """Construct the isolated TorchTitan environment for one run."""
-    if world_size < 1:
-        raise ValueError(f"world size {world_size} must be >= 1")
+    """The inherited environment with the repository path and the build caches.
+
+    A cache directory that the caller already set is kept.
+    """
     result = dict(environment or os.environ)
     pythonpath = result.get("PYTHONPATH")
     result.update(
         {
-            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-            "CUDA_VISIBLE_DEVICES": gpu,
             "PYTHONPATH": f"{paths.bench_dir}{':' + pythonpath if pythonpath else ''}",
             "PATH": f"{Path(sys.executable).parent}:{result['PATH']}",
             "TORCH_EXTENSIONS_DIR": result.get(
@@ -97,8 +54,6 @@ def runtime_environment(
             "TRITON_CACHE_DIR": result.get(
                 "TRITON_CACHE_DIR", str(paths.cache_root / "triton_cache")
             ),
-            "NGPU": str(world_size),
-            **_rank_logging(world_size),
         }
     )
     return result

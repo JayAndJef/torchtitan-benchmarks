@@ -1972,53 +1972,16 @@ class MegatronNanGuardSourceTest(unittest.TestCase):
         self.assertIn("raise RuntimeError(full_message)", branch)
 
 
-class RendezvousDefaultsTest(unittest.TestCase):
-    """At one rank the driver fills the rendezvous; under torchrun it does not."""
+class DriverOrderTest(unittest.TestCase):
+    """The driver prepares Megatron before it imports the training entry point."""
 
-    def test_an_empty_environment_gets_both_variables(self) -> None:
-        env: dict[str, str] = {}
-        bootstrap.install_rendezvous_defaults(env)
-        self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
-        self.assertTrue(1024 <= int(env["MASTER_PORT"]) <= 65535)
-
-    def test_the_torchrun_values_are_kept(self) -> None:
-        env = {"MASTER_ADDR": "10.0.0.7", "MASTER_PORT": "29500"}
-        bootstrap.install_rendezvous_defaults(env)
-        self.assertEqual(
-            env, {"MASTER_ADDR": "10.0.0.7", "MASTER_PORT": "29500"}
-        )
-
-    def test_a_set_port_is_kept_when_only_the_address_is_absent(self) -> None:
-        env = {"MASTER_PORT": "29500"}
-        bootstrap.install_rendezvous_defaults(env)
-        self.assertEqual(env["MASTER_PORT"], "29500")
-        self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
-
-
-class AllocatorDefaultsTest(unittest.TestCase):
-    """The driver sets the allocator policy run_train.sh gives the other arm."""
-
-    def test_an_empty_environment_gets_the_policy(self) -> None:
-        env: dict[str, str] = {}
-        bootstrap.install_allocator_defaults(env)
-        self.assertEqual(env["PYTORCH_ALLOC_CONF"], "expandable_segments:True")
-
-    def test_an_existing_value_is_kept(self) -> None:
-        env = {"PYTORCH_ALLOC_CONF": "max_split_size_mb:128"}
-        bootstrap.install_allocator_defaults(env)
-        self.assertEqual(env, {"PYTORCH_ALLOC_CONF": "max_split_size_mb:128"})
-
-    def test_main_sets_both_before_it_imports_torch(self) -> None:
-        """Ordering is load-bearing: torch reads the policy at CUDA init."""
+    def test_main_prepares_before_it_imports_pretrain(self) -> None:
         import inspect
 
         source = inspect.getsource(train.main)
-        allocator = source.index("bootstrap.install_allocator_defaults()")
-        rendezvous = source.index("bootstrap.install_rendezvous_defaults()")
-        prepare = source.index("bootstrap.prepare()")
-        self.assertLess(allocator, rendezvous)
-        self.assertLess(rendezvous, prepare)
-        self.assertLess(prepare, source.index("import pretrain_gpt"))
+        self.assertLess(
+            source.index("bootstrap.prepare()"), source.index("import pretrain_gpt")
+        )
 
 
 class StepLineTest(unittest.TestCase):

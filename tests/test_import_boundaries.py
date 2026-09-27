@@ -112,6 +112,8 @@ PARENT_SIDE_MODULES = (
     "benchmarks.execution.devices",
     "benchmarks.execution.environment",
     "benchmarks.execution.events",
+    # The parent builds each arm's argv and child environment here.
+    "benchmarks.execution.launcher",
     "benchmarks.execution.paths",
     "benchmarks.execution.provenance",
     "benchmarks.kernel.registry",

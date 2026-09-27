@@ -1,8 +1,8 @@
-"""Build the training launch command for one end-to-end benchmark arm.
+"""Build the training launch of one end-to-end benchmark arm.
 
 This module holds one builder per engine. Each builder reads the run and
-the arm's config, and each engine in ``benchmarks.e2e.engines`` calls its
-own builder.
+the arm's config and returns a ``Launch``, and each engine in
+``benchmarks.e2e.engines`` calls its own builder.
 
 **At the trivial parallelism spec the argv is the argv this repo has always
 built.** ``_titan_parallelism_flags`` returns an empty tuple there, so no
@@ -14,10 +14,9 @@ list.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-from benchmarks.e2e.engines.api import Arm, CompileMode, RunSpec
+from benchmarks.e2e.engines.api import Arm, CompileMode, Launch, RunSpec
 from benchmarks.e2e.parallelism import (
     PP_SCHEDULES,
     ParallelismSpec,
@@ -146,8 +145,12 @@ def _titan_parallelism_flags(spec: ParallelismSpec) -> tuple[str, ...]:
     return tuple(flags)
 
 
-def titan_command(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
-    """The ``run_train.sh`` command line of one TorchTitan arm."""
+TORCHTITAN_TRAIN_MODULE = "torchtitan.train"
+"""What ``python -m`` starts for a TorchTitan arm."""
+
+
+def titan_launch(run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
+    """The ``torchtitan.train`` launch of one TorchTitan arm."""
     config = arm.config
     refuse_passthrough(
         "torchtitan", arm.name, config.extra_flags, run.parallelism.zero
@@ -171,7 +174,6 @@ def titan_command(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
         else ()
     )
     args = [
-        "./run_train.sh",
         "--module",
         config.module,
         "--config",
@@ -200,69 +202,20 @@ def titan_command(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
     if run.ac_mode == "none":
         # A tyro subcommand token, which has to come last.
         args.append("activation-checkpoint:none")
-    return args
+    return Launch(
+        target=("-m", TORCHTITAN_TRAIN_MODULE, *args),
+        processes="per_rank",
+        pin=True,
+    )
 
 
-def _megatron_launcher(spec: ParallelismSpec) -> list[str]:
-    """What starts the megatron driver's processes.
-
-    **At the trivial spec this is ``[sys.executable, "-m"]``**, so the argv
-    is the argv this repo has always built and every recorded command line
-    is reproduced token for token.
-
-    Above one rank it is ``torch.distributed.run`` -- torchrun under its
-    module name, run by this same interpreter, so the CLI and the training
-    processes keep sharing one environment. The flags are the ones
-    TorchTitan's own ``run_train.sh`` passes, for one reason each:
-
-    * ``--nproc-per-node`` starts the ranks. It reads the spec rather than
-      the device count, and parallelism rule 1 is what makes the two agree.
-    * ``--rdzv-backend``/``--rdzv-endpoint`` let the kernel pick the port,
-      so two runs on one host cannot collide.
-    * ``--local-ranks-filter`` names every rank. **torchrun's own default is
-      every rank**, not rank 0 -- the empty default resolves to no filter at
-      all. Rank 0 alone is ``run_train.sh``'s ``LOG_RANK`` default, which is
-      a TorchTitan fact and reaches only the titan arms. The flag is passed
-      here so the megatron launcher states the set rather than inheriting a
-      default from either side; a kernel that degraded on rank 1 must not be
-      invisible.
-    * ``--role rank`` with ``--tee 3`` is what puts a rank prefix on every
-      line. ``TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE`` (set by
-      ``benchmarks/execution/environment.py``) decides its shape, and
-      ``benchmarks/artifacts/layout.py``'s ``logs_by_rank`` reads it back.
-
-    The titan arms need no equivalent: ``run_train.sh`` already calls
-    torchrun with these flags and reads ``NGPU`` and ``LOG_RANK`` from the
-    environment.
-    """
-    if spec.world_size == 1:
-        return [sys.executable, "-m"]
-    return [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        f"--nproc-per-node={spec.world_size}",
-        "--rdzv-backend",
-        "c10d",
-        "--rdzv-endpoint",
-        "localhost:0",
-        "--local-ranks-filter",
-        ",".join(str(rank) for rank in range(spec.world_size)),
-        "--role",
-        "rank",
-        "--tee",
-        "3",
-        "-m",
-    ]
-
-
-def megatron_stock_command(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
-    """The command line of one stock Megatron-LM arm.
+def megatron_stock_launch(run: RunSpec, arm: Arm, arm_dir: Path) -> Launch:
+    """The launch of one stock Megatron-LM arm.
 
     ``benchmarks/e2e/megatron_stock/flags.py`` builds every flag, and this
-    function adds the launcher, the driver module and the passthrough
-    tokens. The refusals repeat the run checks, so a caller that builds a
-    command line without a run gets a message that names the arm.
+    function adds the driver module and the passthrough tokens. The
+    refusals repeat the run checks, so a caller that builds a launch
+    without a run gets a message that names the arm.
     """
     config = arm.config
     spec = run.parallelism
@@ -285,10 +238,14 @@ def megatron_stock_command(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
     from benchmarks.e2e.megatron_stock.flags import stock_megatron_flags
 
     refuse_passthrough("megatron", arm.name, config.extra_flags, spec.zero)
-    return [
-        *_megatron_launcher(spec),
-        STOCK_MEGATRON_DRIVER_MODULE,
-        *stock_megatron_flags(run, config, arm_dir=str(arm_dir)),
-        # Last, because Megatron's parser is last-wins.
-        *config.extra_flags,
-    ]
+    return Launch(
+        target=(
+            "-m",
+            STOCK_MEGATRON_DRIVER_MODULE,
+            *stock_megatron_flags(run, config, arm_dir=str(arm_dir)),
+            # Last, because Megatron's parser is last-wins.
+            *config.extra_flags,
+        ),
+        processes="per_rank",
+        pin=True,
+    )

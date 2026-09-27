@@ -1394,10 +1394,12 @@ class CommandTests(unittest.TestCase):
             run_spec(), ENGINES.arm("titan_compiled"), "/out/titan_stock"
         )
         self.assertNotIn("--override.imports", argv)
+        trainer = argv.index("torchtitan.train") - 1
         self.assertEqual(
-            argv[:5],
+            argv[trainer : trainer + 6],
             [
-                "./run_train.sh",
+                "-m",
+                "torchtitan.train",
                 "--module",
                 "benchmarks.models.piper_qwen3",
                 "--config",

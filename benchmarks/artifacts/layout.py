@@ -136,8 +136,8 @@ def logs_by_rank(text: str) -> dict[int, str]:
     A log with **fewer than two** ranks in it comes back whole, under the one
     rank it names. That is not a convenience: it is what makes this reader
     inert on every log written so far. A single-rank log holds unprefixed
-    lines too -- the runner's own header, the ``nvidia-smi`` block, and
-    ``run_train.sh``'s shell trace -- and those belong to no rank, so a split
+    lines too -- the runner's own header, the ``nvidia-smi`` block and
+    torchrun's own lines -- and those belong to no rank, so a split
     would drop them and change what every rule reads today. Two ranks make
     the split necessary and the unprefixed lines the launcher's.
 
