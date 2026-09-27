@@ -359,8 +359,9 @@ Rule 8 reads both ways. The marker must be present when the arm declares
 `compile="torch"` and absent when it declares `compile="none"`. Never relax
 the absence half, or an arm that silently compiled publishes as eager.
 
-Without the profile axis the arm writes no trace, so rules 5, 6 and 13 are
-skipped whole. The mesh fact then carries the data-parallel axis alone. Cite
+Both engines check rules 5, 6 and 13 through one helper,
+`benchmarks.e2e.validation:trace_refusals`. Without the profile axis the arm
+writes no trace, so rules 5, 6 and 13 are skipped whole. The mesh fact then carries the data-parallel axis alone. Cite
 a data-parallel number from an unprofiled run as resting on that log line.
 
 Rule 13 matches the kernel name `ncclDevKernel_AllReduce`. Megatron issues

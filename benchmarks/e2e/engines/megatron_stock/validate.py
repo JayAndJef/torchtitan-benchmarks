@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from benchmarks.artifacts.layout import trace_files_by_rank
 from benchmarks.e2e.engines.api import Arm, DataSpec, RunSpec
 from benchmarks.e2e.engines.megatron_stock.flags import (
     DATA_PARALLEL_WRAPPERS,
@@ -17,11 +16,7 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
     microbatch_geometry,
 )
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.validation import (
-    ALL_REDUCE_MARKER,
-    count_trace_windows,
-    trace_contains,
-)
+from benchmarks.e2e.validation import trace_refusals
 
 
 def mesh_markers(
@@ -96,55 +91,6 @@ def required_lines(run: RunSpec, arm: Arm) -> dict[str, tuple[str, ...]]:
     return lines
 
 
-def trace_refusals(run: RunSpec, arm: Arm, arm_dir: Path) -> list[str]:
-    """The trace rules that a profiled arm breaks: the windows of each rank, the kernel markers and the all-reduce."""
-    if not run.profile:
-        return []
-    spec = run.parallelism
-    windows = count_trace_windows(arm_dir)
-    ranks = range(spec.world_size)
-    refusals = []
-    if spec.world_size > 1:
-        refusals.extend(
-            f"rank {rank} wrote no trace under {arm_dir}"
-            for rank in ranks
-            if rank not in windows
-        )
-        refusals.extend(
-            f"rank {rank} wrote traces under {arm_dir}, and the run declares "
-            f"{spec.world_size} ranks"
-            for rank in windows
-            if rank >= spec.world_size
-        )
-    minimum = run.window.min_windows
-    for rank, count in (windows or {0: 0}).items():
-        if count < minimum:
-            where = f"for rank {rank} under" if len(windows) > 1 else "under"
-            refusals.append(
-                f"expected at least {minimum} profiler windows, found {count} "
-                f"{where} {arm_dir}"
-            )
-    traces = trace_files_by_rank(arm_dir)
-    every_trace = [path for paths in traces.values() for path in paths]
-    # A pipeline stage can lack a marker kernel, so the markers read every rank as one set.
-    refusals.extend(
-        f"marker kernel {marker!r} absent from profiler traces"
-        for marker in arm.config.trace_kernel_markers
-        if not any(trace_contains(path, marker) for path in every_trace)
-    )
-    if spec.dp > 1:
-        refusals.extend(
-            f"dp {spec.dp} was requested and rank {rank}'s profiler traces "
-            f"under {arm_dir} carry no {ALL_REDUCE_MARKER!r}"
-            for rank in ranks
-            if not any(
-                trace_contains(path, ALL_REDUCE_MARKER)
-                for path in traces.get(rank, ())
-            )
-        )
-    return refusals
-
-
 def validate_outputs(
     run: RunSpec, arm: Arm, arm_dir: Path, rank_logs: Mapping[int, str]
 ) -> list[str]:
@@ -158,4 +104,8 @@ def validate_outputs(
         for marker in markers
         if marker not in log
     ]
-    return refusals + trace_refusals(run, arm, arm_dir)
+    if run.profile:
+        refusals.extend(
+            trace_refusals(run, arm_dir, arm.config.trace_kernel_markers)
+        )
+    return refusals
