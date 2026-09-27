@@ -28,15 +28,17 @@ def tokens_per_second(
 
 
 def loss_value(loss_dict: dict) -> float | None:
-    """The loss in ``loss_dict``, or ``None`` when this rank holds no loss."""
+    """The loss in ``loss_dict``, or ``None`` when this rank holds no loss; a loss that is not one number raises."""
     for key, value in loss_dict.items():
         if "loss" not in key:
             continue
         try:
             return float(value)
-        except Exception:
-            # A value that is not one number is not a loss.
-            return None
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise RuntimeError(
+                f"megatron's loss entry {key!r} is {value!r}, not one number; "
+                "the step line cannot state a loss"
+            ) from error
     return None
 
 

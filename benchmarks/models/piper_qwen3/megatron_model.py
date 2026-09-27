@@ -22,7 +22,7 @@ it only ever **removes** a part. The config is not touched, so the three
 single-valued fields above keep their values and the disagreement hazard is
 not reached. ``_blank_layer_parts`` carries the rules.
 
-``BASE`` mirrors the qwen3_piper_1b TorchTitan config: RMSNorm eps 1e-6, no
+``BASE`` mirrors ``_piper_1b_model`` in ``titan_model.py``: RMSNorm eps 1e-6, no
 biases, SwiGLU; MoE on every layer with 4 experts, top-2,
 softmax-then-topk with top-k renormalization; fp32 router math, no aux loss
 and no expert bias; per-head qk RMSNorm before RoPE; NeoX rotate-half RoPE
