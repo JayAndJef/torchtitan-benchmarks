@@ -26,7 +26,7 @@ DEFAULT_WARMUP_STEPS = 10
 """How many steps an unprofiled run discards before it measures."""
 
 SEED = 42
-"""The seed of every run; both engines draw the same initial parameters from it."""
+"""The seed of every run, which each engine passes to its own initialization."""
 
 C4_REPLAY_DATA = DataSpec(
     dataset=REPLAY_DATASET,

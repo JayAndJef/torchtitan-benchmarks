@@ -1,4 +1,4 @@
-"""The stock GPT model builder, plus a check of the parameter count of each stage and the line that rule 11 reads.
+"""The stock GPT model builder, plus a check of the parameter count of each stage and the line that the model fact reads.
 
 This module imports megatron, so only the training process imports it, through ``BenchGPTModelConfig.builder``.
 """

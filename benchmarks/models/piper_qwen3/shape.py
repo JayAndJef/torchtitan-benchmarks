@@ -26,7 +26,7 @@ class PiperShape:
     max_seq_len: int = 4096
     """The size of the RoPE cache and the sequence ceiling; a longer sequence fails the eager bounds check and reads out of bounds under compile."""
     parity_gate: float = 2e-2
-    """The rel_l2 ceiling of a cross-engine logit comparison; no code reads it, and only ``1b`` and ``huge`` carry a measured value."""
+    """The rel_l2 ceiling of a cross-engine logit comparison; no check gates on it, and only ``1b`` and ``huge`` carry a measured value."""
 
     def __post_init__(self) -> None:
         if self.dim < 1:
@@ -341,7 +341,7 @@ PIPER_SHAPES: dict[str, PiperShape] = {
 """Every registered shape, smallest to largest by parameter count."""
 
 MODEL_SIZE_ALIASES: dict[str, str] = {"normal": "1b"}
-"""The retired ``--model-size`` names, each mapped to the name of its shape."""
+"""The ``--model-size`` aliases, each mapped to the name of its shape."""
 
 MODEL_SIZE_CHOICES: tuple[str, ...] = tuple(PIPER_SHAPES) + tuple(
     MODEL_SIZE_ALIASES

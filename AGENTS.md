@@ -76,10 +76,8 @@ shares one pre-push hook.
 | path | contents |
 |---|---|
 | `benchmarks/cli/` | The Click CLI: `benchmarks/cli/e2e.py`, `benchmarks/cli/kernel.py`, and the group in `benchmarks/cli/main.py`. The group attaches each command, so no command module imports the group. |
-| `benchmarks/e2e/` | The shared end-to-end code: the scenario table in `benchmarks/e2e/registry.py`, the `--set` parser, the run checks, the parallelism rules, the harness facts, the validation helpers, the runner and the evaluation. |
-| `benchmarks/e2e/engines/` | The engine interface in `benchmarks/e2e/engines/api.py`, the engine registry in `benchmarks/e2e/engines/registry.py`, and one package per engine. |
-| `benchmarks/e2e/engines/torchtitan/` | The TorchTitan engine. `benchmarks/e2e/engines/torchtitan/plugins/` holds the modules that the trainer imports through `--module`. |
-| `benchmarks/e2e/engines/megatron_stock/` | The stock Megatron-LM engine. `benchmarks/e2e/engines/megatron_stock/driver/` holds the driver. |
+| `benchmarks/e2e/` | The shared end-to-end code: the scenario table in `benchmarks/e2e/registry.py`, the run request, the `--set` parser, the flag-pattern matcher, the run checks, the parallelism rules, the harness facts, the validation helpers, the runner and the evaluation. |
+| `benchmarks/e2e/engines/` | The engine interface in `benchmarks/e2e/engines/api.py`, the engine registry in `benchmarks/e2e/engines/registry.py`, and one package per engine. `benchmarks/e2e/engines/torchtitan/plugins/` holds the modules that the TorchTitan trainer imports through `--module`. |
 | `benchmarks/e2e/data/c4_replay.py` | The pre-tokenized c4_test stream that both engines read. |
 | `benchmarks/artifacts/` | `manifest.json` and its schema 18 reader, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
@@ -151,8 +149,8 @@ prefix, then the interpreter, then the torchrun flags, then the target. A
 
 The launcher owns six environment keys: `CUDA_DEVICE_ORDER`,
 `CUDA_VISIBLE_DEVICES`, `NGPU`, `LOG_RANK`,
-`TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE` and `PYTORCH_ALLOC_CONF`. A launch
-that sets one of them is refused before any arm starts.
+`TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE` and `PYTORCH_ALLOC_CONF`. The
+runner refuses a launch that sets one of them, before any arm starts.
 
 Each engine decides its own pinning through `pin`. A launch that declines
 the prefix records `declined by engine` as its CPU pinning.
@@ -171,7 +169,9 @@ A Piper package follows these steps, in this order.
    Each rank prints a completion line, its parameter count, its mesh, and
    one step line or step record per step.
 4. Write the engine: a subclass of `Engine` with each member of the table
-   above. Keep `can_profile` false until `validate` checks the traces.
+   above. Its `check` refuses each `extra_flags` token that it does not
+   classify, and its `launch` sends the other tokens last. Keep
+   `can_profile` false until `validate` checks the traces.
 5. Add one instance to the engine tuple in
    `benchmarks/e2e/engines/registry.py`, and declare the arms in
    `benchmarks/e2e/registry.py`.
@@ -203,9 +203,8 @@ directory. `manifest.json` records the plain name.
 227.5 GiB of TorchTitan state against an H200's 139.81 GiB. The harness
 reads layer counts and not memory, so a one-GPU run of it runs out of
 memory. Pass `--model-size 1b` for a one-GPU run. `--pp 8` also needs
-`--batch 16`, because parallelism rules 11 and 12 ask for a microbatch
-count that divides the pipeline degree and is at least twice the stage
-count.
+`--batch 16`. Parallelism rules 11 and 12 ask for a microbatch count that
+divides the pipeline degree and is at least twice the stage count.
 
 ### Flag table
 
@@ -239,9 +238,8 @@ parses this table and compares each default against the code.
 | `--profile` | -- | `off` | Whether the run collects profiler traces. |
 | `--warmup-steps` | `WARMUP_STEPS` | `10` | Steps an unprofiled run discards before it measures. |
 
-The six parallelism options and `--set` take no environment variable. Each
-one has to agree with the `<gpu>` positional or with `--arm`, and a
-positional has no environment form.
+The six parallelism options and `--set` take no environment variable,
+because each one must agree with the `<gpu>` positional or with `--arm`.
 
 ### Arm settings: `--set`
 
@@ -252,11 +250,10 @@ per engine: `benchmarks/e2e/engines/torchtitan/config.py` and
 
 - The arm must be a selected arm, and the field must exist.
 - A choice field takes one of its values. A switch takes `on`, `off`,
-  `true` or `false`. A list field, such as `extra_flags`, takes `+=` alone,
-  and shell rules split the value.
+  `true` or `false`. A list field, such as `extra_flags`, takes `+=` alone.
 
-Five `run` options became `--set` values. Each old option is refused, and
-the message gives the `--set` spelling of its value.
+Five `run` options became `--set` values. The run refuses each old option,
+and the message gives the `--set` spelling of its value.
 
 | old option | `--set` value |
 |---|---|
@@ -268,7 +265,8 @@ the message gives the `--set` spelling of its value.
 
 ### Engine passthrough
 
-A perf flag passes. A flag that changes a recorded fact is refused.
+A perf flag passes. The engine's check refuses a flag that changes a
+recorded fact.
 
 An arm's `extra_flags` reach that arm alone. Shell rules split one value, so
 `--set "megatron_stock.extra_flags+=--moe-token-dispatcher-type flex"` adds
@@ -288,8 +286,8 @@ the owner.
 - An unlisted Megatron flag passes, so every fusion flag that Megatron
   offers passes. Section 7 names the stock omissions that a passthrough can
   add.
-- An unlisted TorchTitan flag is refused. So a field that a fork bump adds
-  fails until someone classifies it.
+- The TorchTitan check refuses an unlisted flag. So a field that a fork
+  bump adds fails until someone classifies it.
 - `tests/test_passthrough.py` checks that the tables do not overlap and
   that each emitted flag has one class.
 
@@ -305,8 +303,8 @@ the manifest's `run` block, each arm's `config`, the CPU pinning,
 run.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every
-number published before that flip was measured under `on`. State the value
-beside any Megatron number.
+Megatron number published before that flip had both at `on`. State the
+value beside any Megatron number.
 
 The `lean` value of the Megatron `precision` field changes the numerics. It
 holds bf16 Adam moments and accumulates gradients in bf16. Read the loss
@@ -324,8 +322,8 @@ window.
   warmup, so `--steps` must be **more than** `--warmup-steps`.
 - On: each engine writes `<arm>/profiling/traces/iteration_*/`, every trace
   rule applies, and `--steps` must be at least 40, for two profiler
-  windows. `--warmup-steps` is refused. An arm whose engine sets
-  `can_profile` false is refused, and the message names the arm and the
+  windows. The run refuses `--warmup-steps`. It also refuses each arm whose
+  engine sets `can_profile` false, and the message names the arm and the
   engine.
 
 An exported `WARMUP_STEPS` refuses every profiled run. Unset it first.
@@ -382,7 +380,8 @@ definition as `throughput_definition`.
 
 The training step is host-bound at these sizes, so an unpinned run measures
 scheduler placement. For each engine whose launch accepts it, the runner
-binds each training process to its GPU's own NUMA node with `numactl --cpunodebind --membind`, resolved from the PCI
+binds each training process to the NUMA node of its GPU with
+`numactl --cpunodebind --membind`. The runner finds the node from the PCI
 bus id through sysfs. When that fails, or when the devices sit on two
 nodes, the run proceeds unpinned and `cpu_pinning` records why. Pinned and
 unpinned runs are not comparable. `--resume` refuses to mix them, and
@@ -404,19 +403,17 @@ not follow the previous step of its rank, also fail the arm.
 The four harness facts live in `benchmarks/e2e/evidence.py`. They apply to
 every engine:
 
-- **Completion:** each rank from 0 to the world size writes output and
+- **Completion:** each rank below the world size writes output and
   completes. A missing rank fails, and so does a rank outside the run.
 - **Model:** each stated parameter count equals the shape's count, and at
   least one rank states it.
 - **Mesh:** each rank's stated `dp`, `pp` and `ep` equal the run's spec.
   Above one data-parallel rank the stated ZeRO level must also equal the
-  spec. A log that states no mesh reads as one device.
+  spec. A log that states no mesh reads as one device. So a two-way
+  data-parallel run cannot publish as one GPU, which would read as roughly
+  twice the true rate.
 - **Finite trajectories:** no rank's step samples carry a `nan` or an `inf`
   loss or gradient norm.
-
-The mesh fact reads both ways, so a log that records a pipeline or data
-parallelism fails a run that declares none. A two-way data-parallel run
-published as one GPU reads as roughly twice the true rate.
 
 Each engine's `validate` holds its own rules. The code names each rule by
 its message.
@@ -490,9 +487,9 @@ ranks:
   step line. `results.json` records a warning that names the arm, the rank,
   the step and the log line. Validation does not fail on it.
 - When a whole step line comes first, the reader reads it.
-- **A known gap:** when a whole step line of one rank follows the line of
-  another rank, the step is lost with no warning. Per-rank log files would
-  remove this gap.
+- **A known gap:** when a whole step line of one rank comes after the text
+  of another rank on one log line, the step is lost with no warning.
+  Per-rank log files would remove this gap.
 
 `results.json` is schema 6. Per arm it carries `stable_tokens_per_second`,
 `stable_sample_count`, `peak_memory_gib`, `step_ms` with `mean`, `median`,
@@ -522,9 +519,8 @@ are different figures, not two readings of one.
 
 `benchmarks.e2e.results:refuse_non_finite_trajectories` fails an arm whose
 step samples carry a `nan` or an `inf` on any rank. A run that diverged
-publishes no throughput. The stock
-driver records a `nan` gradient norm on a step that Megatron skipped, so
-the refusal also refuses a skipped step.
+publishes no throughput. The stock driver records a `nan` gradient norm on
+a step that Megatron skipped, so the refusal also refuses a skipped step.
 
 The evaluation warns when tokens/s spreads more than 1.15x across ranks, and
 when the arms of one run mix pinned and unpinned processes. It also repeats
@@ -559,8 +555,8 @@ states its job.
 
 The driver substitutes **one** provider, the dataset provider. The model
 builder, the optimizer, the schedule, the distributed setup, the forward
-step and the training loop all stay Megatron's. No file of the Megatron-LM
-checkout is edited. Four shims run in the driver process instead.
+step and the training loop all stay Megatron's. The driver edits no file of
+the Megatron-LM checkout. Four shims run in the driver process instead.
 
 These faithfulness guarantees hold today:
 
@@ -569,7 +565,10 @@ These faithfulness guarantees hold today:
 - **Same data.** Both engines read the samples that
   `benchmarks.e2e.data.c4_replay:materialize` drains from TorchTitan's own
   dataset class with TorchTitan's own tokenizer. The test suite asserts that
-  the loaders of both engines give that class's tokens bit for bit.
+  the loaders of both engines give that class's tokens bit for bit. Each
+  engine reads the whole run at startup, so no measured step pays a data
+  cost, and each engine raises when a step asks for a sample past the
+  last one.
 - **No recompute, ever.** The engine's check refuses `--ac sac`.
 - **Stock precision.** The arm is **not** plain bf16. Under `--bf16` alone
   Megatron keeps fp32 master weights and fp32 Adam moments and reduces
@@ -588,8 +587,8 @@ engine gap. Say so beside any loss-path claim. The stock recipe also omits
 `--moe-permute-fusion`, `--overlap-grad-reduce` and
 `--overlap-param-gather`. A `megatron_stock.extra_flags` value can add each
 of them, and `--use-flash-attn` too. `--overlap-param-gather` needs
-`--zero 1`. The data-parallel line reads `overlap_grad_reduce` from the
-arm's own flags. A passthrough cannot turn off `--moe-grouped-gemm`,
+`--zero 1`. The mesh rule takes the expected `overlap_grad_reduce` value
+from the arm's own flags. A passthrough cannot turn off `--moe-grouped-gemm`,
 because Megatron has no negative form of it.
 
 Of the three Megatron treatments, the `p2p_sync` value `on` needs more
@@ -607,9 +606,9 @@ Read `OptimizerParamScheduler` before you report a learning rate.
 Eight facts explain the driver:
 
 - **One sample is one packed sequence.** Megatron flattens an `(m, S)`
-  microbatch to `(1, m*S)` but sizes the pipeline receive buffer as
-  `(S, m, H)`, so a microbatch of several rows reaches the next stage
-  permuted, and nothing raises. So the flag list sends
+  microbatch to `(1, m*S)`, but it sizes the pipeline receive buffer as
+  `(S, m, H)`. So a microbatch of several rows reaches the next stage
+  permuted, and nothing raises. The flag list therefore sends
   `--micro-batch-size 1`, and the driver packs the rows of one microbatch
   into one sample. `cu_seqlens` marks every document.
 - **The driver does not restart a rank.** It omits the
@@ -689,7 +688,7 @@ Three of the five registered schedules raise on a compiled stage module.
 
 Two legal meshes warn and do not refuse. The runner prints both warnings,
 and `results.json` records them.
-`benchmarks.e2e.parallelism:zero_warnings` states the first one, and the
+`benchmarks.e2e.parallelism:zero_warnings` states the first one. The
 TorchTitan engine's `warnings` states the second one.
 
 - A sharded level at one data-parallel rank: the shard degree is 1, so the
@@ -876,11 +875,6 @@ has no DDP class, and it prints the `piper1b data parallel` line after it
 counts the FSDP units. That line, and not TorchTitan's mesh line, proves
 the wrap, because TorchTitan logs the mesh before the function runs.
 
-The TorchTitan replay loader and the Megatron driver both call
-`benchmarks.e2e.data.c4_replay:materialize` at startup, which reads the
-samples of the whole run. So no measured step pays a data cost, and each
-engine raises when a step asks for a sample past the last one.
-
 `benchmarks/e2e/engines/torchtitan/plugins/config_registry.py` and
 `benchmarks/models/piper_qwen3/titan_model.py` import private Qwen3
 helpers. After a bump, verify that each of these still exists with
@@ -906,9 +900,9 @@ The kernel scenarios additionally depend on `HelionCosSinRoPE`,
 
 Three fork features are no longer load-bearing, and the list above drops
 them. The compile-mode field served the deleted compile-mode axis; the
-TorchTitan engine sends `--compile.enable` alone. The loss-owned LM head protocol
-served the deleted fused linear cross-entropy arm; no module imports it
-today. The expert-usage accumulation gate served graph capture, which is
+TorchTitan engine sends `--compile.enable` alone. The loss-owned LM head
+protocol served the deleted fused linear cross-entropy arm; no module
+imports it today. The expert-usage accumulation gate served graph capture, which is
 also deleted. Keep the commits on the branch, and do not treat them as
 requirements.
 
