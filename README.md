@@ -111,7 +111,8 @@ The suite runs on the CPU in about a minute. The pre-push hook runs it.
 
 | path | contents |
 |---|---|
-| `benchmarks/e2e/` | End-to-end runner, launch, validation and results |
+| `benchmarks/e2e/` | End-to-end runner, checks, validation and results |
+| `benchmarks/e2e/engines/` | One package per training engine, behind one interface |
 | `benchmarks/kernel/` | Kernel-isolation system |
 | `benchmarks/models/piper_qwen3/` | The model port and its shapes |
 | `benchmarks/cli/` | The command line |
