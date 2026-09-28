@@ -58,7 +58,7 @@ class ArmResult:
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """Complete machine-readable result for one benchmark output directory."""
+    """The evaluation of one run directory, as ``results.json`` records it."""
 
     output_dir: str
     scenario: str
@@ -215,7 +215,7 @@ def _slowest_rank(per_rank: dict[int, float | None]) -> int:
 
 
 def _throughput_spread(per_rank: dict[int, float | None]) -> float | None:
-    """max/min over the ranks that reported, or None below two of them."""
+    """The highest rank throughput over the lowest; ``None`` below two ranks with a throughput."""
     values = [value for value in per_rank.values() if value]
     if len(values) < 2:
         return None
@@ -322,7 +322,6 @@ def evaluate_run(
     published_throughput_rank = {
         arm: _slowest_rank(by_rank) for arm, by_rank in throughput.items()
     }
-    # One step's tokens, and the degree that divides its cost.
     tokens_per_step = run.data.local_batch_size * run.data.seq_len
     pp = run.parallelism.pp
     rank_step_ms = {
@@ -377,9 +376,8 @@ def evaluate_run(
                 "rank is starved or the ranks are not running one job"
             )
 
-    # One rank's trajectory: under a pipeline split only one rank holds it.
+    # Under a pipeline, one rank alone holds the loss.
     trajectory_rank = loss_visible_rank(world_size=world_size, pp=pp)
-    # Refuse a diverged rank before anything is published.
     for arm in arms:
         refuse_non_finite_trajectories(arm, steps[arm], out_dir / f"{arm}.log")
     return EvaluationResult(
@@ -401,6 +399,7 @@ def evaluate_run(
 
 
 def write_results(result: EvaluationResult, path: Path | None = None) -> Path:
+    """Write ``result`` to ``path``, else to ``results.json`` in the run directory, and return the file."""
     destination = path or Path(result.output_dir) / "results.json"
     atomic_write_json(destination, result.to_dict())
     return destination

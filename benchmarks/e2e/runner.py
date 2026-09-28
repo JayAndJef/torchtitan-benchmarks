@@ -63,6 +63,8 @@ from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 @dataclass(frozen=True)
 class RunResult:
+    """The output directory, the scenario and the arms of one finished run."""
+
     out_dir: Path
     scenario: Scenario
     selected_arms: tuple[Arm, ...]
@@ -140,7 +142,7 @@ def _resumed_arms(
 
 @dataclass(frozen=True)
 class ResolvedRun:
-    """One checked run: every question that the request left open has an answer."""
+    """One checked run, with each value that the request omits resolved."""
 
     paths: RuntimePaths
     scenario: Scenario

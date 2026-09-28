@@ -1,7 +1,4 @@
-"""The CPU pinning of a run: a ``numactl`` prefix that binds the processes to the NUMA node of their GPUs.
-
-A failure to resolve the node returns an unpinned result that names the reason; it never raises.
-"""
+"""The CPU pinning of a run: a ``numactl`` prefix that binds the processes to the NUMA node of their GPUs."""
 
 from __future__ import annotations
 
@@ -17,6 +14,7 @@ from benchmarks.execution.provenance import run_text
 PCI_BUS_ID = re.compile(
     r"^([0-9a-fA-F]{4,8}):([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])$"
 )
+"""A PCI bus id as ``nvidia-smi`` prints it: the domain, then the bus, the device and the function."""
 
 
 @dataclass(frozen=True)

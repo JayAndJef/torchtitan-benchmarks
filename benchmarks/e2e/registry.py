@@ -89,17 +89,15 @@ ENGINES = Scenario(
         ),
     ),
 )
-"""The engine comparison: what each engine costs per token at one mesh.
-
-The scenario refuses ``--ac sac``, because Megatron's recompute options are
-not parity with TorchTitan's per-op SAC.
-"""
+"""The engine comparison: what each engine costs per token at one mesh; it refuses ``--ac sac``, because Megatron has no recompute that matches TorchTitan's per-op SAC."""
 
 
 SCENARIOS = {"engines": ENGINES}
+"""Every end-to-end scenario, by name."""
 
 
 def scenario_by_name(name: str) -> Scenario:
+    """The scenario ``name``; an unknown name raises and names the choices."""
     try:
         return SCENARIOS[name]
     except KeyError as error:

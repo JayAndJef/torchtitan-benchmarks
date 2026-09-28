@@ -1,12 +1,4 @@
-"""The environment of a training or kernel-worker subprocess.
-
-``PYTHONPATH`` gets the repository root prepended, and the training
-subprocess resolves ``--module benchmarks.models.piper_qwen3`` and every
-``--override.imports`` path through it. The subprocess also runs with its
-working directory inside the torchtitan submodule, which ``python -m`` puts
-first on ``sys.path``; ``tests/test_import_boundaries.py`` names this module
-for that reason.
-"""
+"""The environment of a training process or a kernel worker."""
 
 from __future__ import annotations
 
@@ -35,10 +27,7 @@ def runtime_environment(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """The inherited environment with the repository path and the build caches.
-
-    A cache directory that the caller already set is kept.
-    """
+    """The inherited environment, with the repository on ``PYTHONPATH`` and each build cache that the caller did not set."""
     result = dict(environment or os.environ)
     pythonpath = result.get("PYTHONPATH")
     result.update(
@@ -62,7 +51,7 @@ def runtime_environment(
 def add_compiler_environment(
     environment: dict[str, str], compiler_env: Path | None
 ) -> dict[str, str]:
-    """Return an environment extended by an optional compiler setup script."""
+    """``environment`` with the variables that the ``compiler_env`` script exports; a ``None`` script gives a copy."""
     if compiler_env is None:
         return environment.copy()
     if not compiler_env.is_file():
