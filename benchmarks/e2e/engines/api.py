@@ -188,6 +188,8 @@ class Engine(ABC):
     name: ClassVar[str]
     """The engine name that a manifest records."""
     config_type: ClassVar[type[EngineConfig]]
+    can_profile: ClassVar[bool] = False
+    """Whether the engine writes the profiler traces of a ``--profile`` run."""
 
     @abstractmethod
     def check(self, run: RunSpec, arm: Arm) -> list[str]:

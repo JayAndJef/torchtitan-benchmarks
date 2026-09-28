@@ -12,8 +12,9 @@ import json
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -29,12 +30,15 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
     BENCH_PROFILE_SCHEDULE_FLAGS,
     stock_megatron_flags,
 )
-from benchmarks.e2e.checks import step_floor_refusals
+from benchmarks.e2e.checks import check_run, step_floor_refusals
+from benchmarks.e2e.engines.api import Arm, Engine, EngineConfig
+from benchmarks.e2e.engines.registry import ENGINES as ENGINE_REGISTRY
 from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.megatron_stock.profiling import partial_cycle_refusal
 from benchmarks.e2e.registry import DEFAULT_PROFILE, ENGINES, scenario_by_name
 from tests.engine_helpers import (
     command,
+    registered,
     run_spec,
     titan_step_line,
     validate,
@@ -107,6 +111,70 @@ class StepFloorTests(unittest.TestCase):
             step_floor_refusals(run_spec(profile=False, warmup_steps=2, steps=12)),
             [],
         )
+
+
+@dataclass(frozen=True, kw_only=True)
+class _TracelessConfig(EngineConfig):
+    """The config of an engine that writes no profiler trace."""
+
+
+def _traceless_engine() -> Engine:
+    """An engine that passes its own check and writes no profiler trace."""
+    engine = mock.Mock(spec=Engine)
+    engine.name = "traceless"
+    engine.config_type = _TracelessConfig
+    engine.can_profile = False
+    engine.check.return_value = []
+    return engine
+
+
+_TRACELESS_ARM = Arm(
+    name="traceless_arm",
+    description="an arm on an engine that writes no profiler trace",
+    config=_TracelessConfig(),
+)
+"""An arm of the traceless engine."""
+
+
+class ProfileSupportTests(unittest.TestCase):
+    """The shared check refuses ``--profile`` for each arm whose engine writes no trace."""
+
+    def _check(self, run, arms) -> None:
+        with registered(_traceless_engine()):
+            check_run(run, ENGINES, arms, device_count=1, resumed=None)
+
+    def test_both_engines_write_profiler_traces(self) -> None:
+        for engine in ENGINE_REGISTRY.values():
+            with self.subTest(engine=engine.name):
+                self.assertTrue(engine.can_profile)
+
+    def test_a_profiled_run_refuses_the_arm_and_names_it_and_its_engine(
+        self,
+    ) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._check(
+                run_spec(ac_mode="none", profile=True),
+                (ENGINES.arm("titan_eager"), _TRACELESS_ARM),
+            )
+        self.assertEqual(
+            str(caught.exception),
+            "traceless_arm: the engine 'traceless' writes no profiler trace; "
+            "drop --profile, or deselect the arm",
+        )
+
+    def test_the_refusal_is_listed_with_the_other_refusals(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._check(
+                run_spec(ac_mode="none", profile=True, steps=12),
+                (_TRACELESS_ARM,),
+            )
+        message = str(caught.exception)
+        for part in ("at least 40", "traceless_arm: the engine 'traceless'"):
+            with self.subTest(part=part):
+                self.assertIn(part, message)
+
+    def test_an_unprofiled_run_accepts_the_arm(self) -> None:
+        self._check(run_spec(ac_mode="none", profile=False), (_TRACELESS_ARM,))
 
 
 class TitanArgvTests(unittest.TestCase):

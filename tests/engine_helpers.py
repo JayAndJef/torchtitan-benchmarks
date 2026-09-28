@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from benchmarks.artifacts.manifests import ArmRecord, write_manifest
-from benchmarks.e2e.engines.api import Arm, DataSpec, ProfileWindow, RunSpec
+from benchmarks.e2e.engines import registry
+from benchmarks.e2e.engines.api import Arm, DataSpec, Engine, ProfileWindow, RunSpec
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
 from benchmarks.e2e.registry import DEFAULT_WARMUP_STEPS, ENGINES, SEED
@@ -50,6 +52,15 @@ def run_spec(
 def configured(arm: Arm, **fields: object) -> Arm:
     """``arm``, with ``fields`` replaced in its config."""
     return replace(arm, config=replace(arm.config, **fields))
+
+
+def registered(engine: Engine) -> mock._patch:
+    """A context that adds ``engine`` to the engine registry inside its block alone."""
+    return mock.patch.object(
+        registry,
+        "ENGINES",
+        registry._registry((*registry.ENGINES.values(), engine)),
+    )
 
 
 UNPINNED = CpuPinning((), "none: test")

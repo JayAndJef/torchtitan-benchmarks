@@ -45,6 +45,21 @@ def ac_mode_refusals(run: RunSpec, scenario: Scenario) -> list[str]:
     return []
 
 
+def profile_refusals(run: RunSpec, arms: tuple[Arm, ...]) -> list[str]:
+    """Why each arm whose engine writes no profiler trace cannot run under ``--profile``, or nothing."""
+    if not run.profile:
+        return []
+    refusals = []
+    for arm in arms:
+        engine = engine_for(arm)
+        if not engine.can_profile:
+            refusals.append(
+                f"{arm.name}: the engine {engine.name!r} writes no profiler "
+                "trace; drop --profile, or deselect the arm"
+            )
+    return refusals
+
+
 def check_run(
     run: RunSpec,
     scenario: Scenario,
@@ -63,6 +78,7 @@ def check_run(
         ),
         *step_floor_refusals(run),
         *ac_mode_refusals(run, scenario),
+        *profile_refusals(run, arms),
     ]
     if resumed is not None:
         mismatches = resume_mismatches(resumed, run=run, arms=arms)
