@@ -1,34 +1,4 @@
-"""``run_state.json``: the per-arm progress ledger a resume reads.
-
-A separate file from the manifest, and a separate module from
-``manifests.py``, because it answers a different question and changes at a
-different rate. The manifest records *what a run is* -- scenario, arms,
-commands, the three global axes, the model shape, provenance -- and has
-reached schema 9 doing it. This records *how far the run got*, and is still
-at schema 1: nothing about "pending / running / completed / failed, plus an
-attempt count and a UTC stamp per transition" has needed to change since it
-was written. Splitting them means a manifest schema bump no longer touches
-the file whose schema is not bumping.
-
-Two of its properties are what make ``run --resume`` safe rather than
-merely convenient. Every transition is rewritten through
-``atomic_write_json``, so a run interrupted between arms leaves a readable
-ledger and not a truncated one; and ``update_run_state`` increments
-``attempts`` on entry to ``running`` rather than on failure, so an arm killed
-by ``SIGKILL`` -- which never gets to report anything -- is still counted.
-
-This is also the one module in ``artifacts/`` with no runtime dependency on
-``benchmarks.e2e`` whatsoever. ``Arm`` appears in two signatures and is used
-for ``arm.name`` alone, so the import sits under ``TYPE_CHECKING``; see
-``manifests.py`` for the runtime edge that cannot be avoided so cheaply.
-
-``record_evaluation_status`` deliberately does not take the arm definitions
-the other three do, and returns silently when there is no state file.
-Evaluation runs after the arms are finished and is reachable from
-``benchmarks.cli.e2e``'s ``evaluate <out_dir>`` against a directory whose
-scenario the current process never loaded -- including one written by an
-older schema -- so it reads and rewrites the ledger as plain JSON.
-"""
+"""``run_state.json``: the status and the attempt count of each arm, which a resume reads."""
 
 from __future__ import annotations
 
@@ -40,13 +10,14 @@ from typing import TYPE_CHECKING, Any
 from benchmarks.artifacts.layout import atomic_write_json
 
 if TYPE_CHECKING:
-    from benchmarks.e2e.schema import Arm
+    from benchmarks.e2e.engines.api import Arm
 
 
 STATE_SCHEMA_VERSION = 1
 
 
 def initial_run_state(arms: tuple[Arm, ...]) -> dict[str, Any]:
+    """The run state of a new run, with every arm pending."""
     return {
         "schema_version": STATE_SCHEMA_VERSION,
         "status": "pending",
@@ -57,6 +28,7 @@ def initial_run_state(arms: tuple[Arm, ...]) -> dict[str, Any]:
 
 
 def load_run_state(out_dir: Path, arms: tuple[Arm, ...]) -> dict[str, Any]:
+    """The run state in ``out_dir``, or a new one when the directory holds none."""
     path = out_dir / "run_state.json"
     if not path.exists():
         return initial_run_state(arms)
@@ -74,6 +46,7 @@ def update_run_state(
     status: str,
     error: str | None = None,
 ) -> None:
+    """Set the status of the run or of one arm, and rewrite the file; an arm that starts ``running`` counts one more attempt."""
     now = dt.datetime.now(dt.timezone.utc).strftime("%FT%TZ")
     if arm_name is None:
         state["status"] = status
@@ -94,7 +67,7 @@ def update_run_state(
 def record_evaluation_status(
     out_dir: Path, *, completed: bool, error: str | None = None
 ) -> None:
-    """Record automatic evaluation without requiring arm definitions."""
+    """Record the evaluation status in the run state of ``out_dir``; a directory without a run state is left as it is."""
     path = out_dir / "run_state.json"
     if not path.exists():
         return

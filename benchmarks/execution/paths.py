@@ -1,10 +1,4 @@
-"""Where the repository, the TorchTitan checkout and the build caches of a run live.
-
-The paths follow from the location of this file and not from the
-environment, so a run cannot use a TorchTitan checkout that
-``torchtitan_git_rev`` does not describe. A worker module imports this
-module to find the TorchTitan assets without the launcher code.
-"""
+"""Where the repository, the TorchTitan checkout and the build caches of a run live."""
 
 from __future__ import annotations
 
@@ -16,12 +10,15 @@ from typing import Mapping
 
 
 BENCH_DIR = Path(__file__).resolve().parents[2]
+"""The repository root."""
+
 TITAN_DIR = BENCH_DIR / "third_party" / "torchtitan"
+"""The TorchTitan submodule checkout."""
 
 
 @dataclass(frozen=True)
 class RuntimePaths:
-    """Filesystem locations needed to execute a benchmark."""
+    """The directories and the compiler script of one run."""
 
     bench_dir: Path
     titan_dir: Path
@@ -36,6 +33,7 @@ class RuntimePaths:
         compiler_env: Path | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> RuntimePaths:
+        """The paths of a run: each argument, else its environment variable, else the fallback."""
         environment = environment or os.environ
         cache = cache_root or _optional_path(environment.get("BENCHMARK_CACHE_ROOT"))
         if cache is None:
@@ -55,4 +53,5 @@ class RuntimePaths:
 
 
 def _optional_path(value: str | None) -> Path | None:
+    """``value`` as a path; an empty value gives ``None``."""
     return Path(value) if value else None

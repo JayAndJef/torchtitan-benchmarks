@@ -30,7 +30,7 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 MANIFEST_SCHEMA_VERSION = 19
 
 THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
-"""What the ``tps`` step-line figure and ``stable_tokens_per_second`` count."""
+"""What the tokens/s of a step sample and ``stable_tokens_per_second`` count."""
 
 HOST_KEYS = (
     "nvidia_smi",
