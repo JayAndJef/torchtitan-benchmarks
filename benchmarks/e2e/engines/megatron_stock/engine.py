@@ -93,7 +93,7 @@ class MegatronStockEngine(Engine):
         if run.seed is None:
             refusals.append(
                 f"{arm.name}: the stock megatron arm needs a seeded workload, "
-                "because both engines must draw the same initial parameters"
+                "because Megatron takes its --seed from the run"
             )
         cycle = partial_cycle_refusal(arm.name, run)
         if cycle is not None:
