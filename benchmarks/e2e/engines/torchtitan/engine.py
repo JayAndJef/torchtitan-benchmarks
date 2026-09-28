@@ -43,6 +43,7 @@ class TorchTitanEngine(Engine):
 
     name = "torchtitan"
     config_type = TorchTitanConfig
+    can_profile = True
 
     def check(self, run: RunSpec, arm: Arm) -> list[str]:
         refusals = []

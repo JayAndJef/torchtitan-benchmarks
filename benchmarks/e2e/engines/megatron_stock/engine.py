@@ -42,6 +42,7 @@ class MegatronStockEngine(Engine):
 
     name = "megatron_stock"
     config_type = MegatronStockConfig
+    can_profile = True
 
     def check(self, run: RunSpec, arm: Arm) -> list[str]:
         config = arm.config
