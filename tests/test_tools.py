@@ -7,11 +7,15 @@ Two things are pinned here, because both fail silently:
 * the module list of the continuous-integration workflow, which must name
   test modules that exist and that a host without the machine-learning
   stack can import.
+
+It also runs the cell slug of the matrix script, whose failure is a silent
+refusal of every pass.
 """
 
 import ast
 import os
 import re
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -23,6 +27,7 @@ from tests.test_import_boundaries import REPO_ROOT
 PRE_PUSH = REPO_ROOT / "tools" / "pre-push.sh"
 SYNC = REPO_ROOT / "sync.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "tests.yml"
+RUN_MATRIX = REPO_ROOT / "tools" / "run_matrix.sh"
 
 FORBIDDEN_IMPORTS = ("torch", "transformer_engine")
 """Module roots that a hosted runner cannot install."""
@@ -136,6 +141,54 @@ class WorkflowModuleListTests(unittest.TestCase):
 
     def test_the_workflow_does_not_fetch_the_submodules(self) -> None:
         self.assertIn("submodules: false", WORKFLOW.read_text())
+
+
+def cell_slug(cell: str) -> str:
+    """The directory name ``tools/run_matrix.sh`` gives ``cell``."""
+    source = RUN_MATRIX.read_text()
+    match = re.search(r"^cell_slug\(\) \{\n.*?^\}\n", source, re.M | re.S)
+    assert match, "tools/run_matrix.sh has no cell_slug function"
+    return subprocess.run(
+        ["bash", "-c", match.group(0) + 'cell_slug "$1"', "bash", cell],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+class MatrixCellSlugTests(unittest.TestCase):
+    PIPELINE_FLAGS_CELL = (
+        "--scenario engines --model-size 30b-a3b-20l --dp 2 --pp 2 --ep 2 "
+        "--zero 1 --pp-schedule 1F1B --pp-microbatch-size 4 --batch 8 "
+        "--profile --arm megatron_stock "
+        "--megatron-arg=--cross-entropy-loss-fusion "
+        "--megatron-arg=--moe-permute-fusion "
+        "--megatron-arg=--overlap-grad-reduce "
+        "--megatron-arg=--overlap-param-gather"
+    )
+
+    def test_a_short_cell_keeps_its_whole_slug(self) -> None:
+        self.assertEqual(
+            cell_slug("--dp 2 --arm titan_eager"), "dp-2-arm-titan_eager"
+        )
+
+    def test_the_longest_derived_name_fits_name_max(self) -> None:
+        """The 2026-09-30 pipeline cell slugged to 272 bytes, and every pass
+        failed before it wrote a log."""
+        slug = cell_slug(self.PIPELINE_FLAGS_CELL)
+        self.assertEqual(len(slug), 200)
+        self.assertLessEqual(
+            len(slug + ".contaminated-20260930T064353Z.log"), 255
+        )
+
+    def test_two_long_cells_that_share_a_prefix_differ(self) -> None:
+        other = self.PIPELINE_FLAGS_CELL.replace(
+            "overlap-param-gather", "use-flash-attn"
+        )
+        self.assertNotEqual(
+            cell_slug(self.PIPELINE_FLAGS_CELL), cell_slug(other)
+        )
+
 
 
 if __name__ == "__main__":
