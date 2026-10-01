@@ -206,7 +206,10 @@ class ShapeArithmeticTests(unittest.TestCase):
         """
         self.assertEqual(
             tuple(PIPER_SHAPES),
-            ("1b", "large", "9b", "huge", "giant", "30b-a3b", "48b"),
+            (
+                "1b", "large", "9b", "huge", "30b-a3b-20l", "giant",
+                "30b-a3b", "48b",
+            ),
         )
         counts = [shape.param_count for shape in PIPER_SHAPES.values()]
         self.assertEqual(counts, sorted(counts))
@@ -566,6 +569,26 @@ PINNED_SHAPES: dict[str, dict[str, object]] = {
         "nparams_sparse": 29_003_612_160,
         "nparams_active": 3_353_032_704,
         "num_flops_per_token": 20_667_125_760,
+    },
+    # Qwen3-30B-A3B cut to 20 layers; every other field is 30b-a3b's.
+    "30b-a3b-20l": {
+        "dim": 2048,
+        "n_layers": 20,
+        "n_heads": 32,
+        "n_kv_heads": 4,
+        "head_dim": 128,
+        "moe_hidden_dim": 768,
+        "num_experts": 128,
+        "top_k": 8,
+        "vocab_size": 151_936,
+        "rope_theta": 1_000_000.0,
+        "max_seq_len": 4096,
+        "parity_gate": 2e-2,
+        "param_count": 13_084_744_704,
+        "nparams_dense": 999_906_304,
+        "nparams_sparse": 12_084_838_400,
+        "nparams_active": 1_760_123_904,
+        "num_flops_per_token": 9_700_386_816,
     },
     # Piper 48B, transcribed from examples/models/qwen3.py case '48B'.
     "48b": {
