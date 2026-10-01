@@ -321,6 +321,19 @@ Its ``max_seq_len`` is 4096, and Piper declares 262144. A run above
 sequence length 4096 needs a wider RoPE cache.
 """
 
+PIPER_30B_A3B_CUT = PiperShape(
+    name="30b-a3b-20l",
+    dim=2048,
+    n_layers=20,
+    head_dim=128,
+    n_kv_heads=4,
+    num_experts=128,
+    n_heads=32,
+    moe_hidden_dim=768,
+    top_k=8,
+)
+"""Qwen3-30B-A3B cut to 20 layers: 13,084,744,704 parameters; it fits four H200 at dp 4 x ep 4 under ZeRO-1."""
+
 PIPER_48B = PiperShape(
     name="48b",
     dim=4096,
@@ -335,7 +348,8 @@ PIPER_48B = PiperShape(
 PIPER_SHAPES: dict[str, PiperShape] = {
     shape.name: shape
     for shape in (
-        PIPER_1B, LARGE, PIPER_9B, HUGE, GIANT, PIPER_30B_A3B, PIPER_48B
+        PIPER_1B, LARGE, PIPER_9B, HUGE, PIPER_30B_A3B_CUT, GIANT, PIPER_30B_A3B,
+        PIPER_48B
     )
 }
 """Every registered shape, smallest to largest by parameter count."""

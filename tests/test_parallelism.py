@@ -972,9 +972,10 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
         """The deepest pipeline the budget holds, shape by shape.
 
         Four shapes divide: 1b (16 layers, 2 a stage), 9b (24, 3), 30b-a3b
-        (48, 6) and 48b (32, 4). Three do not: large has 4 layers, huge and
-        giant have 1. Rule 7 is the only rule that reads the layer count, so
-        it is the one that decides which shapes the depth-8 cell can run.
+        (48, 6) and 48b (32, 4). Four do not: large has 4 layers, huge and
+        giant have 1, and 30b-a3b-20l has 20. Rule 7 is the only rule that
+        reads the layer count, so it is the one that decides which shapes the
+        depth-8 cell can run.
 
         Batch 16 is what rule 12 asks for at eight stages.
         """
