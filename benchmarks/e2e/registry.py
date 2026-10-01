@@ -97,11 +97,11 @@ ATTENTION_OVERRIDES = "benchmarks.models.piper_qwen3.components.attention"
 ATTENTION = Scenario(
     name="attention",
     description=(
-        "Compiled TorchTitan with three attention kernels, FlexAttention, FA3 "
-        "varlen and torch's cuDNN varlen, against stock Megatron-LM, which "
-        "runs TransformerEngine's cuDNN attention. The FA3 and cuDNN arms "
-        "build the document offsets of each microbatch from its positions, "
-        "with a cap of 32 documents. The Megatron arm carries the four "
+        "Compiled TorchTitan with two attention kernels, FlexAttention and FA3 "
+        "varlen, against stock Megatron-LM, which runs TransformerEngine's "
+        "cuDNN attention. The FA3 arm builds the document offsets of each "
+        "microbatch from its positions, with a cap of 32 documents. The "
+        "Megatron arm carries the four "
         "differences of the engines scenario: fp32 master weights and an fp32 "
         "gradient reduction, unfused native cross entropy, "
         "--init-method-std 0.01 with no weight transfer, and no permutation "
@@ -124,21 +124,6 @@ ATTENTION = Scenario(
                     f"{ATTENTION_OVERRIDES}.fa3_override.packed_fa3_attention",
                 ),
                 trace_kernel_markers=("FlashAttnFwdSm90",),
-            ),
-        ),
-        Arm(
-            name="titan_compiled_cudnn",
-            description=(
-                "titan_compiled with torch's cuDNN varlen attention on packed "
-                "documents"
-            ),
-            config=TorchTitanConfig(
-                compile=CompileMode.TORCH,
-                overrides_per_block=1,
-                override_imports=(
-                    f"{ATTENTION_OVERRIDES}.cudnn_override.packed_cudnn_attention",
-                ),
-                trace_kernel_markers=("cudnn_generated_fort_native_sdpa",),
             ),
         ),
         ENGINES.arm("megatron_stock"),
