@@ -36,19 +36,23 @@ forward-compat driver under `.cuda-compat/`. No action is necessary.
 ./run_bench.sh scenarios                            # list scenarios and arms
 ./run_bench.sh run 0 --model-size 1b                # one GPU
 ./run_bench.sh run 0,1 --pp 2 --pp-schedule 1F1B    # two-GPU pipeline
-./run_bench.sh run 0 --model-size 1b --arm titan_eager
+./run_bench.sh run 0 --model-size 1b --scenario engines --arm titan_eager
 ./run_bench.sh evaluate out/<timestamp>/<scenario>/<hardware>
 ./run_bench.sh run 0 --resume out/<timestamp>/<scenario>/<hardware>
 ```
 
-`run` trains, validates and evaluates the three arms of the `engines`
-scenario:
+`run` trains, validates and evaluates the arms of each scenario. The
+`engines` scenario has three arms:
 
 | arm | treatment |
 |---|---|
 | `titan_compiled` | TorchTitan, whole-block `torch.compile` |
 | `titan_eager` | TorchTitan, eager |
 | `megatron_stock` | Stock Megatron-LM `pretrain` |
+
+The `attention` scenario keeps `titan_compiled` and `megatron_stock`, and
+adds `titan_compiled_fa3` and `titan_compiled_cudnn`. These two arms replace
+TorchTitan's FlexAttention with FA3 varlen and with torch's cuDNN varlen.
 
 Read these points before you publish a number:
 

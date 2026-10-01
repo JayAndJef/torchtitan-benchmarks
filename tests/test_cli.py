@@ -43,8 +43,8 @@ class CliTests(unittest.TestCase):
     def _two_scenarios(self) -> dict:
         """The registry with a second scenario, for the multi-scenario rules.
 
-        One scenario is declared today, so the rules that need two are
-        exercised against a copy of it under another name.
+        A copy of ``engines`` under another name keeps these rules
+        independent of the declared scenarios.
         """
         engines = SCENARIOS["engines"]
         return {

@@ -32,6 +32,7 @@ MOVED_ASIDE = (".contaminated-", ".nomanifest-")
 
 COLUMNS = (
     ("cell", "cell"),
+    ("scenario", "scenario"),
     ("arm", "arm"),
     ("model_size", "size"),
     ("ac_mode", "ac"),
