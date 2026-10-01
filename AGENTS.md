@@ -4,16 +4,36 @@
 
 Two measurement systems share one CLI. Never mix their numbers.
 
-**End-to-end throughput.** One scenario, `engines`, trains the same
-Qwen3 MoE model on one pre-tokenized c4_test stream. It publishes tokens/s,
-step time and peak memory. `--model-size` selects the shape. The scenario
-has three arms:
+**End-to-end throughput.** Two scenarios train the same Qwen3 MoE model
+on one pre-tokenized c4_test stream. Each publishes tokens/s, step time and
+peak memory. `--model-size` selects the shape. The `engines` scenario has
+three arms:
 
 | arm | engine | treatment |
 |---|---|---|
 | `titan_compiled` | `torchtitan` | whole-block `torch.compile` |
 | `titan_eager` | `torchtitan` | the same model, blocks eager |
 | `megatron_stock` | `megatron_stock` | stock `megatron.training.pretrain` |
+
+The `attention` scenario has four arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds two arms that replace the attention
+kernel of `titan_compiled` through an override:
+
+| arm | engine | attention kernel |
+|---|---|---|
+| `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask |
+| `titan_compiled_fa3` | `torchtitan` | FA3 varlen |
+| `titan_compiled_cudnn` | `torchtitan` | torch's cuDNN varlen, through the raw aten ops |
+| `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention |
+
+The FA3 and cuDNN arms build the document offsets of each microbatch from
+its `positions`, inside each layer. The cap is 32 documents per microbatch.
+The c4_test stream holds at most 23 at batch 4 and sequence length 4096. A
+larger batch can exceed the cap, and then the run stops at a device assert.
+The cuDNN backward allocates a workspace of about 128 MiB per document slot
+at sequence length 4096, so do not raise the cap without a reason.
+`--arm` applies to every selected scenario, so an arm name that one of them
+lacks needs `--scenario`.
 
 **Kernel isolation.** `kernel-bench` times competing implementations of one
 model component head-to-head on synthetic tensors. A kernel that wins in
@@ -22,8 +42,8 @@ isolation can be irrelevant once the compiler fuses the graph around it.
 A kernel number is never an end-to-end number, and an end-to-end number is
 never a kernel number. State which system produced a figure.
 
-The `engines` scenario carries four deliberate differences by default, and
-each one moves the number. The Megatron arm keeps fp32 master weights and
+The `engines` and `attention` scenarios carry four deliberate differences
+by default, and each one moves the number. The Megatron arm keeps fp32 master weights and
 reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
 It keeps `--init-method-std 0.01` with no weight transfer. It applies no
 permutation fusion. A `megatron_stock.extra_flags` value can remove the two
@@ -528,8 +548,7 @@ the warnings that the runner printed.
 
 **What is deliberately absent.** There is no baseline arm, no ratio, no GPU
 kernel time, no per-region measurement, no launch latency and no
-significance test. The three arms share no implementation, so a reader
-compares two absolute rows.
+significance test. A reader compares two absolute rows.
 
 Send a kernel-level question to `kernel-bench`. Send a trace-level question
 to the external trace-anatomy tool, which reads the trace layout that a

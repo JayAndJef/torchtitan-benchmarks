@@ -70,9 +70,8 @@ PIPER_OPTIMIZED_SWIGLU_OVERRIDE = (
     "piper_optimized_inductor_fused_grouped_experts"
 )
 
-# No registered arm carries an override or needs the host compiler today.
-# The plumbing stays, so the rules that guard it are exercised against a
-# synthetic arm: the override argv, arm rules 2 and 3, and the
+# No registered arm needs the host compiler today, so a synthetic arm
+# exercises the override argv, the override rules and the
 # compiler-environment branch of the runner.
 OVERRIDE_ARM = Arm(
     name="override_arm",
@@ -1078,6 +1077,52 @@ class EnginesScenarioTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
+
+
+class AttentionScenarioTests(unittest.TestCase):
+    def test_scenario_registration(self) -> None:
+        scenario = scenario_by_name("attention")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            [
+                "titan_compiled",
+                "titan_compiled_fa3",
+                "titan_compiled_cudnn",
+                "megatron_stock",
+            ],
+        )
+        self.assertIs(scenario.data, C4_REPLAY_DATA)
+        self.assertEqual(scenario.supported_ac_modes, ("none",))
+        self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
+        self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
+
+    def test_each_kernel_arm_overrides_one_attention_per_block(self) -> None:
+        scenario = scenario_by_name("attention")
+        prefix = "benchmarks.models.piper_qwen3.components.attention"
+        for name, target, marker in (
+            (
+                "titan_compiled_fa3",
+                f"{prefix}.fa3_override.packed_fa3_attention",
+                "FlashAttnFwdSm90",
+            ),
+            (
+                "titan_compiled_cudnn",
+                f"{prefix}.cudnn_override.packed_cudnn_attention",
+                "cudnn_generated_fort_native_sdpa",
+            ),
+        ):
+            with self.subTest(arm=name):
+                config = scenario.arm(name).config
+                self.assertEqual(engine_for(scenario.arm(name)).name, "torchtitan")
+                self.assertEqual(config.compile, CompileMode.TORCH)
+                self.assertEqual(config.override_imports, (target,))
+                self.assertEqual(config.overrides_per_block, 1)
+                self.assertEqual(config.trace_kernel_markers, (marker,))
+
+    def test_every_arm_command_builds_at_ac_none(self) -> None:
+        for arm in scenario_by_name("attention").arms:
+            argv = command(run_spec(ac_mode="none"), arm, Path("/out") / arm.name)
+            self.assertTrue(argv, arm.name)
 
 
 class CompilerEnvironmentTests(unittest.TestCase):
