@@ -15,23 +15,25 @@ three arms:
 | `titan_eager` | `torchtitan` | the same model, blocks eager |
 | `megatron_stock` | `megatron_stock` | stock `megatron.training.pretrain` |
 
-The `attention` scenario has four arms. It reuses `titan_compiled` and
-`megatron_stock` unchanged, and it adds two arms that replace the attention
+The `attention` scenario has three arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds one arm that replaces the attention
 kernel of `titan_compiled` through an override:
 
 | arm | engine | attention kernel |
 |---|---|---|
 | `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask |
 | `titan_compiled_fa3` | `torchtitan` | FA3 varlen |
-| `titan_compiled_cudnn` | `torchtitan` | torch's cuDNN varlen, through the raw aten ops |
 | `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention |
 
-The FA3 and cuDNN arms build the document offsets of each microbatch from
-its `positions`, inside each layer. The cap is 32 documents per microbatch.
-The c4_test stream holds at most 23 at batch 4 and sequence length 4096. A
-larger batch can exceed the cap, and then the run stops at a device assert.
-The cuDNN backward allocates a workspace of about 128 MiB per document slot
-at sequence length 4096, so do not raise the cap without a reason.
+The FA3 arm builds the document offsets of each microbatch from its
+`positions`, inside each layer. The cap is 32 documents per microbatch. The
+c4_test stream holds at most 23 at batch 4 and sequence length 4096. A larger
+batch can exceed the cap, and then the run stops at a device assert.
+
+`benchmarks/models/piper_qwen3/components/attention/cudnn_override.py` holds
+a cuDNN override that no arm uses. Torch's ragged cuDNN op builds its graph
+again on every call, at about 84 ms of host time against a 0.83 ms kernel.
+So an arm on it measures the graph build and not the kernel.
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
 

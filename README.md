@@ -51,8 +51,8 @@ forward-compat driver under `.cuda-compat/`. No action is necessary.
 | `megatron_stock` | Stock Megatron-LM `pretrain` |
 
 The `attention` scenario keeps `titan_compiled` and `megatron_stock`, and
-adds `titan_compiled_fa3` and `titan_compiled_cudnn`. These two arms replace
-TorchTitan's FlexAttention with FA3 varlen and with torch's cuDNN varlen.
+adds `titan_compiled_fa3`, which replaces TorchTitan's FlexAttention with
+FA3 varlen.
 
 Read these points before you publish a number:
 

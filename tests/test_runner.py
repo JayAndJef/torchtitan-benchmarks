@@ -1087,7 +1087,6 @@ class AttentionScenarioTests(unittest.TestCase):
             [
                 "titan_compiled",
                 "titan_compiled_fa3",
-                "titan_compiled_cudnn",
                 "megatron_stock",
             ],
         )
@@ -1104,11 +1103,6 @@ class AttentionScenarioTests(unittest.TestCase):
                 "titan_compiled_fa3",
                 f"{prefix}.fa3_override.packed_fa3_attention",
                 "FlashAttnFwdSm90",
-            ),
-            (
-                "titan_compiled_cudnn",
-                f"{prefix}.cudnn_override.packed_cudnn_attention",
-                "cudnn_generated_fort_native_sdpa",
             ),
         ):
             with self.subTest(arm=name):
