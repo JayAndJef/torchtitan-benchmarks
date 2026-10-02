@@ -30,10 +30,6 @@ The FA3 arm builds the document offsets of each microbatch from its
 c4_test stream holds at most 23 at batch 4 and sequence length 4096. A larger
 batch can exceed the cap, and then the run stops at a device assert.
 
-`benchmarks/models/piper_qwen3/components/attention/cudnn_override.py` holds
-a cuDNN override that no arm uses. Torch's ragged cuDNN op builds its graph
-again on every call, at about 84 ms of host time against a 0.83 ms kernel.
-So an arm on it measures the graph build and not the kernel.
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
 
