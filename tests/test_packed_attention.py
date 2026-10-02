@@ -1,4 +1,4 @@
-"""The packed-document attention overrides: the offset builder, the config swap and GPU parity with Flex."""
+"""The packed-document FA3 override: the offset builder, the config swap, the block checks and GPU parity with Flex."""
 
 import dataclasses
 import sys
@@ -8,6 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
+
+from torchtitan.config import derive
 
 from benchmarks.models.piper_qwen3.components.attention.packed import (
     PackedGQAttention,
@@ -23,10 +25,6 @@ from benchmarks.models.piper_qwen3.titan_model import (
 FA3_OVERRIDE = (
     "benchmarks.models.piper_qwen3.components.attention.fa3_override."
     "packed_fa3_attention"
-)
-CUDNN_OVERRIDE = (
-    "benchmarks.models.piper_qwen3.components.attention.cudnn_override."
-    "packed_cudnn_attention"
 )
 
 TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
@@ -85,45 +83,27 @@ class MicrobatchOffsetsTests(unittest.TestCase):
 
 
 class OverrideTests(unittest.TestCase):
-    def test_each_override_replaces_one_attention_per_block(self) -> None:
+    def test_the_override_replaces_one_attention_per_block(self) -> None:
         sentinel = object()
-        for target, inner in (
-            (FA3_OVERRIDE, "PackedFA3Attention"),
-            (CUDNN_OVERRIDE, "PackedCuDNNAttention"),
-        ):
-            with self.subTest(target=target):
-                config = _piper_1b_model(fuse_qkv=True, shape=TINY)
-                config.layers[0].attention.inner_attention.sharding_config = sentinel
-                lines = apply_config_overrides(config, [target], expected=TINY.n_layers)
-                for layer, line in enumerate(lines):
-                    self.assertIn(f"layers.{layer}.attention", line)
-                for layer in config.layers:
-                    attention = layer.attention
-                    self.assertIs(type(attention), PackedGQAttention.Config)
-                    self.assertEqual(type(attention.inner_attention).__qualname__, f"{inner}.Config")
-                    self.assertIs(attention.inner_attention.sharding_config, sentinel)
-
-    def test_the_cudnn_override_builds_on_cpu(self) -> None:
-        model = build_titan_model(
-            shape=TINY,
-            overrides=[CUDNN_OVERRIDE],
-            overrides_per_block=1,
-            device="cpu",
-            dtype=torch.float32,
-        )
-        attention = model.layers["0"].attention
-        self.assertIsInstance(attention, PackedGQAttention)
-        self.assertEqual(type(attention.inner_attention).__name__, "PackedCuDNNAttention")
+        config = _piper_1b_model(fuse_qkv=True, shape=TINY)
+        config.layers[0].attention.inner_attention.sharding_config = sentinel
+        lines = apply_config_overrides(config, [FA3_OVERRIDE], expected=TINY.n_layers)
+        for layer, line in enumerate(lines):
+            self.assertIn(f"layers.{layer}.attention", line)
+        for layer in config.layers:
+            attention = layer.attention
+            self.assertIs(type(attention), PackedGQAttention.Config)
+            self.assertEqual(
+                type(attention.inner_attention).__qualname__, "PackedFA3Attention.Config"
+            )
+            self.assertIs(attention.inner_attention.sharding_config, sentinel)
 
     def test_the_block_refuses_missing_or_malformed_offsets(self) -> None:
-        model = build_titan_model(
-            shape=TINY,
-            overrides=[CUDNN_OVERRIDE],
-            overrides_per_block=1,
-            device="cpu",
-            dtype=torch.float32,
-        )
-        attention = model.layers["0"].attention
+        """The checks run before the inner kernel, so a Flex inner builds the block on the CPU."""
+        attention = derive(
+            _piper_1b_model(fuse_qkv=True, shape=TINY).layers[0].attention,
+            PackedGQAttention.Config,
+        ).build()
         positions = positions_from_docs([[4, 4], [8]])
         x = torch.zeros(2, 8, TINY.dim)
         offsets = microbatch_offsets(positions, 2)
@@ -157,7 +137,7 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
     "needs an sm90 GPU",
 )
 class GpuParityTests(unittest.TestCase):
-    """Each packed kernel against stock FlexAttention, on the same weights and the same packed batch."""
+    """The packed FA3 kernel against stock FlexAttention, on the same weights and the same packed batch."""
 
     def _run(self, overrides: list[str]):
         model = build_titan_model(
@@ -182,15 +162,13 @@ class GpuParityTests(unittest.TestCase):
         }
         return logits.detach(), grads
 
-    def test_fa3_and_cudnn_match_flex(self) -> None:
+    def test_fa3_matches_flex(self) -> None:
         flex_logits, flex_grads = self._run([])
-        for target in (FA3_OVERRIDE, CUDNN_OVERRIDE):
-            with self.subTest(target=target):
-                logits, grads = self._run([target])
-                self.assertLess(_rel(logits, flex_logits), 2e-2)
-                self.assertEqual(grads.keys(), flex_grads.keys())
-                for name, grad in grads.items():
-                    self.assertLess(_rel(grad, flex_grads[name]), 5e-2, name)
+        logits, grads = self._run([FA3_OVERRIDE])
+        self.assertLess(_rel(logits, flex_logits), 2e-2)
+        self.assertEqual(grads.keys(), flex_grads.keys())
+        for name, grad in grads.items():
+            self.assertLess(_rel(grad, flex_grads[name]), 5e-2, name)
 
 
 if __name__ == "__main__":
