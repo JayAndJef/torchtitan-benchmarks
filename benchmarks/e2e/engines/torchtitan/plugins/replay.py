@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, default_collate
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 
 from benchmarks.e2e.data.c4_replay import Sample, materialize
 from benchmarks.e2e.engines.api import REPLAY_DATASET, DataSpec
+from benchmarks.models.piper_qwen3.components.attention.packed import (
+    microbatch_offsets,
+)
 
 
 class PretokenizedReplayDataset(IterableDataset, Stateful):
@@ -35,6 +39,17 @@ class PretokenizedReplayDataset(IterableDataset, Stateful):
         del state_dict
 
 
+def collate_with_offsets(
+    samples: list[Sample], *, rows_per_microbatch: int
+) -> Sample:
+    """The default batch, plus the offsets of each microbatch under the input key ``attention_masks``."""
+    inputs, labels = default_collate(samples)
+    inputs["attention_masks"] = microbatch_offsets(
+        inputs["positions"], rows_per_microbatch
+    )
+    return inputs, labels
+
+
 class PretokenizedReplayDataLoader(ParallelAwareDataloader):
     """The dataloader of one data-parallel rank, over the samples that ``materialize`` gives it."""
 
@@ -43,6 +58,8 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
         dataset: str = REPLAY_DATASET
         replay_steps: int = 40
         """The steps whose samples the loader materializes; it must be at least ``--training.steps``."""
+        offset_rows: int = 0
+        """The rows of one pipeline microbatch, whose document offsets each batch carries; 0 sends no offsets."""
 
     def __init__(
         self,
@@ -63,6 +80,13 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
                 f"checkout, and the config names the path {config.dataset_path!r}; "
                 "remove --dataloader.dataset-path"
             )
+        if config.offset_rows < 0 or (
+            config.offset_rows and local_batch_size % config.offset_rows
+        ):
+            raise ValueError(
+                f"--dataloader.offset-rows {config.offset_rows} must be 0, or "
+                f"divide the local batch size {local_batch_size}"
+            )
         spec = DataSpec(
             dataset=config.dataset,
             seq_len=seq_len,
@@ -79,4 +103,10 @@ class PretokenizedReplayDataLoader(ParallelAwareDataloader):
             prefetch_factor=config.prefetch_factor,
             snapshot_every_n_steps=snapshot_every_n_steps,
             batch_size=local_batch_size,
+            # None is the default collate, so the other arms keep their batches.
+            collate_fn=(
+                partial(collate_with_offsets, rows_per_microbatch=config.offset_rows)
+                if config.offset_rows
+                else None
+            ),
         )

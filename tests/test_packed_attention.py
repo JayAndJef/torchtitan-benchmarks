@@ -10,9 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 from benchmarks.models.piper_qwen3.components.attention.packed import (
-    MAX_DOCUMENTS,
     PackedGQAttention,
-    cu_seqlens_from_positions,
+    microbatch_offsets,
 )
 from benchmarks.models.piper_qwen3.shape import PIPER_30B_A3B, PiperShape
 from benchmarks.models.piper_qwen3.titan_model import (
@@ -45,51 +44,44 @@ def positions_from_docs(rows: list[list[int]]) -> torch.Tensor:
     )
 
 
-def expected_offsets(rows: list[list[int]], max_docs: int) -> list[int]:
+def exact_offsets(rows: list[list[int]]) -> list[int]:
+    """The offsets of the documents of ``rows``, packed into one microbatch."""
     starts, offset = [], 0
     for row in rows:
         for n in row:
             starts.append(offset)
             offset += n
-    return starts + [offset] * (max_docs + 1 - len(starts))
+    return starts + [offset]
 
 
-class CuSeqlensTests(unittest.TestCase):
+class MicrobatchOffsetsTests(unittest.TestCase):
     def test_rows_with_uneven_document_counts(self) -> None:
         rows = [[3, 5], [8], [1, 1, 6], [2, 2, 2, 2]]
-        cu = cu_seqlens_from_positions(positions_from_docs(rows), 12)
-        self.assertEqual(cu.dtype, torch.int32)
-        self.assertEqual(cu.tolist(), expected_offsets(rows, 12))
+        offsets = microbatch_offsets(positions_from_docs(rows), 4)
+        self.assertEqual(offsets.dtype, torch.int32)
+        self.assertEqual(offsets.tolist(), [exact_offsets(rows)])
 
-    def test_exactly_max_documents(self) -> None:
-        rows = [[2, 2], [1, 3]]
-        cu = cu_seqlens_from_positions(positions_from_docs(rows), 4)
-        self.assertEqual(cu.tolist(), [0, 2, 4, 5, 8])
-
-    def test_more_documents_than_the_cap_raises(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "more documents than max_documents"):
-            cu_seqlens_from_positions(positions_from_docs([[1, 1, 1, 1, 4]]), 4)
+    def test_each_microbatch_starts_at_zero_and_a_shorter_row_pads_at_the_end(self) -> None:
+        """The pipeline splitter cuts dim 0, so each microbatch reads its own row."""
+        rows = [[3, 5], [1, 1, 1, 5], [8], [6, 2]]
+        offsets = microbatch_offsets(positions_from_docs(rows), 2)
+        self.assertEqual(
+            offsets.tolist(),
+            [exact_offsets(rows[:2]), exact_offsets(rows[2:]) + [16, 16, 16]],
+        )
+        first, second = offsets.chunk(2, dim=0)
+        self.assertEqual(tuple(first.shape), (1, 7))
+        self.assertEqual(tuple(second.shape), (1, 7))
 
     def test_a_row_that_does_not_start_a_document_raises(self) -> None:
-        positions = positions_from_docs([[4, 4]])
-        positions[0, :4] += 1
-        with self.assertRaisesRegex(RuntimeError, "each row must start a document"):
-            cu_seqlens_from_positions(positions, 4)
+        positions = positions_from_docs([[4, 4], [8]])
+        positions[1, :4] += 1
+        with self.assertRaisesRegex(ValueError, "does not start a document"):
+            microbatch_offsets(positions, 1)
 
-    def test_each_pipeline_microbatch_gets_its_own_offsets(self) -> None:
-        """The pipeline splitter cuts positions along the batch, and each half rebases to 0."""
-        rows = [[3, 5], [8], [5, 3], [6, 2]]
-        first, second = positions_from_docs(rows).chunk(2, dim=0)
-        self.assertEqual(
-            cu_seqlens_from_positions(first, 4).tolist(), expected_offsets(rows[:2], 4)
-        )
-        self.assertEqual(
-            cu_seqlens_from_positions(second, 4).tolist(), expected_offsets(rows[2:], 4)
-        )
-
-    def test_the_cap_covers_the_replay_stream(self) -> None:
-        """At batch 4 and sequence length 4096 the c4_test stream holds at most 23 documents per microbatch."""
-        self.assertGreaterEqual(MAX_DOCUMENTS, 23)
+    def test_rows_that_do_not_divide_into_microbatches_raise(self) -> None:
+        with self.assertRaisesRegex(ValueError, "do not divide into microbatches"):
+            microbatch_offsets(positions_from_docs([[8], [8], [8]]), 2)
 
 
 class OverrideTests(unittest.TestCase):
@@ -108,7 +100,6 @@ class OverrideTests(unittest.TestCase):
                 for layer in config.layers:
                     attention = layer.attention
                     self.assertIs(type(attention), PackedGQAttention.Config)
-                    self.assertEqual(attention.max_documents, MAX_DOCUMENTS)
                     self.assertEqual(type(attention.inner_attention).__qualname__, f"{inner}.Config")
                     self.assertIs(attention.inner_attention.sharding_config, sentinel)
 
@@ -123,6 +114,27 @@ class OverrideTests(unittest.TestCase):
         attention = model.layers["0"].attention
         self.assertIsInstance(attention, PackedGQAttention)
         self.assertEqual(type(attention.inner_attention).__name__, "PackedCuDNNAttention")
+
+    def test_the_block_refuses_missing_or_malformed_offsets(self) -> None:
+        model = build_titan_model(
+            shape=TINY,
+            overrides=[CUDNN_OVERRIDE],
+            overrides_per_block=1,
+            device="cpu",
+            dtype=torch.float32,
+        )
+        attention = model.layers["0"].attention
+        positions = positions_from_docs([[4, 4], [8]])
+        x = torch.zeros(2, 8, TINY.dim)
+        offsets = microbatch_offsets(positions, 2)
+        for masks, error, message in (
+            (None, ValueError, "--dataloader.offset-rows"),
+            (offsets.long(), TypeError, "must be int32"),
+            (microbatch_offsets(positions, 1), ValueError, r"must be \[1, W\]"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(error, message):
+                    attention(x, masks, positions)
 
     @unittest.skipIf(torch.cuda.is_available(), "a GPU may have FA3")
     def test_the_fa3_override_refuses_to_build_without_fa3(self) -> None:
@@ -152,12 +164,17 @@ class GpuParityTests(unittest.TestCase):
             shape=GQA_PROBE, overrides=overrides, overrides_per_block=len(overrides)
         )
         rows = [[700, 1300, 48, 2048], [4096], [17, 4000, 79], [1, 1, 4094]]
-        positions = positions_from_docs(rows).cuda()
+        cpu_positions = positions_from_docs(rows)
+        positions = cpu_positions.cuda()
         tokens = torch.randint(
             0, GQA_PROBE.vocab_size, positions.shape, device="cuda",
             generator=torch.Generator("cuda").manual_seed(0),
         )
-        masks = model.get_attention_masks(positions) if not overrides else None
+        masks = (
+            microbatch_offsets(cpu_positions, len(rows)).cuda()
+            if overrides
+            else model.get_attention_masks(positions)
+        )
         logits = model(tokens, positions=positions, attention_masks=masks)
         logits.float().square().mean().backward()
         grads = {
