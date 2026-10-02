@@ -631,7 +631,8 @@ Eight facts explain the driver:
   `(S, m, H)`. So a microbatch of several rows reaches the next stage
   permuted, and nothing raises. The flag list therefore sends
   `--micro-batch-size 1`, and the driver packs the rows of one microbatch
-  into one sample. `cu_seqlens` marks every document.
+  into one sample. `cu_seqlens` marks every document. The driver pads
+  `cu_seqlens` to the packed length, as Megatron's dataset does.
 - **The driver does not restart a rank.** It omits the
   `inprocess_restart.maybe_wrap_for_inprocess_restart` wrap of Megatron's
   GPT entry point, because a restarted rank publishes a number that no run
