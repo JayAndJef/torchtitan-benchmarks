@@ -1,66 +1,91 @@
-"""Grouped-query attention that builds its varlen offsets from each microbatch's ``positions``.
+"""Grouped-query attention that reads the varlen offsets of its microbatch from the batch.
 
-The trainer builds no mask for an inner attention config that it does not
-know, and the pipeline splitter cuts ``positions`` per microbatch. So each
-layer builds offsets that are right for the rows it holds, with no host sync.
+The replay loader computes the exact offsets of each pipeline microbatch on
+the CPU and sends them under the batch key ``attention_masks``. The trainer
+builds no mask for an inner attention config that it does not know, so the
+key reaches each layer untouched, and the pipeline splitter gives each
+microbatch its own row.
 """
 
 from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    GQAttention,
-    VarlenMetadata,
-)
-
-MAX_DOCUMENTS = 32
-"""The document cap of one microbatch; the c4_test replay stream holds at most 23 at batch 4 and sequence length 4096."""
+from torchtitan.models.common.attention import GQAttention, VarlenMetadata
 
 
-def cu_seqlens_from_positions(positions: torch.Tensor, max_docs: int) -> torch.Tensor:
-    """The ``max_docs + 1`` int32 offsets of the documents in ``positions``, padded with empty documents."""
-    torch._assert_async(
-        (positions[:, 0] == 0).all(), "each row must start a document"
+def microbatch_offsets(
+    positions: torch.Tensor, rows_per_microbatch: int
+) -> torch.Tensor:
+    """The int32 ``[G, W]`` document offsets of each microbatch of ``rows_per_microbatch`` rows; a shorter row repeats its last offset."""
+    if positions.device.type != "cpu":
+        raise ValueError(
+            f"the offsets are built on the CPU, but positions is on {positions.device}"
+        )
+    if positions.dim() != 2:
+        raise ValueError(
+            f"positions must be [rows, seq_len], but has the shape {tuple(positions.shape)}"
+        )
+    rows = positions.shape[0]
+    if rows_per_microbatch < 1 or rows % rows_per_microbatch:
+        raise ValueError(
+            f"{rows} rows do not divide into microbatches of "
+            f"{rows_per_microbatch} row(s)"
+        )
+    if not bool((positions[:, 0] == 0).all()):
+        raise ValueError(
+            "a row does not start a document, so a document can cross a row "
+            "and max_q = seq_len does not hold"
+        )
+    groups = []
+    for chunk in positions.split(rows_per_microbatch):
+        flat = chunk.reshape(-1)
+        starts = (flat == 0).nonzero(as_tuple=True)[0].to(torch.int32)
+        end = torch.tensor([flat.numel()], dtype=torch.int32)
+        groups.append(torch.cat([starts, end]))
+    width = max(group.numel() for group in groups)
+    return torch.stack(
+        [torch.cat([group, group[-1:].expand(width - group.numel())]) for group in groups]
     )
-    flat = positions.reshape(-1)
-    is_start = flat == 0
-    torch._assert_async(
-        is_start.sum() <= max_docs, "a microbatch holds more documents than max_documents"
-    )
-    starts = torch.nonzero_static(
-        is_start, size=max_docs, fill_value=flat.numel()
-    ).flatten()
-    end = torch.full((1,), flat.numel(), dtype=starts.dtype, device=starts.device)
-    return torch.cat([starts, end]).to(torch.int32)
 
 
 class PackedGQAttention(GQAttention):
-    """GQAttention whose inner varlen kernel reads offsets built from this microbatch's ``positions``."""
+    """GQAttention whose inner varlen kernel reads the loader's offsets of this microbatch."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
-        max_documents: int
-
-    def __init__(self, config: "PackedGQAttention.Config"):
-        super().__init__(config)
-        self.max_documents = config.max_documents
+        pass
 
     def forward(
         self,
         x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: torch.Tensor | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if attention_masks is not None:
+        # These checks run at trace time, so the graph holds no assert kernel.
+        if attention_masks is None:
+            raise ValueError(
+                "PackedGQAttention reads its offsets from the batch key "
+                "'attention_masks', and the batch has none; set "
+                "--dataloader.offset-rows"
+            )
+        if not isinstance(attention_masks, torch.Tensor):
             raise TypeError(
-                "PackedGQAttention builds its own offsets, but the trainer "
-                f"passed a {type(attention_masks).__name__}"
+                "PackedGQAttention needs the loader's offsets tensor, but got "
+                f"a {type(attention_masks).__name__}"
+            )
+        if attention_masks.dtype != torch.int32:
+            raise TypeError(
+                f"the offsets must be int32, but are {attention_masks.dtype}"
+            )
+        if attention_masks.dim() != 2 or attention_masks.shape[0] != 1:
+            raise ValueError(
+                "the offsets of one microbatch must be [1, W], but have the "
+                f"shape {tuple(attention_masks.shape)}"
             )
         if positions is None:
             raise ValueError("PackedGQAttention needs the per-token positions")
         # max_q = L holds because every row starts a document.
         L = x_BLD.shape[1]
-        cu = cu_seqlens_from_positions(positions, self.max_documents)
+        cu = attention_masks[0]
         return super().forward(x_BLD, VarlenMetadata(cu, cu, L, L), positions)

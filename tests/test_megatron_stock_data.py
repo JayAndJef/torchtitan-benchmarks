@@ -171,6 +171,56 @@ class PackingParityTests(unittest.TestCase):
                 local_batch_size=BATCH,
             )
 
+    def test_the_loader_adds_the_offsets_of_each_microbatch(self) -> None:
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import (
+            PretokenizedReplayDataLoader,
+        )
+        from benchmarks.models.piper_qwen3.components.attention.packed import (
+            microbatch_offsets,
+        )
+
+        for offset_rows in (0, 2):
+            with self.subTest(offset_rows=offset_rows):
+                loader = self._skip_on_a_read_only_cache(
+                    lambda: PretokenizedReplayDataLoader(
+                        PretokenizedReplayDataLoader.Config(
+                            replay_steps=1, offset_rows=offset_rows
+                        ),
+                        dp_world_size=1,
+                        dp_rank=0,
+                        tokenizer=None,
+                        seq_len=SEQ_LEN,
+                        local_batch_size=BATCH,
+                    )
+                )
+                inputs, _ = next(iter(loader))
+                if not offset_rows:
+                    self.assertEqual(sorted(inputs), ["input", "positions"])
+                    continue
+                offsets = inputs["attention_masks"]
+                self.assertEqual(offsets.dtype, torch.int32)
+                self.assertEqual(offsets.shape[0], BATCH // offset_rows)
+                self.assertTrue(
+                    torch.equal(
+                        offsets, microbatch_offsets(inputs["positions"], offset_rows)
+                    )
+                )
+
+    def test_offset_rows_that_do_not_divide_the_batch_are_refused(self) -> None:
+        from benchmarks.e2e.engines.torchtitan.plugins.replay import (
+            PretokenizedReplayDataLoader,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--dataloader.offset-rows 3"):
+            PretokenizedReplayDataLoader(
+                PretokenizedReplayDataLoader.Config(offset_rows=3),
+                dp_world_size=1,
+                dp_rank=0,
+                tokenizer=None,
+                seq_len=SEQ_LEN,
+                local_batch_size=BATCH,
+            )
+
     def test_replay_exhaustion_is_loud(self) -> None:
         from benchmarks.e2e.engines.torchtitan.plugins.replay import (
             PretokenizedReplayDataset,

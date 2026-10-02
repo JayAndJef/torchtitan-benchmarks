@@ -12,10 +12,7 @@ from torchtitan.config import derive, override
 from torchtitan.models.common.attention import GQAttention, VarlenAttention
 from torchtitan.protocols.module import Module
 
-from benchmarks.models.piper_qwen3.components.attention.packed import (
-    MAX_DOCUMENTS,
-    PackedGQAttention,
-)
+from benchmarks.models.piper_qwen3.components.attention.packed import PackedGQAttention
 
 
 class PackedFA3Attention(VarlenAttention):
@@ -37,12 +34,11 @@ class PackedFA3Attention(VarlenAttention):
 @override(
     target=GQAttention.Config,
     exact=True,
-    description="FA3 varlen attention on packed documents, offsets built per microbatch.",
+    description="FA3 varlen attention on packed documents, offsets read from the batch.",
 )
 def packed_fa3_attention(cfg: GQAttention.Config) -> PackedGQAttention.Config:
     return derive(
         cfg,
         PackedGQAttention.Config,
-        max_documents=MAX_DOCUMENTS,
         inner_attention=derive(cfg.inner_attention, PackedFA3Attention.Config),
     )
