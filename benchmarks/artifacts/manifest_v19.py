@@ -8,6 +8,9 @@ from typing import Any
 
 V19_SCHEMA_VERSION = 19
 
+V20_SCHEMA_VERSION = 20
+"""The schema that ``upgrade_v19`` writes; ``manifests.MANIFEST_SCHEMA_VERSION`` takes it."""
+
 V20_FIELDS: dict[str, dict[str, Any]] = {"torchtitan": {"packed_offsets": False}}
 """The config fields that schema 20 adds, by engine, with the value that every older arm held."""
 
@@ -29,4 +32,4 @@ def upgrade_v19(manifest: Mapping[str, Any]) -> dict[str, Any]:
                 "schema 20 adds"
             )
         arms.append({**record, "config": {**record["config"], **added}})
-    return {**manifest, "schema_version": 20, "arms": arms}
+    return {**manifest, "schema_version": V20_SCHEMA_VERSION, "arms": arms}
