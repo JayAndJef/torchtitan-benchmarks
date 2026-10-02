@@ -30,6 +30,7 @@ from tests.engine_helpers import configured, run_spec
 
 PARALLEL_SPEC = ParallelismSpec(dp=2, pp=2, ep=2, zero=1, pp_schedule="1F1B")
 ENGINES = scenario_by_name("engines")
+ATTENTION = scenario_by_name("attention")
 OVERRIDE_ARM = Arm(
     name="override_arm",
     description="an arm with an override import",
@@ -110,7 +111,7 @@ def _megatron_argvs() -> list[list[str]]:
 
 def _titan_argvs() -> list[list[str]]:
     argvs = []
-    for arm in (*ENGINES.arms, OVERRIDE_ARM):
+    for arm in (*ENGINES.arms, ATTENTION.arm("titan_compiled_fa3"), OVERRIDE_ARM):
         if engine_for(arm).name != "torchtitan":
             continue
         for spec, profile, ac_mode in (
@@ -340,6 +341,8 @@ class TitanTableTests(unittest.TestCase):
             ("activation-checkpoint:full", "owned by --ac"),
             ("--profiler.enable-profiling", "owned by --profile"),
             ("--debug.seed", "pinned by the shared data stream"),
+            ("--dataloader.replay-steps", "pinned by the shared data stream"),
+            ("--dataloader.offset-rows=2", "owned by the arm's packed_offsets value"),
             ("--training.dtype", "pinned by the precision recipe"),
         ):
             with self.subTest(token=token):

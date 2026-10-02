@@ -1165,6 +1165,25 @@ class AttentionScenarioTests(unittest.TestCase):
             argv = command(run_spec(ac_mode="none"), arm, Path("/out") / arm.name)
             self.assertTrue(argv, arm.name)
 
+    def test_the_fa3_arm_sends_the_rows_of_one_pipeline_microbatch(self) -> None:
+        scenario = scenario_by_name("attention")
+        pp2 = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
+        for spec, rows in ((TRIVIAL_SPEC, "8"), (pp2, "2")):
+            run = run_spec(ac_mode="none", parallelism=spec, local_batch_size=8)
+            with self.subTest(pp=spec.pp):
+                argv = command(run, scenario.arm("titan_compiled_fa3"), Path("/out"))
+                self.assertEqual(argv[argv.index("--dataloader.offset-rows") + 1], rows)
+                self.assertNotIn(
+                    "--dataloader.offset-rows",
+                    command(run, scenario.arm("titan_compiled"), Path("/out")),
+                )
+
+    def test_packed_offsets_without_an_override_is_refused(self) -> None:
+        arm = configured(ENGINES.arm("titan_compiled"), packed_offsets=True)
+        (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
+        self.assertIn("titan_compiled: packed_offsets", refusal)
+        self.assertIn("no override imports", refusal)
+
 
 class CompilerEnvironmentTests(unittest.TestCase):
     """The ``requires_gcc_toolset`` branch, against the synthetic arm.

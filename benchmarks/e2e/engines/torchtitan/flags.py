@@ -61,6 +61,12 @@ def parallelism_args(spec: ParallelismSpec) -> tuple[str, ...]:
     return tuple(args)
 
 
+def offset_rows(run: RunSpec) -> int:
+    """The rows of one pipeline microbatch: the microbatch size above one pipeline rank, the local batch at one."""
+    spec = run.parallelism
+    return spec.pp_microbatch_size if spec.pp > 1 else run.data.local_batch_size
+
+
 def trainer_args(
     run: RunSpec, config: TorchTitanConfig, arm_dir: Path
 ) -> tuple[str, ...]:
@@ -86,6 +92,8 @@ def trainer_args(
     args.extend(parallelism_args(run.parallelism))
     # The replay loader refuses a step past the samples it holds.
     args.extend(("--dataloader.replay-steps", str(run.data.steps)))
+    if config.packed_offsets:
+        args.extend(("--dataloader.offset-rows", str(offset_rows(run))))
     if run.seed is not None:
         args.extend(("--debug.seed", str(run.seed)))
     if config.override_imports:
@@ -125,6 +133,7 @@ OWNED_FLAGS: dict[str, tuple[str, ...]] = {
     "--profile": ("--profiler.*",),
     "the arm's compile value": ("--compile.enable",),
     "the arm's override imports": ("--override.*",),
+    "the arm's packed_offsets value": ("--dataloader.offset-rows",),
 }
 """The TorchTitan flags that each harness option, or arm setting, sets."""
 
@@ -141,7 +150,13 @@ PINNED_FLAGS: dict[str, tuple[str, ...]] = {
     ),
     "the routing matched across engines": ("--debug.moe-force-load-balance",),
     "the shared data stream": (
-        "--dataloader.*",
+        "--dataloader.dataset",
+        "--dataloader.dataset-path",
+        "--dataloader.replay-steps",
+        "--dataloader.num-workers",
+        "--dataloader.persistent-workers",
+        "--dataloader.pin-memory",
+        "--dataloader.prefetch-factor",
         "--tokenizer.*",
         "--hf-assets-path",
         "--debug.seed",

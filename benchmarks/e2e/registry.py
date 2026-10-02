@@ -99,8 +99,8 @@ ATTENTION = Scenario(
     description=(
         "Compiled TorchTitan with two attention kernels, FlexAttention and FA3 "
         "varlen, against stock Megatron-LM, which runs TransformerEngine's "
-        "cuDNN attention. The FA3 arm builds the document offsets of each "
-        "microbatch from its positions, with a cap of 32 documents. The "
+        "cuDNN attention. The FA3 arm reads the exact document offsets of "
+        "each microbatch, which the loader computes on the CPU. The "
         "Megatron arm carries the four "
         "differences of the engines scenario: fp32 master weights and an fp32 "
         "gradient reduction, unfused native cross entropy, "
@@ -124,6 +124,7 @@ ATTENTION = Scenario(
                     f"{ATTENTION_OVERRIDES}.fa3_override.packed_fa3_attention",
                 ),
                 trace_kernel_markers=("FlashAttnFwdSm90",),
+                packed_offsets=True,
             ),
         ),
         ENGINES.arm("megatron_stock"),
