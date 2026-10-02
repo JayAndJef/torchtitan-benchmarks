@@ -1066,13 +1066,24 @@ class MicrobatchContractTest(unittest.TestCase):
                     [self.packed] * (len(values) - end - 1),
                 )
 
-    def test_the_padded_width_is_the_widest_pack_of_this_rank(self) -> None:
-        # The pack of rows [8,4,4] and [16] holds five documents, so six
-        # entries: 0, 8, 12, 16, 32.  Wait -- that pack is rows 2 and 3.
-        widest = self.iterator.padded_documents
-        for _ in range(self.iterator.microbatch_count):
+    def test_cu_seqlens_is_padded_to_the_packed_length(self) -> None:
+        """``GPTDataset`` pads each row to ``seq_length + 1`` entries, filled with ``seq_length``."""
+        for index in range(self.iterator.microbatch_count):
+            row = next(self.iterator)["cu_seqlens"]
+            self.assertEqual(tuple(row.shape), (1, self.packed + 1))
+            exact = data.document_offsets(
+                torch.cat(
+                    [
+                        self.samples[self.rows * index + r][0]["positions"]
+                        for r in range(self.rows)
+                    ]
+                ),
+                self.packed,
+            ).tolist()
+            values = row[0].tolist()
+            self.assertEqual(values[: len(exact)], exact)
             self.assertEqual(
-                tuple(next(self.iterator)["cu_seqlens"].shape), (1, widest)
+                values[len(exact) :], [self.packed] * (len(values) - len(exact))
             )
 
     def test_max_seqlen_is_the_longest_document_in_the_pack(self) -> None:
@@ -2837,6 +2848,30 @@ class PipelineShapeAgreementTest(unittest.TestCase):
                     ]
                 ],
             )
+
+
+    def test_megatron_s_merge_strips_the_padding(self) -> None:
+        """``_merge_cu_seqlens_across_micro_batch`` gives back the exact offsets of each microbatch."""
+        try:
+            bootstrap.prepare()
+            from megatron.core.utils import _merge_cu_seqlens_across_micro_batch
+        except Exception as error:  # pragma: no cover - host dependent
+            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        seq_len = 16
+        samples = synthetic_samples(8, seq_len, [[16], [4, 12], [8, 4, 4]])
+        iterator = data.StockReplayIterator(
+            samples, rows_per_sample=2, seq_len=seq_len
+        )
+        for index in range(iterator.microbatch_count):
+            microbatch = next(iterator)
+            exact = data.document_offsets(
+                microbatch["position_ids"][0], iterator.packed_len
+            )
+            merged = _merge_cu_seqlens_across_micro_batch(
+                microbatch["cu_seqlens"], iterator.packed_len
+            )
+            with self.subTest(microbatch=index):
+                self.assertEqual(merged.tolist(), exact.tolist())
 
 
 class ModelBuilderTest(unittest.TestCase):

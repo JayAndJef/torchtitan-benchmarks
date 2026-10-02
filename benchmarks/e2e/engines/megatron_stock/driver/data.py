@@ -40,26 +40,24 @@ def document_offsets(positions: torch.Tensor, seq_len: int) -> torch.Tensor:
 
 
 def _microbatch(
-    rows: list[Sample],
-    *,
-    packed_len: int,
-    padded_documents: int,
+    rows: list[Sample], *, packed_len: int
 ) -> dict[str, torch.Tensor | None]:
-    """One microbatch on the CPU: one packed row of ``packed_len`` tokens, with ``cu_seqlens`` padded to ``padded_documents``."""
+    """One microbatch on the CPU: one packed row of ``packed_len`` tokens, with ``cu_seqlens`` padded to ``packed_len + 1`` entries as ``GPTDataset`` pads it."""
     tokens = torch.cat([inputs["input"] for inputs, _ in rows]).to(torch.int64)
     positions = torch.cat([inputs["positions"] for inputs, _ in rows]).to(torch.int64)
     labels = torch.cat([label for _, label in rows]).to(torch.int64)
     cu_seqlens = document_offsets(positions, packed_len)
-    pad = padded_documents - cu_seqlens.numel()
-    if pad < 0:
-        raise ValueError(
-            f"a pack holds {cu_seqlens.numel()} cu_seqlens entries, above "
-            f"the run's padded width of {padded_documents}; padding cannot "
-            "remove a document"
-        )
     longest = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
+    # Megatron's get_batch strips the trailing copies of packed_len.
     padded = torch.cat(
-        [cu_seqlens, torch.full((pad,), packed_len, dtype=torch.int32)]
+        [
+            cu_seqlens,
+            torch.full(
+                (packed_len + 1 - cu_seqlens.numel(),),
+                packed_len,
+                dtype=torch.int32,
+            ),
+        ]
     )
     return {
         "tokens": tokens.unsqueeze(0),
@@ -100,28 +98,10 @@ class StockReplayIterator:
             samples[start : start + rows_per_sample]
             for start in range(0, len(samples), rows_per_sample)
         ]
-        # No collective reads this width, so each rank can have its own.
-        self._padded_documents = max(
-            document_offsets(
-                torch.cat([inputs["positions"] for inputs, _ in group]),
-                self._packed_len,
-            ).numel()
-            for group in groups
-        )
         self._microbatches = [
-            _microbatch(
-                group,
-                packed_len=self._packed_len,
-                padded_documents=self._padded_documents,
-            )
-            for group in groups
+            _microbatch(group, packed_len=self._packed_len) for group in groups
         ]
         self._served = 0
-
-    @property
-    def padded_documents(self) -> int:
-        """The ``cu_seqlens`` width of each microbatch of this rank."""
-        return self._padded_documents
 
     @property
     def packed_len(self) -> int:
