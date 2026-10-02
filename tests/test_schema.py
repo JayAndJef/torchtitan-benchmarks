@@ -79,6 +79,7 @@ LAYER_ORDER = (
     "benchmarks.e2e.engines.torchtitan.engine",
     "benchmarks.e2e.engines.megatron_stock.engine",
     "benchmarks.e2e.engines.registry",
+    "benchmarks.artifacts.manifest_v19",
     "benchmarks.artifacts.manifest_v18",
     "benchmarks.artifacts.manifests",
     "benchmarks.e2e.checks",

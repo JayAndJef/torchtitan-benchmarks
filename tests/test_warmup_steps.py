@@ -131,7 +131,7 @@ class ManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             recorded = _manifest(Path(temporary), False, 10)
         self.assertEqual(recorded["schema_version"], MANIFEST_SCHEMA_VERSION)
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 19)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 20)
         self.assertEqual(recorded["run"]["warmup_steps"], 10)
 
     def test_a_profiled_run_records_null(self) -> None:

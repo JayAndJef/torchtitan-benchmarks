@@ -29,7 +29,7 @@ GOLDEN_RUN = REPO_ROOT / "tests" / "fixtures" / "golden" / "runs" / "dp1-1b"
 
 
 def write_manifest(cell: Path, *, model_size: str, dp: int, zero: int) -> None:
-    """Write the schema 19 manifest of a titan_compiled and megatron_stock cell."""
+    """Write the schema 20 manifest of a titan_compiled and megatron_stock cell."""
     write_run_manifest(
         cell,
         run_spec(
@@ -161,6 +161,25 @@ class CollectTests(unittest.TestCase):
         )
         self.assertEqual(rows[2]["engine"], "megatron_stock")
         self.assertEqual(rows[0]["model_size"], "1b")
+
+    def test_a_schema_19_cell_is_read(self) -> None:
+        cell = self.root / "recorded-19"
+        cell.mkdir()
+        shutil.copy(
+            REPO_ROOT / "tests/fixtures/manifest_v19/titan-compiled-fa3-dp4-ep4.json",
+            cell / "manifest.json",
+        )
+        payload = results(tokens_per_second=1000.0)
+        payload["arms"] = ["titan_compiled_fa3"]
+        payload["results"] = {"titan_compiled_fa3": payload["results"]["titan_compiled"]}
+        (cell / "results.json").write_text(json.dumps(payload))
+        rows = [
+            row
+            for row in collect_matrix.collect(self.root, None)
+            if row["cell"] == "recorded-19"
+        ]
+        self.assertEqual([row["arm"] for row in rows], ["titan_compiled_fa3"])
+        self.assertIs(rows[0]["config"]["packed_offsets"], False)
 
     def test_contamination_marker_marks_the_rows(self) -> None:
         (self.root / "model-size-1b-ac-none.CONTAMINATED").write_text("foreign")

@@ -3,6 +3,7 @@
 import gzip
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files
+from benchmarks.artifacts.manifest_v19 import upgrade_v19
+from benchmarks.artifacts.manifests import load_manifest, run_record
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.checks import check_run
 from benchmarks.e2e.overrides import parse_override
@@ -43,7 +46,7 @@ from benchmarks.e2e.runner import (
     select_arms,
 )
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
-from dataclasses import fields, replace
+from dataclasses import asdict, fields, replace
 from benchmarks.models.piper_qwen3.components.lm_head.losses import (
     PiperOptimizedCrossEntropyLoss,
 )
@@ -681,6 +684,50 @@ class OverrideResumeTests(unittest.TestCase):
             _resolve(("megatron_stock",), resume_dir=golden)
 
 
+V19_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "manifest_v19"
+"""Two manifests that the dp4 x ep4 attention matrix recorded under schema 19."""
+
+
+class SchemaNineteenTests(unittest.TestCase):
+    def test_a_recorded_schema_19_run_loads_with_packed_offsets_off(self) -> None:
+        titan = run_record(
+            json.loads((V19_FIXTURES / "titan-compiled-fa3-dp4-ep4.json").read_text()),
+            "titan",
+        )
+        (arm,) = titan.arms
+        self.assertEqual(arm.arm.name, "titan_compiled_fa3")
+        self.assertIs(arm.arm.config.packed_offsets, False)
+        recorded = json.loads(
+            (V19_FIXTURES / "megatron-stock-dp4-ep4.json").read_text()
+        )
+        (megatron,) = run_record(recorded, "megatron").arms
+        self.assertEqual(
+            asdict(megatron.arm.config),
+            {
+                key: tuple(value) if isinstance(value, list) else value
+                for key, value in recorded["arms"][0]["config"].items()
+            },
+        )
+
+    def test_a_resume_refuses_a_schema_19_manifest_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            shutil.copy(
+                V19_FIXTURES / "titan-compiled-fa3-dp4-ep4.json",
+                out_dir / "manifest.json",
+            )
+            with self.assertRaisesRegex(ValueError, "records manifest schema 19"):
+                load_manifest(out_dir)
+
+    def test_the_upgrade_refuses_a_field_that_schema_19_cannot_hold(self) -> None:
+        manifest = json.loads(
+            (V19_FIXTURES / "titan-compiled-fa3-dp4-ep4.json").read_text()
+        )
+        manifest["arms"][0]["config"]["packed_offsets"] = True
+        with self.assertRaisesRegex(ValueError, "which schema 20 adds"):
+            upgrade_v19(manifest)
+
+
 class ParallelizeTests(unittest.TestCase):
     def test_all_piper_configs_run_single_gpu_plain_bf16(self) -> None:
         for factory in (qwen3_piper_1b_pretokenized,):
@@ -1279,7 +1326,7 @@ class ManifestTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 19)
+        self.assertEqual(manifest["schema_version"], 20)
         self.assertEqual(manifest["scenario"], "engines")
         self.assertEqual(manifest["hardware"], "rtx-a6000")
         self.assertEqual(
@@ -1366,7 +1413,7 @@ class EagerArmTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = self._run(Path(temporary) / "run")
 
-        self.assertEqual(manifest["schema_version"], 19)
+        self.assertEqual(manifest["schema_version"], 20)
         (arm,) = manifest["arms"]
         self.assertNotIn("--compile.enable", arm["command"])
 

@@ -2,7 +2,7 @@
 
     .venv/bin/python tools/collect_matrix.py out/matrix-<utc> [--size 1b] [--json matrix.json]
 
-The tool reads manifest schemas 18 and 19, and results schema 6 alone.
+The tool reads manifest schemas 18, 19 and 20, and results schema 6 alone.
 """
 
 from __future__ import annotations

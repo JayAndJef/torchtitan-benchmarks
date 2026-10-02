@@ -493,7 +493,7 @@ class AffinityDeviceTests(unittest.TestCase):
 def _manifest(
     parallelism: ParallelismSpec = TRIVIAL_SPEC, **megatron_fields: str
 ) -> dict:
-    """The schema 19 manifest of a titan_eager and megatron_stock run at ``parallelism``."""
+    """The schema 20 manifest of a titan_eager and megatron_stock run at ``parallelism``."""
     arms = (
         ENGINES.arm("titan_eager"),
         configured(ENGINES.arm("megatron_stock"), **megatron_fields),
@@ -512,15 +512,15 @@ def _arm(manifest: dict, name: str) -> dict:
     return record
 
 
-class ManifestSchemaNineteenTests(unittest.TestCase):
-    def test_the_schema_is_nineteen(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 19)
-        self.assertEqual(_manifest()["schema_version"], 19)
+class ManifestSchemaTwentyTests(unittest.TestCase):
+    def test_the_schema_is_twenty(self) -> None:
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 20)
+        self.assertEqual(_manifest()["schema_version"], 20)
 
     def test_a_foreign_schema_is_refused_and_the_versions_are_named(
         self,
     ) -> None:
-        for recorded in (8, 17, 20, None):
+        for recorded in (8, 17, 21, None):
             with self.subTest(schema_version=recorded):
                 with tempfile.TemporaryDirectory() as temporary:
                     out_dir = Path(temporary)

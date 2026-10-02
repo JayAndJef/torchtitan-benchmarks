@@ -152,8 +152,8 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
         self.assertEqual(THROUGHPUT_DEFINITION, "tokens_per_second_per_device")
 
     def test_the_schema_moved_with_the_new_key(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 19)
-        self.assertEqual(self._manifest()["schema_version"], 19)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 20)
+        self.assertEqual(self._manifest()["schema_version"], 20)
 
 
 class PerRankLogParsingTests(unittest.TestCase):

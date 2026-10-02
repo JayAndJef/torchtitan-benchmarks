@@ -9,8 +9,8 @@ golden record before the comparison.
 ``launch/<case>.json`` holds, per arm, the argv, the child environment and
 the working directory that ``execute_run`` hands to the process runner, and
 the schema 18 manifest that the run wrote. The test reads that manifest
-through ``upgrade_v18`` and compares it with the schema 19 manifest of the
-current code. ``runs/<name>/`` holds a run directory and
+through ``current_manifest`` and compares it with the schema 20 manifest of
+the current code. ``runs/<name>/`` holds a run directory and
 ``expected_results.json``, which is the evaluation of that directory.
 """
 
@@ -29,7 +29,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts.manifest_v18 import upgrade_v18
+from benchmarks.artifacts.manifests import current_manifest
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.overrides import parse_override
 from benchmarks.e2e.parallelism import ParallelismSpec
@@ -511,7 +511,7 @@ class GoldenLaunchTest(unittest.TestCase):
                     with self.subTest(case=name, arm=arm, part=part):
                         self.assertEqual(actual["arms"][arm][part], launched[part])
             with self.subTest(case=name, part="manifest"):
-                manifest = upgrade_v18(expected["manifest"])
+                manifest = dict(current_manifest(expected["manifest"]))
                 _schema_19_facts(manifest, actual["manifest"], expected["arms"])
                 self.assertEqual(actual["manifest"], manifest)
 
