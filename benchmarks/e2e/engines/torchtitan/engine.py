@@ -37,6 +37,9 @@ ZERO2_AT_PP1 = (
 )
 """The warning of a TorchTitan arm at ZeRO level 1 and one pipeline rank."""
 
+PACKED_ATTENTION_PACKAGE = "benchmarks.models.piper_qwen3.components.attention."
+"""The prefix of each override import whose attention reads the loader's offsets."""
+
 
 class TorchTitanEngine(Engine):
     """The TorchTitan engine."""
@@ -64,11 +67,21 @@ class TorchTitanEngine(Engine):
                 f"stage module, and {arm.name} asks for torch.compile; select "
                 "the eager arms alone, or choose another --pp-schedule"
             )
-        if arm.config.packed_offsets and not arm.config.override_imports:
+        packed = [
+            target
+            for target in arm.config.override_imports
+            if target.startswith(PACKED_ATTENTION_PACKAGE)
+        ]
+        if arm.config.packed_offsets and not packed:
             refusals.append(
-                f"{arm.name}: packed_offsets sends offsets that only an "
-                "override attention reads, and the arm has no override "
-                "imports; turn packed_offsets off or add the override"
+                f"{arm.name}: packed_offsets is on, and no override import "
+                f"starts with {PACKED_ATTENTION_PACKAGE}, so no attention reads "
+                "the offsets; turn packed_offsets off or add the override"
+            )
+        for target in packed if not arm.config.packed_offsets else ():
+            refusals.append(
+                f"{arm.name}: the override import {target} reads the loader's "
+                "offsets, and packed_offsets is off; turn packed_offsets on"
             )
         refusals.extend(passthrough_refusals(arm.name, arm.config.extra_flags))
         return refusals

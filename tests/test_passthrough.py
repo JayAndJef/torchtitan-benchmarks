@@ -355,6 +355,12 @@ class TitanTableTests(unittest.TestCase):
         self.assertIn("not classified", refusal)
         self.assertIn("cannot pass through titan_eager.extra_flags", refusal)
 
+    def test_an_unlisted_loader_flag_is_refused(self) -> None:
+        (refusal,) = titan_flags.passthrough_refusals(
+            TITAN_ARM.name, ("--dataloader.foo=1",)
+        )
+        self.assertIn("--dataloader.foo=1 (not classified", refusal)
+
     def test_the_engine_check_refuses_an_unlisted_flag(self) -> None:
         arm = configured(TITAN_ARM, extra_flags=("--training.new-field",))
         (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)

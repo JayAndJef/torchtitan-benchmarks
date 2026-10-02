@@ -31,7 +31,7 @@
 # The output directory is $ROOT/<slug of the cell>, where the slug drops the
 # `--` of each flag and joins the remaining words with `-`. Two cells that
 # slug the same are refused, because they would share one directory.
-# A slug above 200 bytes is cut to 191 and given a hash of the whole cell.
+# A slug above 200 bytes is cut to 191 bytes and given a hash of the whole slug.
 #
 # Usage
 # -----

@@ -511,7 +511,7 @@ class GoldenLaunchTest(unittest.TestCase):
                     with self.subTest(case=name, arm=arm, part=part):
                         self.assertEqual(actual["arms"][arm][part], launched[part])
             with self.subTest(case=name, part="manifest"):
-                manifest = dict(current_manifest(expected["manifest"]))
+                manifest = current_manifest(expected["manifest"])
                 _schema_19_facts(manifest, actual["manifest"], expected["arms"])
                 self.assertEqual(actual["manifest"], manifest)
 

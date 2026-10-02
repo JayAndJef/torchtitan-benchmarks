@@ -13,7 +13,11 @@ from typing import Any, Literal
 
 from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.artifacts.manifest_v18 import V18_SCHEMA_VERSION, upgrade_v18
-from benchmarks.artifacts.manifest_v19 import V19_SCHEMA_VERSION, upgrade_v19
+from benchmarks.artifacts.manifest_v19 import (
+    V19_SCHEMA_VERSION,
+    V20_SCHEMA_VERSION,
+    upgrade_v19,
+)
 from benchmarks.e2e.engines.api import (
     Arm,
     DataSpec,
@@ -28,7 +32,7 @@ from benchmarks.e2e.schema import Scenario
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
-MANIFEST_SCHEMA_VERSION = 20
+MANIFEST_SCHEMA_VERSION = V20_SCHEMA_VERSION
 
 THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
 """What the tokens/s of a step sample and ``stable_tokens_per_second`` count."""
@@ -272,8 +276,8 @@ def _run(block: Mapping[str, Any]) -> RunSpec:
     )
 
 
-def current_manifest(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The schema 20 form of a schema 18, 19 or 20 manifest; another schema raises."""
+def current_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """A new dict that holds the schema 20 form of a schema 18, 19 or 20 manifest; another schema raises."""
     found = manifest.get("schema_version")
     if found == V18_SCHEMA_VERSION:
         return upgrade_v19(upgrade_v18(manifest))
@@ -285,7 +289,7 @@ def current_manifest(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
             f"{V18_SCHEMA_VERSION}, {V19_SCHEMA_VERSION} and "
             f"{MANIFEST_SCHEMA_VERSION}"
         )
-    return manifest
+    return dict(manifest)
 
 
 def run_record(manifest: Mapping[str, Any], source: str) -> RunRecord:

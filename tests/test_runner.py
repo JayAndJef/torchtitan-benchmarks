@@ -18,7 +18,7 @@ from benchmarks.artifacts.manifest_v19 import upgrade_v19
 from benchmarks.artifacts.manifests import load_manifest, run_record
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.checks import check_run
-from benchmarks.e2e.overrides import parse_override
+from benchmarks.e2e.overrides import apply_overrides, parse_override
 from benchmarks.e2e.engines.api import Arm, CompileMode
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
@@ -1178,11 +1178,32 @@ class AttentionScenarioTests(unittest.TestCase):
                     command(run, scenario.arm("titan_compiled"), Path("/out")),
                 )
 
-    def test_packed_offsets_without_an_override_is_refused(self) -> None:
-        arm = configured(ENGINES.arm("titan_compiled"), packed_offsets=True)
+    def test_packed_offsets_without_a_packed_attention_override_is_refused(self) -> None:
+        for imports in ((), ("benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope",)):
+            with self.subTest(imports=imports):
+                arm = configured(
+                    ENGINES.arm("titan_compiled"),
+                    packed_offsets=True,
+                    override_imports=imports,
+                )
+                (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
+                self.assertIn("titan_compiled: packed_offsets is on", refusal)
+                self.assertIn("benchmarks.models.piper_qwen3.components.attention.", refusal)
+
+    def test_a_packed_attention_override_without_packed_offsets_is_refused(self) -> None:
+        scenario = scenario_by_name("attention")
+        (arm,) = apply_overrides(
+            (scenario.arm("titan_compiled_fa3"),),
+            _overrides("titan_compiled_fa3.packed_offsets=off"),
+        )
         (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
-        self.assertIn("titan_compiled: packed_offsets", refusal)
-        self.assertIn("no override imports", refusal)
+        self.assertIn("titan_compiled_fa3: the override import", refusal)
+        self.assertIn("fa3_override.packed_fa3_attention", refusal)
+        self.assertIn("packed_offsets is off", refusal)
+        self.assertEqual(
+            engine_for(arm).check(run_spec(ac_mode="none"), scenario.arm("titan_compiled_fa3")),
+            [],
+        )
 
 
 class CompilerEnvironmentTests(unittest.TestCase):

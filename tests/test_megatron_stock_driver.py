@@ -2849,14 +2849,11 @@ class PipelineShapeAgreementTest(unittest.TestCase):
                 ],
             )
 
-
     def test_megatron_s_merge_strips_the_padding(self) -> None:
         """``_merge_cu_seqlens_across_micro_batch`` gives back the exact offsets of each microbatch."""
-        try:
-            bootstrap.prepare()
-            from megatron.core.utils import _merge_cu_seqlens_across_micro_batch
-        except Exception as error:  # pragma: no cover - host dependent
-            raise unittest.SkipTest(f"megatron is not importable: {error}")
+        self.megatron_functions()
+        from megatron.core.utils import _merge_cu_seqlens_across_micro_batch
+
         seq_len = 16
         samples = synthetic_samples(8, seq_len, [[16], [4, 12], [8, 4, 4]])
         iterator = data.StockReplayIterator(
