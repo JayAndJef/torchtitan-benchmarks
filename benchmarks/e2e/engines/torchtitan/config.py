@@ -25,3 +25,5 @@ class TorchTitanConfig(EngineConfig):
     """The kernel names that the traces of a profiled run must hold."""
     requires_gcc_toolset: bool = False
     """Whether the arm runs under the ``--compiler-env`` script."""
+    packed_offsets: bool = False
+    """Whether the loader sends the document offsets of each pipeline microbatch, which an override attention reads."""

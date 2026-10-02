@@ -1331,7 +1331,7 @@ class ManifestAndResumeTests(unittest.TestCase):
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["schema_version"], 19)
+        self.assertEqual(manifest["schema_version"], 20)
         self.assertEqual(manifest["run"]["shape"], HUGE.describe(seq_len=4096))
         (arm,) = manifest["arms"]
         command = arm["command"]

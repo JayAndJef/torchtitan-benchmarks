@@ -6,6 +6,7 @@ import dataclasses
 from collections.abc import Mapping
 from typing import Any
 
+from benchmarks.artifacts.manifest_v19 import V19_SCHEMA_VERSION, V20_FIELDS
 from benchmarks.e2e.engines.api import Engine
 from benchmarks.e2e.engines.registry import engine_named
 
@@ -60,6 +61,8 @@ def _config(
     values = {}
     for field in dataclasses.fields(engine.config_type):
         name = field.name
+        if name in V20_FIELDS.get(engine.name, {}):
+            continue
         if name == "extra_flags":
             values[name] = manifest[EXTRA_FLAGS_KEYS[engine.name]]
         elif name == "module":
@@ -107,7 +110,7 @@ def upgrade_v18(manifest: Mapping[str, Any]) -> dict[str, Any]:
     parallelism = manifest["parallelism"]
     declared = {record["name"]: record for record in manifest["arms"]}
     return {
-        "schema_version": 19,
+        "schema_version": V19_SCHEMA_VERSION,
         "scenario": manifest["scenario"],
         "description": manifest["description"],
         "hardware": manifest["hardware"],

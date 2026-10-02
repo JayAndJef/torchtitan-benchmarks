@@ -97,7 +97,7 @@ shares one pre-push hook.
 | `benchmarks/e2e/` | The shared end-to-end code: the scenario table in `benchmarks/e2e/registry.py`, the run request, the `--set` parser, the flag-pattern matcher, the run checks, the parallelism rules, the harness facts, the validation helpers, the runner and the evaluation. |
 | `benchmarks/e2e/engines/` | The engine interface in `benchmarks/e2e/engines/api.py`, the engine registry in `benchmarks/e2e/engines/registry.py`, and one package per engine. `benchmarks/e2e/engines/torchtitan/plugins/` holds the modules that the TorchTitan trainer imports through `--module`. |
 | `benchmarks/e2e/data/c4_replay.py` | The pre-tokenized c4_test stream that both engines read. |
-| `benchmarks/artifacts/` | `manifest.json` and its schema 18 reader, `run_state.json`, the output layout and the atomic JSON writer. |
+| `benchmarks/artifacts/` | `manifest.json` and its schema 18 and 19 readers, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
 | `benchmarks/execution/` | The launcher in `benchmarks/execution/launcher.py`, the subprocess environment, device parsing, CPU pinning, provenance and the progress events. A runner prints nothing: it emits events, and `benchmarks/cli/rendering.py` prints them. |
 | `benchmarks/kernel/` | The kernel-isolation system: registry, spans, runner, worker, timing engine, results. |
@@ -361,13 +361,14 @@ skips the arms that pass, archives the partial artifacts under
   `<arm>.config.<field>`.
 - A resume does **not** inherit the parallelism spec. Omitted parallelism
   flags ask for the single-GPU spec.
-- A resume reads manifest schema 19 alone, and it refuses schema 18 by name.
+- A resume reads manifest schema 20 alone, and it refuses schemas 18 and 19
+  by name.
 
 ### Output layout
 
 ```
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # schema 19
+  manifest.json     # schema 20
   run_state.json    # per-arm status, attempts, evaluation status
   results.json      # schema 6
   <arm>.log         # training stdout and stderr, every rank
@@ -375,15 +376,18 @@ out/<timestamp>/<scenario>/<hardware>/
   attempts/<ts>/<arm>/   # archived artifacts of a failed attempt
 ```
 
-`manifest.json` is schema 19. It records the scenario, the `run` block, one
+`manifest.json` is schema 20. It records the scenario, the `run` block, one
 record per selected arm, the throughput definition and
 `hardware_metadata`. An arm record holds the engine, the config type name,
 the config, the execution model, the command line, the environment keys
 that the launcher and the engine set, and the CPU pinning.
 
-`evaluate` and `tools/collect_matrix.py` read schemas 18 and 19.
+`evaluate` and `tools/collect_matrix.py` read schemas 18, 19 and 20.
 `benchmarks.artifacts.manifest_v18:upgrade_v18` converts a schema 18
-manifest, and the reader refuses any other version by name.
+manifest to schema 19. `benchmarks.artifacts.manifest_v19:upgrade_v19`
+converts a schema 19 manifest to schema 20. It gives each TorchTitan arm
+`packed_offsets` false, because no older arm sent loader offsets. The reader
+refuses any other version by name.
 
 A provenance probe that fails records `unavailable: <error>` and does not
 stop the run. A device list of two GPU models stops it.

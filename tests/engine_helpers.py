@@ -122,7 +122,7 @@ def write_run_manifest(
     *,
     pinning: CpuPinning = UNPINNED,
 ) -> None:
-    """Write the schema 19 manifest that the runner writes for ``arms`` of the ``engines`` scenario."""
+    """Write the schema 20 manifest that the runner writes for ``arms`` of the ``engines`` scenario."""
     world_size = run.parallelism.world_size
     records = []
     for arm in arms:

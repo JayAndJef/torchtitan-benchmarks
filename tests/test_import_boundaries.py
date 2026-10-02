@@ -113,6 +113,7 @@ PARENT_SIDE_MODULES = (
     "benchmarks.artifacts.layout",
     "benchmarks.artifacts.manifests",
     "benchmarks.artifacts.manifest_v18",
+    "benchmarks.artifacts.manifest_v19",
     "benchmarks.artifacts.run_state",
     "benchmarks.artifacts.summaries",
     "benchmarks.execution.affinity",

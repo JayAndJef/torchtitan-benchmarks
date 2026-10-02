@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from benchmarks.artifacts.layout import atomic_write_json
 from benchmarks.artifacts.manifest_v18 import V18_SCHEMA_VERSION, upgrade_v18
+from benchmarks.artifacts.manifest_v19 import V19_SCHEMA_VERSION, upgrade_v19
 from benchmarks.e2e.engines.api import (
     Arm,
     DataSpec,
@@ -27,7 +28,7 @@ from benchmarks.e2e.schema import Scenario
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
-MANIFEST_SCHEMA_VERSION = 19
+MANIFEST_SCHEMA_VERSION = 20
 
 THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
 """What the tokens/s of a step sample and ``stable_tokens_per_second`` count."""
@@ -124,7 +125,7 @@ def manifest_data(
     run: RunSpec,
     arms: tuple[ArmRecord, ...],
 ) -> dict[str, Any]:
-    """The schema 19 manifest of one run."""
+    """The schema 20 manifest of one run."""
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "scenario": scenario.name,
@@ -154,12 +155,12 @@ def _read(out_dir: Path) -> tuple[dict[str, Any], Path]:
 
 
 def load_manifest(out_dir: Path) -> dict[str, Any]:
-    """The schema 19 manifest that a resume continues; any other schema is refused by name."""
+    """The schema 20 manifest that a resume continues; any other schema is refused by name."""
     manifest, path = _read(out_dir)
     found = manifest.get("schema_version")
-    if found == V18_SCHEMA_VERSION:
+    if found in (V18_SCHEMA_VERSION, V19_SCHEMA_VERSION):
         raise ValueError(
-            f"{path} records manifest schema 18, which a resume cannot "
+            f"{path} records manifest schema {found}, which a resume cannot "
             f"continue; this code resumes schema {MANIFEST_SCHEMA_VERSION} "
             "only. Start a new run"
         )
@@ -271,17 +272,26 @@ def _run(block: Mapping[str, Any]) -> RunSpec:
     )
 
 
-def run_record(manifest: Mapping[str, Any], source: str) -> RunRecord:
-    """The run that a schema 18 or schema 19 manifest records; ``source`` names the file."""
+def current_manifest(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The schema 20 form of a schema 18, 19 or 20 manifest; another schema raises."""
     found = manifest.get("schema_version")
+    if found == V18_SCHEMA_VERSION:
+        return upgrade_v19(upgrade_v18(manifest))
+    if found == V19_SCHEMA_VERSION:
+        return upgrade_v19(manifest)
+    if found != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            f"the manifest records schema {found!r}; this code reads schemas "
+            f"{V18_SCHEMA_VERSION}, {V19_SCHEMA_VERSION} and "
+            f"{MANIFEST_SCHEMA_VERSION}"
+        )
+    return manifest
+
+
+def run_record(manifest: Mapping[str, Any], source: str) -> RunRecord:
+    """The run that a schema 18, 19 or 20 manifest records; ``source`` names the file."""
     try:
-        if found == V18_SCHEMA_VERSION:
-            manifest = upgrade_v18(manifest)
-        elif found != MANIFEST_SCHEMA_VERSION:
-            raise ValueError(
-                f"{source} records manifest schema {found!r}; this code reads "
-                f"schemas {V18_SCHEMA_VERSION} and {MANIFEST_SCHEMA_VERSION}"
-            )
+        manifest = current_manifest(manifest)
         return RunRecord(
             scenario=manifest["scenario"],
             description=manifest["description"],
@@ -298,7 +308,7 @@ def run_record(manifest: Mapping[str, Any], source: str) -> RunRecord:
 
 
 def load_run_record(out_dir: Path) -> RunRecord:
-    """The run that ``out_dir/manifest.json`` records, under schema 18 or 19."""
+    """The run that ``out_dir/manifest.json`` records, under schema 18, 19 or 20."""
     manifest, path = _read(out_dir)
     return run_record(manifest, str(path))
 
