@@ -27,8 +27,9 @@ kernel of `titan_compiled` through an override:
 
 The FA3 arm sets `packed_offsets`, so the replay loader computes the exact
 document offsets of each pipeline microbatch on the CPU. The offsets have no
-cap and no device assert. Their width changes per batch, so each compiled
-block recompiles once and then runs one dynamic graph.
+cap and no device assert. Their width changes per batch, so the override
+marks that length dynamic. Each block compiles once, with a dynamic offsets
+length.
 
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
