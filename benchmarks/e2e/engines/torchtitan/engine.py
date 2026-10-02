@@ -64,6 +64,12 @@ class TorchTitanEngine(Engine):
                 f"stage module, and {arm.name} asks for torch.compile; select "
                 "the eager arms alone, or choose another --pp-schedule"
             )
+        if arm.config.packed_offsets and not arm.config.override_imports:
+            refusals.append(
+                f"{arm.name}: packed_offsets sends offsets that only an "
+                "override attention reads, and the arm has no override "
+                "imports; turn packed_offsets off or add the override"
+            )
         refusals.extend(passthrough_refusals(arm.name, arm.config.extra_flags))
         return refusals
 

@@ -25,10 +25,10 @@ kernel of `titan_compiled` through an override:
 | `titan_compiled_fa3` | `torchtitan` | FA3 varlen |
 | `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention |
 
-The FA3 arm builds the document offsets of each microbatch from its
-`positions`, inside each layer. The cap is 32 documents per microbatch. The
-c4_test stream holds at most 23 at batch 4 and sequence length 4096. A larger
-batch can exceed the cap, and then the run stops at a device assert.
+The FA3 arm sets `packed_offsets`, so the replay loader computes the exact
+document offsets of each pipeline microbatch on the CPU. The offsets have no
+cap and no device assert. Their width changes per batch, so each compiled
+block recompiles once and then runs one dynamic graph.
 
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
