@@ -6,6 +6,7 @@ Activation:
 
 from dataclasses import dataclass
 
+import torch
 from torch.nn.attention import current_flash_attention_impl
 
 from torchtitan.config import derive, override
@@ -13,6 +14,26 @@ from torchtitan.models.common.attention import GQAttention, VarlenAttention
 from torchtitan.protocols.module import Module
 
 from benchmarks.models.piper_qwen3.components.attention.packed import PackedGQAttention
+
+OFFSETS_LENGTH_SOURCE = "L['attention_masks']:1"
+"""The ``dynamic_sources`` entry for dim 1 of the block's offsets, which is their length."""
+
+
+def mark_offsets_length_dynamic() -> None:
+    """Add ``OFFSETS_LENGTH_SOURCE`` to ``torch.compiler.config.dynamic_sources`` once; a torch without the field raises."""
+    config = torch.compiler.config
+    if not hasattr(config, "dynamic_sources"):
+        raise RuntimeError(
+            "this torch has no torch.compiler.config.dynamic_sources, so each "
+            "compiled block recompiles on the second offsets length"
+        )
+    entries = [entry for entry in config.dynamic_sources.replace(" ", "").split(",") if entry]
+    if OFFSETS_LENGTH_SOURCE not in entries:
+        config.dynamic_sources = ",".join([*entries, OFFSETS_LENGTH_SOURCE])
+
+
+# A second offsets length must not recompile the block on a measured step.
+mark_offsets_length_dynamic()
 
 
 class PackedFA3Attention(VarlenAttention):

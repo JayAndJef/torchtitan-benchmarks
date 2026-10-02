@@ -1,9 +1,12 @@
 """The packed-document FA3 override: the offset builder, the config swap, the block checks and GPU parity with Flex."""
 
 import dataclasses
+import importlib
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -115,6 +118,34 @@ class OverrideTests(unittest.TestCase):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(error, message):
                     attention(x, masks, positions)
+
+    def test_importing_the_override_marks_the_offsets_length_dynamic(self) -> None:
+        module = importlib.import_module(FA3_OVERRIDE.rpartition(".")[0])
+        entries = torch.compiler.config.dynamic_sources.split(",")
+        self.assertEqual(entries.count(module.OFFSETS_LENGTH_SOURCE), 1)
+        with torch.compiler.config.patch(dynamic_sources="L['x']:0"):
+            module.mark_offsets_length_dynamic()
+            module.mark_offsets_length_dynamic()
+            self.assertEqual(
+                torch.compiler.config.dynamic_sources,
+                f"L['x']:0,{module.OFFSETS_LENGTH_SOURCE}",
+            )
+
+    def test_the_offsets_length_entry_matches_the_offsets_alone(self) -> None:
+        from torch._dynamo.variables.builder import is_dynamic_source
+
+        module = importlib.import_module(FA3_OVERRIDE.rpartition(".")[0])
+        with torch.compiler.config.patch(dynamic_sources=module.OFFSETS_LENGTH_SOURCE):
+            self.assertTrue(is_dynamic_source("L['attention_masks']", 1))
+            self.assertFalse(is_dynamic_source("L['attention_masks']", 0))
+            self.assertFalse(is_dynamic_source("L['x']", 1))
+            self.assertFalse(is_dynamic_source("L['positions']", 1))
+
+    def test_a_torch_without_dynamic_sources_refuses_the_override(self) -> None:
+        module = importlib.import_module(FA3_OVERRIDE.rpartition(".")[0])
+        with mock.patch.object(torch.compiler, "config", SimpleNamespace()):
+            with self.assertRaisesRegex(RuntimeError, "no torch.compiler.config.dynamic_sources"):
+                module.mark_offsets_length_dynamic()
 
     @unittest.skipIf(torch.cuda.is_available(), "a GPU may have FA3")
     def test_the_fa3_override_refuses_to_build_without_fa3(self) -> None:
