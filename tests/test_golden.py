@@ -17,7 +17,9 @@ the current code. ``runs/<name>/`` holds a run directory and
 from __future__ import annotations
 
 import json
+import math
 import shlex
+import statistics
 import sys
 import tempfile
 import unittest
@@ -29,7 +31,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.artifacts.manifests import current_manifest
+from benchmarks.artifacts.manifests import current_manifest, load_run_record
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.overrides import parse_override
 from benchmarks.e2e.parallelism import ParallelismSpec
@@ -481,6 +483,78 @@ def expected_launch(name: str) -> dict[str, Any]:
     return record
 
 
+@dataclass(frozen=True)
+class AcceptedEvaluationDifference:
+    """One change from the baseline evaluation that the plan names, and its reason."""
+
+    reason: str
+    apply: Callable[[Path, dict[str, Any]], None]
+    """Changes the golden results of one run directory in place."""
+
+
+def _logged_tps(step_ms: float, *, tokens_per_step: int, pp: int) -> int:
+    """The whole tokens/s that a step line logged, recovered from its step cost; a value that does not recover exactly raises."""
+    tps = round(1000.0 * tokens_per_step / (step_ms * pp))
+    if 1000.0 * tokens_per_step / (tps * pp) != step_ms:
+        raise AssertionError(f"the step cost {step_ms} holds no whole tokens/s")
+    return tps
+
+
+def _schema_6_step_ms(series: list[float]) -> dict[str, Any]:
+    """The schema 6 step cost of one series: the mean, the median and the nearest-rank p95."""
+    return {
+        "mean": statistics.fmean(series),
+        "median": statistics.median(series),
+        "p95": sorted(series)[max(math.ceil(0.95 * len(series)), 1) - 1],
+        "series": series,
+    }
+
+
+def _profiled_rule_drops_step_2(run_dir: Path, record: dict[str, Any]) -> None:
+    run = load_run_record(run_dir).run
+    if not run.profile:
+        return
+    tokens_per_step = run.data.local_batch_size * run.data.seq_len
+    for result in record["results"].values():
+        for row in result["per_rank"]:
+            # The series keeps step order, so step 2 is its first value.
+            _, *series = row["step_ms"]["series"]
+            row["stable_tokens_per_second"] = statistics.median(
+                _logged_tps(ms, tokens_per_step=tokens_per_step, pp=run.parallelism.pp)
+                for ms in series
+            )
+            row["stable_sample_count"] = len(series)
+            row["step_ms"] = _schema_6_step_ms(series)
+        published = min(
+            result["per_rank"],
+            key=lambda row: (row["stable_tokens_per_second"], row["rank"]),
+        )
+        result["stable_tokens_per_second"] = published["stable_tokens_per_second"]
+        result["stable_sample_count"] = published["stable_sample_count"]
+        result["step_ms"] = published["step_ms"]
+        result["published_rank"] = published["rank"]
+
+
+ACCEPTED_EVALUATION_DIFFERENCES = (
+    AcceptedEvaluationDifference(
+        "Plan A.3: the profiled rule drops step 2, the first sample of each "
+        "rank, which runs slow in every arm. Each rank of a profiled run "
+        "loses its first sample, and its figures and the published rank "
+        "follow from the samples that remain.",
+        _profiled_rule_drops_step_2,
+    ),
+)
+"""The changes from the baseline evaluation that the plan names."""
+
+
+def expected_evaluation(run_dir: Path) -> dict[str, Any]:
+    """The golden results of one run directory, with every accepted evaluation difference applied."""
+    record = json.loads((run_dir / EXPECTED_RESULTS).read_text())
+    for difference in ACCEPTED_EVALUATION_DIFFERENCES:
+        difference.apply(run_dir, record)
+    return record
+
+
 def evaluation(run_dir: Path) -> dict[str, Any]:
     """The evaluation of one run directory, with its own path as a placeholder."""
     result = evaluate_run(run_dir).to_dict()
@@ -527,7 +601,7 @@ class GoldenEvaluationTest(unittest.TestCase):
                 self.assertTrue((run_dir / EXPECTED_RESULTS).is_file())
 
     def test_every_run_directory_evaluates_to_its_expected_results(self) -> None:
-        """The written text matches byte for byte, without the ``extras`` of each arm, which the baseline did not have."""
+        """The written text matches byte for byte, with every accepted difference applied and without the ``extras`` of each arm, which the baseline did not have."""
         for run_dir in sorted(path for path in RUNS_DIR.iterdir() if path.is_dir()):
             with self.subTest(run=run_dir.name):
                 actual = evaluation(run_dir)
@@ -539,7 +613,18 @@ class GoldenEvaluationTest(unittest.TestCase):
                     self.assertEqual(sorted(extras[ENGINE_BY_ARM[arm]]), ["mfu", "tflops"])
                 self.assertEqual(
                     json.dumps(actual, indent=2, allow_nan=False) + "\n",
-                    (run_dir / EXPECTED_RESULTS).read_text(),
+                    json.dumps(expected_evaluation(run_dir), indent=2, allow_nan=False)
+                    + "\n",
+                )
+
+    def test_an_unchanged_record_writes_the_golden_text(self) -> None:
+        """The comparison above dumps the golden record again, so a dump with no difference applied must give the file's own text."""
+        for run_dir in sorted(path for path in RUNS_DIR.iterdir() if path.is_dir()):
+            with self.subTest(run=run_dir.name):
+                text = (run_dir / EXPECTED_RESULTS).read_text()
+                self.assertEqual(
+                    json.dumps(json.loads(text), indent=2, allow_nan=False) + "\n",
+                    text,
                 )
 
 

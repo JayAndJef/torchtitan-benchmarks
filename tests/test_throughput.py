@@ -81,7 +81,7 @@ def _samples(arm: Arm, log: Path) -> dict:
     return {rank: read.samples for rank, read in arm_steps(arm, log).items()}
 
 
-def _step_lines(*, tps: int, first_step: int = 2, count: int = 4) -> str:
+def _step_lines(*, tps: int, first_step: int = 3, count: int = 4) -> str:
     """Step lines a rank prints, inside the stable window rule."""
     return "".join(
         titan_step_line(step, tps=tps)
@@ -522,14 +522,14 @@ class TornStepLineTests(unittest.TestCase):
     def test_the_warning_names_the_arm_the_rank_the_step_and_the_log_line(
         self,
     ) -> None:
-        cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        cut = titan_step_line(4)[:-60] + "[rank0]:USDT: profiler_stop\n"
         lines = [
-            "[rank0]:" + titan_step_line(2),
-            "[rank1]:" + titan_step_line(2),
             "[rank0]:" + titan_step_line(3),
-            "[rank1]:" + cut,
+            "[rank1]:" + titan_step_line(3),
             "[rank0]:" + titan_step_line(4),
-            "[rank1]:" + titan_step_line(4),
+            "[rank1]:" + cut,
+            "[rank0]:" + titan_step_line(5),
+            "[rank1]:" + titan_step_line(5),
         ]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
@@ -538,7 +538,7 @@ class TornStepLineTests(unittest.TestCase):
             )
             result = evaluate_run(out_dir)
         self.assertIn(
-            "baseline: rank 1 step 3: a rank prefix cut the step line "
+            "baseline: rank 1 step 4: a rank prefix cut the step line "
             "at line 4 of baseline.log, so the evaluation drops that step",
             result.warnings,
         )

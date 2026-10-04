@@ -172,15 +172,20 @@ def refuse_non_finite_trajectories(
         )
 
 
+SLOW_FIRST_STEP = 2
+"""The first step that the profiled rule would take; it runs 1.1 to 2.9 s slower than the later steps in every measured arm."""
+
+
 def stable_samples(
     samples: Sequence[StepSample], window: ProfileWindow
 ) -> list[StepSample]:
-    """The samples of a profiled run: the steps of each profiler cycle that carry no profiler cost."""
+    """The samples of a profiled run: the steps of each profiler cycle that carry no profiler cost, without ``SLOW_FIRST_STEP``."""
     wait = window.freq - window.warmup - window.active
     return [
         sample
         for sample in samples
         if 2 <= ((sample.step - 1) % window.freq) + 1 <= wait
+        and sample.step != SLOW_FIRST_STEP
     ]
 
 
