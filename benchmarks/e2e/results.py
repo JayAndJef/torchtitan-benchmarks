@@ -421,14 +421,18 @@ def rank_result(
     tokens_per_step: int,
     pp: int,
 ) -> RankResult:
-    """The figures of one rank: ``sampled`` gives every statistic, and ``steps`` gives the memory maximum."""
+    """The figures of one rank: ``sampled`` gives every statistic, and ``steps`` gives the memory maximum; a sampled rate that is not positive and finite raises ``ValueError``."""
     for sample in sampled:
-        if sample.tokens_per_second <= 0:
-            raise ValueError(
-                f"{arm}: rank {rank} logs {sample.tokens_per_second} tokens/s "
-                f"at sampled step {sample.step}; a sampled step must have a "
-                "positive rate"
-            )
+        for figure, value in (
+            ("tokens/s", sample.tokens_per_second),
+            *sample.extras.items(),
+        ):
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(
+                    f"{arm}: rank {rank} logs {figure} {value} at sampled step "
+                    f"{sample.step}; each rate of a sampled step must be "
+                    "positive and finite"
+                )
     rates = [sample.tokens_per_second for sample in sampled]
     memory = [sample.peak_memory_gib for sample in sampled]
     return RankResult(
