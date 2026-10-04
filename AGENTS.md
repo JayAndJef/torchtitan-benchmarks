@@ -410,7 +410,13 @@ binds each training process to the NUMA node of its GPU with
 `numactl --cpunodebind --membind`. The runner finds the node from the PCI
 bus id through sysfs. When that fails, or when the devices sit on two
 nodes, the run proceeds unpinned and `cpu_pinning` records why. Pinned and
-unpinned runs are not comparable. `--resume` refuses to mix them, and
+unpinned runs are not comparable.
+
+A Slurm job can hold part of the node's CPUs, or none of them. When the job
+holds part of them, the runner binds to that part with
+`numactl --physcpubind --membind`. When the job holds none of them, the run
+proceeds unpinned. Both cases record a different `cpu_pinning`, so they are
+not comparable with a run on the whole node. `--resume` refuses to mix them, and
 `results.json` warns when the arms of one run mix them.
 
 ## 6. Validation and evaluation

@@ -1290,6 +1290,9 @@ class CpuPinningTests(unittest.TestCase):
         node_dir = root / "bus/pci/devices" / device
         node_dir.mkdir(parents=True)
         (node_dir / "numa_node").write_text(node + "\n")
+        cpus_dir = root / f"devices/system/node/node{node}"
+        cpus_dir.mkdir(parents=True)
+        (cpus_dir / "cpulist").write_text("64-127,192-255\n")
         return root
 
     def test_pins_to_the_gpu_numa_node(self) -> None:
@@ -1297,7 +1300,9 @@ class CpuPinningTests(unittest.TestCase):
             "benchmarks.execution.affinity.run_text", return_value="00000000:E3:00.0\n"
         ), mock.patch("benchmarks.execution.affinity.shutil.which", return_value="/usr/bin/numactl"):
             sysfs = self._sysfs(Path(temporary), "0000:e3:00.0", "1")
-            pinning = resolve_cpu_pinning("7", sysfs_root=sysfs)
+            pinning = resolve_cpu_pinning(
+                "7", sysfs_root=sysfs, allowed_cpus=frozenset(range(256))
+            )
         self.assertEqual(
             pinning.prefix, ("numactl", "--cpunodebind=1", "--membind=1")
         )

@@ -421,13 +421,26 @@ class ProvenanceDeviceTests(unittest.TestCase):
                 self.assertEqual(self._metadata(gpu, query)[0], "nvidia-h200")
 
 
+NODE_CPULIST = {"0": "0-63,128-191\n", "1": "64-127,192-255\n"}
+"""The NUMA nodes of the test sysfs: two nodes of 128 CPUs each."""
+
+
 class AffinityDeviceTests(unittest.TestCase):
     def _sysfs(self, root: Path, device: str, node: str) -> None:
         path = root / "bus/pci/devices" / device
         path.mkdir(parents=True, exist_ok=True)
         (path / "numa_node").write_text(node)
+        node_dir = root / f"devices/system/node/node{node}"
+        node_dir.mkdir(parents=True, exist_ok=True)
+        (node_dir / "cpulist").write_text(NODE_CPULIST.get(node, "0-3"))
 
-    def _pinning(self, gpu: str, bus_ids: dict, root: Path) -> CpuPinning:
+    def _pinning(
+        self,
+        gpu: str,
+        bus_ids: dict,
+        root: Path,
+        allowed_cpus: frozenset[int] = frozenset(range(256)),
+    ) -> CpuPinning:
         def fake_run_text(command, **kwargs):
             index = command[1].removeprefix("--id=")
             return bus_ids[index]
@@ -435,7 +448,9 @@ class AffinityDeviceTests(unittest.TestCase):
         with mock.patch.object(
             affinity.shutil, "which", return_value="/usr/bin/numactl"
         ), mock.patch.object(affinity, "run_text", fake_run_text):
-            return resolve_cpu_pinning(gpu, sysfs_root=root)
+            return resolve_cpu_pinning(
+                gpu, sysfs_root=root, allowed_cpus=allowed_cpus
+            )
 
     def test_the_one_device_description_is_unchanged(self) -> None:
         """``--resume`` compares this string in every directory under out/."""
@@ -476,6 +491,43 @@ class AffinityDeviceTests(unittest.TestCase):
             )
         self.assertEqual(pinning.prefix, ())
         self.assertEqual(pinning.description, "none: devices 0,1 span NUMA nodes 0,1")
+
+    def test_a_job_with_part_of_the_node_pins_to_that_part(self) -> None:
+        """A Slurm job gave GPU 3 the CPUs 0-7, 64-71, 128-135 and 192-199."""
+        allowed = frozenset(
+            [*range(0, 8), *range(64, 72), *range(128, 136), *range(192, 200)]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._sysfs(root, "0000:1b:00.0", "0")
+            pinning = self._pinning(
+                "0", {"0": "00000000:1B:00.0\n"}, root, allowed_cpus=allowed
+            )
+        self.assertEqual(
+            pinning.prefix,
+            ("numactl", "--physcpubind=0-7,128-135", "--membind=0"),
+        )
+        self.assertEqual(
+            pinning.description, "numactl --physcpubind=0-7,128-135 --membind=0"
+        )
+
+    def test_a_job_with_no_cpu_of_the_node_runs_unpinned_and_says_so(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._sysfs(root, "0000:1b:00.0", "0")
+            pinning = self._pinning(
+                "0",
+                {"0": "00000000:1B:00.0\n"},
+                root,
+                allowed_cpus=frozenset(range(64, 72)),
+            )
+        self.assertEqual(pinning.prefix, ())
+        self.assertEqual(
+            pinning.description,
+            "none: the process may use no CPU of NUMA node 0",
+        )
 
     def test_one_unresolvable_device_decides_the_whole_set(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
