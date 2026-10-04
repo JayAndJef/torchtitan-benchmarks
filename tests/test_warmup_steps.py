@@ -97,7 +97,7 @@ class MeasuredSamplesTests(unittest.TestCase):
         """The two rules are two figures, not one figure read two ways."""
         samples = _samples(40)
         self.assertEqual(len(measured_samples(samples, 10)), 30)
-        self.assertEqual(len(stable_samples(samples, ENGINES.window)), 18)
+        self.assertEqual(len(stable_samples(samples, ENGINES.window)), 17)
 
 
 class StepFloorTests(unittest.TestCase):
@@ -204,7 +204,7 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
             (ENGINES.arm("titan_eager"),),
         )
         # Step 1 is fast, every later step is slow. The profiled rule drops
-        # step 1 and keeps steps 2..10; a warmup of 1 keeps steps 2..12.
+        # steps 1 and 2 and keeps steps 3..10; a warmup of 1 keeps steps 2..12.
         (root / "titan_eager.log").write_text(
             "".join(
                 titan_step_line(step, tps=9000 if step == 1 else 1000)
@@ -219,7 +219,7 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
                 Path(temporary), profile=False, warmup_steps=1
             )
             summary = evaluate_run(root).results["titan_eager"]
-        # Steps 2..12: eleven samples, where the profiled rule takes nine.
+        # Steps 2..12: eleven samples, where the profiled rule takes eight.
         self.assertEqual(summary.stable_sample_count, 11)
         self.assertEqual(summary.stable_tokens_per_second, 1000)
 
@@ -227,8 +227,8 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = self._build(Path(temporary), profile=True, warmup_steps=None)
             summary = evaluate_run(root).results["titan_eager"]
-        # Steps 2..10 of the one cycle this log holds.
-        self.assertEqual(summary.stable_sample_count, 9)
+        # Steps 3..10 of the one cycle this log holds; step 2 is the slow first step.
+        self.assertEqual(summary.stable_sample_count, 8)
 
 
 if __name__ == "__main__":
