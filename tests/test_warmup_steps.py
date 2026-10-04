@@ -220,15 +220,15 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
             )
             summary = evaluate_run(root).results["titan_eager"]
         # Steps 2..12: eleven samples, where the profiled rule takes eight.
-        self.assertEqual(summary.stable_sample_count, 11)
-        self.assertEqual(summary.stable_tokens_per_second, 1000)
+        self.assertEqual(summary.sample_count, 11)
+        self.assertEqual(summary.tokens_per_second.median, 1000)
 
     def test_a_profiled_run_still_reads_the_profiler_rule(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = self._build(Path(temporary), profile=True, warmup_steps=None)
             summary = evaluate_run(root).results["titan_eager"]
         # Steps 3..10 of the one cycle this log holds; step 2 is the slow first step.
-        self.assertEqual(summary.stable_sample_count, 8)
+        self.assertEqual(summary.sample_count, 8)
 
 
 if __name__ == "__main__":

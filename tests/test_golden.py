@@ -35,7 +35,7 @@ from benchmarks.artifacts.manifests import current_manifest, load_run_record
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.overrides import parse_override
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.results import evaluate_run
+from benchmarks.e2e.results import RESULTS_SCHEMA_VERSION, evaluate_run
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.execution.launcher import LAUNCHER_KEYS
@@ -581,6 +581,62 @@ def expected_evaluation(run_dir: Path) -> dict[str, Any]:
     return record
 
 
+def schema_6_view(actual: dict[str, Any]) -> dict[str, Any]:
+    """The schema 6 record inside a schema 7 evaluation.
+
+    Plan A.5 to A.7 regroup the figures: schema 7 publishes each statistic
+    at its own slowest rank and keeps each rank's sampled steps. Schema 6
+    published every figure at the rank with the lowest median tokens/s,
+    which is the schema 7 ``median_rank`` of tokens/s, and it kept each
+    rank's step costs as a bare series. The view drops every figure that
+    schema 6 did not have; ``test_every_schema_7_figure_follows_from_the_steps``
+    checks those.
+    """
+    if actual["schema_version"] != RESULTS_SCHEMA_VERSION:
+        raise AssertionError(f"the evaluation records schema {actual['schema_version']}")
+    results = {}
+    for arm, result in actual["results"].items():
+        rows = {
+            row["rank"]: {
+                "rank": row["rank"],
+                "stable_tokens_per_second": row["tokens_per_second"]["median"],
+                "stable_sample_count": len(row["steps"]),
+                "step_ms": {
+                    "mean": row["step_ms"]["mean"],
+                    "median": row["step_ms"]["median"],
+                    "p95": row["step_ms"]["p95"],
+                    "series": [step["step_ms"] for step in row["steps"]],
+                },
+            }
+            for row in result["per_rank"]
+        }
+        published = result["tokens_per_second"]["median_rank"]
+        results[arm] = {
+            "stable_tokens_per_second": result["tokens_per_second"]["median"],
+            "stable_sample_count": result["sample_count"],
+            "peak_memory_gib": result["peak_memory_gib"]["max"],
+            "step_ms": rows[published]["step_ms"],
+            "rank_reduction": "min_over_ranks",
+            "published_rank": published,
+            "per_rank": list(rows.values()),
+        }
+    return {**actual, "schema_version": 6, "results": results}
+
+
+def sampled_steps_by_hand(run_dir: Path) -> list[int]:
+    """The steps that the sample rule of the run takes, restated from the plan: steps 3 to 10 of each 20-step cycle, or every step after the warmup."""
+    run = load_run_record(run_dir).run
+    steps = range(1, run.data.steps + 1)
+    if not run.profile:
+        return [step for step in steps if step > run.warmup_steps]
+    wait = run.window.freq - run.window.warmup - run.window.active
+    return [
+        step
+        for step in steps
+        if 2 <= (step - 1) % run.window.freq + 1 <= wait and step != 2
+    ]
+
+
 def evaluation(run_dir: Path) -> dict[str, Any]:
     """The evaluation of one run directory, with its own path as a placeholder."""
     result = evaluate_run(run_dir).to_dict()
@@ -627,22 +683,95 @@ class GoldenEvaluationTest(unittest.TestCase):
                 self.assertTrue((run_dir / EXPECTED_RESULTS).is_file())
 
     def test_every_run_directory_evaluates_to_its_expected_results(self) -> None:
-        """The written text matches byte for byte, with every accepted difference applied and without the ``extras`` of each arm, which the baseline did not have."""
+        """The schema 6 view of the evaluation matches the golden text byte for byte, with every accepted difference applied."""
         for run_dir in sorted(path for path in RUNS_DIR.iterdir() if path.is_dir()):
             if run_dir.name in ACCEPTED_REFUSALS:
                 continue
             with self.subTest(run=run_dir.name):
-                actual = evaluation(run_dir)
-                for arm, result in actual["results"].items():
-                    extras = result.pop("extras")
-                    self.assertEqual(
-                        list(extras), [ENGINE_BY_ARM[arm]], f"{arm} extras"
-                    )
-                    self.assertEqual(sorted(extras[ENGINE_BY_ARM[arm]]), ["mfu", "tflops"])
+                actual = schema_6_view(evaluation(run_dir))
                 self.assertEqual(
                     json.dumps(actual, indent=2, allow_nan=False) + "\n",
                     json.dumps(expected_evaluation(run_dir), indent=2, allow_nan=False)
                     + "\n",
+                )
+
+    def test_every_schema_7_figure_follows_from_the_steps(self) -> None:
+        """Each rank holds the sampled steps of the plan's rule, each statistic follows from them, and each arm statistic is at its worst rank."""
+        for run_dir in sorted(path for path in RUNS_DIR.iterdir() if path.is_dir()):
+            if run_dir.name in ACCEPTED_REFUSALS:
+                continue
+            run = load_run_record(run_dir).run
+            tokens_per_step = run.data.local_batch_size * run.data.seq_len
+            expected_steps = sampled_steps_by_hand(run_dir)
+            for arm, result in evaluation(run_dir)["results"].items():
+                with self.subTest(run=run_dir.name, arm=arm):
+                    self._check_arm(
+                        result,
+                        engine=ENGINE_BY_ARM[arm],
+                        expected_steps=expected_steps,
+                        tokens_per_step=tokens_per_step,
+                        pp=run.parallelism.pp,
+                    )
+
+    def _check_arm(
+        self,
+        result: dict[str, Any],
+        *,
+        engine: str,
+        expected_steps: list[int],
+        tokens_per_step: int,
+        pp: int,
+    ) -> None:
+        self.assertEqual(result["sample_count"], len(expected_steps))
+        self.assertEqual(result["rank_reduction"], "slowest_rank_per_statistic")
+        by_rank = {row["rank"]: row for row in result["per_rank"]}
+        for row in result["per_rank"]:
+            steps = row["steps"]
+            self.assertEqual([step["step"] for step in steps], expected_steps)
+            for step in steps:
+                self.assertEqual(
+                    step["step_ms"],
+                    1000.0 * tokens_per_step / (step["tokens_per_second"] * pp),
+                )
+            rates = [step["tokens_per_second"] for step in steps]
+            self.assertEqual(row["tokens_per_second"]["median"], statistics.median(rates))
+            self.assertAlmostEqual(
+                row["tokens_per_second"]["mean"],
+                len(rates) / sum(1 / rate for rate in rates),
+                places=6,
+            )
+            memory = [step["peak_memory_gib"] for step in steps]
+            self.assertEqual(row["peak_memory_gib"]["median"], statistics.median(memory))
+            self.assertAlmostEqual(row["peak_memory_gib"]["mean"], sum(memory) / len(memory))
+            self.assertGreaterEqual(row["peak_memory_gib"]["max"], max(memory))
+            self.assertEqual(sorted(row["extras"]), ["mfu", "tflops"])
+            for name, figure in row["extras"].items():
+                values = [step["extras"][name] for step in steps]
+                self.assertEqual(figure["median"], statistics.median(values))
+                self.assertAlmostEqual(
+                    figure["mean"], len(values) / sum(1 / value for value in values)
+                )
+        for figure, highest, names in (
+            ("tokens_per_second", False, ("median", "mean")),
+            ("step_ms", True, ("median", "mean", "p95")),
+            ("peak_memory_gib", True, ("max", "median", "mean")),
+        ):
+            for name in names:
+                values = {rank: row[figure][name] for rank, row in by_rank.items()}
+                worst = max(values.values()) if highest else min(values.values())
+                rank = result[figure][f"{name}_rank"]
+                self.assertEqual(result[figure][name], worst, f"{figure} {name}")
+                self.assertEqual(values[rank], worst, f"{figure} {name}_rank")
+                self.assertEqual(rank, min(r for r, v in values.items() if v == worst))
+        self.assertEqual(list(result["extras"]), [engine])
+        for name, figure in result["extras"][engine].items():
+            for statistic in ("median", "mean"):
+                values = {
+                    rank: row["extras"][name][statistic] for rank, row in by_rank.items()
+                }
+                self.assertEqual(figure[statistic], min(values.values()))
+                self.assertEqual(
+                    values[figure[f"{statistic}_rank"]], min(values.values())
                 )
 
     def test_every_accepted_refusal_is_refused_and_on_record(self) -> None:
