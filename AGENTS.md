@@ -371,7 +371,7 @@ skips the arms that pass, archives the partial artifacts under
 out/<timestamp>/<scenario>/<hardware>/
   manifest.json     # schema 20
   run_state.json    # per-arm status, attempts, evaluation status
-  results.json      # schema 6
+  results.json      # schema 7
   <arm>.log         # training stdout and stderr, every rank
   <arm>/profiling/traces/iteration_*/rank<n>_trace.json.gz   # --profile only
   attempts/<ts>/<arm>/   # archived artifacts of a failed attempt
@@ -393,8 +393,8 @@ refuses any other version by name.
 A provenance probe that fails records `unavailable: <error>` and does not
 stop the run. A device list of two GPU models stops it.
 
-The tokens/s of a step sample, and `stable_tokens_per_second`, are **per
-device**. Both engines divide one rank's token count by `cp * tp * pp`. The
+The tokens/s of a step sample, and each tokens/s figure of `results.json`,
+are **per device**. Both engines divide one rank's token count by `cp * tp * pp`. The
 data-parallel degree is absent from that divisor, because each
 data-parallel rank reads a batch of its own. The manifest records the
 definition as `throughput_definition`.
@@ -511,16 +511,59 @@ ranks:
   the step and the log line. Validation does not fail on it.
 - When a whole step line comes first, the reader reads it.
 - **A known gap:** when a whole step line of one rank comes after the text
-  of another rank on one log line, the step is lost with no warning.
-  Per-rank log files would remove this gap.
+  of another rank on one log line, the reader loses the step with no
+  warning. Per-rank log files would remove this gap.
 
-`results.json` is schema 6. Per arm it carries `stable_tokens_per_second`,
-`stable_sample_count`, `peak_memory_gib`, `step_ms` with `mean`, `median`,
-`p95` and `series`, plus `rank_reduction`, `published_rank`, a `per_rank`
-list and `extras`. The `extras` of an arm hold the engine's name, and under
-it the median of each extra figure over the published rank's sampled steps.
-Do not compare an extra across engines, because each engine computes its
-own. The file also carries `losses`, `gradient_norms` and `warnings`.
+A lost step that the sample rule takes refuses the arm, as the lost-step
+refusal below states. A lost step outside the sample rule changes no figure.
+
+The sample rule follows the recorded axis.
+`benchmarks.e2e.results:measured_samples` takes every step after the warmup
+in an unprofiled run. `benchmarks.e2e.results:stable_samples` takes the
+steps of each profiler cycle that carry no profiler cost, without step 2.
+Step 2 is the first step of that rule, and it runs slow in every measured
+arm. So an 80-step profiled run samples 35 steps: 3 to 10, 22 to 30, 42 to
+50 and 62 to 70. The two rules give different figures, not two readings of
+one figure.
+
+**The lost-step refusal.** `benchmarks.e2e.results:sampled_steps` lists the
+steps that the rule takes from the run's step count.
+`benchmarks.e2e.results:refuse_lost_steps` refuses the arm when a rank lacks
+one of them, before the evaluation computes a figure. The error names the
+arm, the rank and the step, and the evaluation writes no `results.json`.
+So every rank holds the same sampled steps.
+
+`results.json` is schema 7, the value of
+`benchmarks.e2e.results:RESULTS_SCHEMA_VERSION`. Per arm it carries these
+keys:
+
+- `sample_count`: the sampled steps of each rank.
+- `tokens_per_second`: the `median` and the `mean`, each with its rank as
+  `median_rank` and `mean_rank`.
+- `step_ms`: the same four keys, plus the `p95` and its `p95_rank`.
+- `peak_memory_gib`: the same four keys, plus the `max` over every step and
+  rank and its `max_rank`. The median and the mean read the per-step peaks
+  of the sampled steps.
+- `extras`: the engine's name, and under it the same four keys for each
+  extra figure. Do not compare an extra across engines, because each engine
+  computes its own.
+- `rank_reduction`: `slowest_rank_per_statistic`.
+- `per_rank`: each rank's own statistics, and a `steps` table with the
+  step, the tokens/s, the step time, the peak memory and the extras of each
+  sampled step.
+
+The file also carries `losses`, `gradient_norms` and `warnings`.
+
+Each figure has two statistics of equal weight. The median is
+`statistics.median` of the per-step values. The mean of a rate is the total
+over the total time: for tokens/s, the total tokens over the total step
+time. `benchmarks.e2e.results:rate_mean` computes it as the harmonic mean of
+the per-step rates, because each step of one rank holds the same token
+count. TFLOPS and MFU are rates too, so they take the same mean.
+
+The mean of a step time or of a memory figure is the arithmetic mean. A
+host stall pulls the mean below the median, so state which statistic a
+figure is.
 
 `benchmarks.e2e.results:step_ms` derives the step cost from the throughput:
 
@@ -528,24 +571,24 @@ own. The file also carries `losses`, `gradient_norms` and `warnings`.
 step_ms = 1000 * local_batch_size * seq_len / (tps * pp)
 ```
 
-The published rank is the **slowest** rank, never the mean. A parallel
-schedule locks the ranks together at every step boundary, so the mesh runs
-at the pace of its slowest rank. `peak_memory_gib` is the maximum over the
-ranks. The 95th percentile uses the nearest-rank method, so it is always a
-measured step.
+Each statistic is published at the **slowest** rank for that statistic,
+never as a mean over the ranks. A parallel schedule locks the ranks together
+at every step boundary, so the mesh runs at the pace of its slowest rank.
+The slowest rank has the lowest tokens/s or extra, and the highest step time
+or memory. The evaluation finds it separately for each figure and each
+statistic, so the median and the mean can name two ranks. A tie goes to the
+lower rank.
 
-The sample rule follows the recorded axis.
-`benchmarks.e2e.results:measured_samples` takes every step after the warmup
-in an unprofiled run. `benchmarks.e2e.results:stable_samples` takes the
-steps of each profiler cycle that carry no profiler cost. The two figures
-are different figures, not two readings of one.
+The 95th percentile uses the nearest-rank method, so it is always a measured
+step.
 
 `benchmarks.e2e.results:refuse_non_finite_trajectories` fails an arm whose
 step samples carry a `nan` or an `inf` on any rank. A run that diverged
 publishes no throughput. The stock driver records a `nan` gradient norm on
 a step that Megatron skipped, so the refusal also refuses a skipped step.
 
-The evaluation warns when tokens/s spreads more than 1.15x across ranks, and
+The evaluation warns when the median tokens/s spreads more than 1.15x across
+ranks, and
 when the arms of one run mix pinned and unpinned processes. It also repeats
 the warnings that the runner printed.
 

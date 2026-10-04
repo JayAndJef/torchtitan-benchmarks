@@ -248,7 +248,7 @@ def refuse_non_finite_trajectories(
 
 
 SLOW_FIRST_STEP = 2
-"""The first step that the profiled rule would take; it runs 1.1 to 2.9 s slower than the later steps in every measured arm."""
+"""The first step that the profiled rule would take; it runs slower than the steps after it in every measured arm."""
 
 
 def _stable_step(step: int, window: ProfileWindow) -> bool:
