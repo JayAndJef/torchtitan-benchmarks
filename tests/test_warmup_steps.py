@@ -200,7 +200,7 @@ class EvaluationPicksTheRuleTests(unittest.TestCase):
         run = _run(profile, warmup_steps)
         write_run_manifest(
             root,
-            replace(run, data=replace(run.data, seq_len=1024)),
+            replace(run, data=replace(run.data, seq_len=1024, steps=12)),
             (ENGINES.arm("titan_eager"),),
         )
         # Step 1 is fast, every later step is slow. The profiled rule drops

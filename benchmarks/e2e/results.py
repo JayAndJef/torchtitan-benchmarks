@@ -14,7 +14,13 @@ from benchmarks.artifacts.layout import atomic_write_json, logs_by_rank
 from benchmarks.artifacts.manifests import ArmRecord, load_run_record
 from benchmarks.artifacts.summaries import _value
 from benchmarks.e2e.checks import run_warnings
-from benchmarks.e2e.engines.api import Arm, ProfileWindow, StepRead, StepSample
+from benchmarks.e2e.engines.api import (
+    Arm,
+    ProfileWindow,
+    RunSpec,
+    StepRead,
+    StepSample,
+)
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.evidence import non_finite_refusals, rank_steps
 from benchmarks.execution.affinity import is_pinned
@@ -176,17 +182,17 @@ SLOW_FIRST_STEP = 2
 """The first step that the profiled rule would take; it runs 1.1 to 2.9 s slower than the later steps in every measured arm."""
 
 
+def _stable_step(step: int, window: ProfileWindow) -> bool:
+    """Whether the profiled rule takes ``step``."""
+    wait = window.freq - window.warmup - window.active
+    return 2 <= ((step - 1) % window.freq) + 1 <= wait and step != SLOW_FIRST_STEP
+
+
 def stable_samples(
     samples: Sequence[StepSample], window: ProfileWindow
 ) -> list[StepSample]:
     """The samples of a profiled run: the steps of each profiler cycle that carry no profiler cost, without ``SLOW_FIRST_STEP``."""
-    wait = window.freq - window.warmup - window.active
-    return [
-        sample
-        for sample in samples
-        if 2 <= ((sample.step - 1) % window.freq) + 1 <= wait
-        and sample.step != SLOW_FIRST_STEP
-    ]
+    return [sample for sample in samples if _stable_step(sample.step, window)]
 
 
 def measured_samples(
@@ -194,6 +200,58 @@ def measured_samples(
 ) -> list[StepSample]:
     """The samples of an unprofiled run: every step after the warmup."""
     return [sample for sample in samples if sample.step > warmup_steps]
+
+
+def run_samples(run: RunSpec, samples: Sequence[StepSample]) -> list[StepSample]:
+    """The samples that the run's own rule takes: ``stable_samples`` when the run is profiled, else ``measured_samples``."""
+    if run.profile:
+        return stable_samples(samples, run.window)
+    return measured_samples(samples, run.warmup_steps)
+
+
+def sampled_steps(run: RunSpec) -> tuple[int, ...]:
+    """The steps that the run's rule takes from a rank that logs every step, from step 1 to the run's last step."""
+    if run.profile:
+        return tuple(
+            step
+            for step in range(1, run.data.steps + 1)
+            if _stable_step(step, run.window)
+        )
+    return tuple(range(run.warmup_steps + 1, run.data.steps + 1))
+
+
+def lost_step_refusals(
+    run: RunSpec, sampled: Mapping[int, Sequence[StepSample]]
+) -> list[str]:
+    """The first lost sampled step of each rank, or its first sampled step past the run; a rank absent from ``sampled`` logged none."""
+    expected = sampled_steps(run)
+    if not expected:
+        return [f"the sample rule takes none of the run's {run.data.steps} steps"]
+    refusals = []
+    for rank in sorted(set(range(run.parallelism.world_size)) | set(sampled)):
+        found = {sample.step for sample in sampled.get(rank, ())}
+        lost = [step for step in expected if step not in found]
+        extra = sorted(found.difference(expected))
+        if lost:
+            refusals.append(f"rank {rank} lacks sampled step {lost[0]}")
+        elif extra:
+            refusals.append(
+                f"rank {rank} logs sampled step {extra[0]}, and the run has "
+                f"{run.data.steps} steps"
+            )
+    return refusals
+
+
+def refuse_lost_steps(
+    arm: str, run: RunSpec, sampled: Mapping[int, Sequence[StepSample]], log_path: Path
+) -> None:
+    """Raise ``ValueError`` when a rank lacks a step that the sample rule takes, so that every rank holds the same sampled steps."""
+    refusals = lost_step_refusals(run, sampled)
+    if refusals:
+        raise ValueError(
+            f"{arm}: {'; '.join(refusals)}; every rank must log every sampled "
+            f"step, so no results.json is written for it (see {log_path})"
+        )
 
 
 def extras_medians(samples: Sequence[StepSample]) -> dict[str, float]:
@@ -297,19 +355,12 @@ def evaluate_run(
         arm: {rank: list(read.samples) for rank, read in by_rank.items()}
         for arm, by_rank in reads.items()
     }
-    if run.profile:
-        def _samples(samples: list[StepSample]) -> list[StepSample]:
-            return stable_samples(samples, run.window)
-    else:
-        warmup_steps = run.warmup_steps
-
-        def _samples(samples: list[StepSample]) -> list[StepSample]:
-            return measured_samples(samples, warmup_steps)
-
     sampled = {
-        arm: {rank: _samples(samples) for rank, samples in by_rank.items()}
+        arm: {rank: run_samples(run, samples) for rank, samples in by_rank.items()}
         for arm, by_rank in steps.items()
     }
+    for arm in arms:
+        refuse_lost_steps(arm, run, sampled[arm], out_dir / f"{arm}.log")
     tps_samples = {
         arm: {
             rank: [sample.tokens_per_second for sample in samples]

@@ -547,6 +547,32 @@ ACCEPTED_EVALUATION_DIFFERENCES = (
 """The changes from the baseline evaluation that the plan names."""
 
 
+@dataclass(frozen=True)
+class AcceptedRefusal:
+    """A golden run directory that the current code refuses to evaluate, and its reason."""
+
+    reason: str
+    arm: str
+    rank: int
+    """The rank that lacks a sampled step."""
+    error: str
+    """The start of the refusal."""
+
+
+ACCEPTED_REFUSALS = {
+    "dp4-ep4-titan-compiled-profile": AcceptedRefusal(
+        "Plan A.4: the evaluation refuses an arm when a rank lacks a sampled "
+        "step. A log line of NUL and other bytes lost step 42 of rank 3 "
+        "with no warning, and the baseline published rank 3 from one sample "
+        "fewer than the others.",
+        arm="titan_compiled",
+        rank=3,
+        error="titan_compiled: rank 3 lacks sampled step 42; ",
+    ),
+}
+"""The golden run directories that the plan refuses, by name."""
+
+
 def expected_evaluation(run_dir: Path) -> dict[str, Any]:
     """The golden results of one run directory, with every accepted evaluation difference applied."""
     record = json.loads((run_dir / EXPECTED_RESULTS).read_text())
@@ -603,6 +629,8 @@ class GoldenEvaluationTest(unittest.TestCase):
     def test_every_run_directory_evaluates_to_its_expected_results(self) -> None:
         """The written text matches byte for byte, with every accepted difference applied and without the ``extras`` of each arm, which the baseline did not have."""
         for run_dir in sorted(path for path in RUNS_DIR.iterdir() if path.is_dir()):
+            if run_dir.name in ACCEPTED_REFUSALS:
+                continue
             with self.subTest(run=run_dir.name):
                 actual = evaluation(run_dir)
                 for arm, result in actual["results"].items():
@@ -616,6 +644,27 @@ class GoldenEvaluationTest(unittest.TestCase):
                     json.dumps(expected_evaluation(run_dir), indent=2, allow_nan=False)
                     + "\n",
                 )
+
+    def test_every_accepted_refusal_is_refused_and_on_record(self) -> None:
+        """The golden record of a refused directory shows the lost sample: the rank holds one sample fewer than each other rank."""
+        for name, refusal in ACCEPTED_REFUSALS.items():
+            run_dir = RUNS_DIR / name
+            with self.subTest(run=name):
+                with self.assertRaises(ValueError) as caught:
+                    evaluate_run(run_dir)
+                self.assertTrue(
+                    str(caught.exception).startswith(refusal.error),
+                    str(caught.exception),
+                )
+                golden = json.loads((run_dir / EXPECTED_RESULTS).read_text())
+                counts = {
+                    row["rank"]: row["stable_sample_count"]
+                    for row in golden["results"][refusal.arm]["per_rank"]
+                }
+                others = {
+                    count for rank, count in counts.items() if rank != refusal.rank
+                }
+                self.assertEqual(others, {counts[refusal.rank] + 1})
 
     def test_an_unchanged_record_writes_the_golden_text(self) -> None:
         """The comparison above dumps the golden record again, so a dump with no difference applied must give the file's own text."""

@@ -318,11 +318,12 @@ class TracelessEvaluationTests(unittest.TestCase):
                 warmup_steps=3,
                 seq_len=1024,
                 local_batch_size=4,
+                steps=5,
             ),
             (ENGINES.arm("titan_eager"),),
         )
         (root / "titan_eager.log").write_text(
-            "".join(titan_step_line(step) for step in range(2, 6))
+            "".join(titan_step_line(step) for step in range(1, 6))
         )
         return root
 
