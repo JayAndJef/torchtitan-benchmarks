@@ -54,6 +54,7 @@ from benchmarks.e2e.results import (  # noqa: E402
     extras_statistics,
     loss_visible_rank,
     lost_step_refusals,
+    rank_result,
     rate_mean,
     refuse_non_finite_trajectories,
     render_evaluation,
@@ -1043,9 +1044,47 @@ class MeanAndMedianTests(unittest.TestCase):
 
     def test_a_sampled_step_without_a_rate_is_refused(self) -> None:
         with self.assertRaisesRegex(
-            ValueError, r"baseline: rank 0 logs 0 tokens/s at sampled step 4"
+            ValueError, r"baseline: rank 0 logs tokens/s 0 at sampled step 4; "
         ):
             self._evaluate({0: self._lines({4: 0})})
+
+    def _rank_result(self, tokens_per_second: float, extras: dict[str, float]):
+        sample = StepSample(
+            rank=0,
+            step=4,
+            tokens_per_second=tokens_per_second,
+            peak_memory_gib=3.0,
+            loss=1.0,
+            grad_norm=2.0,
+            extras=extras,
+        )
+        return rank_result(
+            "baseline", 0, [sample], [sample], tokens_per_step=4096, pp=1
+        )
+
+    def test_a_non_finite_tokens_per_second_is_refused(self) -> None:
+        for value in (float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                rf"^baseline: rank 0 logs tokens/s {value} at sampled step 4; ",
+            ):
+                self._rank_result(value, {"tflops": 12.5})
+
+    def test_an_extra_that_is_not_a_positive_finite_rate_is_refused(self) -> None:
+        for value in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                rf"^baseline: rank 0 logs mfu {value} at sampled step 4; ",
+            ):
+                self._rank_result(1000, {"tflops": 12.5, "mfu": value})
+
+    def test_a_zero_extra_on_an_unsampled_step_refuses_nothing(self) -> None:
+        # Step 1 is outside the sample rule.
+        first = titan_step_line(1).replace("mfu: 1.26%", "mfu: 0.00%")
+        self.assertNotEqual(first, titan_step_line(1))
+        lines = self._lines({}).replace(titan_step_line(1), first)
+        summary = self._evaluate({0: lines})
+        self.assertEqual(summary.extras["torchtitan"]["mfu"].median, 1.26)
 
 
 class StepMsArithmeticTests(unittest.TestCase):
