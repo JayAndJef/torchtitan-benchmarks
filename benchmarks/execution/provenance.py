@@ -1,58 +1,4 @@
-"""The hardware and source-revision facts recorded in every manifest.
-
-``hardware_metadata`` produces the manifest's ``hardware_metadata`` block --
-the requested GPU, the ``nvidia-smi`` identity line, the torch version, the
-TorchTitan, benchmarks and Megatron revisions, and the TransformerEngine
-version --
-and, as a second job, resolves ``--hardware auto`` into the slugified GPU
-name used as the output-directory label. The two travel together because both
-are read out of the same ``nvidia-smi`` query, and issuing it twice would let
-the label and the recorded identity disagree.
-
-The query covers **every** device the run asked for. ``nvidia-smi --id=``
-accepts the comma list verbatim and answers one line per device, so a
-one-device run issues the command it always issued and records the same
-string. A run over several devices records every line, and
-``hardware_metadata`` **raises** when two of them name different models: one
-label and one ``model_shape`` describe the whole run, so a mixed device set
-is not one measurement. That raise is the single exception to the rule
-below, and it is deliberate -- it reports a fact about the request rather
-than a failure to collect one.
-
-**The check is conditional on a well-formed answer**, and ``_device_names``
-below states exactly when it stands down. A query that did not return one
-line per requested device is a diagnostic rather than a device roster, so it
-is recorded and the run goes on. That keeps a warning line on stderr from
-killing a one-device run, which is the case every published number comes
-from.
-
-Every lookup here shells out through ``run_text``, which returns
-``"unavailable: <error>"`` rather than raising. That is deliberate:
-collecting provenance must never be the thing that fails a run. The string is
-honest about what happened, and because ``_resume_mismatches`` compares
-``nvidia_smi``, ``torchtitan_git_rev``, ``benchmarks_git_rev`` and
-``megatron_git_rev`` verbatim, an "unavailable" value is still a resume
-boundary rather than a hole in one.
-
-``cudnn_torch_build`` and ``cudnn_loader_resolves`` are recorded separately
-and on purpose. TransformerEngine's ``DT_NEEDED`` entries carry no
-``RUNPATH``, and torch loads its own cuDNN lazily, so on a host that ships
-cuDNN in a system directory the loader binds that copy for TE rather than
-the wheel torch is pinned against. Which cuDNN a megatron arm runs is
-therefore decided by the host, not by the pin, and until 2026-08-20 no
-manifest recorded it. The two fields are collected but **not** yet compared
-by ``_resume_mismatches``: recording the boundary and gating on it are
-separate decisions, and older manifests carry neither field.
-
-Separate from ``environment.py`` because it changes for a different reason. A
-new entry here is a manifest-schema decision -- ``megatron_git_rev`` and
-``te_version`` were both added that way, and every one of these fields is
-something a published number has to be cited with -- while a new entry there
-is a subprocess-configuration decision. The Megatron revision is collected
-for every run, pure-titan scenarios included, because
-``benchmarks.models.piper_qwen3.megatron_bootstrap`` never imports Megatron
-itself: the cost is one ``git rev-parse``.
-"""
+"""The hardware facts and the source revisions that every manifest records."""
 
 from __future__ import annotations
 
@@ -65,6 +11,7 @@ from benchmarks.execution.paths import RuntimePaths
 
 
 def _megatron_git_rev() -> str:
+    """The revision of the Megatron-LM checkout."""
     try:
         from benchmarks.models.piper_qwen3.megatron_bootstrap import megatron_git_rev
     except ImportError as error:
@@ -73,6 +20,7 @@ def _megatron_git_rev() -> str:
 
 
 def _te_version() -> str:
+    """The installed TransformerEngine version."""
     import importlib.metadata
 
     try:
@@ -99,12 +47,7 @@ else:
 
 
 def _cudnn_torch_build() -> str:
-    """The cuDNN version torch was compiled against.
-
-    Read through ``getCompileVersion`` rather than ``backends.cudnn.version``,
-    because the latter raises whenever the resolved runtime is older, which is
-    the very case this field exists to record.
-    """
+    """The cuDNN version that torch was built against; ``getCompileVersion`` reads it, because ``backends.cudnn.version`` raises when the runtime is older."""
     return run_text(
         [
             sys.executable,
@@ -116,12 +59,12 @@ def _cudnn_torch_build() -> str:
 
 
 def _cudnn_loader_resolves() -> str:
-    """The cuDNN the dynamic loader binds, which is the one TE gets."""
+    """The cuDNN library that the dynamic loader binds, which TransformerEngine uses."""
     return run_text([sys.executable, "-c", _CUDNN_LOADER_PROBE]).strip()
 
 
 def run_text(command: list[str], *, cwd: Path | None = None) -> str:
-    """Run a metadata command, returning a diagnostic instead of failing."""
+    """The output of a provenance command; a failure gives ``unavailable: <error>`` and does not raise."""
     try:
         return subprocess.check_output(
             command, text=True, stderr=subprocess.STDOUT, cwd=cwd
@@ -131,26 +74,7 @@ def run_text(command: list[str], *, cwd: Path | None = None) -> str:
 
 
 def _device_names(gpu: str, query: str) -> list[str]:
-    """The model name each ``nvidia-smi`` line reports.
-
-    **Not in the order the devices were requested.** ``nvidia-smi`` sorts its
-    answer by index, so ``--id=1,0`` reports device 0 first. Only the set and
-    the first entry are read here, so the order does not matter -- but do not
-    index this list by rank.
-
-    Empty unless the query answered with exactly one line per requested
-    device. ``run_text`` returns ``"unavailable: <error>"`` on any failure,
-    and a merged stderr can carry a warning line ahead of the data; neither
-    is a device roster, and reading one as a roster would let a degraded box
-    raise below. Every such case returns an empty list instead, which keeps
-    the rule that collecting provenance never fails a run.
-
-    **That guard also disarms the model check on a degraded multi-device
-    query**, and the trade is deliberate: a mixed set plus one stray stderr
-    line is recorded rather than refused. Refusing a one-device run over a
-    warning line is the worse failure, because every published number so far
-    is a one-device run.
-    """
+    """The GPU model on each line of the ``nvidia-smi`` query, in index order; an empty list when the query does not give one line per device."""
     names = [
         line.split(",")[1].strip() for line in query.splitlines() if "," in line
     ]
@@ -160,9 +84,7 @@ def _device_names(gpu: str, query: str) -> list[str]:
 def hardware_metadata(
     paths: RuntimePaths, gpu: str, hardware_label: str
 ) -> tuple[str, dict[str, str]]:
-    """Collect the hardware and source provenance stored in the manifest."""
-    # One query for every requested device. --id= takes the comma list as
-    # typed, so a single-device run issues exactly the command it always did.
+    """The hardware label and the ``hardware_metadata`` block of a manifest; a device set of two GPU models raises."""
     query = run_text(
         [
             "nvidia-smi",
@@ -199,8 +121,7 @@ def hardware_metadata(
     }
     if hardware_label != "auto":
         return hardware_label, metadata
-    # Left as it is: rewriting it would move the label on a box whose
-    # nvidia-smi fails, and --resume compares the label.
+    # Not _device_names: --resume compares the label, so it must not move on a host whose nvidia-smi fails.
     name = query.split(",")[1].strip() if "," in query else f"gpu{gpu}"
     label = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
     return label, metadata

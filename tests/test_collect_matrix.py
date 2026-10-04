@@ -1,19 +1,10 @@
-"""Tests for ``tools/collect_matrix.py`` over a synthetic matrix tree.
-
-``tools/`` is a directory of scripts and not an importable package, so the
-module is loaded from its path, the way ``tests/test_tools.py`` reads the
-other scripts from theirs.
-
-The fixture is two cells that differ in one axis, because the axis columns
-are the whole reason a matrix tree is collected: a table that printed the
-figures without them would put two measurements of different runs in one
-column.
-"""
+"""Tests for ``tools/collect_matrix.py`` over a synthetic matrix tree of two cells that differ in one axis."""
 
 import contextlib
 import importlib.util
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -21,6 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.e2e.parallelism import ParallelismSpec
+from benchmarks.e2e.registry import ENGINES
+from tests.engine_helpers import configured, run_spec, write_run_manifest
 from tests.test_import_boundaries import REPO_ROOT
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -30,22 +24,28 @@ collect_matrix = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(collect_matrix)
 
 
-def manifest(*, model_size: str, dp: int, zero: int) -> dict:
-    """A manifest with the axis keys this tool reads, and nothing else."""
-    return {
-        "schema_version": 18,
-        "scenario": "engines",
-        "model_size": model_size,
-        "ac_mode": "none",
-        "profile": False,
-        "parallelism": {
-            "dp": dp,
-            "pp": 1,
-            "ep": 1,
-            "zero": zero,
-            "world_size": dp,
-        },
-    }
+GOLDEN_RUN = REPO_ROOT / "tests" / "fixtures" / "golden" / "runs" / "dp1-1b"
+"""A schema 18 run directory with a results file."""
+
+
+def write_manifest(cell: Path, *, model_size: str, dp: int, zero: int) -> None:
+    """Write the schema 20 manifest of a titan_compiled and megatron_stock cell."""
+    write_run_manifest(
+        cell,
+        run_spec(
+            model_size,
+            ac_mode="none",
+            profile=False,
+            parallelism=ParallelismSpec(dp=dp, zero=zero),
+        ),
+        (
+            ENGINES.arm("titan_compiled"),
+            configured(
+                ENGINES.arm("megatron_stock"),
+                extra_flags=("--moe-permute-fusion",),
+            ),
+        ),
+    )
 
 
 def results(*, tokens_per_second: float) -> dict:
@@ -72,10 +72,11 @@ def results(*, tokens_per_second: float) -> dict:
     }
 
 
-def write_cell(root: Path, name: str, manifest_data: dict, results_data) -> Path:
+def write_cell(
+    root: Path, name: str, *, model_size: str, dp: int, zero: int, results_data
+) -> Path:
     cell = root / name
-    cell.mkdir(parents=True)
-    (cell / "manifest.json").write_text(json.dumps(manifest_data))
+    write_manifest(cell, model_size=model_size, dp=dp, zero=zero)
     if results_data is not None:
         (cell / "results.json").write_text(json.dumps(results_data))
     return cell
@@ -88,14 +89,18 @@ class CollectTests(unittest.TestCase):
         write_cell(
             self.root,
             "model-size-1b-ac-none",
-            manifest(model_size="1b", dp=1, zero=0),
-            results(tokens_per_second=12000.0),
+            model_size="1b",
+            dp=1,
+            zero=0,
+            results_data=results(tokens_per_second=12000.0),
         )
         write_cell(
             self.root,
             "model-size-1b-ac-none-dp-2-zero-1",
-            manifest(model_size="1b", dp=2, zero=1),
-            results(tokens_per_second=21000.0),
+            model_size="1b",
+            dp=2,
+            zero=1,
+            results_data=results(tokens_per_second=21000.0),
         )
         self.addCleanup(self._tmp.cleanup)
 
@@ -131,6 +136,51 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(first["zero"], 0)
         self.assertEqual((sharded["dp"], sharded["zero"]), (2, 1))
 
+    def test_row_carries_the_engine_and_the_arm_config(self) -> None:
+        titan, megatron = collect_matrix.collect(self.root, None)[:2]
+        self.assertEqual(
+            (titan["engine"], megatron["engine"]), ("torchtitan", "megatron_stock")
+        )
+        self.assertEqual(titan["extra_flags"], "")
+        self.assertEqual(megatron["extra_flags"], "--moe-permute-fusion")
+        self.assertEqual(megatron["config"]["precision"], "stock")
+
+    def test_a_schema_18_cell_is_read(self) -> None:
+        cell = self.root / "golden"
+        cell.mkdir()
+        for name in ("manifest.json", "results.json"):
+            shutil.copy(GOLDEN_RUN / name, cell / name)
+        rows = [
+            row
+            for row in collect_matrix.collect(self.root, None)
+            if row["cell"] == "golden"
+        ]
+        self.assertEqual(
+            [row["arm"] for row in rows],
+            ["titan_compiled", "titan_eager", "megatron_stock"],
+        )
+        self.assertEqual(rows[2]["engine"], "megatron_stock")
+        self.assertEqual(rows[0]["model_size"], "1b")
+
+    def test_a_schema_19_cell_is_read(self) -> None:
+        cell = self.root / "recorded-19"
+        cell.mkdir()
+        shutil.copy(
+            REPO_ROOT / "tests/fixtures/manifest_v19/titan-compiled-fa3-dp4-ep4.json",
+            cell / "manifest.json",
+        )
+        payload = results(tokens_per_second=1000.0)
+        payload["arms"] = ["titan_compiled_fa3"]
+        payload["results"] = {"titan_compiled_fa3": payload["results"]["titan_compiled"]}
+        (cell / "results.json").write_text(json.dumps(payload))
+        rows = [
+            row
+            for row in collect_matrix.collect(self.root, None)
+            if row["cell"] == "recorded-19"
+        ]
+        self.assertEqual([row["arm"] for row in rows], ["titan_compiled_fa3"])
+        self.assertIs(rows[0]["config"]["packed_offsets"], False)
+
     def test_contamination_marker_marks_the_rows(self) -> None:
         (self.root / "model-size-1b-ac-none.CONTAMINATED").write_text("foreign")
         rows = collect_matrix.collect(self.root, None)
@@ -141,8 +191,10 @@ class CollectTests(unittest.TestCase):
         write_cell(
             self.root,
             "model-size-huge-ac-none",
-            manifest(model_size="huge", dp=1, zero=0),
-            None,
+            model_size="huge",
+            dp=1,
+            zero=0,
+            results_data=None,
         )
         cells = [row["cell"] for row in collect_matrix.collect(self.root, None)]
         self.assertNotIn("model-size-huge-ac-none", cells)
@@ -151,8 +203,10 @@ class CollectTests(unittest.TestCase):
         write_cell(
             self.root,
             "model-size-1b-ac-none.contaminated-20260920T000000Z",
-            manifest(model_size="1b", dp=1, zero=0),
-            results(tokens_per_second=1.0),
+            model_size="1b",
+            dp=1,
+            zero=0,
+            results_data=results(tokens_per_second=1.0),
         )
         names = {cell.name for cell in collect_matrix.cell_dirs(self.root)}
         self.assertEqual(names, {
@@ -164,8 +218,10 @@ class CollectTests(unittest.TestCase):
         write_cell(
             self.root,
             "model-size-huge-ac-none",
-            manifest(model_size="huge", dp=1, zero=0),
-            results(tokens_per_second=900.0),
+            model_size="huge",
+            dp=1,
+            zero=0,
+            results_data=results(tokens_per_second=900.0),
         )
         sizes = {row["model_size"] for row in collect_matrix.collect(self.root, "huge")}
         self.assertEqual(sizes, {"huge"})

@@ -17,6 +17,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,40 +25,66 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarks.artifacts.manifests import (  # noqa: E402
     MANIFEST_SCHEMA_VERSION,
     THROUGHPUT_DEFINITION,
+    ArmRecord,
     manifest_data,
+    write_manifest,
 )
-from benchmarks.e2e.megatron_stock.step_log import (  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.driver.step_log import (  # noqa: E402
     tokens_per_second,
 )
-from benchmarks.e2e.parallelism import TRIVIAL_SPEC  # noqa: E402
-from benchmarks.e2e.axes import RunAxes  # noqa: E402
-from benchmarks.e2e.registry import SCENARIOS  # noqa: E402
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec  # noqa: E402
+from benchmarks.e2e.engines.api import (  # noqa: E402
+    Arm,
+    CompileMode,
+    DroppedLine,
+    RunSpec,
+    StepRead,
+)
+from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig  # noqa: E402
+from benchmarks.e2e.registry import SCENARIOS, SEED  # noqa: E402
+from benchmarks.models.piper_qwen3.shape import PIPER_1B  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
+    arm_steps,
+    dropped_line_warnings,
     evaluate_run,
+    pinning_warnings,
     loss_visible_rank,
-    losses,
-    per_rank_training_metrics,
     refuse_non_finite_trajectories,
     render_evaluation,
     step_ms,
-    training_metrics,
+    trajectory,
     write_results,
 )
 
 
-WORKLOAD = {
-    "profile_freq": 20,
-    "profiler_warmup": 5,
-    "profiler_active": 5,
-    "local_batch_size": 4,
-    "seq_len": 1024,
-}
+from tests.engine_helpers import (  # noqa: E402
+    TEST_METADATA,
+    run_spec,
+    titan_step_line,
+)
+
+
+FIXTURE_RUN = run_spec(seq_len=1024, local_batch_size=4)
+"""A profiled run at sequence length 1024 and local batch 4."""
+
+
+TITAN_ARM = Arm(
+    name="baseline",
+    description="baseline",
+    config=TorchTitanConfig(compile=CompileMode.NONE),
+)
+"""A TorchTitan arm, whose engine reads the fork's step line."""
+
+
+def _samples(arm: Arm, log: Path) -> dict:
+    """The step samples of each rank in the log."""
+    return {rank: read.samples for rank, read in arm_steps(arm, log).items()}
 
 
 def _step_lines(*, tps: int, first_step: int = 2, count: int = 4) -> str:
     """Step lines a rank prints, inside the stable window rule."""
     return "".join(
-        f"step: {step} loss: 1.0 grad_norm: 2.0 memory: 3.00GiB tps: {tps}\n"
+        titan_step_line(step, tps=tps)
         for step in range(first_step, first_step + count)
     )
 
@@ -92,23 +119,29 @@ class DriverArithmeticTests(unittest.TestCase):
 class ManifestRecordsTheDefinitionTests(unittest.TestCase):
     def _manifest(self) -> dict:
         scenario = SCENARIOS["engines"]
+        run = RunSpec(
+            shape=PIPER_1B,
+            data=scenario.data,
+            parallelism=TRIVIAL_SPEC,
+            ac_mode="none",
+            profile=False,
+            window=scenario.window,
+            warmup_steps=10,
+            seed=SEED,
+        )
         return manifest_data(
-            scenario,
-            [scenario.arms[0]],
-            {scenario.arms[0].name: ["python", "-m", "x"]},
-            "test-gpu",
-            {"requested_gpu": "0"},
-            torchtitan_args=(),
-            megatron_args=(),
-            axes=RunAxes(
-                ac_mode="none",
-                model_size="1b",
-                parallelism=TRIVIAL_SPEC,
-                megatron_p2p_sync="on",
-                megatron_nan_guard="on",
-                megatron_precision="stock",
-                profile=False,
-                warmup_steps=10,
+            scenario=scenario,
+            hardware="test-gpu",
+            metadata={"requested_gpu": "0"},
+            run=run,
+            arms=(
+                ArmRecord(
+                    arm=scenario.arms[0],
+                    command=("python", "-m", "x"),
+                    env_delta={},
+                    cpu_pinning="none: test",
+                    execution_model="test",
+                ),
             ),
         )
 
@@ -119,20 +152,22 @@ class ManifestRecordsTheDefinitionTests(unittest.TestCase):
         self.assertEqual(THROUGHPUT_DEFINITION, "tokens_per_second_per_device")
 
     def test_the_schema_moved_with_the_new_key(self) -> None:
-        self.assertEqual(MANIFEST_SCHEMA_VERSION, 18)
-        self.assertEqual(self._manifest()["schema_version"], 18)
+        self.assertEqual(MANIFEST_SCHEMA_VERSION, 20)
+        self.assertEqual(self._manifest()["schema_version"], 20)
 
 
 class PerRankLogParsingTests(unittest.TestCase):
-    """One file, two ranks: the rows belong to whoever printed them."""
+    """One file, two ranks: the samples belong to whoever printed them."""
 
     def test_an_unprefixed_log_reads_as_one_rank(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text(_step_lines(tps=1000))
-            by_rank = per_rank_training_metrics(log)
+            by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(list(by_rank), [0])
-        self.assertEqual([row[2] for row in by_rank[0]], [1000] * 4)
+        self.assertEqual(
+            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 4
+        )
 
     def test_two_ranks_do_not_pool_into_one_series(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -141,20 +176,19 @@ class PerRankLogParsingTests(unittest.TestCase):
                 _prefixed(_step_lines(tps=1000), 0)
                 + _prefixed(_step_lines(tps=800), 1)
             )
-            by_rank = per_rank_training_metrics(log)
-            pooled = training_metrics(log)
+            by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(sorted(by_rank), [0, 1])
-        self.assertEqual([row[2] for row in by_rank[0]], [1000] * 4)
-        self.assertEqual([row[2] for row in by_rank[1]], [800] * 4)
-        # The pooled reading is still available for peak memory, and it holds
-        # both ranks' rows rather than one rank's.
-        self.assertEqual(len(pooled), 8)
+        self.assertEqual(
+            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 4
+        )
+        self.assertEqual(
+            [sample.tokens_per_second for sample in by_rank[1].samples], [800] * 4
+        )
+        self.assertEqual({sample.rank for sample in by_rank[1].samples}, {1})
 
     def test_a_missing_log_reads_as_no_ranks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            self.assertEqual(
-                per_rank_training_metrics(Path(temporary) / "absent.log"), {}
-            )
+            self.assertEqual(arm_steps(TITAN_ARM, Path(temporary) / "absent.log"), {})
 
 
 class LossVisibleRankTests(unittest.TestCase):
@@ -174,10 +208,7 @@ class LossVisibleRankTests(unittest.TestCase):
 
 
 class _RunFixture:
-    """A minimal output directory: a manifest and one log per arm.
-
-    Evaluation reads the logs alone, so a fixture needs no trace.
-    """
+    """A minimal output directory: a manifest and one log per arm."""
 
     @staticmethod
     def build(
@@ -185,24 +216,36 @@ class _RunFixture:
         logs: dict[str, str],
         parallelism: dict | None,
     ) -> None:
-        manifest = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "profile": True,
-            "scenario": "synthetic",
-            "hardware": "test-gpu",
-            "workload": WORKLOAD,
-            "selected_arms": sorted(logs),
-            "arms": [
-                {"name": arm, "engine": "torchtitan"}
-                for arm in sorted(logs)
-            ],
-        }
-        manifest["parallelism"] = (
-            {"world_size": 1, "dp": 1, "pp": 1, "ep": 1}
-            if parallelism is None
-            else parallelism
+        spec = ParallelismSpec(
+            **{
+                key: value
+                for key, value in (parallelism or {}).items()
+                if key != "world_size"
+            }
         )
-        (out_dir / "manifest.json").write_text(json.dumps(manifest))
+        if spec.pp > 1:
+            spec = ParallelismSpec(
+                dp=spec.dp, pp=spec.pp, ep=spec.ep, zero=spec.zero,
+                pp_schedule="1F1B",
+            )
+        arms = tuple(
+            ArmRecord(
+                arm=Arm(name=name, description=name, config=TorchTitanConfig(compile=CompileMode.NONE)),
+                command=("python",),
+                env_delta={},
+                cpu_pinning="none: test",
+                execution_model="test",
+            )
+            for name in sorted(logs)
+        )
+        write_manifest(
+            out_dir,
+            scenario=SCENARIOS["engines"],
+            hardware="test-gpu",
+            metadata=TEST_METADATA,
+            run=replace(FIXTURE_RUN, parallelism=spec),
+            arms=arms,
+        )
         for arm, text in logs.items():
             (out_dir / f"{arm}.log").write_text(text)
 
@@ -275,6 +318,81 @@ class ZeroWarningsReachTheArtifactTests(unittest.TestCase):
                     "ep": 1,
                     "zero": 0,
                 }
+            ),
+            [],
+        )
+
+
+class PinningWarningTests(unittest.TestCase):
+    """A run whose arms mix pinned and unpinned processes says so in results.json."""
+
+    PINNED = "numactl --cpunodebind=1 --membind=1"
+
+    def _warnings(self, pinnings: dict[str, str]) -> list[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            arms = tuple(
+                ArmRecord(
+                    arm=Arm(
+                        name=name,
+                        description=name,
+                        config=TorchTitanConfig(compile=CompileMode.NONE),
+                    ),
+                    command=("python",),
+                    env_delta={},
+                    cpu_pinning=pinning,
+                    execution_model="test",
+                )
+                for name, pinning in pinnings.items()
+            )
+            write_manifest(
+                out_dir,
+                scenario=SCENARIOS["engines"],
+                hardware="test-gpu",
+                metadata=TEST_METADATA,
+                run=FIXTURE_RUN,
+                arms=arms,
+            )
+            for name in pinnings:
+                (out_dir / f"{name}.log").write_text(_step_lines(tps=1000))
+            return json.loads(
+                write_results(evaluate_run(out_dir)).read_text()
+            )["warnings"]
+
+    def test_a_pinned_arm_beside_a_declined_arm_warns(self) -> None:
+        (warning,) = self._warnings(
+            {"pinned": self.PINNED, "declined": "declined by engine"}
+        )
+        self.assertIn("the arms mix CPU pinning", warning)
+        self.assertIn("declined: declined by engine", warning)
+
+    def test_arms_with_one_pinning_do_not_warn(self) -> None:
+        for pinning in (self.PINNED, "none: numactl not available"):
+            with self.subTest(pinning=pinning):
+                self.assertEqual(
+                    self._warnings({"first": pinning, "second": pinning}), []
+                )
+
+    def test_two_unpinned_reasons_are_one_pinning(self) -> None:
+        self.assertEqual(
+            pinning_warnings(
+                [
+                    ArmRecord(
+                        arm=Arm(
+                            name=name,
+                            description=name,
+                            config=TorchTitanConfig(compile=CompileMode.NONE),
+                        ),
+                        command=(),
+                        env_delta=None,
+                        cpu_pinning=pinning,
+                        execution_model=None,
+                    )
+                    for name, pinning in (
+                        ("a", "declined by engine"),
+                        ("b", "none: numactl not available"),
+                    )
+                ]
             ),
             [],
         )
@@ -398,6 +516,62 @@ class ARankWithNoSampleDoesNotWinTests(unittest.TestCase):
         self.assertEqual(summary.per_rank[1].step_ms.series, ())
 
 
+class TornStepLineTests(unittest.TestCase):
+    """A step line that another rank's prefix cut is dropped, and results.json names it."""
+
+    def test_the_warning_names_the_arm_the_rank_the_step_and_the_log_line(
+        self,
+    ) -> None:
+        cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        lines = [
+            "[rank0]:" + titan_step_line(2),
+            "[rank1]:" + titan_step_line(2),
+            "[rank0]:" + titan_step_line(3),
+            "[rank1]:" + cut,
+            "[rank0]:" + titan_step_line(4),
+            "[rank1]:" + titan_step_line(4),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir, {"baseline": "".join(lines)}, {"world_size": 2, "pp": 2}
+            )
+            result = evaluate_run(out_dir)
+        self.assertIn(
+            "baseline: rank 1 step 3: a rank prefix cut the step line "
+            "at line 4 of baseline.log, so the evaluation drops that step",
+            result.warnings,
+        )
+        self.assertEqual(result.results["baseline"].per_rank[1].stable_sample_count, 2)
+
+    def test_a_step_that_the_cut_removed_reads_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "megatron_stock.log"
+            log.write_text("a\nb\n")
+            read = StepRead(samples=(), dropped=(DroppedLine(rank=0, line=2, step=None),))
+            (warning,) = dropped_line_warnings("megatron_stock", log, {0: read})
+        self.assertEqual(
+            warning,
+            "megatron_stock: rank 0 step unknown: a rank prefix cut the step "
+            "line at line 2 of megatron_stock.log, so the evaluation drops that step",
+        )
+
+    def test_the_log_line_of_a_one_rank_log_is_its_own(self) -> None:
+        cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {"baseline": "header\n" + titan_step_line(2) + cut},
+                {"world_size": 1, "pp": 1},
+            )
+            warnings = evaluate_run(out_dir).warnings
+        self.assertTrue(
+            any("rank 0 step 3" in w and "at line 3 of" in w for w in warnings),
+            warnings,
+        )
+
+
 class NonFiniteTrajectoryTests(unittest.TestCase):
     """A ``nan`` or an ``inf`` on a step line fails the arm before publication.
 
@@ -407,16 +581,15 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
     did, and it names the rank and the step.
     """
 
-    def _lines(self, *, loss: str = "1.0", grad_norm: str = "2.0", at: int = 3):
-        lines = []
-        for step in range(2, 6):
-            value_loss = loss if step == at else "1.0"
-            value_norm = grad_norm if step == at else "2.0"
-            lines.append(
-                f"step: {step} loss: {value_loss} grad_norm: {value_norm} "
-                "memory: 3.00GiB tps: 1000\n"
+    def _lines(self, *, loss: float = 1.0, grad_norm: float = 2.0, at: int = 3):
+        return "".join(
+            titan_step_line(
+                step,
+                loss=loss if step == at else 1.0,
+                grad_norm=grad_norm if step == at else 2.0,
             )
-        return "".join(lines)
+            for step in range(2, 6)
+        )
 
     def _evaluate(self, logs: dict[str, str], parallelism=None):
         with tempfile.TemporaryDirectory() as temporary:
@@ -429,7 +602,7 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, r"baseline: rank 0 logged a non-finite loss at step 3"
         ):
-            self._evaluate({"baseline": self._lines(loss="nan")})
+            self._evaluate({"baseline": self._lines(loss=float("nan"))})
 
     def test_an_inf_grad_norm_fails_the_arm_and_names_the_step(self) -> None:
         with self.assertRaisesRegex(
@@ -439,13 +612,13 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
             self._evaluate(
                 {
                     "baseline": self._lines(),
-                    "optimized": self._lines(grad_norm="inf", at=4),
+                    "optimized": self._lines(grad_norm=float("inf"), at=4),
                 }
             )
 
     def test_a_negative_inf_is_not_finite_either(self) -> None:
         with self.assertRaisesRegex(ValueError, r"step 5 \(-inf\)"):
-            self._evaluate({"baseline": self._lines(loss="-inf", at=5)})
+            self._evaluate({"baseline": self._lines(loss=float("-inf"), at=5)})
 
     def test_every_rank_is_read_and_the_failure_names_the_rank(self) -> None:
         """The published trajectory is one rank's; the guard reads all of
@@ -456,38 +629,39 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
             self._evaluate(
                 {
                     "baseline": _prefixed(self._lines(), 0)
-                    + _prefixed(self._lines(loss="nan"), 1)
+                    + _prefixed(self._lines(loss=float("nan")), 1)
                 },
                 {"world_size": 2, "pp": 2},
             )
 
-    def test_the_titan_sentinel_is_finite_and_passes(self) -> None:
-        """A rank without the loss prints ``-1.0``, which is a number."""
+    def test_the_titan_sentinel_reads_as_no_loss(self) -> None:
+        """A TorchTitan rank without the loss prints ``-1.0``, which is not a loss."""
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             _RunFixture.build(
                 out_dir,
                 {
-                    "baseline": _prefixed(self._lines(loss="-1.00000"), 0)
+                    "baseline": _prefixed(self._lines(loss=-1.0, at=3), 0)
                     + _prefixed(self._lines(), 1)
                 },
                 {"world_size": 2, "pp": 2},
             )
             result = evaluate_run(out_dir)
+            steps = arm_steps(TITAN_ARM, out_dir / "baseline.log")
         self.assertEqual(result.losses["baseline"][1], (3, 1.0))
+        self.assertIsNone(steps[0].samples[1].loss)
 
-    def test_the_guard_reads_a_bare_log_directly(self) -> None:
+    def test_the_guard_reads_the_samples_directly(self) -> None:
         """Callable on its own, so a reader of an old directory can ask."""
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text(self._lines())
-            refuse_non_finite_trajectories("baseline", log)
-            log.write_text(self._lines(grad_norm="nan", at=2))
+            refuse_non_finite_trajectories("baseline", _samples(TITAN_ARM, log), log)
+            log.write_text(self._lines(grad_norm=float("nan"), at=2))
             with self.assertRaisesRegex(ValueError, r"grad_norm at step 2"):
-                refuse_non_finite_trajectories("baseline", log)
-            log.unlink()
-            # A missing log is a validation failure, not this guard's.
-            refuse_non_finite_trajectories("baseline", log)
+                refuse_non_finite_trajectories(
+                    "baseline", _samples(TITAN_ARM, log), log
+                )
 
 
 class WholeEvaluationTests(unittest.TestCase):
@@ -501,10 +675,10 @@ class WholeEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "baseline.log"
             log.write_text(
-                "step:  1  loss:  7.44780\n"
-                "step:  2  loss:  nan\n"
+                titan_step_line(1, loss=7.4478)
+                + titan_step_line(2, loss=float("nan"))
             )
-            parsed = losses(log)
+            parsed = trajectory(arm_steps(TITAN_ARM, log)[0].samples, "loss")
         self.assertEqual(parsed[0], (1, 7.4478))
         self.assertNotEqual(parsed[1][1], parsed[1][1])  # NaN
 
@@ -577,8 +751,12 @@ class WholeEvaluationTests(unittest.TestCase):
                     "rank_reduction",
                     "published_rank",
                     "per_rank",
+                    "extras",
                 ]
             ),
+        )
+        self.assertEqual(
+            arm["extras"], {"torchtitan": {"mfu": 1.26, "tflops": 12.5}}
         )
         self.assertEqual(
             sorted(arm["step_ms"]), ["mean", "median", "p95", "series"]

@@ -1,4 +1,4 @@
-"""``python -m benchmarks.cli`` entry point; run_bench.sh execs this."""
+"""The ``python -m benchmarks.cli`` entry point, which ``run_bench.sh`` starts."""
 
 from benchmarks.cli.main import cli
 

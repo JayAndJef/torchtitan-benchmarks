@@ -1,301 +1,357 @@
-"""``manifest.json``: what a run is, and whether it may be resumed.
-
-Everything here serializes one run's *identity* -- scenario, arms, the
-command line each arm was launched with, the eight global run axes the
-``RunAxes`` record carries, the resolved model shape, the execution model,
-and the provenance block -- reads one back, and decides whether a recorded
-run is the same run the caller is now asking for.
-
-Those last two are here rather than in modules of their own on purpose. A
-manifest field and its resume rule are two halves of one invariant: a new
-axis adds a field to ``RunAxes`` *and* a key to ``AXIS_KEYS``, which the
-writer and ``_resume_mismatches`` both read, and a field recorded but not
-gated is a comparability boundary that silently does not hold. Splitting
-reader from writer would divide the same invariant the other way -- a schema
-bump has to move both together, and neither half is meaningful alone.
-
-**The axis keys stay flat, and their names stay fixed.** One nested
-``axes`` object would read better and would break every external reader
-that addresses ``manifest["parallelism"]`` or ``manifest["ac_mode"]`` by
-name. ``RunAxes`` is the in-process grouping; the file keeps the shape it
-had.
-
-**The reader takes one schema.** Every field above is a comparability
-boundary, so a manifest another schema wrote cannot be read as this one.
-``load_manifest`` names the version it found and the version it wants, and
-refuses. There are no per-version branches and no defaulted lookups: a run
-recorded under an older schema is read by the code that wrote it.
-
-What *is* split out is everything engine-neutral: output layout and the
-atomic writer are ``layout.py``, the progress ledger is ``run_state.py``,
-sample summarization is ``summaries.py``. This module is exactly the part
-that is not, which is why the whole of the edge described below now lands in
-one file.
-
-**Structural edge, almost closed.** A manifest serializes a run's scenario
-and arms, so the builders here need those types by construction. ``Arm``
-and ``Scenario`` come from ``benchmarks.e2e.schema``, which imports nothing
-first-party, and ``RunAxes`` and ``RunRequest`` from
-``benchmarks.e2e.axes``. Neither needs a ``TYPE_CHECKING`` block. The
-``RunRequest`` import is the sharpest case: it used to come from
-``e2e/runner.py``, which imports this module, and only the
-``TYPE_CHECKING`` guard kept that pair out of a module-level cycle. It sits
-in ``axes.py`` now, below this module, so the cycle cannot come back.
-
-No name crosses to ``benchmarks.e2e.registry`` any more. ``Workload``,
-which ``_resume_workload`` reconstructs and revalidates from recorded JSON,
-comes from ``schema`` as well.
-
-At *package* granularity ``artifacts/`` and ``e2e/`` remain mutually
-dependent, because ``e2e/runner.py`` and ``e2e/results.py`` import from this
-module. The candidate resolution is to move this module into ``e2e/``
-outright, leaving ``artifacts/`` engine-neutral; splitting ``layout.py`` and
-``run_state.py`` off reduced it to a single-file move. The move itself is
-deferred rather than made permanent.
-
-"""
+"""``manifest.json``: how the runner writes the record of one run, and how a reader and a resume read it back."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
-from dataclasses import asdict
+import typing
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal
 
 from benchmarks.artifacts.layout import atomic_write_json
-from benchmarks.e2e.axes import RunAxes, RunRequest
-from benchmarks.e2e.parallelism import (
-    ParallelismSpec,
-    describe as describe_parallelism,
-    execution_model,
+from benchmarks.artifacts.manifest_v18 import V18_SCHEMA_VERSION, upgrade_v18
+from benchmarks.artifacts.manifest_v19 import (
+    V19_SCHEMA_VERSION,
+    V20_SCHEMA_VERSION,
+    upgrade_v19,
 )
-from benchmarks.e2e.schema import Arm, Scenario, Workload
-from benchmarks.models.piper_qwen3.shape import (
-    canonical_size_name,
-    shape_by_name,
+from benchmarks.e2e.engines.api import (
+    Arm,
+    DataSpec,
+    EngineConfig,
+    ProfileWindow,
+    RunSpec,
 )
+from benchmarks.e2e.engines.registry import engine_for, engine_named
+from benchmarks.e2e.overrides import field_types
+from benchmarks.e2e.parallelism import ParallelismSpec, describe
+from benchmarks.e2e.schema import Scenario
+from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
-MANIFEST_SCHEMA_VERSION = 18
+MANIFEST_SCHEMA_VERSION = V20_SCHEMA_VERSION
 
 THROUGHPUT_DEFINITION = "tokens_per_second_per_device"
-"""What the ``tps`` step-log figure, and ``stable_tokens_per_second``, count.
+"""What the tokens/s of a step sample and ``stable_tokens_per_second`` count."""
 
-Both engines divide one rank's own token count by ``cp * tp * pp``, so the
-value is per device. The manifest records the definition because a later
-tensor or context parallel degree would move the divisor again. It is not
-resume-gated: one revision cannot write two definitions.
-"""
-
-
-def _parallelism_record(
-    scenario: Scenario, parallelism: ParallelismSpec
-) -> dict[str, Any]:
-    """The ``parallelism`` block for one run, written and compared here.
-
-    ``describe`` needs the local batch size, because the microbatch count is
-    arithmetic over the batch and the microbatch size. Taking it from the
-    scenario's own workload keeps the writer and the resume comparison
-    reading one number: one call produces both.
-    """
-    return describe_parallelism(
-        parallelism, local_batch_size=scenario.workload.local_batch_size
-    )
-
-
-AXIS_KEYS = (
-    "ac_mode",
-    "model_size",
-    "parallelism",
-    "megatron_p2p_sync",
-    "megatron_nan_guard",
-    "megatron_precision",
-    "profile",
-    "warmup_steps",
+HOST_KEYS = (
+    "nvidia_smi",
+    "cpu_pinning",
+    "torchtitan_git_rev",
+    "benchmarks_git_rev",
+    "megatron_git_rev",
 )
-"""The manifest keys that record the run axes, one key per ``RunAxes`` field.
-
-The names are flat and written out here rather than derived from the
-dataclass. External readers address them by name, so a renamed field must
-stay a deliberate schema change. ``tests/test_axes.py`` compares this tuple
-against ``RunAxes``, so a new axis that nothing recorded fails there.
-"""
+"""The ``hardware_metadata`` keys that a resume must find unchanged."""
 
 
-def _axis_record(scenario: Scenario, axes: RunAxes) -> dict[str, Any]:
-    """The flat axis keys of one manifest, written and compared here.
+@dataclass(frozen=True)
+class ArmRecord:
+    """One arm of a run, as its manifest records it."""
 
-    Two of the eight are not the field value itself. ``model_size`` is
-    canonicalized, so a fresh manifest never carries a retired alias.
-    ``parallelism`` becomes the described block, which holds the derived
-    degrees a reader needs beside the six spec fields.
-    """
-    record = {**asdict(axes)}
-    record["model_size"] = canonical_size_name(axes.model_size)
-    record["parallelism"] = _parallelism_record(scenario, axes.parallelism)
-    return {key: record[key] for key in AXIS_KEYS}
+    arm: Arm
+    command: tuple[str, ...]
+    env_delta: Mapping[str, str] | None
+    """The keys that the launcher and the engine set; a schema 18 manifest records none."""
+    cpu_pinning: str
+    """The pinning prefix text, the host's reason for none, or ``declined by engine``."""
+    execution_model: str | None
+    """How the arm holds the model state; a schema 18 manifest records it for TorchTitan arms alone."""
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """One run, as its manifest records it."""
+
+    scenario: str
+    description: str
+    hardware: str
+    metadata: Mapping[str, str]
+    run: RunSpec
+    arms: tuple[ArmRecord, ...]
+    """The selected arms, in run order."""
+
+    def arm(self, name: str) -> ArmRecord:
+        """The record of the arm ``name``."""
+        for record in self.arms:
+            if record.arm.name == name:
+                return record
+        raise ValueError(
+            f"the run records no arm {name!r}. Available: "
+            + ", ".join(record.arm.name for record in self.arms)
+        )
+
+
+def run_json(run: RunSpec) -> dict[str, Any]:
+    """The ``run`` block of a manifest."""
+    return {
+        "shape": run.shape.describe(seq_len=run.data.seq_len),
+        "data": asdict(run.data),
+        "parallelism": describe(
+            run.parallelism, local_batch_size=run.data.local_batch_size
+        ),
+        "ac_mode": run.ac_mode,
+        "profile": run.profile,
+        "window": asdict(run.window),
+        "warmup_steps": run.warmup_steps,
+        "seed": run.seed,
+    }
+
+
+def config_json(config: EngineConfig) -> dict[str, Any]:
+    """The JSON form of an engine config, one key per field."""
+    return json.loads(json.dumps(asdict(config)))
+
+
+def arm_json(record: ArmRecord) -> dict[str, Any]:
+    """The manifest record of one arm."""
+    arm = record.arm
+    return {
+        "name": arm.name,
+        "description": arm.description,
+        "engine": engine_for(arm).name,
+        "config_type": type(arm.config).__name__,
+        "config": config_json(arm.config),
+        "execution_model": record.execution_model,
+        "command": list(record.command),
+        "env_delta": None if record.env_delta is None else dict(record.env_delta),
+        "cpu_pinning": record.cpu_pinning,
+    }
 
 
 def manifest_data(
-    scenario: Scenario,
-    selected_arms: tuple[Arm, ...],
-    commands: dict[str, list[str]],
-    hardware: str,
-    metadata: dict[str, str],
     *,
-    # No default, because the resume check compares every field: a writer
-    # that defaults what the checker demands records the wrong run.
-    torchtitan_args: list[str] | tuple[str, ...],
-    megatron_args: list[str] | tuple[str, ...],
-    axes: RunAxes,
+    scenario: Scenario,
+    hardware: str,
+    metadata: Mapping[str, str],
+    run: RunSpec,
+    arms: tuple[ArmRecord, ...],
 ) -> dict[str, Any]:
-    shape = shape_by_name(canonical_size_name(axes.model_size))
+    """The schema 20 manifest of one run."""
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "scenario": scenario.name,
         "description": scenario.description,
         "hardware": hardware,
-        "hardware_metadata": metadata,
-        "workload": asdict(scenario.workload),
-        "arms": [asdict(arm) for arm in scenario.arms],
-        "selected_arms": [arm.name for arm in selected_arms],
-        "commands": commands,
-        "extra_torchtitan_args": list(torchtitan_args),
-        "extra_megatron_args": list(megatron_args),
-        **_axis_record(scenario, axes),
-        "model_shape": shape.describe(seq_len=scenario.workload.seq_len),
+        "hardware_metadata": dict(metadata),
+        "run": run_json(run),
+        "arms": [arm_json(record) for record in arms],
         "throughput_definition": THROUGHPUT_DEFINITION,
-        "execution_model": execution_model(axes.parallelism),
     }
 
 
-def write_manifest(
-    out_dir: Path,
-    scenario: Scenario,
-    selected_arms: tuple[Arm, ...],
-    commands: dict[str, list[str]],
-    hardware: str,
-    metadata: dict[str, str],
-    *,
-    torchtitan_args: list[str] | tuple[str, ...],
-    megatron_args: list[str] | tuple[str, ...],
-    axes: RunAxes,
-) -> None:
-    atomic_write_json(
-        out_dir / "manifest.json",
-        manifest_data(
-            scenario,
-            selected_arms,
-            commands,
-            hardware,
-            metadata,
-            torchtitan_args=torchtitan_args,
-            megatron_args=megatron_args,
-            axes=axes,
-        ),
-    )
+def write_manifest(out_dir: Path, **fields: Any) -> None:
+    """Write ``manifest_data(**fields)`` to ``out_dir/manifest.json``."""
+    atomic_write_json(out_dir / "manifest.json", manifest_data(**fields))
+
+
+def _read(out_dir: Path) -> tuple[dict[str, Any], Path]:
+    """The JSON of one manifest, of any schema, and its path."""
+    path = out_dir / "manifest.json"
+    if not path.is_file():
+        raise ValueError(f"manifest is missing: {path}")
+    try:
+        return json.loads(path.read_text()), path
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read manifest {path}: {error}") from error
 
 
 def load_manifest(out_dir: Path) -> dict[str, Any]:
-    """Read one manifest. Refuse anything another schema wrote."""
-    manifest_path = out_dir / "manifest.json"
-    if not manifest_path.is_file():
-        raise ValueError(f"manifest is missing: {manifest_path}")
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read manifest {manifest_path}: {error}") from error
+    """The schema 20 manifest that a resume continues; any other schema is refused by name."""
+    manifest, path = _read(out_dir)
     found = manifest.get("schema_version")
+    if found in (V18_SCHEMA_VERSION, V19_SCHEMA_VERSION):
+        raise ValueError(
+            f"{path} records manifest schema {found}, which a resume cannot "
+            f"continue; this code resumes schema {MANIFEST_SCHEMA_VERSION} "
+            "only. Start a new run"
+        )
     if found != MANIFEST_SCHEMA_VERSION:
         raise ValueError(
-            f"{manifest_path} records manifest schema {found!r}; this code "
-            f"reads schema {MANIFEST_SCHEMA_VERSION} only"
+            f"{path} records manifest schema {found!r}; this code resumes "
+            f"schema {MANIFEST_SCHEMA_VERSION} only"
         )
     return manifest
 
 
-def _resume_mismatches(
-    manifest: dict,
-    scenario: Scenario,
-    arms: tuple[Arm, ...],
-    hardware: str,
-    metadata: dict[str, str],
-    *,
-    torchtitan_args: tuple[str, ...],
-    megatron_args: tuple[str, ...],
-    axes: RunAxes,
+def _typed(annotation: Any, value: Any, where: str) -> Any:
+    """``value`` from JSON, as the field type ``annotation`` holds it."""
+    origin = typing.get_origin(annotation)
+    if origin is tuple:
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise ValueError(f"{where} is not a list of strings: {value!r}")
+        return tuple(value)
+    if origin is Literal:
+        if value not in typing.get_args(annotation):
+            raise ValueError(
+                f"{where} {value!r} is not one of "
+                + ", ".join(str(choice) for choice in typing.get_args(annotation))
+            )
+        return value
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return annotation(value)
+    if annotation in (bool, int, str) and type(value) is annotation:
+        return value
+    raise ValueError(f"{where} is not a {annotation!r}: {value!r}")
+
+
+def _config(
+    config_type: type[EngineConfig], values: Mapping[str, Any]
+) -> EngineConfig:
+    """The engine config that ``values`` records."""
+    types = field_types(config_type)
+    name = config_type.__name__
+    unknown = sorted(set(values) - set(types))
+    missing = sorted(set(types) - set(values))
+    if unknown or missing:
+        raise ValueError(
+            f"the {name} record has unknown fields {unknown} and lacks "
+            f"fields {missing}"
+        )
+    return config_type(
+        **{
+            field: _typed(annotation, values[field], f"{name}.{field}")
+            for field, annotation in types.items()
+        }
+    )
+
+
+def _arm_record(record: Mapping[str, Any]) -> ArmRecord:
+    """The arm that one manifest record describes."""
+    engine = engine_named(record["engine"])
+    if record["config_type"] != engine.config_type.__name__:
+        raise ValueError(
+            f"arm {record['name']!r} records config type "
+            f"{record['config_type']!r}, and engine {engine.name!r} takes "
+            f"{engine.config_type.__name__}"
+        )
+    env_delta = record["env_delta"]
+    return ArmRecord(
+        arm=Arm(
+            name=record["name"],
+            description=record["description"],
+            config=_config(engine.config_type, record["config"]),
+        ),
+        command=tuple(record["command"]),
+        env_delta=None if env_delta is None else dict(env_delta),
+        cpu_pinning=record["cpu_pinning"],
+        execution_model=record["execution_model"],
+    )
+
+
+def _shape(described: Mapping[str, Any]) -> PiperShape:
+    """The shape that a manifest describes, built from the record and not from the registry."""
+    shape = PiperShape(
+        **{field.name: described[field.name] for field in dataclasses.fields(PiperShape)}
+    )
+    if shape.param_count != described["param_count"]:
+        raise ValueError(
+            f"shape {shape.name!r} records {described['param_count']:,} "
+            f"parameters, and its fields give {shape.param_count:,}"
+        )
+    return shape
+
+
+def _run(block: Mapping[str, Any]) -> RunSpec:
+    """The run that a manifest's ``run`` block describes."""
+    parallelism = block["parallelism"]
+    return RunSpec(
+        shape=_shape(block["shape"]),
+        data=DataSpec(**block["data"]),
+        parallelism=ParallelismSpec(
+            **{
+                field.name: parallelism[field.name]
+                for field in dataclasses.fields(ParallelismSpec)
+            }
+        ),
+        ac_mode=block["ac_mode"],
+        profile=block["profile"],
+        window=ProfileWindow(**block["window"]),
+        warmup_steps=block["warmup_steps"],
+        seed=block["seed"],
+    )
+
+
+def current_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """A new dict that holds the schema 20 form of a schema 18, 19 or 20 manifest; another schema raises."""
+    found = manifest.get("schema_version")
+    if found == V18_SCHEMA_VERSION:
+        return upgrade_v19(upgrade_v18(manifest))
+    if found == V19_SCHEMA_VERSION:
+        return upgrade_v19(manifest)
+    if found != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            f"the manifest records schema {found!r}; this code reads schemas "
+            f"{V18_SCHEMA_VERSION}, {V19_SCHEMA_VERSION} and "
+            f"{MANIFEST_SCHEMA_VERSION}"
+        )
+    return dict(manifest)
+
+
+def run_record(manifest: Mapping[str, Any], source: str) -> RunRecord:
+    """The run that a schema 18, 19 or 20 manifest records; ``source`` names the file."""
+    try:
+        manifest = current_manifest(manifest)
+        return RunRecord(
+            scenario=manifest["scenario"],
+            description=manifest["description"],
+            hardware=manifest["hardware"],
+            metadata=dict(manifest["hardware_metadata"]),
+            run=_run(manifest["run"]),
+            arms=tuple(_arm_record(record) for record in manifest["arms"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"{source} does not record a readable run: "
+            f"{type(error).__name__}: {error}"
+        ) from error
+
+
+def load_run_record(out_dir: Path) -> RunRecord:
+    """The run that ``out_dir/manifest.json`` records, under schema 18, 19 or 20."""
+    manifest, path = _read(out_dir)
+    return run_record(manifest, str(path))
+
+
+def resume_mismatches(
+    manifest: Mapping[str, Any], *, run: RunSpec, arms: tuple[Arm, ...]
 ) -> list[str]:
-    axis_record = _axis_record(scenario, axes)
-    # Compared on its own, because a recorded manifest may carry an alias.
-    del axis_record["model_size"]
-    expected = {
-        "scenario": scenario.name,
-        "workload": asdict(scenario.workload),
-        "selected_arms": [arm.name for arm in arms],
-        "hardware": hardware,
-        "extra_torchtitan_args": list(torchtitan_args),
-        "extra_megatron_args": list(megatron_args),
-        **axis_record,
-    }
-    mismatches = [
-        key for key, value in expected.items() if manifest.get(key) != value
-    ]
-    if canonical_size_name(
-        str(manifest.get("model_size"))
-    ) != canonical_size_name(axes.model_size):
-        mismatches.append("model_size")
-    existing_metadata = manifest.get("hardware_metadata", {})
-    for key in (
-        "nvidia_smi",
-        "cpu_pinning",
-        "torchtitan_git_rev",
-        "benchmarks_git_rev",
-        "megatron_git_rev",
-    ):
-        if existing_metadata.get(key) != metadata.get(key):
-            mismatches.append(f"hardware_metadata.{key}")
+    """Each run key and each arm field where a resume request differs from the manifest."""
+    mismatches = []
+    recorded_run = manifest["run"]
+    for key, value in run_json(run).items():
+        if recorded_run.get(key) != value:
+            mismatches.append(f"run.{key}")
+    recorded_arms = {record["name"]: record for record in manifest["arms"]}
+    if list(recorded_arms) != [arm.name for arm in arms]:
+        mismatches.append("arms")
+    for arm in arms:
+        recorded = recorded_arms.get(arm.name)
+        if recorded is None:
+            continue
+        if recorded["engine"] != engine_for(arm).name:
+            mismatches.append(f"{arm.name}.engine")
+            continue
+        recorded_config = recorded["config"]
+        for field, value in config_json(arm.config).items():
+            if recorded_config.get(field) != value:
+                mismatches.append(f"{arm.name}.config.{field}")
     return mismatches
 
 
-def _resume_workload(
-    manifest: dict,
-    request: RunRequest,
-    environment: Mapping[str, str],
-) -> Workload:
-    """Hydrate unspecified settings and reject explicit resume conflicts."""
-    try:
-        workload = Workload(**manifest["workload"])
-    except (KeyError, TypeError) as error:
-        raise ValueError("resume manifest has an invalid workload") from error
-
-    requested_values = {
-        "seq_len": request.seq_len
-        if request.seq_len is not None
-        else environment.get("SEQ"),
-        "steps": request.steps
-        if request.steps is not None
-        else environment.get("STEPS"),
-        "local_batch_size": request.batch
-        if request.batch is not None
-        else environment.get("BATCH"),
-    }
-    conflicts = [
-        name
-        for name, value in requested_values.items()
-        if value is not None and int(value) != getattr(workload, name)
-    ]
-    if conflicts:
-        raise ValueError(
-            "resume request conflicts with the recorded workload: "
-            + ", ".join(conflicts)
-        )
-    return workload
-
-
-def load_run(
-    out_dir: Path, arms_override: list[str] | tuple[str, ...] | None
-) -> tuple[dict[str, Any], list[str]]:
-    """The manifest of one run, and the arms a reader asked for."""
-    manifest = load_manifest(out_dir)
-    arms = list(arms_override or manifest["selected_arms"])
-    return manifest, arms
+def host_mismatches(
+    manifest: Mapping[str, Any], *, hardware: str, metadata: Mapping[str, str]
+) -> list[str]:
+    """The hardware label and each ``HOST_KEYS`` value where this host differs from the manifest."""
+    mismatches = []
+    if manifest["hardware"] != hardware:
+        mismatches.append("hardware")
+    recorded = manifest["hardware_metadata"]
+    for key in HOST_KEYS:
+        if recorded.get(key) != metadata.get(key):
+            mismatches.append(f"hardware_metadata.{key}")
+    return mismatches

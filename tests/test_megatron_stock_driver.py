@@ -1,7 +1,7 @@
 """The stock Megatron-LM driver package, checked without a GPU.
 
 Every test here runs on the CPU. The module imports torch, because
-``benchmarks/e2e/megatron_stock/data.py`` and ``profiling.py`` do, but it
+``benchmarks/e2e/engines/megatron_stock/driver/data.py`` and ``profiling.py`` do, but it
 allocates nothing on a device and it starts no training.
 
 The tests are grouped by the file they guard, and each group names the one
@@ -26,7 +26,9 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
+import inspect
 import json
+import math
 import os
 import pathlib
 import sys
@@ -44,17 +46,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch  # noqa: E402
 
-from benchmarks.e2e.megatron_stock import (  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock import flags  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.driver import (  # noqa: E402
     bootstrap,
     data,
     dp_marker,
-    flags,
     markers,
     profiling,
     step_log,
     train,
 )
-from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.flags import (  # noqa: E402
     ALWAYS_OMITTED_FLAGS,
     BENCH_ARM_DIR,
     BENCH_BATCH_P2P_SYNC,
@@ -71,22 +73,19 @@ from benchmarks.e2e.megatron_stock.flags import (  # noqa: E402
     data_parallel_overlap,
     microbatch_geometry,
     omitted_flags,
-    refuse_unknown_nan_guard,
-    refuse_unknown_p2p_sync,
     stock_megatron_flags,
 )
+from benchmarks.e2e.engines.registry import engine_named  # noqa: E402
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.parallelism import TRIVIAL_SPEC
-from benchmarks.e2e.registry import C4_REPLAY_WORKLOAD  # noqa: E402
-from benchmarks.e2e.results import (  # noqa: E402
-    GRAD_NORM_METRIC,
-    LOSS_METRIC,
-    STEP_METRICS,
-)
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC, parallelism_refusals
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig  # noqa: E402
+from benchmarks.e2e.registry import C4_REPLAY_DATA, ENGINES, SEED  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.steps import read_steps  # noqa: E402
 from benchmarks.models.piper_qwen3.shape import (  # noqa: E402
     PIPER_SHAPES,
     shape_by_name,
 )
+from tests.engine_helpers import run_spec  # noqa: E402
 
 # The mesh cell 1 and cell 3 of the run matrix use.
 PP4_SPEC = ParallelismSpec(
@@ -97,7 +96,7 @@ PP4_SPEC = ParallelismSpec(
 # two run matrices use overlapping cell numbers for different cells.
 SHARDED_PP4_SPEC = dataclasses.replace(PP4_SPEC, zero=1)
 EXPERT_PP4_SPEC = dataclasses.replace(SHARDED_PP4_SPEC, ep=2)
-BATCH_32 = dataclasses.replace(C4_REPLAY_WORKLOAD, local_batch_size=32)
+BATCH_32 = dataclasses.replace(C4_REPLAY_DATA, local_batch_size=32)
 # Read as text rather than imported, so the check needs no megatron import
 # and no GPU. DATA_PARALLEL_OPTIMIZERS is a claim about this file.
 MEGATRON_OPTIMIZER_SOURCE = (
@@ -111,15 +110,53 @@ MEGATRON_OPTIMIZER_SOURCE = (
 )
 
 
-def flags_for(shape_name, spec, workload=BATCH_32, **keywords):
+def flags_for(
+    shape_name,
+    spec,
+    replay=BATCH_32,
+    *,
+    seed=SEED,
+    megatron_p2p_sync="off",
+    megatron_nan_guard="off",
+    megatron_precision="stock",
+):
+    """The stock flags of one profiled run of the ``engines`` scenario."""
     return stock_megatron_flags(
-        shape_by_name(shape_name),
-        workload,
-        spec,
+        run_spec(
+            shape_name, data=replay, parallelism=spec, ac_mode="none", seed=seed
+        ),
+        MegatronStockConfig(
+            p2p_sync=megatron_p2p_sync,
+            nan_guard=megatron_nan_guard,
+            precision=megatron_precision,
+        ),
         arm_dir="/tmp/arm",
-        model_size=shape_name,
-        **keywords,
     )
+
+
+def refusals_for(
+    shape_name,
+    spec,
+    replay=BATCH_32,
+    *,
+    seed=SEED,
+    megatron_p2p_sync="off",
+    megatron_nan_guard="off",
+    megatron_precision="stock",
+):
+    """The stock engine's refusals of one profiled run, joined into one string."""
+    arm = dataclasses.replace(
+        ENGINES.arm("megatron_stock"),
+        config=MegatronStockConfig(
+            p2p_sync=megatron_p2p_sync,
+            nan_guard=megatron_nan_guard,
+            precision=megatron_precision,
+        ),
+    )
+    run = run_spec(
+        shape_name, data=replay, parallelism=spec, ac_mode="none", seed=seed
+    )
+    return " ".join(engine_named("megatron_stock").check(run, arm))
 
 
 def value_after(emitted, flag):
@@ -287,16 +324,15 @@ class FlagListTest(unittest.TestCase):
         """The field is inert without a pipeline message."""
         for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
             with self.subTest(dp=spec.dp):
-                with self.assertRaisesRegex(
-                    ValueError, "no pipeline message"
-                ):
-                    flags_for("1b", spec, megatron_p2p_sync="on")
+                self.assertIn(
+                    "no pipeline message",
+                    refusals_for("1b", spec, megatron_p2p_sync="on"),
+                )
 
     def test_an_unknown_p2p_value_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not one of"):
-            flags_for("1b", PP4_SPEC, megatron_p2p_sync="maybe")
-        with self.assertRaisesRegex(ValueError, "not one of"):
-            refuse_unknown_p2p_sync("false")
+        self.assertIn(
+            "not one of", refusals_for("1b", PP4_SPEC, megatron_p2p_sync="maybe")
+        )
 
     def test_the_nan_guard_on_argv_carries_no_token(self) -> None:
         """``on`` is Megatron's own default, so it needs no flag."""
@@ -330,10 +366,9 @@ class FlagListTest(unittest.TestCase):
                 self.assertFalse(NO_CHECK_FOR_NAN_FLAG.startswith("--bench-"))
 
     def test_an_unknown_nan_guard_value_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not one of"):
-            flags_for("1b", PP4_SPEC, megatron_nan_guard="maybe")
-        with self.assertRaisesRegex(ValueError, "not one of"):
-            refuse_unknown_nan_guard("false")
+        self.assertIn(
+            "not one of", refusals_for("1b", PP4_SPEC, megatron_nan_guard="maybe")
+        )
 
     def test_the_stock_argv_for_30b_a3b_carries_the_written_geometry(
         self,
@@ -460,8 +495,13 @@ class FlagListTest(unittest.TestCase):
         A replicated expert row would compare two memory strategies, which
         is two changes rather than one.
         """
-        with self.assertRaisesRegex(ValueError, "--zero 1"):
-            flags_for("1b", dataclasses.replace(PP4_SPEC, ep=2))
+        refusals = parallelism_refusals(
+            dataclasses.replace(PP4_SPEC, ep=2),
+            shape=shape_by_name("1b"),
+            local_batch_size=32,
+            device_count=8,
+        )
+        self.assertTrue(any("--zero 1" in refusal for refusal in refusals))
 
     def test_an_unknown_zero_value_is_refused(self) -> None:
         """``ParallelismSpec`` refuses the level, so no argv is built.
@@ -549,7 +589,7 @@ class FlagListTest(unittest.TestCase):
         # Level 1 reads no_shard for the same reason. It shards the
         # optimizer states through the DistributedOptimizer instead.
         self.assertEqual(SHARDING_STRATEGIES[1], "no_shard")
-        self.assertFalse(data_parallel_overlap())
+        self.assertFalse(data_parallel_overlap(()))
         self.assertTrue(data_parallel_overlap(("--overlap-grad-reduce",)))
 
     def test_lean_sends_the_four_precision_flags(self) -> None:
@@ -587,20 +627,22 @@ class FlagListTest(unittest.TestCase):
         owner of that flag. Unrefused, the run dies inside Megatron's own
         config validation and names neither axis.
         """
-        with self.assertRaisesRegex(
-            ValueError, "needs --zero 1"
-        ):
-            flags_for("1b", PP4_SPEC, megatron_precision="lean")
+        self.assertIn(
+            "needs --zero 1",
+            refusals_for("1b", PP4_SPEC, megatron_precision="lean"),
+        )
 
     def test_an_unknown_precision_value_is_refused(self) -> None:
         """A silent fall through would send the stock argv under the lean
         label, and record 10 bytes per parameter for a run that held 18."""
-        with self.assertRaisesRegex(ValueError, "megatron precision"):
-            flags_for(
+        self.assertIn(
+            "megatron precision 'bf16' is not one of",
+            refusals_for(
                 "1b",
                 dataclasses.replace(PP4_SPEC, zero=1),
                 megatron_precision="bf16",
-            )
+            ),
+        )
 
     def test_the_two_flags_the_recipe_never_sends(self) -> None:
         """Both would be wrong, and each for its own reason.
@@ -731,12 +773,12 @@ class FlagListTest(unittest.TestCase):
         """
         for steps in (40, 60, 80):
             with self.subTest(steps=steps):
-                workload = dataclasses.replace(
+                replay = dataclasses.replace(
                     BATCH_32, steps=steps, local_batch_size=32
                 )
-                emitted = flags_for("1b", PP4_SPEC, workload)
+                emitted = flags_for("1b", PP4_SPEC, replay)
                 end = int(value_after(emitted, "--profile-step-end"))
-                self.assertEqual(end % workload.profile_freq, 0)
+                self.assertEqual(end % ENGINES.window.freq, 0)
                 self.assertEqual(end, steps)
                 self.assertEqual(
                     end, int(value_after(emitted, "--train-iters"))
@@ -753,13 +795,13 @@ class FlagListTest(unittest.TestCase):
         """
         for steps in (41, 45, 50, 55, 59, 99):
             with self.subTest(steps=steps):
-                workload = dataclasses.replace(
+                replay = dataclasses.replace(
                     BATCH_32, steps=steps, local_batch_size=32
                 )
-                with self.assertRaisesRegex(
-                    ValueError, r"whole number of profiler cycles"
-                ):
-                    flags_for("1b", PP4_SPEC, workload)
+                self.assertIn(
+                    "whole number of profiler cycles",
+                    refusals_for("1b", PP4_SPEC, replay),
+                )
 
     def test_the_workload_supplies_the_run_lengths(self) -> None:
         emitted = flags_for("1b", TRIVIAL_SPEC)
@@ -775,9 +817,9 @@ class FlagListTest(unittest.TestCase):
         self.assertEqual(value_after(emitted, "--profile-step-start"), "1")
         self.assertEqual(
             value_after(emitted, "--bench-min-trace-windows"),
-            str(BATCH_32.min_trace_windows),
+            str(ENGINES.window.min_windows),
         )
-        self.assertEqual(value_after(emitted, "--seed"), str(BATCH_32.seed))
+        self.assertEqual(value_after(emitted, "--seed"), str(SEED))
         # --seq-length is the packed sample, and --bench-seq-len is the
         # titan row the workload declares.
         self.assertEqual(
@@ -785,47 +827,30 @@ class FlagListTest(unittest.TestCase):
         )
 
     def test_a_refused_request_names_its_reason(self) -> None:
-        shape = shape_by_name("1b")
         cases = {
-            "seeded": (
-                dataclasses.replace(BATCH_32, seed=None),
-                TRIVIAL_SPEC,
-                "seeded",
-            ),
-            "expert": (
-                BATCH_32,
-                ParallelismSpec(dp=2, ep=2),
-                "expert-parallel",
-            ),
-            "schedule": (
-                BATCH_32,
-                ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B"),
-                "pipeline schedule",
-            ),
             "divides": (
                 dataclasses.replace(BATCH_32, local_batch_size=6),
                 PP4_SPEC,
-                "does not divide",
             ),
             "divides_trivial": (
                 dataclasses.replace(BATCH_32, local_batch_size=6),
                 ParallelismSpec(
                     pp=4, pp_schedule="1F1B", pp_microbatch_size=4
                 ),
-                "does not divide",
             ),
         }
-        for label, (workload, spec, phrase) in cases.items():
+        for label, (replay, spec) in cases.items():
             with self.subTest(case=label):
                 with self.assertRaises(ValueError) as caught:
-                    stock_megatron_flags(
-                        shape,
-                        workload,
-                        spec,
-                        arm_dir="/tmp/arm",
-                        model_size="1b",
-                    )
-                self.assertIn(phrase, str(caught.exception))
+                    flags_for("1b", spec, replay)
+                self.assertIn("does not divide", str(caught.exception))
+        self.assertIn(
+            "implements '1F1B' alone",
+            refusals_for(
+                "1b", ParallelismSpec(pp=2, pp_schedule="Interleaved1F1B")
+            ),
+        )
+        self.assertIn("seeded", refusals_for("1b", TRIVIAL_SPEC, seed=None))
 
 
 # --------------------------------------------------------------------------
@@ -929,7 +954,7 @@ class TypingOverrideShimTest(unittest.TestCase):
             "import typing, sys;"
             "before = hasattr(typing, 'override');"
             "sys.path.insert(0, %r);"
-            "from benchmarks.e2e.megatron_stock import bootstrap;"
+            "from benchmarks.e2e.engines.megatron_stock.driver import bootstrap;"
             "added = bootstrap.install_typing_override();"
             "print(before, added, callable(typing.override))"
             % str(Path(__file__).resolve().parent.parent)
@@ -951,7 +976,7 @@ class TypingOverrideShimTest(unittest.TestCase):
 
 
 def synthetic_samples(count, seq_len, document_lengths):
-    """``(input, positions, label)`` triples with known document splits.
+    """Samples of the shared stream's form, with known document splits.
 
     ``document_lengths`` is one list per sample, and each must sum to
     ``seq_len``.
@@ -968,7 +993,7 @@ def synthetic_samples(count, seq_len, document_lengths):
             index * seq_len, (index + 1) * seq_len, dtype=torch.int64
         )
         labels = tokens + 1
-        samples.append((tokens, positions, labels))
+        samples.append(({"input": tokens, "positions": positions}, labels))
     return samples
 
 
@@ -1041,13 +1066,24 @@ class MicrobatchContractTest(unittest.TestCase):
                     [self.packed] * (len(values) - end - 1),
                 )
 
-    def test_the_padded_width_is_the_widest_pack_of_this_rank(self) -> None:
-        # The pack of rows [8,4,4] and [16] holds five documents, so six
-        # entries: 0, 8, 12, 16, 32.  Wait -- that pack is rows 2 and 3.
-        widest = self.iterator.padded_documents
-        for _ in range(self.iterator.microbatch_count):
+    def test_cu_seqlens_is_padded_to_the_packed_length(self) -> None:
+        """``GPTDataset`` pads each row to ``seq_length + 1`` entries, filled with ``seq_length``."""
+        for index in range(self.iterator.microbatch_count):
+            row = next(self.iterator)["cu_seqlens"]
+            self.assertEqual(tuple(row.shape), (1, self.packed + 1))
+            exact = data.document_offsets(
+                torch.cat(
+                    [
+                        self.samples[self.rows * index + r][0]["positions"]
+                        for r in range(self.rows)
+                    ]
+                ),
+                self.packed,
+            ).tolist()
+            values = row[0].tolist()
+            self.assertEqual(values[: len(exact)], exact)
             self.assertEqual(
-                tuple(next(self.iterator)["cu_seqlens"].shape), (1, widest)
+                values[len(exact) :], [self.packed] * (len(values) - len(exact))
             )
 
     def test_max_seqlen_is_the_longest_document_in_the_pack(self) -> None:
@@ -1070,7 +1106,7 @@ class MicrobatchContractTest(unittest.TestCase):
             tokens = next(self.iterator)["tokens"][0]
             expected = torch.cat(
                 [
-                    self.samples[self.rows * index + row][0]
+                    self.samples[self.rows * index + row][0]["input"]
                     for row in range(self.rows)
                 ]
             )
@@ -1607,9 +1643,10 @@ class MarkerStringTest(unittest.TestCase):
 
         A one-character difference fails a real run at arm rule 12.
         """
-        from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
-
-        profile = MEGATRON_STOCK_PROFILE
+        from benchmarks.e2e.engines.megatron_stock.validate import (
+            mesh_markers,
+            precision_markers,
+        )
         cases = {
             "stock": stock_args(),
             "lean": stock_args(
@@ -1621,7 +1658,7 @@ class MarkerStringTest(unittest.TestCase):
         }
         for value, args in cases.items():
             line = markers.mode_line(args)
-            for marker in profile.precision_markers(value):
+            for marker in precision_markers(value):
                 with self.subTest(value=value, marker=marker):
                     self.assertIn(marker, line)
 
@@ -1734,7 +1771,7 @@ class DriverRefusalTest(unittest.TestCase):
 
     def test_a_schedule_other_than_1f1b_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            flags.refuse_unsupported_run(
+            train.refuse_unsupported_run(
                 stock_args(
                     pipeline_model_parallel_size=4,
                     bench_pp_schedule="Interleaved1F1B",
@@ -1744,11 +1781,11 @@ class DriverRefusalTest(unittest.TestCase):
 
     def test_a_schedule_at_pipeline_degree_one_is_refused(self) -> None:
         with self.assertRaises(ValueError):
-            flags.refuse_unsupported_run(stock_args(bench_pp_schedule="1F1B"))
+            train.refuse_unsupported_run(stock_args(bench_pp_schedule="1F1B"))
 
     def test_a_virtual_pipeline_degree_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
-            flags.refuse_unsupported_run(
+            train.refuse_unsupported_run(
                 stock_args(virtual_pipeline_model_parallel_size=2)
             )
         self.assertIn("virtual pipeline", str(caught.exception))
@@ -1756,21 +1793,21 @@ class DriverRefusalTest(unittest.TestCase):
     def test_a_batched_microbatch_is_refused(self) -> None:
         """It would send the next pipeline stage a permuted activation."""
         with self.assertRaises(ValueError) as caught:
-            flags.refuse_unsupported_run(stock_args(micro_batch_size=4))
+            train.refuse_unsupported_run(stock_args(micro_batch_size=4))
         self.assertIn("permuted", str(caught.exception))
 
     def test_a_packing_that_does_not_match_seq_length_is_refused(
         self,
     ) -> None:
         with self.assertRaises(ValueError) as caught:
-            flags.refuse_unsupported_run(
+            train.refuse_unsupported_run(
                 stock_args(bench_rows_per_sample=8)
             )
         self.assertIn("--seq-length", str(caught.exception))
 
     def test_the_declared_run_is_accepted(self) -> None:
-        flags.refuse_unsupported_run(stock_args())
-        flags.refuse_unsupported_run(
+        train.refuse_unsupported_run(stock_args())
+        train.refuse_unsupported_run(
             stock_args(
                 world_size=8,
                 pipeline_model_parallel_size=4,
@@ -1785,12 +1822,12 @@ class DriverRefusalTest(unittest.TestCase):
         """The field is inert without a pipeline message, and the run would
         print a treatment it did not have."""
         with self.assertRaises(ValueError) as caught:
-            flags.refuse_unsupported_run(stock_args(bench_batch_p2p_sync="off"))
+            train.refuse_unsupported_run(stock_args(bench_batch_p2p_sync="off"))
         self.assertIn(BENCH_BATCH_P2P_SYNC, str(caught.exception))
         self.assertIn("no pipeline message", str(caught.exception))
 
     def test_p2p_sync_off_under_a_pipeline_is_accepted(self) -> None:
-        flags.refuse_unsupported_run(
+        train.refuse_unsupported_run(
             stock_args(
                 world_size=4,
                 pipeline_model_parallel_size=4,
@@ -1812,14 +1849,14 @@ class P2pSyncMappingTest(unittest.TestCase):
     """
 
     def test_off_sets_the_field_false_on_args(self) -> None:
-        args = flags.apply_p2p_sync(stock_args(bench_batch_p2p_sync="off"))
+        args = train.apply_p2p_sync(stock_args(bench_batch_p2p_sync="off"))
         self.assertIs(args.batch_p2p_sync, False)
 
     def test_on_leaves_the_attribute_absent(self) -> None:
         """Megatron's dataclass default must rule, exactly as it did before
         the option existed. An attribute set to True would be copied too,
         and a Megatron bump that moved the default would then be masked."""
-        args = flags.apply_p2p_sync(stock_args())
+        args = train.apply_p2p_sync(stock_args())
         self.assertFalse(hasattr(args, "batch_p2p_sync"))
 
     def test_the_line_reads_the_built_transformer_config(self) -> None:
@@ -1863,7 +1900,7 @@ class P2pSyncMappingTest(unittest.TestCase):
 class NanGuardLineTest(unittest.TestCase):
     """The driver prints Megatron's PARSED value, and nothing sets it here.
 
-    ``--megatron-nan-guard off`` reaches the argv as Megatron's own
+    ``megatron_stock.nan_guard=off`` reaches the argv as Megatron's own
     ``--no-check-for-nan-in-loss-and-grad``. The driver reads no harness
     value for it; the line is an observation of what Megatron resolved.
     """
@@ -1967,101 +2004,51 @@ class MegatronNanGuardSourceTest(unittest.TestCase):
         self.assertIn("raise RuntimeError(full_message)", branch)
 
 
-class RendezvousDefaultsTest(unittest.TestCase):
-    """At one rank the driver fills the rendezvous; under torchrun it does not."""
+class DriverOrderTest(unittest.TestCase):
+    """The driver prepares Megatron before it imports the training entry point."""
 
-    def test_an_empty_environment_gets_both_variables(self) -> None:
-        env: dict[str, str] = {}
-        bootstrap.install_rendezvous_defaults(env)
-        self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
-        self.assertTrue(1024 <= int(env["MASTER_PORT"]) <= 65535)
-
-    def test_the_torchrun_values_are_kept(self) -> None:
-        env = {"MASTER_ADDR": "10.0.0.7", "MASTER_PORT": "29500"}
-        bootstrap.install_rendezvous_defaults(env)
-        self.assertEqual(
-            env, {"MASTER_ADDR": "10.0.0.7", "MASTER_PORT": "29500"}
-        )
-
-    def test_a_set_port_is_kept_when_only_the_address_is_absent(self) -> None:
-        env = {"MASTER_PORT": "29500"}
-        bootstrap.install_rendezvous_defaults(env)
-        self.assertEqual(env["MASTER_PORT"], "29500")
-        self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
-
-
-class AllocatorDefaultsTest(unittest.TestCase):
-    """The driver sets the allocator policy run_train.sh gives the other arm."""
-
-    def test_an_empty_environment_gets_the_policy(self) -> None:
-        env: dict[str, str] = {}
-        bootstrap.install_allocator_defaults(env)
-        self.assertEqual(env["PYTORCH_ALLOC_CONF"], "expandable_segments:True")
-
-    def test_an_existing_value_is_kept(self) -> None:
-        env = {"PYTORCH_ALLOC_CONF": "max_split_size_mb:128"}
-        bootstrap.install_allocator_defaults(env)
-        self.assertEqual(env, {"PYTORCH_ALLOC_CONF": "max_split_size_mb:128"})
-
-    def test_main_sets_both_before_it_imports_torch(self) -> None:
-        """Ordering is load-bearing: torch reads the policy at CUDA init."""
+    def test_main_prepares_before_it_imports_pretrain(self) -> None:
         import inspect
 
         source = inspect.getsource(train.main)
-        allocator = source.index("bootstrap.install_allocator_defaults()")
-        rendezvous = source.index("bootstrap.install_rendezvous_defaults()")
-        prepare = source.index("bootstrap.prepare()")
-        self.assertLess(allocator, rendezvous)
-        self.assertLess(rendezvous, prepare)
-        self.assertLess(prepare, source.index("import pretrain_gpt"))
-
-
-class StepLineTest(unittest.TestCase):
-    """The line ``benchmarks/e2e/results.py`` parses."""
-
-    def line(self, **overrides):
-        fields = dict(
-            step=7,
-            loss=2.5,
-            grad_norm=0.75,
-            memory_bytes=12 * 2**30,
-            device_total_bytes=140 * 2**30,
-            tps=41234,
-            tflops=123.4,
-            mfu=12.5,
-        )
-        fields.update(overrides)
-        return step_log.step_log_line(**fields)
-
-    def test_the_three_regexes_read_it(self) -> None:
-        line = self.line()
-        match = STEP_METRICS.search(line)
-        self.assertIsNotNone(match)
-        self.assertEqual(int(match.group(1)), 7)
-        self.assertAlmostEqual(float(match.group(2)), 12.0, places=2)
-        self.assertEqual(int(match.group(3).replace(",", "")), 41234)
-        self.assertAlmostEqual(
-            float(LOSS_METRIC.search(line).group(2)), 2.5, places=4
-        )
-        self.assertAlmostEqual(
-            float(GRAD_NORM_METRIC.search(line).group(2)), 0.75, places=4
+        self.assertLess(
+            source.index("bootstrap.prepare()"), source.index("import pretrain_gpt")
         )
 
-    def test_a_rank_without_a_loss_prints_no_loss_field(self) -> None:
-        """Only the last pipeline stage computes one, and nothing broadcasts.
 
-        ``results.py`` reads the trajectory from ``loss_visible_rank``,
-        which is a last-stage rank, so an absent field costs nothing and a
-        sentinel would add a constant that is not a loss.
-        """
-        line = self.line(loss=None)
-        self.assertIsNone(LOSS_METRIC.search(line))
-        self.assertIsNotNone(STEP_METRICS.search(line))
-        self.assertIsNotNone(GRAD_NORM_METRIC.search(line))
+class StepRecordTest(unittest.TestCase):
+    """The step record that the shim prints, and the figures that feed it."""
 
-    def test_a_skipped_step_prints_nan(self) -> None:
-        line = self.line(grad_norm=None)
-        self.assertEqual(GRAD_NORM_METRIC.search(line).group(2), "nan")
+    def test_the_shim_prints_the_step_record(self) -> None:
+        inner = [
+            const
+            for const in step_log.install_step_log_shim.__code__.co_consts
+            if isinstance(const, types.CodeType)
+            and const.co_name == "replacement"
+        ]
+        self.assertEqual(len(inner), 1)
+        self.assertIn("step_record", inner[0].co_names)
+
+    def test_a_skipped_step_reads_as_a_non_finite_norm(self) -> None:
+        """Megatron states no norm on a skipped step, and the shim prints ``nan`` for it."""
+        source = inspect.getsource(step_log.install_step_log_shim)
+        self.assertIn(
+            'grad_norm=float("nan") if grad_norm is None else float(grad_norm)',
+            source,
+        )
+        (sample,) = read_steps(
+            0,
+            step_log.step_record(
+                step=1,
+                tokens_per_second=1,
+                peak_memory_gib=1.0,
+                loss=1.0,
+                grad_norm=float("nan"),
+                tflops=1.0,
+                mfu=1.0,
+            ),
+        ).samples
+        self.assertTrue(math.isnan(sample.grad_norm))
 
     def test_tokens_per_second_divides_by_the_pipeline_degree(self) -> None:
         """The published figure is per device, as TorchTitan's is."""
@@ -2077,27 +2064,23 @@ class StepLineTest(unittest.TestCase):
         )
         self.assertIsNone(step_log.loss_value({"skipped iterations": 0}))
 
+    def test_a_loss_that_is_not_one_number_raises(self) -> None:
+        for value in (torch.tensor([1.0, 2.0]), "nan?", None):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "'lm loss'"):
+                    step_log.loss_value({"lm loss": value})
+
 
 class LossBroadcastTest(unittest.TestCase):
-    """The loss every rank prints, and the path it comes through.
-
-    Only the last pipeline stage computes a loss. A rank without one would
-    print no loss field, and ``benchmarks/e2e/results.py`` reads the
-    trajectory from whichever rank it selects. So the driver broadcasts.
-    """
+    """The loss every rank prints; the last pipeline stage computes it and broadcasts it."""
 
     def test_the_loss_is_unchanged_without_a_process_group(self) -> None:
         """One rank is the whole pipeline, so there is nobody to ask."""
         self.assertEqual(step_log.broadcast_pipeline_loss(1.25), 1.25)
         self.assertIsNone(step_log.broadcast_pipeline_loss(None))
 
-    def test_the_step_line_takes_its_loss_from_the_broadcast(self) -> None:
-        """The shim must not print this rank's own empty ``loss_dict``.
-
-        A rank that is not the last stage holds no loss. Printing
-        ``loss_value(loss_dict)`` directly gives that rank a line with no
-        loss field, which ``LOSS_METRIC`` does not match.
-        """
+    def test_the_step_record_takes_its_loss_from_the_broadcast(self) -> None:
+        """The shim prints the broadcast loss, not the empty ``loss_dict`` of a rank that is not the last stage."""
         inner = [
             const
             for const in step_log.install_step_log_shim.__code__.co_consts
@@ -2451,7 +2434,7 @@ class DataParallelMarkerTest(unittest.TestCase):
 
         This needs no megatron, because it reads the function alone.
         """
-        from benchmarks.e2e.megatron_stock.flags import (
+        from benchmarks.e2e.engines.megatron_stock.flags import (
             data_parallel_optimizer,
         )
 
@@ -2513,7 +2496,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         the wrapper at ``DistributedDataParallel``. So the two values share
         a wrapper name, and only the optimizer class tells them apart.
         """
-        from benchmarks.e2e.megatron_stock.flags import (
+        from benchmarks.e2e.engines.megatron_stock.flags import (
             DATA_PARALLEL_OPTIMIZERS,
             DATA_PARALLEL_WRAPPERS,
         )
@@ -2594,14 +2577,15 @@ class DataParallelMarkerTest(unittest.TestCase):
         ``ChainedOptimizer(optimizers)``, and this suite takes no other
         path.
         """
-        from benchmarks.e2e.megatron_stock.flags import (
+        from benchmarks.e2e.engines.megatron_stock.flags import (
             CHAINED_OPTIMIZER,
             DATA_PARALLEL_OPTIMIZERS,
             grad_reduce_in_fp32,
         )
-        from benchmarks.e2e.validation import MEGATRON_STOCK_PROFILE
-
-        profile = MEGATRON_STOCK_PROFILE
+        from benchmarks.e2e.engines.megatron_stock.validate import (
+            mesh_markers,
+            precision_markers,
+        )
         ddp_cls, _ = self.wrapper_classes()
         for spec, cls in (
             (PP4_SPEC, ddp_cls),
@@ -2633,8 +2617,8 @@ class DataParallelMarkerTest(unittest.TestCase):
                         optimizer=CHAINED_OPTIMIZER,
                         members=(inner, inner),
                     )
-                    markers = profile.parallelism_markers(
-                        spec, BATCH_32, precision
+                    markers = mesh_markers(
+                        spec, BATCH_32, precision, ()
                     )
                     self.assertEqual(printed, markers[1])
 
@@ -2687,7 +2671,7 @@ class HarnessArgumentTest(unittest.TestCase):
     def test_the_group_accepts_the_emitted_flags(self) -> None:
         import argparse
 
-        parser = flags.add_bench_args(
+        parser = train.add_bench_args(
             argparse.ArgumentParser(allow_abbrev=False)
         )
         emitted = flags_for("1b", PP4_SPEC)
@@ -2714,7 +2698,7 @@ class HarnessArgumentTest(unittest.TestCase):
         self.assertEqual(parsed.bench_seq_len, BATCH_32.seq_len)
         self.assertEqual(parsed.bench_rows_per_sample, 4)
         self.assertEqual(
-            parsed.bench_min_trace_windows, BATCH_32.min_trace_windows
+            parsed.bench_min_trace_windows, ENGINES.window.min_windows
         )
         # The default argv carries the p2p flag above pp 1, and the
         # parser reads the value the flag list emitted.
@@ -2725,7 +2709,7 @@ class HarnessArgumentTest(unittest.TestCase):
     ) -> None:
         import argparse
 
-        parser = flags.add_bench_args(
+        parser = train.add_bench_args(
             argparse.ArgumentParser(allow_abbrev=False)
         )
         emitted = flags_for("1b", PP4_SPEC, megatron_p2p_sync="off")
@@ -2865,6 +2849,27 @@ class PipelineShapeAgreementTest(unittest.TestCase):
                 ],
             )
 
+    def test_megatron_s_merge_strips_the_padding(self) -> None:
+        """``_merge_cu_seqlens_across_micro_batch`` gives back the exact offsets of each microbatch."""
+        self.megatron_functions()
+        from megatron.core.utils import _merge_cu_seqlens_across_micro_batch
+
+        seq_len = 16
+        samples = synthetic_samples(8, seq_len, [[16], [4, 12], [8, 4, 4]])
+        iterator = data.StockReplayIterator(
+            samples, rows_per_sample=2, seq_len=seq_len
+        )
+        for index in range(iterator.microbatch_count):
+            microbatch = next(iterator)
+            exact = data.document_offsets(
+                microbatch["position_ids"][0], iterator.packed_len
+            )
+            merged = _merge_cu_seqlens_across_micro_batch(
+                microbatch["cu_seqlens"], iterator.packed_len
+            )
+            with self.subTest(microbatch=index):
+                self.assertEqual(merged.tolist(), exact.tolist())
+
 
 class ModelBuilderTest(unittest.TestCase):
     """The builder path Megatron imports, and the count it must agree with."""
@@ -2896,7 +2901,7 @@ class ModelBuilderTest(unittest.TestCase):
         import importlib
 
         builder_cls, config_cls = self.megatron_symbols()
-        from benchmarks.e2e.megatron_stock import model_builder
+        from benchmarks.e2e.engines.megatron_stock.driver import model_builder
 
         module_path, _, class_name = (
             model_builder.BenchGPTModelConfig.builder.rpartition(".")

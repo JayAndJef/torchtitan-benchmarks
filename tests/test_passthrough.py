@@ -5,41 +5,38 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib.util
-import typing
+import sys
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from benchmarks.cli.e2e import run_command
-from benchmarks.e2e.launch import megatron_stock_command, titan_command
-from benchmarks.e2e.megatron_stock.flags import (
+from benchmarks.e2e.engines.api import Arm, CompileMode
+from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
+from benchmarks.e2e.engines.registry import engine_for
+from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
+from benchmarks.e2e.engines.torchtitan import flags as titan_flags
+from benchmarks.e2e.engines.megatron_stock import flags as megatron_flags
+from benchmarks.e2e.engines.megatron_stock.flags import (
     ALWAYS_OMITTED_FLAGS,
+    passthrough_refusals,
     stock_megatron_flags,
 )
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec
-from benchmarks.e2e.passthrough import (
-    OWNED_FLAGS,
-    PERF_FLAGS,
-    PINNED_FLAGS,
-    flag_name,
-    matches,
-    reach_refusal,
-    refusal,
-    refuse_passthrough,
-    row_for,
-)
-from benchmarks.e2e.registry import C4_REPLAY_WORKLOAD, scenario_by_name
-from benchmarks.e2e.schema import Arm
-from benchmarks.models.piper_qwen3.shape import PIPER_1B
+from benchmarks.e2e.passthrough import matches, row_for
+from benchmarks.e2e.registry import scenario_by_name
+from tests.engine_helpers import configured, run_spec
 
 PARALLEL_SPEC = ParallelismSpec(dp=2, pp=2, ep=2, zero=1, pp_schedule="1F1B")
-WORKLOAD = replace(C4_REPLAY_WORKLOAD, local_batch_size=8, steps=40)
 ENGINES = scenario_by_name("engines")
+ATTENTION = scenario_by_name("attention")
 OVERRIDE_ARM = Arm(
     name="override_arm",
     description="an arm with an override import",
-    compile="none",
-    override_imports=("some.override",),
+    config=TorchTitanConfig(
+        compile=CompileMode.NONE, override_imports=("some.override",)
+    ),
 )
 
 
@@ -49,81 +46,102 @@ def _run_option_names() -> set[str]:
     }
 
 
+TABLES = {
+    "torchtitan": (
+        titan_flags.OWNED_FLAGS,
+        titan_flags.PINNED_FLAGS,
+        titan_flags.PERF_FLAGS,
+    ),
+    "megatron": (
+        megatron_flags.OWNED_FLAGS,
+        megatron_flags.PINNED_FLAGS,
+        megatron_flags.PERF_FLAGS,
+    ),
+}
+"""The owned, pinned and perf tables of each engine."""
+
+
 def _owner_options() -> set[str]:
     return {
         name
-        for owner in OWNED_FLAGS
+        for owned, _, _ in TABLES.values()
+        for owner in owned
         if owner.startswith("--")
-        for name in owner.split("/")
+        for name in owner.split()[0].split("/")
     }
 
 
 def _classes(side: str, name: str) -> list[str]:
+    owned, pinned, perf = TABLES[side]
     found = []
-    if row_for(side, name, OWNED_FLAGS) is not None:
+    if row_for(name, owned) is not None:
         found.append("owned")
-    if row_for(side, name, PINNED_FLAGS) is not None:
+    if row_for(name, pinned) is not None:
         found.append("pinned")
-    if any(matches(name, pattern) for pattern in getattr(PERF_FLAGS, side)):
+    if any(matches(name, pattern) for pattern in perf):
         found.append("perf")
     return found
 
 
 def _repeated_patterns(side: str) -> list[str]:
+    owned, pinned, perf = TABLES[side]
     patterns = [
         pattern
-        for table in (OWNED_FLAGS, PINNED_FLAGS)
-        for flags in table.values()
-        for pattern in getattr(flags, side)
-    ] + list(getattr(PERF_FLAGS, side))
+        for table in (owned, pinned)
+        for row in table.values()
+        for pattern in row
+    ] + list(perf)
     return sorted({p for p in patterns if patterns.count(p) > 1})
 
 
 def _megatron_argvs() -> list[list[str]]:
     return [
         stock_megatron_flags(
-            PIPER_1B,
-            WORKLOAD,
-            TRIVIAL_SPEC,
+            run_spec(profile=False, local_batch_size=8),
+            MegatronStockConfig(),
             arm_dir="/x",
-            model_size="1b",
-            profile=False,
         ),
         stock_megatron_flags(
-            PIPER_1B,
-            WORKLOAD,
-            PARALLEL_SPEC,
+            run_spec(parallelism=PARALLEL_SPEC, local_batch_size=8),
+            MegatronStockConfig(precision="lean"),
             arm_dir="/x",
-            model_size="1b",
-            megatron_p2p_sync="off",
-            megatron_nan_guard="off",
-            megatron_precision="lean",
-            profile=True,
         ),
     ]
 
 
 def _titan_argvs() -> list[list[str]]:
     argvs = []
-    for arm in (*ENGINES.arms, OVERRIDE_ARM):
-        if arm.engine != "torchtitan":
+    for arm in (*ENGINES.arms, ATTENTION.arm("titan_compiled_fa3"), OVERRIDE_ARM):
+        if engine_for(arm).name != "torchtitan":
             continue
         for spec, profile, ac_mode in (
             (TRIVIAL_SPEC, False, "none"),
             (PARALLEL_SPEC, True, "sac"),
         ):
-            argvs.append(
-                titan_command(
-                    WORKLOAD,
-                    arm,
-                    Path("/x"),
-                    (),
-                    ac_mode,
-                    parallelism=spec,
-                    profile=profile,
-                )
+            run = run_spec(
+                parallelism=spec,
+                profile=profile,
+                ac_mode=ac_mode,
+                local_batch_size=8,
             )
+            argvs.append(list(titan_flags.trainer_args(run, arm.config, Path("/x"))))
     return argvs
+
+
+def _megatron_parser() -> argparse.ArgumentParser:
+    """Megatron's own parser, imported through the driver's bootstrap."""
+    from benchmarks.e2e.engines.megatron_stock.driver import bootstrap
+    from benchmarks.models.piper_qwen3.megatron_bootstrap import (
+        add_megatron_to_path,
+    )
+
+    bootstrap.install_typing_override()
+    add_megatron_to_path()
+    from megatron.training.arguments import add_megatron_arguments
+
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    add_megatron_arguments(parser)
+    return parser
 
 
 MEGATRON_ARM = ENGINES.arm("megatron_stock")
@@ -144,7 +162,7 @@ class MegatronTableTests(unittest.TestCase):
     def test_every_emitted_flag_has_exactly_one_class(self) -> None:
         for argv in _megatron_argvs():
             for token in argv:
-                name = flag_name("megatron", token)
+                name = megatron_flags.flag_name(token)
                 if name is None:
                     continue
                 with self.subTest(name=name):
@@ -161,7 +179,7 @@ class MegatronTableTests(unittest.TestCase):
         )
         for flag in perf:
             self.assertIn(flag, ALWAYS_OMITTED_FLAGS)
-        refuse_passthrough(MEGATRON_ARM, perf, zero=1)
+        self.assertEqual(passthrough_refusals(MEGATRON_ARM.name, perf, zero=1), [])
 
     def test_the_other_omitted_members_are_refused(self) -> None:
         for flag in (
@@ -173,66 +191,66 @@ class MegatronTableTests(unittest.TestCase):
         ):
             with self.subTest(flag=flag):
                 self.assertIn(flag, ALWAYS_OMITTED_FLAGS)
-                with self.assertRaisesRegex(ValueError, flag):
-                    refuse_passthrough(MEGATRON_ARM, (flag,), zero=1)
+                self.assertIn(
+                    flag,
+                    " ".join(passthrough_refusals(MEGATRON_ARM.name, (flag,), zero=1)),
+                )
 
     def test_the_equals_form_and_a_prefix_are_refused(self) -> None:
         for tokens, reason in (
             (("--num-layers=4",), "owned by --model-size"),
             (("--bench-seq-len", "8"), "pinned by the harness driver"),
-            (("--fp8-format", "hybrid"), "owned by --megatron-precision"),
+            (("--fp8-format", "hybrid"), "owned by --set megatron_stock.precision"),
             (("--recompute-granularity", "full"), "owned by --ac"),
         ):
             with self.subTest(tokens=tokens):
-                with self.assertRaisesRegex(ValueError, reason):
-                    refuse_passthrough(MEGATRON_ARM, tokens, zero=1)
+                self.assertIn(
+                    reason,
+                    " ".join(passthrough_refusals(MEGATRON_ARM.name, tokens, zero=1)),
+                )
 
     def test_an_unlisted_flag_passes(self) -> None:
-        self.assertIsNone(refusal("megatron", "--attention-backend"))
+        self.assertIsNone(megatron_flags.refusal("--attention-backend"))
 
     def test_param_gather_overlap_needs_zero_1(self) -> None:
-        with self.assertRaisesRegex(ValueError, "needs --zero 1"):
-            refuse_passthrough(
-                MEGATRON_ARM, ("--overlap-param-gather",), zero=0
-            )
+        self.assertIn(
+            "needs --zero 1",
+            " ".join(
+                passthrough_refusals(
+                    MEGATRON_ARM.name, ("--overlap-param-gather",), zero=0
+                )
+            ),
+        )
 
     def test_the_passthrough_lands_last(self) -> None:
-        command = megatron_stock_command(
-            WORKLOAD,
-            MEGATRON_ARM,
+        command = engine_for(MEGATRON_ARM).launch(
+            run_spec(ac_mode="none", profile=False),
+            configured(
+                MEGATRON_ARM,
+                extra_flags=(
+                    "--moe-token-dispatcher-type",
+                    "flex",
+                    "--moe-permute-fusion",
+                ),
+            ),
             Path("/x"),
-            ("--moe-token-dispatcher-type", "flex", "--moe-permute-fusion"),
-            "none",
-            profile=False,
-        )
+        ).target
         self.assertEqual(
             command[-3:],
-            ["--moe-token-dispatcher-type", "flex", "--moe-permute-fusion"],
+            ("--moe-token-dispatcher-type", "flex", "--moe-permute-fusion"),
         )
 
     @unittest.skipUnless(
         importlib.util.find_spec("torch"), "reading Megatron's parser needs torch"
     )
     def test_every_spelling_of_a_refused_setting_is_refused(self) -> None:
-        from benchmarks.models.piper_qwen3.megatron_bootstrap import (
-            add_megatron_to_path,
-        )
-
-        add_megatron_to_path()
-        if not hasattr(typing, "override"):
-            import typing_extensions
-
-            typing.override = typing_extensions.override
-        from megatron.training.arguments import add_megatron_arguments
-
-        parser = argparse.ArgumentParser(allow_abbrev=False)
-        add_megatron_arguments(parser)
+        parser = _megatron_parser()
         missing = []
         for action in parser._actions:
             refused = [
                 name
                 for name in action.option_strings
-                if refusal("megatron", name) is not None
+                if megatron_flags.refusal(name) is not None
             ]
             if refused:
                 missing.extend(
@@ -240,16 +258,34 @@ class MegatronTableTests(unittest.TestCase):
                 )
         self.assertEqual(missing, [])
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("torch"), "reading Megatron's parser needs torch"
+    )
+    def test_every_emitted_megatron_flag_is_in_the_pinned_parser(self) -> None:
+        parser = _megatron_parser()
+        known = {name for action in parser._actions for name in action.option_strings}
+        unknown = sorted(
+            {
+                name
+                for argv in _megatron_argvs()
+                for token in argv
+                if (name := megatron_flags.flag_name(token)) is not None
+                and not name.startswith("--bench-")
+                and name not in known
+            }
+        )
+        self.assertEqual(unknown, [])
+
 
 class TitanTableTests(unittest.TestCase):
     def test_every_emitted_flag_is_owned_or_pinned(self) -> None:
         for argv in _titan_argvs():
-            for token in argv[1:]:
-                name = flag_name("torchtitan", token)
+            for token in argv:
+                name = titan_flags.flag_name(token)
                 if name is None:
                     continue
                 with self.subTest(name=name):
-                    self.assertIsNotNone(refusal("torchtitan", token))
+                    self.assertIsNotNone(titan_flags.refusal(token))
                     self.assertEqual(len(_classes("torchtitan", name)), 1)
 
     @unittest.skipUnless(
@@ -282,17 +318,19 @@ class TitanTableTests(unittest.TestCase):
         self.assertEqual(unclassified, [])
 
     def test_perf_flags_pass_in_every_spelling(self) -> None:
-        refuse_passthrough(
-            TITAN_ARM,
-            (
-                "--compile.mode",
-                "max-autotune",
-                "--training.gc_freq=10",
-                "--parallelism.no-enable-sequence-parallel",
-                "--comm.init-timeout-seconds",
-                "600",
+        self.assertEqual(
+            titan_flags.passthrough_refusals(
+                TITAN_ARM.name,
+                (
+                    "--compile.mode",
+                    "max-autotune",
+                    "--training.gc_freq=10",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--comm.init-timeout-seconds",
+                    "600",
+                ),
             ),
-            zero=0,
+            [],
         )
 
     def test_owned_and_pinned_flags_are_refused(self) -> None:
@@ -303,27 +341,30 @@ class TitanTableTests(unittest.TestCase):
             ("activation-checkpoint:full", "owned by --ac"),
             ("--profiler.enable-profiling", "owned by --profile"),
             ("--debug.seed", "pinned by the shared data stream"),
+            ("--dataloader.replay-steps", "pinned by the shared data stream"),
+            ("--dataloader.offset-rows=2", "owned by the arm's packed_offsets value"),
             ("--training.dtype", "pinned by the precision recipe"),
         ):
             with self.subTest(token=token):
-                self.assertEqual(refusal("torchtitan", token), reason)
+                self.assertEqual(titan_flags.refusal(token), reason)
 
     def test_an_unlisted_flag_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not classified"):
-            refuse_passthrough(TITAN_ARM, ("--training.new-field",), zero=0)
-
-
-class ReachTests(unittest.TestCase):
-    def test_a_list_must_reach_an_arm_of_its_engine(self) -> None:
-        self.assertIsNone(reach_refusal(ENGINES.arms, ("--a",), ("--b",)))
-        self.assertIn(
-            "--megatron-arg reaches no arm",
-            reach_refusal((TITAN_ARM,), (), ("--moe-permute-fusion",)),
+        (refusal,) = titan_flags.passthrough_refusals(
+            TITAN_ARM.name, ("--training.new-field",)
         )
-        self.assertIn(
-            "--torchtitan-arg reaches no arm",
-            reach_refusal((MEGATRON_ARM,), ("--compile.mode",), ()),
+        self.assertIn("not classified", refusal)
+        self.assertIn("cannot pass through titan_eager.extra_flags", refusal)
+
+    def test_an_unlisted_loader_flag_is_refused(self) -> None:
+        (refusal,) = titan_flags.passthrough_refusals(
+            TITAN_ARM.name, ("--dataloader.foo=1",)
         )
+        self.assertIn("--dataloader.foo=1 (not classified", refusal)
+
+    def test_the_engine_check_refuses_an_unlisted_flag(self) -> None:
+        arm = configured(TITAN_ARM, extra_flags=("--training.new-field",))
+        (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
+        self.assertIn("--training.new-field (not classified", refusal)
 
 
 if __name__ == "__main__":

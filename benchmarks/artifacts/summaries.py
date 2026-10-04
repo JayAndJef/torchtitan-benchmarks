@@ -1,13 +1,4 @@
-"""Sample summarization and the shared numeric column formatters.
-
-Deliberately dependency-light: ``dataclasses`` and ``statistics`` only. Both
-measurement systems summarize samples the same way and render them into the
-same fixed-width columns, so these live below both rather than inside either.
-``benchmarks.e2e.results`` imports from here, as do four kernel modules
-spanning two subpackages -- ``kernel.engine.run``, ``kernel.engine.statistics``,
-``kernel.results.schema`` and ``kernel.results.reporting`` -- and neither
-measurement system imports the other.
-"""
+"""The sample summary and the fixed-width number columns that both measurement systems print."""
 
 from __future__ import annotations
 
@@ -17,6 +8,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SampleSummary:
+    """The count, the mean, the median and the standard deviation of one sample, in microseconds."""
+
     count: int
     mean_us: float
     median_us: float
@@ -24,7 +17,7 @@ class SampleSummary:
 
 
 def describe(values: list[float]) -> tuple[int, float, float, float]:
-    """Return (n, mean, sd, median) for one sample."""
+    """The count, the mean, the standard deviation and the median of one sample."""
     count = len(values)
     if not count:
         raise ValueError("cannot summarize an empty sample")
@@ -38,18 +31,20 @@ def describe(values: list[float]) -> tuple[int, float, float, float]:
 
 
 def summarize(values: list[float]) -> SampleSummary:
+    """The summary of one sample."""
     count, mean, standard_deviation, median = describe(values)
     return SampleSummary(count, mean, median, standard_deviation)
 
 
 def _value(value: float | None, width: int, precision: int = 1) -> str:
+    """``value`` in a fixed-width column; ``None`` prints as ``n/a``."""
     if value is None:
         return f"{'n/a':>{width}s}"
     return f"{value:{width}.{precision}f}"
 
 
 def _pvalue(value: float | None, width: int) -> str:
-    """Significant-digit form; p-values span many orders of magnitude."""
+    """``value`` in three significant digits, because a p-value spans many orders of magnitude."""
     if value is None:
         return f"{'n/a':>{width}s}"
     return f"{value:{width}.3g}"

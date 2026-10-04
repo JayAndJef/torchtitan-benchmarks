@@ -347,11 +347,11 @@ class TitanArmTest(unittest.TestCase):
         """
         from torchtitan.models.common.rope import CosSinRoPE
 
-        from benchmarks.models.piper_qwen3 import config_registry
+        from benchmarks.e2e.engines.torchtitan.plugins import config_registry
         from benchmarks.models.piper_qwen3.shape import shape_by_name
 
         shape = shape_by_name("normal")
-        trainer = config_registry.qwen3_piper_1b(size="normal")
+        trainer = config_registry.qwen3_piper_1b_pretokenized(size="normal")
         production = trainer.model_spec.model.layers[0].attention.rope
         self.assertEqual(
             production,

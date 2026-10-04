@@ -8,7 +8,7 @@ engines. One GEMM per side, over one shared ``[vocab_size, dim]`` weight:
   ``lm_head`` is ``torchtitan.models.common.Linear``, which is ``nn.Linear``
   with ``bias=False`` (``models/common/linear.py:26-40``). Our registry sets
   that config node at
-  ``benchmarks/models/piper_qwen3/config_registry.py:123-127``.
+  ``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``.
 * Megatron-core: ``GPTModel.output_layer``, built at
   ``third_party/Megatron-LM/megatron/core/models/gpt/gpt_model.py:264-286``
   and called at ``:762``.
@@ -290,7 +290,7 @@ def titan_lm_head_module(shape: PiperShape, device: torch.device):
     ``Decoder.__init__`` builds it with ``self.lm_head = config.lm_head.build
     ()`` (``third_party/torchtitan/torchtitan/models/common/decoder.py:241``),
     and ``_piper_1b_model`` is where our registry sets that node
-    (``benchmarks/models/piper_qwen3/config_registry.py:123-127``). So this is
+    (``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``). So this is
     the production module built by the production config, and the extraction
     is one attribute read.
 
@@ -305,7 +305,7 @@ def titan_lm_head_module(shape: PiperShape, device: torch.device):
     calls ``init_weights``. It only chooses values, which a GEMM's cost does
     not depend on and which this arm overwrites.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     node = _piper_1b_model(fuse_qkv=True, shape=shape).lm_head
     previous_dtype = torch.get_default_dtype()

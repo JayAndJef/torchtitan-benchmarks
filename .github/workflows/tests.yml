@@ -39,7 +39,12 @@ jobs:
             tests.test_cli \
             tests.test_docstrings \
             tests.test_engines \
+            tests.test_evidence \
+            tests.test_golden \
             tests.test_import_boundaries \
+            tests.test_launcher \
+            tests.test_overrides \
             tests.test_parallelism_plumbing \
             tests.test_schema \
+            tests.test_step_samples \
             tests.test_warmup_steps

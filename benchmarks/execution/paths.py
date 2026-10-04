@@ -1,30 +1,4 @@
-"""Where the repository, its submodules, and a run's caches live.
-
-Defined once, deliberately. ``BENCH_DIR`` is this file's own location walked
-back to the repository root and ``TITAN_DIR`` is derived from it, not read
-from the environment: there is no ``TITAN_DIR`` override and no
-``TITAN_PYTHON``, so a run cannot be pointed at a torchtitan checkout that
-the manifest's ``torchtitan_git_rev`` does not describe. The only thing that
-invalidates ``parents[2]`` is moving this file. Check the walk against the
-directory that holds ``run_bench.sh`` after any move, because a stale
-``.parent`` chain does not raise -- it silently relocates ``out/``, the
-caches, and the git-rev lookups.
-
-These constants are split out from the rest of ``execution/`` because they
-have consumers that are not the runners. ``benchmarks.artifacts.layout``
-takes ``BENCH_DIR`` alone to root the default output directory, and
-``benchmarks.e2e.megatron_stock.data`` -- which executes inside the *training*
-subprocess rather than the supervisor -- takes ``TITAN_DIR`` alone to find
-torchtitan's ``c4_test`` assets. Neither should have to import
-subprocess-launching machinery to spell a path.
-
-``RuntimePaths`` belongs here rather than beside ``runtime_environment``
-because it is a record of resolved locations that the environment builder
-then consumes; its own docstring has always said so. It resolves the cache
-root and the compiler-env script from a caller-supplied mapping, defaulting
-to ``os.environ`` only when none is passed, so a test or a resume can
-resolve a run's paths without touching the real environment.
-"""
+"""Where the repository, the TorchTitan checkout and the build caches of a run live."""
 
 from __future__ import annotations
 
@@ -36,12 +10,15 @@ from typing import Mapping
 
 
 BENCH_DIR = Path(__file__).resolve().parents[2]
+"""The repository root."""
+
 TITAN_DIR = BENCH_DIR / "third_party" / "torchtitan"
+"""The TorchTitan submodule checkout."""
 
 
 @dataclass(frozen=True)
 class RuntimePaths:
-    """Filesystem locations needed to execute a benchmark."""
+    """The directories and the compiler script of one run."""
 
     bench_dir: Path
     titan_dir: Path
@@ -56,6 +33,7 @@ class RuntimePaths:
         compiler_env: Path | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> RuntimePaths:
+        """The paths of a run: each argument, else its environment variable, else the fallback."""
         environment = environment or os.environ
         cache = cache_root or _optional_path(environment.get("BENCHMARK_CACHE_ROOT"))
         if cache is None:
@@ -75,4 +53,5 @@ class RuntimePaths:
 
 
 def _optional_path(value: str | None) -> Path | None:
+    """``value`` as a path; an empty value gives ``None``."""
     return Path(value) if value else None

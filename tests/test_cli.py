@@ -19,16 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from benchmarks.artifacts.layout import _default_output_dir
 from benchmarks.cli.e2e import run_command
 from benchmarks.cli.main import cli
-from benchmarks.e2e.parallelism import (
-    MEGATRON_ENGINES,
-)
 from benchmarks.e2e.registry import (
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
     ENGINES,
     SCENARIOS,
 )
+from benchmarks.e2e.overrides import Override
 from benchmarks.e2e.runner import execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import HUGE
@@ -47,8 +43,8 @@ class CliTests(unittest.TestCase):
     def _two_scenarios(self) -> dict:
         """The registry with a second scenario, for the multi-scenario rules.
 
-        One scenario is declared today, so the rules that need two are
-        exercised against a copy of it under another name.
+        A copy of ``engines`` under another name keeps these rules
+        independent of the declared scenarios.
         """
         engines = SCENARIOS["engines"]
         return {
@@ -295,8 +291,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, result.output)
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["model_size"], "huge")
-        command = manifest["commands"]["titan_compiled"]
+        self.assertEqual(manifest["run"]["shape"]["name"], "huge")
+        (arm,) = manifest["arms"]
+        command = arm["command"]
         self.assertEqual(
             command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
         )
@@ -321,36 +318,81 @@ class CliTests(unittest.TestCase):
             )
         return result, execute
 
-    def test_run_collects_both_passthrough_lists(self) -> None:
+    def test_run_collects_every_set_in_command_line_order(self) -> None:
         result, execute = self._invoke_run(
-            "--torchtitan-arg=--compile.mode max-autotune",
-            "--torchtitan-arg",
-            "--debug.deterministic",
-            "--megatron-arg=--cross-entropy-loss-fusion",
-            "--megatron-arg=--moe-token-dispatcher-type flex",
+            "--set",
+            "titan_eager.extra_flags+=--compile.mode max-autotune",
+            "--set=megatron_stock.nan_guard=on",
         )
         self.assertEqual(result.exit_code, 0, result.output)
         request = execute.call_args.args[0]
         self.assertEqual(request.gpu, "2")
         self.assertEqual(
-            request.torchtitan_args,
-            ("--compile.mode", "max-autotune", "--debug.deterministic"),
-        )
-        self.assertEqual(
-            request.megatron_args,
+            request.overrides,
             (
-                "--cross-entropy-loss-fusion",
-                "--moe-token-dispatcher-type",
-                "flex",
+                Override(
+                    "titan_eager", "extra_flags", "+=", "--compile.mode max-autotune"
+                ),
+                Override("megatron_stock", "nan_guard", "=", "on"),
             ),
         )
 
-    def test_an_absent_passthrough_reaches_the_request_as_none(self) -> None:
+    def test_an_absent_set_reaches_the_request_empty(self) -> None:
         result, execute = self._invoke_run()
         self.assertEqual(result.exit_code, 0, result.output)
-        request = execute.call_args.args[0]
-        self.assertIsNone(request.torchtitan_args)
-        self.assertIsNone(request.megatron_args)
+        self.assertEqual(execute.call_args.args[0].overrides, ())
+
+    def test_a_malformed_set_is_refused(self) -> None:
+        result, execute = self._invoke_run("--set", "megatron_stock nan_guard on")
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("is not <arm>.<field>=<value>", result.output)
+        execute.assert_not_called()
+
+    def test_a_set_that_names_an_undeclared_arm_is_refused(self) -> None:
+        result, execute = self._invoke_run("--set", "piper.nan_guard=on")
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--set: scenario 'engines' has no arm(s) 'piper'", result.output)
+        execute.assert_not_called()
+
+    def test_every_removed_option_names_its_set_spelling(self) -> None:
+        for arguments, message in (
+            (
+                ("--megatron-nan-guard", "on"),
+                "--megatron-nan-guard on is now --set megatron_stock.nan_guard=on",
+            ),
+            (
+                ("--megatron-p2p-sync", "on"),
+                "--megatron-p2p-sync on is now --set megatron_stock.p2p_sync=on",
+            ),
+            (
+                ("--megatron-precision", "lean"),
+                "--megatron-precision lean is now --set megatron_stock.precision=lean",
+            ),
+            (
+                ("--megatron-arg=--moe-permute-fusion",),
+                "--megatron-arg --moe-permute-fusion is now --set "
+                "megatron_stock.extra_flags+=--moe-permute-fusion",
+            ),
+            (
+                ("--torchtitan-arg", "--training.gc-freq 50"),
+                "--torchtitan-arg '--training.gc-freq 50' is now --set "
+                "'titan_compiled.extra_flags+=--training.gc-freq 50' or --set "
+                "'titan_eager.extra_flags+=--training.gc-freq 50', once for "
+                "each selected arm",
+            ),
+        ):
+            with self.subTest(option=arguments[0]):
+                result, execute = self._invoke_run(*arguments)
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn(message, " ".join(result.output.split()))
+                execute.assert_not_called()
+
+    def test_the_removed_options_are_hidden_from_help(self) -> None:
+        result = self.runner.invoke(cli, ["run", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--set", result.output)
+        for flag in ("--megatron-nan-guard", "--torchtitan-arg", "--megatron-arg"):
+            self.assertNotIn(flag, result.output)
 
     def test_a_trailing_passthrough_is_refused(self) -> None:
         result, execute = self._invoke_run("--", "--debug.deterministic")
@@ -692,315 +734,6 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("arm failed", result.output)
         evaluate.assert_not_called()
-
-    def test_megatron_p2p_sync_reaches_the_request(self) -> None:
-        completed = SimpleNamespace(
-            out_dir=Path("/tmp/output"),
-            selected_arms=(ENGINES.arm("titan_compiled"),),
-        )
-        with mock.patch(
-            "benchmarks.cli.e2e.execute_run", return_value=completed
-        ) as execute:
-            result = self.runner.invoke(
-                cli, ["run", "2", "--megatron-p2p-sync", "off"]
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].axes.megatron_p2p_sync, "off")
-
-    def test_megatron_p2p_sync_defaults_to_unrequested(self) -> None:
-        """``None`` is what lets a resume inherit the recorded value."""
-        completed = SimpleNamespace(
-            out_dir=Path("/tmp/output"),
-            selected_arms=(ENGINES.arm("titan_compiled"),),
-        )
-        with mock.patch(
-            "benchmarks.cli.e2e.execute_run", return_value=completed
-        ) as execute:
-            result = self.runner.invoke(cli, ["run", "2"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].axes.megatron_p2p_sync)
-
-    def test_an_unknown_megatron_p2p_sync_value_is_rejected(self) -> None:
-        result = self.runner.invoke(
-            cli, ["run", "2", "--megatron-p2p-sync", "false"]
-        )
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Invalid value", result.output)
-
-    def test_megatron_p2p_sync_takes_no_environment_variable(self) -> None:
-        """Its ``off`` value has to agree with ``<gpu>`` and with ``--arm``.
-
-        An exported value would make a plain ``run 0 --scenario X`` fail a
-        refusal naming a flag the operator never passed.
-        """
-        for command in (run_command,):
-            parameters = {
-                option: parameter
-                for parameter in command.params
-                for option in parameter.opts
-            }
-            with self.subTest(command=command.name):
-                self.assertIsNone(parameters["--megatron-p2p-sync"].envvar)
-
-    def test_all_scenarios_at_p2p_sync_off_skips_titan_only_scenarios(
-        self,
-    ) -> None:
-        """The value reaches megatron arms alone.
-
-        ``_resolve_run`` refuses ``off`` for a run with no megatron arm, so
-        a sweep that reached such a scenario would abort at its first
-        titan-only entry. The sweep skips it with a message instead, as it
-        skips a scenario that declines a mode.
-        """
-        holds_megatron = [
-            name
-            for name, scenario in SCENARIOS.items()
-            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
-        ]
-        self.assertTrue(holds_megatron)
-        with tempfile.TemporaryDirectory() as temporary:
-            completed = SimpleNamespace(out_dir=Path(temporary))
-            with mock.patch(
-                "benchmarks.cli.e2e.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
-                result = self.runner.invoke(
-                    cli,
-                    [
-                        "run",
-                        "0,1",
-                        "--ac",
-                        "none",
-                        "--pp",
-                        "2",
-                        "--pp-schedule",
-                        "1F1B",
-                        "--megatron-p2p-sync",
-                        "off",
-                    ],
-                )
-        self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
-        self.assertEqual(
-            [request.scenario_name for request in requests], holds_megatron
-        )
-        self.assertEqual(
-            {request.axes.megatron_p2p_sync for request in requests}, {"off"}
-        )
-
-    def test_megatron_nan_guard_reaches_the_request(self) -> None:
-        completed = SimpleNamespace(
-            out_dir=Path("/tmp/output"),
-            selected_arms=(ENGINES.arm("titan_compiled"),),
-        )
-        with mock.patch(
-            "benchmarks.cli.e2e.execute_run", return_value=completed
-        ) as execute:
-            result = self.runner.invoke(
-                cli, ["run", "2", "--megatron-nan-guard", "off"]
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].axes.megatron_nan_guard, "off")
-
-    def test_megatron_nan_guard_defaults_to_unrequested(self) -> None:
-        """``None`` is what lets a resume inherit the recorded value."""
-        completed = SimpleNamespace(
-            out_dir=Path("/tmp/output"),
-            selected_arms=(ENGINES.arm("titan_compiled"),),
-        )
-        with mock.patch(
-            "benchmarks.cli.e2e.execute_run", return_value=completed
-        ) as execute:
-            result = self.runner.invoke(cli, ["run", "2"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].axes.megatron_nan_guard)
-
-    def test_an_unknown_megatron_nan_guard_value_is_rejected(self) -> None:
-        result = self.runner.invoke(
-            cli, ["run", "2", "--megatron-nan-guard", "false"]
-        )
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Invalid value", result.output)
-
-    def test_megatron_nan_guard_takes_no_environment_variable(self) -> None:
-        """Its ``off`` value has to agree with ``--scenario`` and ``--arm``.
-
-        An exported value would make a plain titan run fail a refusal
-        naming a flag the operator never passed.
-        """
-        for command in (run_command,):
-            parameters = {
-                option: parameter
-                for parameter in command.params
-                for option in parameter.opts
-            }
-            with self.subTest(command=command.name):
-                self.assertIsNone(parameters["--megatron-nan-guard"].envvar)
-
-    def test_all_scenarios_at_nan_guard_off_runs_the_stock_scenario_alone(
-        self,
-    ) -> None:
-        """The value reaches the stock megatron arm alone.
-
-        ``_resolve_run`` refuses ``off`` for a run with no such arm, and for
-        a run holding the tuned arm, so the sweep would abort at its first
-        titan-only entry. It skips both kinds with the refusal's own
-        reason instead, as it skips a scenario that declines a mode.
-        """
-        holds_stock = [
-            name
-            for name, scenario in SCENARIOS.items()
-            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
-        ]
-        self.assertEqual(holds_stock, ["engines"])
-        with tempfile.TemporaryDirectory() as temporary:
-            completed = SimpleNamespace(out_dir=Path(temporary))
-            with mock.patch(
-                "benchmarks.cli.e2e.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
-                result = self.runner.invoke(
-                    cli,
-                    [
-                        "run",
-                        "0",
-                        "--ac",
-                        "none",
-                        "--megatron-nan-guard",
-                        "off",
-                    ],
-                )
-        self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
-        self.assertEqual(
-            [request.scenario_name for request in requests], holds_stock
-        )
-        self.assertEqual(
-            {request.axes.megatron_nan_guard for request in requests}, {"off"}
-        )
-
-    def test_megatron_precision_reaches_the_request(self) -> None:
-        completed = SimpleNamespace(
-            out_dir=Path("/tmp/output"),
-            selected_arms=(ENGINES.arm("titan_compiled"),),
-        )
-        with mock.patch(
-            "benchmarks.cli.e2e.execute_run", return_value=completed
-        ) as execute:
-            result = self.runner.invoke(
-                cli,
-                [
-                    "run",
-                    "2",
-                    # Named, so the sweep's own lean-needs-zero-1 skip does
-                    # not apply and the value reaches the request.
-                    "--scenario",
-                    "engines",
-                    "--zero",
-                    "1",
-                    "--megatron-precision",
-                    "lean",
-                ],
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].axes.megatron_precision, "lean")
-
-    def test_megatron_precision_defaults_to_unrequested(self) -> None:
-        """``None`` is what lets a later resume inherit the recorded value."""
-        completed = SimpleNamespace(
-            out_dir=Path("/tmp/output"),
-            selected_arms=(ENGINES.arm("titan_compiled"),),
-        )
-        with mock.patch(
-            "benchmarks.cli.e2e.execute_run", return_value=completed
-        ) as execute:
-            result = self.runner.invoke(cli, ["run", "2"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].axes.megatron_precision)
-
-    def test_an_unknown_megatron_precision_value_is_rejected(self) -> None:
-        result = self.runner.invoke(
-            cli, ["run", "2", "--megatron-precision", "bf16"]
-        )
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Invalid value", result.output)
-
-    def test_megatron_precision_takes_no_environment_variable(self) -> None:
-        """``lean`` has to agree with ``--scenario``, ``--arm`` AND
-        ``--zero``. An exported value would fail every replicated
-        run on a flag the operator never passed.
-        """
-        for command in (run_command,):
-            parameters = {
-                option: parameter
-                for parameter in command.params
-                for option in parameter.opts
-            }
-            with self.subTest(command=command.name):
-                self.assertIsNone(parameters["--megatron-precision"].envvar)
-
-    def test_all_scenarios_at_lean_runs_the_stock_scenario_alone(self) -> None:
-        """The value reaches the stock megatron arm alone, and it needs a
-        sharded dense value.
-
-        The sweep skips what ``_resolve_run`` would refuse, with the
-        refusal's own reason, rather than aborting at its first titan-only
-        entry.
-        """
-        holds_stock = [
-            name
-            for name, scenario in SCENARIOS.items()
-            if any(arm.engine in MEGATRON_ENGINES for arm in scenario.arms)
-        ]
-        self.assertEqual(holds_stock, ["engines"])
-        with tempfile.TemporaryDirectory() as temporary:
-            completed = SimpleNamespace(out_dir=Path(temporary))
-            with mock.patch(
-                "benchmarks.cli.e2e.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
-                result = self.runner.invoke(
-                    cli,
-                    [
-                        "run",
-                        "0",
-                        "--ac",
-                        "none",
-                        "--zero",
-                        1,
-                        "--megatron-precision",
-                        "lean",
-                    ],
-                )
-        self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
-        self.assertEqual(
-            [request.scenario_name for request in requests], holds_stock
-        )
-        self.assertEqual(
-            {request.axes.megatron_precision for request in requests}, {"lean"}
-        )
-
-    def test_all_scenarios_at_lean_under_zero_zero_skips_everything(
-        self,
-    ) -> None:
-        """Megatron asserts the distributed optimizer under the
-        precision-aware optimizer, and ``--zero`` is the one
-        owner of that flag. No scenario can honour lean without it.
-        """
-        with tempfile.TemporaryDirectory() as temporary:
-            completed = SimpleNamespace(out_dir=Path(temporary))
-            with mock.patch(
-                "benchmarks.cli.e2e.execute_run", return_value=completed
-            ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
-                result = self.runner.invoke(
-                    cli,
-                    ["run", "0", "--ac", "none", "--megatron-precision", "lean"],
-                )
-        # Nothing ran, so the sweep refuses rather than exiting 0.
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertEqual(execute.call_args_list, [])
-        self.assertIn(
-            "skipped: --megatron-precision 'lean' needs --zero 1",
-            result.output,
-        )
 
     def test_run_records_evaluation_failure_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

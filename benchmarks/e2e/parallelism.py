@@ -1,203 +1,31 @@
-"""The parallelism run axis: the degrees, the schedules and the validator.
-
-One ``ParallelismSpec`` describes a whole run, exactly as ``--model-size``
-and ``--ac`` each describe one. Every arm in one run
-shares it, so the world size, the pipeline schedule and the microbatch count
-are properties of the run rather than of an arm.
-
-The CLI, runner, command builders, manifest writer, validation and
-evaluation all import this module. The spec is resolved and validated in the parent
-before any host probe, then the same object builds both engines' command lines
-and the manifest record. The rules remain torch-free and directly testable on
-a CPU.
-
-This is e2e-only. ``benchmarks/models/piper_qwen3/shape.py`` sits under
-``models/`` because two engines build from it; a parallelism degree has one
-reader, the e2e run. ``kernel-bench`` runs one process and never needs it,
-and the TorchTitan training subprocess never needs it either, because
-``parallelize_piper1b`` reads the ``ParallelDims`` TorchTitan builds from the
-command line.
-
-``ParallelismSpec`` and ``PipelineSchedule`` are declared in
-``benchmarks.e2e.schema``, with ``Workload``. This module holds the
-schedule table, the derived values and the rules, and it imports no
-scenario declaration: ``benchmarks/e2e/registry.py`` reads this module and
-not the other way round.
-
-Terms, used here with these meanings only:
-
-rank
-    One process. It owns one GPU.
-world size
-    The number of ranks in one job. Here it is ``dp * pp``.
-degree
-    The number of ranks one axis uses.
-DP
-    Data parallelism. Each rank reads different data and the ranks share the
-    gradients.
-PP
-    Pipeline parallelism. Each rank holds different layers.
-EP
-    Expert parallelism. Each rank holds different MoE experts.
-stage
-    The layers one PP rank holds. A schedule may give a rank more than one.
-microbatch
-    One piece of a rank's batch. The pipeline moves one microbatch at a time.
-bubble
-    Idle time on a rank, caused by the start and the end of the pipeline.
-
-**EP does not multiply into the world size.** Both engines take the expert
-ranks out of the data-parallel axis rather than adding a fourth dimension.
-Megatron subdivides its DP group (``parallel_state.py``). TorchTitan states
-the constraint as ``dp_shard * cp * tp == efsdp * ep`` (``configs.py``), and
-``titan_mesh`` satisfies it under either sharded value by giving the whole
-data-parallel width to ``dp_shard``. So ``dp`` is the whole data-parallel
-width and ``ep`` is a split of it, which is what ``titan_mesh`` and rule 9
-encode.
-
-**TP and CP are deliberately absent.** They are out of scope for this pass,
-and a field nobody can set misleads a later reader into thinking the axis is
-supported. Adding one means adding it to ``world_size``, to
-``execution_model`` and to the throughput divisor at the same time.
-
-**What this module refuses today.** Rule 14 refuses ``ep > 1`` at ZeRO
-level 0, and rules 5 and 6 refuse three of the five registered schedules
-for every cross-engine run. **The numbering keeps a gap at 13, at 15, at
-16 and at 17.** Rule 15 refused a sharded level at ``dp`` 1. It now warns
-instead, because it blocked ``dp 1 x pp 8``, which is the agreed 30B-A3B
-matrix, and because no engine refuses that mesh. ``zero_warnings`` carries
-the warning. The numbers of the deleted rules stay empty: messages, tests
-and the agent guide all name the rules that remain.
-
-Read a registered schedule as a declaration, never as a measurement: only
-``1F1B`` is targeted, and the caps admit up to ``pp 8``. Real ``pp2``,
-``dp2``, and ``dp2 x pp2`` correctness runs have passed on both engines, and
-one ``dp 2 x pp 4`` cell at world size 8 has completed on the stock arm.
-**No run has used ``pp 8``, and no run has used ``zero 1``.** The caps
-admit both; that is a declaration and not evidence.
-No parallel timing is citable, because the cells that ran were on a loaded
-host and nobody repeated them on an idle one.
-"""
+"""The parallelism of one run: the degrees, the schedule names and the rules that refuse a mesh."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 
-from benchmarks.e2e.schema import Workload
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
 @dataclass(frozen=True)
 class PipelineSchedule:
-    """One pipeline schedule, and what a run may do with it.
-
-    ``titan_name`` is the exact string TorchTitan's
-    ``--parallelism.pipeline-parallel-schedule`` accepts. It is a separate
-    field from ``name`` so that our own roster name can never be assumed to
-    be the framework's: the two agree for all five registered schedules
-    today, and a test pins each ``titan_name`` against
-    ``torch.distributed.pipelining.schedules.get_schedule_class``'s own map.
-
-    ``stages_per_rank`` is how many pipeline stages one rank holds under this
-    schedule. It is 1 for the single-stage schedules and 2 for the
-    multi-stage ones, which is TorchTitan's own default
-    (``pipeline_parallel.py``: ``stages_per_rank = 1 if
-    is_single_stage_schedule else 2``). Rules 7 and 12 both read it: the
-    layer count has to divide by ``pp * stages_per_rank``, and a rank's
-    warmup depth -- and therefore its peak activation memory -- grows with
-    it.
-
-    ``megatron_supported`` says whether **Megatron-LM** implements this
-    schedule at all. Three of the five are PyTorch-only, so a run holding a
-    megatron arm has no opponent for them and rule 5 refuses the
-    combination.
-
-    **It is not the same question as "can this repo's megatron driver run
-    it", and rule 5 deliberately asks the library's question.**
-    ``Interleaved1F1B`` is the case where the two answers differ: Megatron-LM
-    implements it, so a cross-engine row is possible in principle, but
-    our stock driver refuses a virtual pipeline degree.
-    Rule 5 therefore lets that spec through and the driver fails it -- the
-    declaration-without-a-builder pattern the kernel spans already use, where
-    the failure lands at the place that owns the missing work rather than at
-    a validator claiming the library cannot do it. A test pins that this
-    combination passes, so nobody "fixes" it by writing a false ``False``
-    here.
-
-    ``requires_uncompiled`` records that the schedule raises on a compiled
-    stage module. Only three of PyTorch's schedule classes call
-    ``_check_torch_compile_compatibility``, and they are exactly the three
-    marked here.
-    """
+    """One pipeline schedule that a run may name."""
 
     name: str
-    titan_name: str
-    megatron_supported: bool
     stages_per_rank: int
-    requires_uncompiled: bool
+    """The pipeline stages that one rank holds; rules 7 and 12 read it."""
     description: str
 
 
 ZERO_MODES: tuple[int, ...] = (0, 1)
-"""How the run holds the dense parameters.
+"""The ZeRO levels of the dense parameters: 0 replicates them, and 1 shards the optimizer states."""
 
-A dense parameter is every parameter that is not a routed expert weight.
-Each value names one ZeRO level, and the number is that level. ``0`` keeps
-a whole copy of everything on each rank. ``1`` shards the optimizer states
-alone.
-
-Under ``1`` Megatron gets ``--use-distributed-optimizer`` alone, and
-TorchTitan gets the whole data-parallel width as ``dp_shard`` plus
-``--parallelism.fsdp-reshard-after-forward never``. The two engines then
-move the same bytes per step: one parameter all-gather and one gradient
-reduce-scatter.
-
-Two statements this axis must not make. Communication volume does not
-separate ZeRO-1 from ZeRO-2, because both move twice the parameters and
-only the gradient lifetime differs. And no ZeRO level shards the activation
-gradients, which belong to the ``--ac`` axis.
-
-It is a comparability boundary at any expert degree, because it decides how
-much optimizer state one rank holds and what the ranks exchange each step.
-Every published number was measured under ``zero 0``, which is the default.
-
-It is also what makes an expert degree legal, for a TorchTitan reason
-rather than a preference: TorchTitan cannot split the experts while it
-keeps the dense parameters replicated, because the expert mesh degree
-``efsdp = dp_shard * cp * tp // ep`` needs ``dp_shard >= ep``. Megatron
-holds every parity, so the two engines compare under an expert degree only
-when both shard, and spec rule 14 refuses the replicated combination.
-"""
 DEFAULT_ZERO = 0
 
 
 @dataclass(frozen=True)
 class ParallelismSpec:
-    """The parallelism degrees and pipeline settings for one run.
-
-    Every field defaults to the single-GPU value, so ``ParallelismSpec()`` is
-    the run this repo has always done and ``TRIVIAL_SPEC`` is that object.
-
-    ``__post_init__`` enforces well-formedness only -- every degree is a
-    positive count, and ``zero`` names a declared ZeRO level. That is
-    not one of the sixteen validator rules; it is the precondition they
-    assume. Without it a spec of ``dp=-1, pp=-1`` would have ``world_size``
-    1 and walk past rule 1 on a one-GPU box, which is exactly the illegal
-    mesh the rules exist to refuse. ``PiperShape`` guards its geometry the
-    same way and for the same reason.
-
-    **``zero`` takes the same treatment, and it must.**
-    ``titan_mesh`` and ``execution_model`` are total functions over a spec
-    and both branch on this value, so a spec carrying a level neither
-    branch knows must not exist. A validator rule would be too late: both
-    functions run on specs the validator never sees.
-
-    ``zero`` sits here rather than beside ``--model-size`` as a
-    run axis of its own, for the reason ``pp_schedule`` and
-    ``pp_microbatch_size`` do: it is a treatment of one parallelism axis,
-    and every function that needs it already takes the spec.
-    """
+    """The parallelism degrees and the pipeline settings of one run."""
 
     dp: int = 1
     pp: int = 1
@@ -226,64 +54,20 @@ class ParallelismSpec:
 
     @property
     def world_size(self) -> int:
-        """The number of ranks the run needs: ``dp * pp``.
-
-        ``ep`` is absent on purpose. Both engines carve the expert ranks out
-        of the data-parallel axis rather than adding a dimension, so ``ep``
-        redistributes the ``dp`` ranks and never asks for more. Rule 9
-        enforces the other half of that: ``ep`` has to divide ``dp``.
-        """
+        """The number of ranks: ``dp * pp``."""
         return self.dp * self.pp
 
 
 MAX_WORLD_SIZE = 8
+"""The GPU budget of one run."""
+
 MAX_PP = 8
-"""The GPU budget for this pass, and the pipeline depth it targets.
-
-Named so that lifting either is one edit here rather than a hunt through
-the rules. The budget is 8 because this host holds 8 devices, and the depth
-is 8 because one pipeline of eight stages is the deepest split those
-devices hold. Neither number is a property of an engine.
-
-The two caps are equal, which makes rule 2's order load-bearing: the world
-size is ``dp * pp``, so every spec above the pipeline cap is also above the
-world-size cap. The pipeline half runs first, because its message names the
-cap somebody has to lift. Do not delete that half to reach the same
-verdict.
-
-Before you run a V-shaped schedule, repair ``loss_visible_rank`` in the
-evaluation rather than this cap. It returns ``(world_size // pp) * (pp -
-1)``, which is right for the two schedules this repo runs and wrong for
-``ZBVZeroBubble`` and ``DualPipeV``, where rank 0 holds the last stage and
-the loss. No run has ever used one.
-
-Sixteen stages are reachable at pp 8, because four of the five registered
-schedules ask for two stages per rank. Rule 7 reads ``pp *
-stages_per_rank`` for that reason.
-"""
-
-
-
-MEGATRON_ENGINES = frozenset({"megatron_stock"})
-"""The ``Arm.engine`` names that drive Megatron-LM.
-
-Rules 5 and 12 and the three megatron run axes read this set. It is
-declared one by one, because a name prefix fails open and the complement of
-``torchtitan`` fails the other way; a new engine is an edit here rather
-than a silent classification. It is stated rather than derived from
-``ENGINES``, because that module sits above this one;
-``tests/test_engines.py`` pins the set equal to the engines whose
-``is_megatron`` is true.
-"""
-
+"""The deepest pipeline that a run may ask for."""
 
 PP_SCHEDULES: dict[str, PipelineSchedule] = {
     "1F1B": PipelineSchedule(
         name="1F1B",
-        titan_name="1F1B",
-        megatron_supported=True,
         stages_per_rank=1,
-        requires_uncompiled=False,
         description=(
             "One forward then one backward per rank, one stage per rank. The "
             "only schedule this pass targets, and the only one both engines "
@@ -292,314 +76,75 @@ PP_SCHEDULES: dict[str, PipelineSchedule] = {
     ),
     "Interleaved1F1B": PipelineSchedule(
         name="Interleaved1F1B",
-        titan_name="Interleaved1F1B",
-        megatron_supported=True,
         stages_per_rank=2,
-        requires_uncompiled=False,
         description=(
-            "1F1B over two stages per rank. Both engines implement it, and "
-            "their warmup formulas are the same expression at the default "
-            "group sizes. It needs a larger batch than the default workload "
-            "gives: two chunks put rank 0's warmup at 4, so rule 12 refuses "
-            "it at batch 4. megatron_supported records what Megatron-LM "
-            "implements, not what this repo's megatron driver handles -- "
-            "that driver has no model-chunk list yet and is expected to "
-            "raise."
+            "1F1B over two stages per rank. It needs a larger batch than the "
+            "default workload gives: two chunks put rank 0's warmup at 4, so "
+            "rule 12 refuses it at batch 4."
         ),
     ),
     "InterleavedZeroBubble": PipelineSchedule(
         name="InterleavedZeroBubble",
-        titan_name="InterleavedZeroBubble",
-        megatron_supported=False,
         stages_per_rank=2,
-        requires_uncompiled=True,
         description=(
             "Interleaved 1F1B with the weight gradient split out to fill the "
-            "bubble. PyTorch-only, so no cross-engine row exists, and it "
-            "raises on a compiled stage module."
+            "bubble."
         ),
     ),
     "ZBVZeroBubble": PipelineSchedule(
         name="ZBVZeroBubble",
-        titan_name="ZBVZeroBubble",
-        megatron_supported=False,
         stages_per_rank=2,
-        requires_uncompiled=True,
         description=(
             "The V-shaped zero-bubble schedule: each rank holds one stage "
-            "from each end of the model. PyTorch-only, and it raises on a "
-            "compiled stage module."
+            "from each end of the model."
         ),
     ),
     "DualPipeV": PipelineSchedule(
         name="DualPipeV",
-        titan_name="DualPipeV",
-        megatron_supported=False,
         stages_per_rank=2,
-        requires_uncompiled=True,
-        description=(
-            "The V-shaped DualPipe variant. PyTorch-only, and it raises on a "
-            "compiled stage module."
-        ),
+        description="The V-shaped DualPipe variant.",
     ),
 }
-"""The five schedules this repo can name.
-
-Two are targets and three are declarations that the validator refuses; see
-each entry. The names are PyTorch's own, verified against its
-``get_schedule_class`` map. PyTorch registers four more that are
-deliberately absent: a schedule is registered here when somebody intends to
-run it.
-"""
+"""The schedules that a run may name, by PyTorch's own schedule names."""
 
 PP_SCHEDULE_CHOICES: tuple[str, ...] = tuple(PP_SCHEDULES)
-"""Every ``--pp-schedule`` value a command accepts.
-
-It is derived from the registry, so registering a schedule is one entry
-above and never a second edit here. ``MODEL_SIZE_CHOICES`` follows the same
-rule.
-"""
-
+"""Every ``--pp-schedule`` value."""
 
 TRIVIAL_SPEC = ParallelismSpec()
-"""The single-GPU run: no data parallelism, no pipeline, no experts split.
-
-Every number this repo has published was measured under this spec.
-"""
-
-
-def titan_mesh(spec: ParallelismSpec) -> tuple[int, int]:
-    """TorchTitan's ``(dp_replicate, dp_shard)`` for this spec.
-
-    TorchTitan has no DDP class; ``fully_shard`` is its only data-parallel
-    path. ``dp_shard=1`` therefore means HSDP over a shard group of one rank,
-    which shards nothing and replicates across ``dp_replicate`` -- the
-    closest thing TorchTitan has to Megatron's DDP, and the pairing a
-    cross-engine DP row needs. That is ZeRO level 0. At level 1 the whole
-    data-parallel width becomes the shard degree, which is pure FSDP.
-
-    **``titan_reshard_after_forward`` is what keeps level 1 at ZeRO-1.**
-    The mesh alone would gather and reshard every forward. That function
-    pins the policy, so the level holds whole parameters through the step.
-
-    **The test names level 0 rather than level 1.** A third level must not
-    take the replicated mesh by omission: the replicated mesh is the one
-    every published number was measured under, and a new level that
-    silently inherited it would publish a parity the run did not have.
-
-    **It reads the declared parity and does NOT infer one from ``ep``.** An
-    earlier revision returned ``(dp // ep, ep)`` at ``ep > 1``, on the
-    grounds that TorchTitan builds the expert mesh out of the shard axis.
-    That is right about the expert mesh and wrong about the dense one.
-    ``parallel_dims.py`` derives ``efsdp = dp_shard * cp * tp // ep`` and
-    builds the sparse mesh as ``("pp", "dp_replicate", "efsdp", "ep")``, so
-    ``dp_replicate`` replicates the experts too. At ``dp 4, ep 2`` the old
-    branch gave dense sharded over 2 with a replica factor of 2, where
-    Megatron shards the dense parameters over ``dp_cp`` -- 4 ranks -- and
-    the experts over ``expt_dp`` -- 2. ``(1, 4)`` gives TorchTitan those
-    same two numbers, term for term.
-
-    The control cell says it a second way: at level 1 with
-    ``dp 4, ep 1`` the mesh is ``(1, 4)``, so an ``ep``-inferred branch would
-    move the dense treatment between the control cell and the expert cell,
-    and the expert row would again carry two changes.
-
-    Spec rule 9 keeps ``dp // ep`` whole, so ``efsdp`` is a whole degree of
-    at least 1 at level 1. At level 0 with ``ep > 1``
-    it would be ``1 // ep``, which is 0 and is not a degree -- and TorchTitan
-    asserts no lower bound on it. Spec rule 14 is what keeps that mesh out of
-    a run. ``replicate * shard == dp`` holds in both branches.
-
-    **The caller must always deliver the shard degree explicitly.**
-    ``data_parallel_shard_degree`` defaults to ``-1`` in TorchTitan, which
-    means "take every remaining rank". A dp=2 run that omitted the flag would
-    silently shard every parameter instead of replicating, and nothing in
-    the log or the manifest would say so.
-    """
-    if spec.zero == 0:
-        return (spec.dp, 1)
-    return (1, spec.dp)
-
-
-def titan_reshard_after_forward(spec: ParallelismSpec) -> str | None:
-    """TorchTitan's ``--parallelism.fsdp-reshard-after-forward`` policy.
-
-    ``"never"`` at ZeRO level 1, and ``None`` at every other level, which
-    means the harness sends no flag and TorchTitan keeps its own default.
-
-    **This one function is what makes level 1 ZeRO-1 on TorchTitan.** Under
-    ``"never"`` FSDP2 gathers the parameters at the first microbatch
-    forward and keeps them for the whole step, so the run shards the
-    optimizer states and holds whole parameters. Under the default policy
-    it reshards after every forward, which shards the parameters too.
-
-    It is one function, and the launcher and the tests both read it. Two
-    spellings of "which value forces the policy" would let the argv and the
-    test disagree about what a recorded cell ran.
-    """
-    return "never" if spec.zero == 1 else None
-
-
-def zero_warnings(
-    spec: ParallelismSpec, *, engines: Iterable[str] = ()
-) -> tuple[str, ...]:
-    """What a reader must not conclude from this spec's own mesh.
-
-    Two legal cells whose recorded ``zero`` level names a mechanism the run
-    does not have. ``engines`` is the set of arm engines the run holds,
-    because the second warning is about TorchTitan's FSDP2 alone. Nothing
-    is emitted above ``dp`` 1 and ``pp`` 1, which is the intended cell.
-    """
-    warnings: list[str] = []
-    if spec.zero != 0 and spec.dp == 1:
-        warnings.append(
-            f"--zero {spec.zero} was requested at dp 1. "
-            "The shard degree is 1 there, whatever the level says. Megatron "
-            "shards the optimizer states over one rank and saves nothing, "
-            "and TorchTitan skips its data-parallel path. So this run holds "
-            "the dense parameters exactly as a replicated run holds them. "
-            "Do not read this cell as a measurement of the sharded parity"
-        )
-    titan = frozenset(engines) - MEGATRON_ENGINES
-    if spec.zero == 1 and spec.pp == 1 and titan:
-        warnings.append(
-            "--zero 1 was requested at pp 1. One microbatch puts the "
-            "gradient reduce-scatter inside the only backward pass, so the "
-            f"TorchTitan arms ({', '.join(sorted(titan))}) hold ZeRO-2 "
-            "rather than the ZeRO-1 shape the level names. Megatron holds "
-            "ZeRO-1 at every mesh. Do not read the two engines of this cell "
-            "as one ZeRO level"
-        )
-    return tuple(warnings)
-
-
-def skip_dp(spec: ParallelismSpec) -> bool:
-    """Whether ``parallelize_piper1b`` may skip TorchTitan's DP path.
-
-    True exactly when no data-parallel machinery is needed, which keeps the
-    plain-bf16 model this repo has always measured. A pipeline-only run
-    qualifies: PP needs no gradient synchronization, so ``dp == 1`` there and
-    FSDP never runs. That is what makes PP2 the cheapest honest cross-engine
-    number.
-    """
-    return spec.dp == 1 and spec.ep == 1
+"""The single-GPU run."""
 
 
 def n_microbatches(spec: ParallelismSpec, *, local_batch_size: int) -> int:
-    """How many microbatches one rank's batch splits into.
-
-    Floor division, deliberately total: ``describe`` records this for any
-    spec, including one a caller never validated. Rule 10 is what makes the
-    division exact for a spec that ran.
-    """
+    """How many microbatches one rank's batch splits into; rule 10 makes the division exact."""
     return local_batch_size // spec.pp_microbatch_size
 
 
-def execution_model(spec: ParallelismSpec) -> str:
-    """How the training process executes the model, as one manifest string.
+def device_term(spec: ParallelismSpec) -> str:
+    """The device count, as the first term of an execution-model string."""
+    return "single-gpu" if spec.world_size == 1 else f"{spec.world_size}-gpu"
 
-    **The trivial spec returns ``"single-gpu-plain-bf16-no-fsdp"``, exactly.**
-    ``benchmarks/e2e/registry.py``'s ``EXECUTION_MODEL`` has held that string
-    since schema 7 and every manifest since records it, so it is a fixed
-    point rather than a format: composing it from parts here must reproduce
-    it character for character, and a test pins it both as a literal and
-    against that constant. (``_resume_mismatches`` does not read the field
-    today, so the manifest is the only thing that would carry a drift -- and
-    it would carry it into every directory silently.)
 
-    Everything else composes from the same parts, in a fixed order: the
-    device count, the parameter treatment, the data-parallel treatment, then
-    the pipeline and expert axes when they are not trivial.
+def data_parallel_term(spec: ParallelismSpec) -> str:
+    """The data-parallel degree and a ZeRO level above 0, as one execution-model term."""
+    if spec.zero == 0:
+        return f"dp{spec.dp}"
+    return f"dp{spec.dp}-zero{spec.zero}"
 
-    **The parallel parts name degrees, not mechanisms.** One manifest carries
-    one ``execution_model`` for a whole run, and a cross-engine run holds
-    arms of both engines -- so a term only one engine's code produces would
-    be false for the other's arm. ``dp2`` is true of both; ``fsdp2-replicate2
-    -shard1`` would describe TorchTitan's DP path and misdescribe Megatron's
-    DDP wrapper. ``no-fsdp`` survives in the trivial string because at world
-    size 1 neither engine wraps the model at all, so it is true of both.
-    ``titan_mesh``'s engine-specific resolution belongs in ``describe``,
-    under names that say whose it is.
 
-    **``plain-bf16`` is a statement about the STATE, and above ``dp`` 1 the
-    two engines differ on one thing it does not cover.** Parameters,
-    gradients and optimizer states stay bf16 on both engines at every
-    degree, with no fp32 masters, which is what the term has always meant
-    here. The gradient **collective** is not state and is not named:
-    TorchTitan's FSDP2 reduces in fp32 and casts back, because the fork
-    types ``training.mixed_precision_reduce`` as ``Literal["float32"]``,
-    where megatron reduces in bf16. A term for that would have to name one
-    engine's mechanism, which is what the paragraph above forbids, so the
-    difference is documented rather than encoded. Cite it beside a
-    cross-engine dp number.
-
-    **``zero`` reaches the string, and it does not name an engine.**
-    Both engines shard at level 1 and at level 3, so ``dp2-zero1`` is true
-    of a TorchTitan arm and of a Megatron arm alike -- unlike
-    ``fsdp2-replicate2-shard1``, which spells out one engine's mesh. The
-    level number carries into the suffix, so a new level cannot take
-    another level's suffix. Level 0 adds nothing, which is what keeps every
-    replicated string this repo has already recorded exactly where it was.
-    """
-    devices = "single-gpu" if spec.world_size == 1 else f"{spec.world_size}-gpu"
-    if skip_dp(spec):
-        data_parallel = "no-fsdp"
-    elif spec.zero == 0:
-        data_parallel = f"dp{spec.dp}"
-    else:
-        data_parallel = f"dp{spec.dp}-zero{spec.zero}"
-    parts = [devices, "plain-bf16", data_parallel]
+def degree_terms(spec: ParallelismSpec) -> tuple[str, ...]:
+    """The pipeline and expert terms of an execution-model string; a degree of 1 has no term."""
+    terms = []
     if spec.pp > 1:
-        parts.append(f"pp{spec.pp}-{spec.pp_schedule}")
+        terms.append(f"pp{spec.pp}-{spec.pp_schedule}")
     if spec.ep > 1:
-        parts.append(f"ep{spec.ep}")
-    return "-".join(parts)
+        terms.append(f"ep{spec.ep}")
+    return tuple(terms)
 
 
 def describe(
     spec: ParallelismSpec, *, local_batch_size: int
 ) -> dict[str, object]:
-    """Flat JSON-safe provenance record for the manifest.
-
-    Mirrors ``PiperShape.describe``: the declared fields, then the values a
-    reader would otherwise have to re-derive with this module in hand.
-
-    ``zero`` is the declared parity, and ``dp_replicate`` and
-    ``dp_shard`` are the **TorchTitan** mesh that parity resolves to. The
-    names say whose the mesh is. Megatron is told neither; it gets a DP group
-    size, and at ``ep > 1`` an ``expert_model_parallel_size`` that subdivides
-    it. They are recorded anyway because the shard degree is the value a
-    TorchTitan run must be given explicitly -- see ``titan_mesh`` -- so a
-    manifest that omitted it could not distinguish replication from
-    sharding after the fact. Both sides are recorded because neither derives the
-    other for a reader without this module: the parity is what the operator
-    asked for and the mesh is what one engine built from it.
-
-    ``n_microbatches`` is arithmetic over two fields in the same record, and
-    what it describes at ``pp == 1`` depends on the engine. Read it beside
-    ``pp``, and beside the arm roster.
-
-    **An earlier revision said it describes no split at ``pp`` 1. That is no
-    longer true.** The stock Megatron-LM driver takes
-    ``--micro-batch-size`` at every degree, so at ``pp`` 1 it runs
-    ``local_batch_size // pp_microbatch_size`` passes of that size and this
-    field counts them. TorchTitan still runs one pass over the whole local
-    batch there, because it reads
-    ``pipeline_parallel_microbatch_size`` only inside
-    ``_build_pipeline_schedule``. So at ``pp`` 1 one number describes a real
-    split for one engine and no split for the other. Spec rule 3 holds
-    ``pp_microbatch_size`` at 1 there, which makes the two agree today; the
-    field would part them the moment that rule changed.
-
-    It also disagrees with the megatron log line arm rule 12 validates, by
-    construction: the driver's ``pipeline_settings`` returns one microbatch
-    at ``pp`` 1 and the rule demands ``microbatches=1`` there, while this
-    record says ``local_batch_size // pp_microbatch_size``. **The log is the
-    run and this is the arithmetic.** A ``dp`` degree above 1 is the first
-    spec that makes the disagreement reachable with more than one rank, so a
-    reader of such a manifest meets it for the first time there.
-    """
-    replicate, shard = titan_mesh(spec)
+    """The JSON record of ``spec`` that a manifest holds: the six fields and two derived values."""
     return {
         "dp": spec.dp,
         "pp": spec.pp,
@@ -608,194 +153,142 @@ def describe(
         "pp_microbatch_size": spec.pp_microbatch_size,
         "zero": spec.zero,
         "world_size": spec.world_size,
-        "dp_replicate": replicate,
-        "dp_shard": shard,
         "n_microbatches": n_microbatches(
             spec, local_batch_size=local_batch_size
         ),
     }
 
 
-def validate_parallelism(
+def parallelism_refusals(
     spec: ParallelismSpec,
     *,
     shape: PiperShape,
-    workload: Workload,
-    engines: Iterable[str],
+    local_batch_size: int,
     device_count: int,
-) -> None:
-    """Refuse a spec this run cannot honor. Each message names one cause.
-
-    ``engines`` is the set of ``Arm.engine`` names the run will start, so
-    the megatron restriction follows the arm roster rather than a scenario
-    name. ``device_count`` is how many devices the operator asked for.
-
-    Rules 8 and 9 were dead behind rule 14 while it refused every
-    ``ep > 1``. Rule 14 now refuses an expert degree only under the
-    ``zero 0`` parity, so both rules are reachable: a sharded spec with
-    an illegal expert count reaches rule 8, and one whose expert degree does
-    not divide ``dp`` reaches rule 9. They were kept through the whole
-    refusal for exactly this, and neither had to be invented here.
-
-    The one thing this function does not check is well-formedness --
-    ``ParallelismSpec.__post_init__`` has already refused a degree below 1,
-    so every rule below may assume positive counts.
-    """
-    engines = frozenset(engines)
-    local_batch_size = workload.local_batch_size
-
-    # A precondition, checked first so the numbered rules may assume it.
+) -> list[str]:
+    """Every numbered rule that ``spec`` breaks; a rule that needs a failed rule's value is skipped."""
     if local_batch_size < 1:
-        raise ValueError(
+        return [
             f"local batch size {local_batch_size} must be >= 1; it is the "
             "count the microbatch split divides"
-        )
-
-    # 1. The mesh is exactly the devices asked for, never fewer.
+        ]
+    refusals = []
+    # 1
     if spec.world_size != device_count:
-        raise ValueError(
+        refusals.append(
             f"parallelism world size {spec.world_size} (dp {spec.dp} x pp "
             f"{spec.pp}) does not match the {device_count} device(s) "
             "requested; ep borrows ranks from the dp axis and never "
             "multiplies the world size"
         )
-
-    # 2. The budget, pipeline half first, so the message names the cap
-    #    somebody has to lift.
+    # 2: the pipeline half first, so the message names the cap to lift.
     if spec.pp > MAX_PP:
-        raise ValueError(
+        refusals.append(
             f"pipeline degree {spec.pp} exceeds the supported maximum "
             f"{MAX_PP}; no run plans a deeper pipeline, and nobody has "
             "checked one"
         )
-    if spec.world_size > MAX_WORLD_SIZE:
-        raise ValueError(
+    elif spec.world_size > MAX_WORLD_SIZE:
+        refusals.append(
             f"parallelism world size {spec.world_size} exceeds the "
             f"{MAX_WORLD_SIZE}-GPU budget"
         )
-
-    # 3. A schedule names a pipeline. Without one it would be recorded in the
-    #    manifest and delivered to nothing.
+    # 3
     if spec.pp == 1 and spec.pp_schedule is not None:
-        raise ValueError(
+        refusals.append(
             f"pp_schedule {spec.pp_schedule!r} was requested at pp 1, where "
             "there is no pipeline to schedule"
         )
     if spec.pp > 1 and spec.pp_schedule is None:
-        raise ValueError(
+        refusals.append(
             f"pp {spec.pp} needs a pipeline schedule; choose one of "
             + ", ".join(PP_SCHEDULE_CHOICES)
         )
-    #    The microbatch size is the schedule's twin and takes the same rule.
     if spec.pp == 1 and spec.pp_microbatch_size != 1:
-        raise ValueError(
+        refusals.append(
             f"pp_microbatch_size {spec.pp_microbatch_size} was requested at "
             "pp 1, where neither engine splits the batch into microbatches"
         )
-
-    # 4. The name has to be one we declared, so that stages_per_rank and the
-    #    two capability flags below exist to read.
-    schedule: PipelineSchedule | None = None
+    # 4
+    schedule = None
     if spec.pp_schedule is not None:
-        try:
-            schedule = PP_SCHEDULES[spec.pp_schedule]
-        except KeyError as error:
-            raise ValueError(
+        schedule = PP_SCHEDULES.get(spec.pp_schedule)
+        if schedule is None:
+            refusals.append(
                 f"Unknown pipeline schedule {spec.pp_schedule!r}. Available: "
                 + ", ".join(PP_SCHEDULE_CHOICES)
-            ) from error
-
-    # 5. A schedule Megatron does not implement has no cross-engine
-    #    opponent, so it reads the engines and not the scenario name.
-    if (
-        schedule is not None
-        and engines & MEGATRON_ENGINES
-        and not schedule.megatron_supported
-    ):
-        raise ValueError(
-            f"pipeline schedule {schedule.name!r} is not implemented by "
-            "Megatron-LM, and this run holds a megatron arm; there would be "
-            "no cross-engine comparison"
-        )
-
-    # 6. DELETED. Compile is an arm property, so _resolve_run asks it.
-
-    # 7. Every stage holds the same layer count, which assumes launch.py
-    #    sends both less-layers flags at every pp > 1.
+            )
+    known_stages = spec.pp_schedule is None or schedule is not None
     stages_per_rank = schedule.stages_per_rank if schedule is not None else 1
     total_stages = spec.pp * stages_per_rank
-    if shape.n_layers % total_stages:
-        raise ValueError(
+    # 7
+    if known_stages and shape.n_layers % total_stages:
+        refusals.append(
             f"shape {shape.name!r} has {shape.n_layers} layers, which does "
             f"not divide evenly into {total_stages} pipeline stages "
             f"(pp {spec.pp} x {stages_per_rank} stage(s) per rank)"
         )
-
-    # 8 and 9. The expert split, before rule 14, so an illegal count is
-    # named by its own rule.
+    # 8
     if spec.ep > shape.num_experts:
-        raise ValueError(
+        refusals.append(
             f"expert degree {spec.ep} exceeds shape {shape.name!r}'s "
             f"{shape.num_experts} experts"
         )
-    if shape.num_experts % spec.ep:
-        raise ValueError(
+    elif shape.num_experts % spec.ep:
+        refusals.append(
             f"shape {shape.name!r}'s {shape.num_experts} experts do not "
             f"divide evenly across expert degree {spec.ep}"
         )
+    # 9
     if spec.dp % spec.ep:
-        raise ValueError(
+        refusals.append(
             f"expert degree {spec.ep} does not divide the data-parallel "
             f"degree {spec.dp}; ep takes its ranks out of the dp axis"
         )
-
-    # 10. A rank's batch has to split into whole microbatches.
+    # 10
     if local_batch_size % spec.pp_microbatch_size:
-        raise ValueError(
+        refusals.append(
             f"local batch size {local_batch_size} does not divide evenly "
             f"into microbatches of {spec.pp_microbatch_size}"
         )
-    microbatches = n_microbatches(spec, local_batch_size=local_batch_size)
-
-    # 11. The two engines derive one microbatch group size only when the
-    #     count divides by pp. Conservative for plain 1F1B on purpose.
-    if microbatches % spec.pp:
-        raise ValueError(
-            f"{microbatches} microbatches do not divide evenly across "
-            f"pipeline degree {spec.pp}; the two engines would derive "
-            "different microbatch group sizes and run different schedules"
-        )
-
-    # 12. Below twice the stage count, 1F1B holds as much as GPipe. Guarded
-    #     on pp > 1, or it would refuse the legal single-GPU --batch 1 run.
-    if spec.pp > 1 and microbatches < 2 * total_stages:
-        raise ValueError(
-            f"{microbatches} microbatches is below the {2 * total_stages} "
-            f"that pp {spec.pp} x {stages_per_rank} stage(s) per rank needs "
-            "for 1F1B to hold less than GPipe; raise --batch or lower "
-            "--pp-microbatch-size"
-        )
-
-    # 13. DELETED with graph capture.
-
-    # 14. TorchTitan cannot split the experts and keep the dense parameters
-    #     replicated, so an ep row under --zero 0 would carry two changes.
+    else:
+        microbatches = n_microbatches(spec, local_batch_size=local_batch_size)
+        # 11: both engines derive one microbatch group size only then.
+        if microbatches % spec.pp:
+            refusals.append(
+                f"{microbatches} microbatches do not divide evenly across "
+                f"pipeline degree {spec.pp}; the two engines would derive "
+                "different microbatch group sizes and run different schedules"
+            )
+        # 12: below twice the stage count, 1F1B holds as much as GPipe.
+        if known_stages and spec.pp > 1 and microbatches < 2 * total_stages:
+            refusals.append(
+                f"{microbatches} microbatches is below the {2 * total_stages} "
+                f"that pp {spec.pp} x {stages_per_rank} stage(s) per rank needs "
+                "for 1F1B to hold less than GPipe; raise --batch or lower "
+                "--pp-microbatch-size"
+            )
+    # 14
     if spec.ep > 1 and spec.zero == 0:
-        raise ValueError(
+        refusals.append(
             f"expert degree {spec.ep} needs --zero 1. TorchTitan cannot "
             "split the experts and keep the dense parameters replicated, "
             f"so under --zero {spec.zero} it would shard them while "
             "Megatron replicates them. The row would carry two changes "
             "rather than one"
         )
+    return refusals
 
-    # 15. DELETED. It refused a sharded value at dp 1, which refused the
-    #     agreed 30B-A3B matrix; zero_warnings says the same thing instead.
 
-    # 16. DELETED. It refused a sharded parity and an expert degree to an
-    #     earlier driver; the stock driver implements both.
-
-    # 17. DELETED with ZeRO level 3.
-
-    # A deleted number stays empty, because the messages, the tests and the
-    # agent guide all name the rules that remain.
+def zero_warnings(spec: ParallelismSpec) -> tuple[str, ...]:
+    """What a reader must not conclude from this mesh, for every engine."""
+    if spec.zero != 0 and spec.dp == 1:
+        return (
+            f"--zero {spec.zero} was requested at dp 1. "
+            "The shard degree is 1 there, whatever the level says. Megatron "
+            "shards the optimizer states over one rank and saves nothing, "
+            "and TorchTitan skips its data-parallel path. So this run holds "
+            "the dense parameters exactly as a replicated run holds them. "
+            "Do not read this cell as a measurement of the sharded parity",
+        )
+    return ()

@@ -1,20 +1,24 @@
-"""Orchestrate declarative TorchTitan benchmark scenarios."""
+"""Resolve a run request, check it, start each arm and validate each arm's outputs."""
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
+import json
 import os
 import shlex
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Any, Mapping
 
 from benchmarks.artifacts.layout import _default_output_dir, archive_incomplete_arm
 from benchmarks.artifacts.manifests import (
-    _resume_mismatches,
-    _resume_workload,
+    ArmRecord,
+    config_json,
+    host_mismatches,
     load_manifest,
+    run_record,
     write_manifest,
 )
 from benchmarks.artifacts.run_state import (
@@ -22,51 +26,45 @@ from benchmarks.artifacts.run_state import (
     load_run_state,
     update_run_state,
 )
-from benchmarks.e2e.axes import RunAxes, RunRequest
-from benchmarks.e2e.engines import command_for_arm
-from benchmarks.e2e.passthrough import reach_refusal
-from benchmarks.e2e.parallelism import (
-    MEGATRON_ENGINES,
-    PP_SCHEDULES,
-    TRIVIAL_SPEC,
-    zero_warnings,
-    validate_parallelism,
-)
+from benchmarks.e2e.axes import RunRequest
+from benchmarks.e2e.checks import check_run, run_warnings
+from benchmarks.e2e.engines.api import Arm, DataSpec, Launch, RunSpec
+from benchmarks.e2e.engines.registry import engine_for
+from benchmarks.e2e.overrides import Override, apply_overrides
+from benchmarks.e2e.parallelism import TRIVIAL_SPEC
 from benchmarks.e2e.registry import (
-    AC_MODES,
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_P2P_SYNC,
-    DEFAULT_MEGATRON_PRECISION,
     DEFAULT_MODEL_SIZE,
     DEFAULT_PROFILE,
     DEFAULT_WARMUP_STEPS,
-    MEGATRON_NAN_GUARD_MODES,
-    MEGATRON_P2P_SYNC_MODES,
-    MEGATRON_PRECISION_MODES,
     SCENARIOS,
+    SEED,
     scenario_by_name,
 )
-from benchmarks.e2e.schema import Arm, Scenario, Workload
+from benchmarks.e2e.schema import Scenario
 from benchmarks.e2e.validation import validate_arm
-from benchmarks.execution.affinity import resolve_cpu_pinning
+from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
 from benchmarks.execution.environment import (
     add_compiler_environment,
     runtime_environment,
 )
 from benchmarks.execution.events import EventHandler, ProcessRunner, _emit
+from benchmarks.execution.launcher import (
+    build_command,
+    command_line,
+    environment_delta,
+    pinning_record,
+)
 from benchmarks.execution.paths import RuntimePaths
 from benchmarks.execution.provenance import hardware_metadata
-from benchmarks.models.piper_qwen3.shape import (
-    canonical_size_name,
-    MODEL_SIZE_CHOICES,
-    PIPER_SHAPES,
-)
+from benchmarks.models.piper_qwen3.shape import shape_by_name
 
 
 @dataclass(frozen=True)
 class RunResult:
+    """The output directory, the scenario and the arms of one finished run."""
+
     out_dir: Path
     scenario: Scenario
     selected_arms: tuple[Arm, ...]
@@ -74,7 +72,7 @@ class RunResult:
 
 
 def select_arms(scenario: Scenario, names: tuple[str, ...]) -> tuple[Arm, ...]:
-    """Resolve an ordered arm subset, rejecting ambiguous requests early."""
+    """The ordered arm subset that ``names`` asks for; every arm when it is empty."""
     if not names:
         return scenario.arms
 
@@ -98,85 +96,73 @@ def select_arms(scenario: Scenario, names: tuple[str, ...]) -> tuple[Arm, ...]:
     return tuple(available[name] for name in names)
 
 
-def workload_with_overrides(
-    scenario: Scenario,
+def data_with_overrides(
+    data: DataSpec,
     *,
     seq_len: int | None = None,
     steps: int | None = None,
     batch: int | None = None,
-    environment: Mapping[str, str] | None = None,
-    profile: bool,
-    warmup_steps: int | None,
-) -> Workload:
-    """Apply portable size overrides without changing scenario arms.
+    environment: Mapping[str, str],
+) -> DataSpec:
+    """``data`` with each size that a flag or ``SEQ``, ``STEPS`` or ``BATCH`` gives."""
+    for field, flag, variable in (
+        ("seq_len", seq_len, "SEQ"),
+        ("steps", steps, "STEPS"),
+        ("local_batch_size", batch, "BATCH"),
+    ):
+        value = flag if flag is not None else environment.get(variable)
+        if value is not None:
+            data = replace(data, **{field: int(value)})
+    return data
 
-    ``profile`` decides which step floor applies: a profiled run needs
-    ``profile_freq * min_trace_windows`` steps, and an unprofiled one needs
-    more than ``warmup_steps``.
-    """
-    environment = environment or os.environ
-    workload = scenario.workload
-    resolved_seq_len = seq_len if seq_len is not None else environment.get("SEQ")
-    resolved_steps = steps if steps is not None else environment.get("STEPS")
-    resolved_batch = batch if batch is not None else environment.get("BATCH")
-    if resolved_seq_len is not None:
-        workload = replace(workload, seq_len=int(resolved_seq_len))
-    if resolved_steps is not None:
-        workload = replace(workload, steps=int(resolved_steps))
-    if resolved_batch is not None:
-        workload = replace(workload, local_batch_size=int(resolved_batch))
-    if profile:
-        minimum_steps = workload.profile_freq * workload.min_trace_windows
-        if workload.steps < minimum_steps:
-            raise ValueError(
-                f"steps ({workload.steps}) must be at least {minimum_steps} to collect "
-                f"{workload.min_trace_windows} profiler windows"
+
+def _resumed_arms(
+    arms: tuple[Arm, ...],
+    overrides: tuple[Override, ...],
+    recorded: Mapping[str, Arm],
+) -> tuple[Arm, ...]:
+    """The arms of a resume: each recorded field, except the fields that ``--set`` names."""
+    named = {(override.arm, override.field) for override in overrides}
+    result = []
+    for arm in arms:
+        before = recorded.get(arm.name)
+        if before is None or type(before.config) is not type(arm.config):
+            result.append(arm)
+            continue
+        values = {
+            field.name: getattr(
+                arm.config if (arm.name, field.name) in named else before.config,
+                field.name,
             )
-    elif warmup_steps is not None and workload.steps <= warmup_steps:
-        raise ValueError(
-            f"steps ({workload.steps}) must be more than the "
-            f"{warmup_steps} warmup step(s); a run that measures no step "
-            "publishes no throughput"
-        )
-    return workload
+            for field in dataclasses.fields(arm.config)
+        }
+        result.append(replace(arm, config=type(arm.config)(**values)))
+    return tuple(result)
 
 
 @dataclass(frozen=True)
 class ResolvedRun:
-    """One run, with every question the request left open answered.
-
-    ``_resolve_run`` builds this record and does every refusal on the way:
-    the scenario name, the arm subset, the mesh, the three megatron axes
-    and the resume comparison. Whatever it returns is startable, so the
-    caller reads fields instead of repeating checks.
-
-    Attributes:
-        paths: The resolved repository, cache and compiler-env locations.
-        scenario: The scenario, with the size overrides already applied to
-            its workload.
-        arms: The arms this run starts, in the order the operator asked
-            for.
-        hardware: The provenance label of the output directory.
-        metadata: The provenance block, including the CPU pinning.
-        out_dir: Where the run writes.
-        commands: One argv per arm name.
-        axes: The eight global run axes, resolved.
-        torchtitan_args: The ``--torchtitan-arg`` tokens, resolved.
-        megatron_args: The ``--megatron-arg`` tokens, resolved.
-        resumed: Whether the run continues a recorded directory.
-    """
+    """One checked run, with each value that the request omits resolved."""
 
     paths: RuntimePaths
     scenario: Scenario
+    run: RunSpec
     arms: tuple[Arm, ...]
+    """The arms in the order the operator asked for, with the ``--set`` overrides applied."""
     hardware: str
     metadata: dict[str, str]
+    """The provenance block, with the host's CPU pinning."""
     out_dir: Path
-    commands: dict[str, list[str]]
-    axes: RunAxes
+    launches: dict[str, Launch]
+    pinning: CpuPinning
+    records: dict[str, ArmRecord]
+    """The manifest record of each arm."""
     resumed: bool
-    torchtitan_args: tuple[str, ...]
-    megatron_args: tuple[str, ...]
+
+    @property
+    def commands(self) -> dict[str, list[str]]:
+        """The argv of each arm."""
+        return {name: list(record.command) for name, record in self.records.items()}
 
 
 def _resolve_run(
@@ -185,248 +171,111 @@ def _resolve_run(
     *,
     event_handler: EventHandler | None = None,
 ) -> ResolvedRun:
-    """Resolve one request into the arms, the run axes and one argv per arm.
-
-    Whatever this returns is startable: the scenario, the arm subset, the
-    mesh, the three megatron axes and the resume comparison are all checked
-    on the way.
-    """
+    """Resolve and check one request; the result is a run that can start."""
     requested = request.axes
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
         compiler_env=request.compiler_env,
         environment=environment,
     )
-    resumed = request.resume_dir is not None
-    existing_manifest = None
-    if resumed:
+    resumed_manifest: dict[str, Any] | None = None
+    recorded = None
+    resume_dir = None
+    if request.resume_dir is not None:
         if request.out_dir is not None:
             raise ValueError("--out cannot be combined with --resume")
         resume_dir = request.resume_dir.expanduser().resolve()
-        existing_manifest = load_manifest(resume_dir)
-        manifest_scenario = existing_manifest.get("scenario")
-        if request.scenario_name and request.scenario_name != manifest_scenario:
+        resumed_manifest = load_manifest(resume_dir)
+        recorded = run_record(resumed_manifest, str(resume_dir / "manifest.json"))
+        if request.scenario_name and request.scenario_name != recorded.scenario:
             raise ValueError(
-                f"resume manifest uses scenario {manifest_scenario!r}, not "
+                f"resume manifest uses scenario {recorded.scenario!r}, not "
                 f"{request.scenario_name!r}"
             )
-        scenario_name = manifest_scenario
+        scenario_name = recorded.scenario
+    elif request.scenario_name is None:
+        raise ValueError(
+            "no scenario requested, and there is no default. Pass "
+            f"--scenario. Available scenarios: {', '.join(SCENARIOS)}"
+        )
     else:
-        resume_dir = None
-        if request.scenario_name is None:
-            raise ValueError(
-                "no scenario requested, and there is no default. Pass "
-                "--scenario. Available scenarios: "
-                f"{', '.join(SCENARIOS)}"
-            )
         scenario_name = request.scenario_name
+    scenario = scenario_by_name(scenario_name)
 
-    scenario = scenario_by_name(str(scenario_name))
-    if existing_manifest is not None:
-        workload = _resume_workload(existing_manifest, request, environment)
-        torchtitan_args = (
-            tuple(existing_manifest["extra_torchtitan_args"])
-            if request.torchtitan_args is None
-            else request.torchtitan_args
-        )
-        megatron_args = (
-            tuple(existing_manifest["extra_megatron_args"])
-            if request.megatron_args is None
-            else request.megatron_args
-        )
-        ac_mode = (
-            str(existing_manifest["ac_mode"])
-            if requested.ac_mode is None
-            else requested.ac_mode
-        )
-        model_size = (
-            str(existing_manifest["model_size"])
-            if requested.model_size is None
-            else requested.model_size
-        )
-        megatron_p2p_sync = (
-            str(existing_manifest["megatron_p2p_sync"])
-            if requested.megatron_p2p_sync is None
-            else requested.megatron_p2p_sync
-        )
-        megatron_nan_guard = (
-            str(existing_manifest["megatron_nan_guard"])
-            if requested.megatron_nan_guard is None
-            else requested.megatron_nan_guard
-        )
-        megatron_precision = (
-            str(existing_manifest["megatron_precision"])
-            if requested.megatron_precision is None
-            else requested.megatron_precision
-        )
-        profile = (
-            bool(existing_manifest["profile"])
-            if requested.profile is None
-            else requested.profile
-        )
-        recorded_warmup = existing_manifest["warmup_steps"]
-        # A request wins; the mismatch check below refuses a disagreement.
-        warmup_steps = (
-            requested.warmup_steps
-            if requested.warmup_steps is not None
-            else (None if recorded_warmup is None else int(recorded_warmup))
-        )
-    else:
-        profile = (
-            DEFAULT_PROFILE if requested.profile is None else requested.profile
-        )
-        # None under a profiled run, where the schedule decides the samples.
-        warmup_steps = (
-            None
-            if profile
-            else (
-                DEFAULT_WARMUP_STEPS
-                if requested.warmup_steps is None
-                else requested.warmup_steps
-            )
-        )
-        workload = workload_with_overrides(
-            scenario,
-            seq_len=request.seq_len,
-            steps=request.steps,
-            batch=request.batch,
-            environment=environment,
-            profile=profile,
-            warmup_steps=warmup_steps,
-        )
-        torchtitan_args = request.torchtitan_args or ()
-        megatron_args = request.megatron_args or ()
+    base = scenario if recorded is None else recorded.run
+    data = data_with_overrides(
+        base.data,
+        seq_len=request.seq_len,
+        steps=request.steps,
+        batch=request.batch,
+        environment=environment,
+    )
+    if recorded is None:
         ac_mode = requested.ac_mode or DEFAULT_AC_MODE
         model_size = requested.model_size or DEFAULT_MODEL_SIZE
-        megatron_p2p_sync = (
-            requested.megatron_p2p_sync or DEFAULT_MEGATRON_P2P_SYNC
-        )
-        megatron_nan_guard = (
-            requested.megatron_nan_guard or DEFAULT_MEGATRON_NAN_GUARD
-        )
-        megatron_precision = (
-            requested.megatron_precision or DEFAULT_MEGATRON_PRECISION
-        )
-    if megatron_p2p_sync not in MEGATRON_P2P_SYNC_MODES:
+        profile = DEFAULT_PROFILE if requested.profile is None else requested.profile
+        warmup_steps = requested.warmup_steps
+        seed: int | None = SEED
+    else:
+        ac_mode = requested.ac_mode or recorded.run.ac_mode
+        model_size = requested.model_size or recorded.run.shape.name
+        profile = recorded.run.profile if requested.profile is None else requested.profile
+        warmup_steps = requested.warmup_steps
+        if warmup_steps is None and profile == recorded.run.profile:
+            warmup_steps = recorded.run.warmup_steps
+        seed = recorded.run.seed
+    if profile and warmup_steps is not None:
         raise ValueError(
-            f"unknown megatron p2p sync {megatron_p2p_sync!r}. Available: "
-            f"{', '.join(MEGATRON_P2P_SYNC_MODES)}"
+            "--warmup-steps applies only without --profile, and this run "
+            f"asks for profile on with {warmup_steps} warmup step(s); the "
+            "profiler schedule decides the samples of a profiled run"
         )
-    if megatron_nan_guard not in MEGATRON_NAN_GUARD_MODES:
-        raise ValueError(
-            f"unknown megatron nan guard {megatron_nan_guard!r}. Available: "
-            f"{', '.join(MEGATRON_NAN_GUARD_MODES)}"
-        )
-    if megatron_precision not in MEGATRON_PRECISION_MODES:
-        raise ValueError(
-            f"unknown megatron precision {megatron_precision!r}. Available: "
-            f"{', '.join(MEGATRON_PRECISION_MODES)}"
-        )
-    if ac_mode not in AC_MODES:
-        raise ValueError(
-            f"unknown ac mode {ac_mode!r}. Available: {', '.join(AC_MODES)}"
-        )
-    # Resolved once here, so nothing downstream sees a retired alias.
-    model_size = canonical_size_name(model_size)
-    if model_size not in PIPER_SHAPES:
-        raise ValueError(
-            f"unknown model size {model_size!r}. "
-            f"Available: {', '.join(MODEL_SIZE_CHOICES)}"
-        )
-    shape = PIPER_SHAPES[model_size]
-    scenario = replace(scenario, workload=workload)
-    arms = select_arms(scenario, request.arm_names)
-    if ac_mode not in scenario.supported_ac_modes:
-        raise ValueError(
-            f"scenario {scenario.name!r} does not support ac mode {ac_mode!r} "
-            f"(supported: {', '.join(scenario.supported_ac_modes)})"
-        )
+    if not profile and warmup_steps is None:
+        warmup_steps = DEFAULT_WARMUP_STEPS
 
-    # Checked before any host probe, against the arms this run really starts.
-    parallelism = requested.parallelism or TRIVIAL_SPEC
-    devices = parse_devices(request.gpu)
-    validate_parallelism(
-        parallelism,
-        shape=shape,
-        workload=workload,
-        engines={arm.engine for arm in arms},
-        device_count=len(devices),
+    arms = apply_overrides(select_arms(scenario, request.arm_names), request.overrides)
+    if recorded is not None:
+        arms = _resumed_arms(
+            arms,
+            request.overrides,
+            {record.arm.name: record.arm for record in recorded.arms},
+        )
+    run = RunSpec(
+        shape=shape_by_name(model_size),
+        data=data,
+        parallelism=requested.parallelism or TRIVIAL_SPEC,
+        ac_mode=ac_mode,
+        profile=profile,
+        window=scenario.window if recorded is None else recorded.run.window,
+        warmup_steps=warmup_steps,
+        seed=seed,
     )
-    # Three schedules raise on a compiled stage module, and compile is an
-    # arm property, so the spec alone cannot answer this.
-    schedule = (
-        PP_SCHEDULES.get(parallelism.pp_schedule)
-        if parallelism.pp_schedule is not None
-        else None
+    check_run(
+        run,
+        scenario,
+        arms,
+        device_count=len(parse_devices(request.gpu)),
+        resumed=resumed_manifest,
     )
-    if schedule is not None and schedule.requires_uncompiled:
-        compiled_arms = [arm.name for arm in arms if arm.compile == "torch"]
-        if compiled_arms:
-            raise ValueError(
-                f"pipeline schedule {schedule.name!r} raises on a compiled "
-                f"stage module, and {', '.join(compiled_arms)} asks for "
-                "torch.compile; select the eager arms alone, or choose "
-                "another --pp-schedule"
-            )
-    # Two legal meshes a reader can misread. Printed before the host probe,
-    # so the operator reads them before the run claims a GPU.
-    for warning in zero_warnings(
-        parallelism, engines=[arm.engine for arm in arms]
-    ):
+    # Printed before the host probe, so the operator reads them before the run claims a GPU.
+    for warning in run_warnings(run, arms):
         _emit(event_handler, "summary", f"WARNING: {warning}")
 
-    # The literal ``on``, never the default: it is the value that asks for
-    # a synchronize, so it is the value a mesh without messages cannot honor.
-    if megatron_p2p_sync == "on":
-        if parallelism.pp == 1:
-            raise ValueError(
-                f"--megatron-p2p-sync {megatron_p2p_sync!r} was requested at "
-                "pp 1, where there is no pipeline message to synchronize; "
-                "the manifest would record a treatment the run did not have"
-            )
-        if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
-            raise ValueError(
-                f"--megatron-p2p-sync {megatron_p2p_sync!r} reaches no arm "
-                f"of this run: {', '.join(arm.name for arm in arms)} run on "
-                "TorchTitan, which sends no pipeline message through "
-                "Megatron; select a megatron arm, or leave the option at "
-                f"{DEFAULT_MEGATRON_P2P_SYNC!r}"
-            )
-
-    # Through the same helper the skip pre-pass reads, so both state one reason.
-    refusal = megatron_nan_guard_refusal(arms, megatron_nan_guard)
-    if refusal is not None:
-        raise ValueError(refusal)
-
-    # Through the same helper the skip pre-pass reads, so both state one reason.
-    refusal = megatron_precision_refusal(
-        arms, megatron_precision, parallelism.zero
-    )
-    if refusal is not None:
-        raise ValueError(refusal)
-
-    refusal = reach_refusal(arms, torchtitan_args, megatron_args)
-    if refusal is not None:
-        raise ValueError(refusal)
-
-    # Every axis is answered, so one record carries them from here on.
-    axes = RunAxes(
-        ac_mode=ac_mode,
-        model_size=model_size,
-        parallelism=parallelism,
-        megatron_p2p_sync=megatron_p2p_sync,
-        megatron_nan_guard=megatron_nan_guard,
-        megatron_precision=megatron_precision,
-        profile=profile,
-        warmup_steps=warmup_steps,
-    )
-
     requested_hardware = request.hardware
-    if existing_manifest is not None and requested_hardware == "auto":
-        requested_hardware = str(existing_manifest.get("hardware", "auto"))
+    if recorded is not None and requested_hardware == "auto":
+        requested_hardware = recorded.hardware
     hardware, metadata = hardware_metadata(paths, request.gpu, requested_hardware)
     pinning = resolve_cpu_pinning(request.gpu)
     metadata = {**metadata, "cpu_pinning": pinning.description}
+    if resumed_manifest is not None:
+        mismatches = host_mismatches(
+            resumed_manifest, hardware=hardware, metadata=metadata
+        )
+        if mismatches:
+            raise ValueError(
+                "resume request does not match the existing manifest: "
+                + ", ".join(mismatches)
+            )
     out_dir = resume_dir or _default_output_dir(
         scenario,
         hardware,
@@ -435,115 +284,65 @@ def _resolve_run(
         request.timestamp,
         request.occurrence,
     )
-    commands = {
-        arm.name: list(pinning.prefix)
-        + command_for_arm(
-            scenario.workload,
-            arm,
-            out_dir / arm.name,
-            megatron_args if arm.engine in MEGATRON_ENGINES else torchtitan_args,
-            axes.ac_mode,
-            model_size=axes.model_size,
-            parallelism=axes.parallelism,
-            megatron_p2p_sync=axes.megatron_p2p_sync,
-            megatron_nan_guard=axes.megatron_nan_guard,
-            megatron_precision=axes.megatron_precision,
-            profile=axes.profile,
+    world_size = run.parallelism.world_size
+    launches = {
+        arm.name: engine_for(arm).launch(run, arm, out_dir / arm.name)
+        for arm in arms
+    }
+    records = {
+        arm.name: ArmRecord(
+            arm=arm,
+            command=command_line(
+                launches[arm.name], world_size=world_size, pinning=pinning
+            ),
+            env_delta=environment_delta(
+                launches[arm.name], world_size=world_size, gpu=request.gpu
+            ),
+            cpu_pinning=pinning_record(launches[arm.name], pinning),
+            execution_model=engine_for(arm).execution_model(run, arm),
         )
         for arm in arms
     }
-
-    if existing_manifest is not None:
-        mismatches = _resume_mismatches(
-            existing_manifest,
-            scenario,
-            arms,
-            hardware,
-            metadata,
-            torchtitan_args=torchtitan_args,
-            megatron_args=megatron_args,
-            axes=axes,
-        )
-        if mismatches:
-            raise ValueError(
-                "resume request does not match the existing manifest: "
-                + ", ".join(mismatches)
-            )
     return ResolvedRun(
         paths=paths,
         scenario=scenario,
+        run=run,
         arms=arms,
         hardware=hardware,
         metadata=metadata,
         out_dir=out_dir,
-        commands=commands,
-        axes=axes,
-        resumed=resumed,
-        torchtitan_args=torchtitan_args,
-        megatron_args=megatron_args,
+        launches=launches,
+        pinning=pinning,
+        records=records,
+        resumed=recorded is not None,
     )
 
 
-def megatron_precision_refusal(
-    arms: Iterable[Arm], megatron_precision: str, zero: int
-) -> str | None:
-    """Why ``--megatron-precision lean`` cannot reach ``arms``, or ``None``.
-
-    Two refusals, each naming its repair. A run with no stock megatron arm
-    gives the value nothing to reach, and ``lean`` under ``zero 0`` asks
-    Megatron for a precision-aware optimizer without the distributed
-    optimizer it asserts. Refused here, the operator reads the repair
-    parent-side rather than minutes into a subprocess.
-    """
-    if megatron_precision == DEFAULT_MEGATRON_PRECISION:
-        return None
-    arms = tuple(arms)
-    if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
-        return (
-            f"--megatron-precision {megatron_precision!r} reaches no arm of "
-            f"this run: {', '.join(arm.name for arm in arms)} run on "
-            "TorchTitan, which holds its own bf16 optimizer states; select "
-            "the stock megatron arm, or leave the option at "
-            f"{DEFAULT_MEGATRON_PRECISION!r}"
+def _banner(resolved: ResolvedRun, gpu: str) -> list[str]:
+    """The summary lines that a run prints before its first arm."""
+    run = resolved.run
+    spec = run.parallelism
+    lines = [
+        f"GPU (PCI index): {gpu}",
+        resolved.metadata["nvidia_smi"],
+        f"cpu pinning: {resolved.metadata['cpu_pinning']}",
+        f"scenario: {resolved.scenario.name}   hardware: {resolved.hardware}",
+        f"arms: {' '.join(arm.name for arm in resolved.arms)}",
+        f"ac mode: {run.ac_mode}",
+        f"model size: {run.shape.name}",
+        f"parallelism: dp {spec.dp} x pp {spec.pp} (ep {spec.ep}, world size "
+        f"{spec.world_size}, zero {spec.zero})",
+        f"profile: {'on' if run.profile else 'off'}",
+    ]
+    if run.warmup_steps is not None:
+        lines.append(f"warmup steps: {run.warmup_steps}")
+    for arm in resolved.arms:
+        lines.append(
+            f"config {arm.name}: {engine_for(arm).name} "
+            f"{json.dumps(config_json(arm.config))}"
         )
-    if zero == 0:
-        return (
-            f"--megatron-precision {megatron_precision!r} needs "
-            "--zero 1: Megatron asserts use_distributed_optimizer under "
-            "--use-precision-aware-optimizer, and the zero level is the "
-            "one owner of that flag"
-        )
-    return None
-
-
-def megatron_nan_guard_refusal(
-    arms: Iterable[Arm], megatron_nan_guard: str
-) -> str | None:
-    """Why ``--megatron-nan-guard on`` cannot reach ``arms``, or ``None``.
-
-    One refusal, naming its repair. A run with no stock megatron arm
-    gives the value nothing to reach, which is the ``--megatron-p2p-sync``
-    refusal with a smaller engine set. ``_resolve_run`` raises the
-    string, and the skip pre-pass prints it and skips the
-    scenario.
-
-    The gate reads the literal ``on`` and never the axis default. ``on``
-    asks stock Megatron to keep its own check, so a run with no stock
-    megatron arm has nothing to ask. ``off`` is refused nowhere: it is the
-    default here, and a TorchTitan arm's argv is untouched under either
-    value.
-    """
-    if megatron_nan_guard != "on":
-        return None
-    arms = tuple(arms)
-    if not any(arm.engine in MEGATRON_ENGINES for arm in arms):
-        return (
-            f"--megatron-nan-guard {megatron_nan_guard!r} reaches no arm of "
-            f"this run: {', '.join(arm.name for arm in arms)} run on "
-            "TorchTitan, which has no Megatron NaN guard; select the stock "
-            f"megatron arm, or leave the option at {DEFAULT_MEGATRON_NAN_GUARD!r}"
-        )
-    return None
+    lines.append(f"output: {resolved.out_dir}")
+    return lines
 
 
 def execute_run(
@@ -553,13 +352,9 @@ def execute_run(
     process_runner: ProcessRunner = subprocess.run,
     environment: Mapping[str, str] | None = None,
 ) -> RunResult:
-    """Execute and validate the selected arms, preserving resumable state."""
+    """Start and validate the selected arms, and keep a state file that a resume reads."""
     host_environment = dict(environment or os.environ)
-    resolved = _resolve_run(
-        request, host_environment, event_handler=event_handler
-    )
-    axes = resolved.axes
-    # Two names for what the loop below reads on nearly every line.
+    resolved = _resolve_run(request, host_environment, event_handler=event_handler)
     arms = resolved.arms
     out_dir = resolved.out_dir
 
@@ -570,89 +365,27 @@ def execute_run(
         out_dir.mkdir(parents=True, exist_ok=False)
         write_manifest(
             out_dir,
-            resolved.scenario,
-            arms,
-            resolved.commands,
-            resolved.hardware,
-            resolved.metadata,
-            torchtitan_args=resolved.torchtitan_args,
-            megatron_args=resolved.megatron_args,
-            axes=axes,
+            scenario=resolved.scenario,
+            hardware=resolved.hardware,
+            metadata=resolved.metadata,
+            run=resolved.run,
+            arms=tuple(resolved.records[arm.name] for arm in arms),
         )
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
 
-    _emit(event_handler, "summary", f"GPU (PCI index): {request.gpu}")
-    _emit(event_handler, "summary", resolved.metadata["nvidia_smi"])
-    _emit(
-        event_handler,
-        "summary",
-        f"cpu pinning: {resolved.metadata['cpu_pinning']}",
-    )
-    _emit(
-        event_handler,
-        "summary",
-        f"scenario: {resolved.scenario.name}   hardware: {resolved.hardware}",
-    )
-    _emit(
-        event_handler,
-        "summary",
-        f"arms: {' '.join(arm.name for arm in arms)}",
-    )
-    _emit(event_handler, "summary", f"ac mode: {axes.ac_mode}")
-    _emit(event_handler, "summary", f"model size: {axes.model_size}")
-    _emit(
-        event_handler,
-        "summary",
-        f"parallelism: dp {axes.parallelism.dp} x pp {axes.parallelism.pp} "
-        f"(ep {axes.parallelism.ep}, world size {axes.parallelism.world_size}, "
-        f"zero {axes.parallelism.zero})",
-    )
-    _emit(
-        event_handler, "summary", f"megatron p2p sync: {axes.megatron_p2p_sync}"
-    )
-    _emit(
-        event_handler,
-        "summary",
-        f"megatron nan guard: {axes.megatron_nan_guard}",
-    )
-    _emit(
-        event_handler,
-        "summary",
-        f"megatron precision: {axes.megatron_precision}",
-    )
-    _emit(
-        event_handler, "summary", f"profile: {'on' if axes.profile else 'off'}"
-    )
-    if axes.warmup_steps is not None:
-        _emit(event_handler, "summary", f"warmup steps: {axes.warmup_steps}")
-    _emit(event_handler, "summary", f"output: {out_dir}")
+    for line in _banner(resolved, request.gpu):
+        _emit(event_handler, "summary", line)
 
     base_environment = runtime_environment(
-        resolved.paths,
-        request.gpu,
-        environment=host_environment,
-        world_size=axes.parallelism.world_size,
+        resolved.paths, environment=host_environment
     )
     for arm in arms:
         arm_dir = out_dir / arm.name
         log_path = out_dir / f"{arm.name}.log"
         if resolved.resumed:
             try:
-                validate_arm(
-                    arm,
-                    arm_dir,
-                    log_path,
-                    resolved.scenario.workload,
-                    ac_mode=axes.ac_mode,
-                    model_size=axes.model_size,
-                    parallelism=axes.parallelism,
-                    megatron_p2p_sync=axes.megatron_p2p_sync,
-                    megatron_nan_guard=axes.megatron_nan_guard,
-                    megatron_precision=axes.megatron_precision,
-                    profile=axes.profile,
-                    megatron_args=resolved.megatron_args,
-                )
+                validate_arm(resolved.run, arm, engine_for(arm), arm_dir, log_path)
             except RuntimeError:
                 archive = archive_incomplete_arm(out_dir, arm.name)
                 if archive is not None:
@@ -679,11 +412,19 @@ def execute_run(
         _emit(event_handler, "command", shlex.join(command), arm.name)
         update_run_state(out_dir, state, arm_name=arm.name, status="running")
         try:
+            launch = resolved.launches[arm.name]
             arm_environment = base_environment
-            if arm.requires_gcc_toolset:
+            if launch.host_compiler:
                 arm_environment = add_compiler_environment(
                     base_environment, resolved.paths.compiler_env
                 )
+            launched = build_command(
+                launch,
+                world_size=resolved.run.parallelism.world_size,
+                gpu=request.gpu,
+                pinning=resolved.pinning,
+                base_env=arm_environment,
+            )
             with log_path.open("w") as log:
                 log.write(
                     f"# scenario={resolved.scenario.name} arm={arm.name} "
@@ -693,9 +434,9 @@ def execute_run(
                 log.write(resolved.metadata["nvidia_smi"] + "\n")
                 log.flush()
                 completed = process_runner(
-                    command,
-                    cwd=resolved.paths.titan_dir,
-                    env=arm_environment,
+                    list(launched.argv),
+                    cwd=launched.cwd,
+                    env=dict(launched.env),
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     check=False,
@@ -705,20 +446,7 @@ def execute_run(
                     f"{arm.name}: training exited with {completed.returncode}; "
                     f"see {log_path}"
                 )
-            validate_arm(
-                arm,
-                arm_dir,
-                log_path,
-                resolved.scenario.workload,
-                ac_mode=axes.ac_mode,
-                model_size=axes.model_size,
-                parallelism=axes.parallelism,
-                megatron_p2p_sync=axes.megatron_p2p_sync,
-                megatron_nan_guard=axes.megatron_nan_guard,
-                megatron_precision=axes.megatron_precision,
-                profile=axes.profile,
-                megatron_args=resolved.megatron_args,
-            )
+            validate_arm(resolved.run, arm, engine_for(arm), arm_dir, log_path)
         except (Exception, KeyboardInterrupt) as error:
             update_run_state(
                 out_dir,

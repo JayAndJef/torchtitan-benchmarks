@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 from benchmarks.models.piper_qwen3.shape import PiperShape
 from benchmarks.models.piper_qwen3.titan_model import (
     apply_config_overrides,

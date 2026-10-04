@@ -1,9 +1,7 @@
 """Structural tests for ``benchmarks/e2e/schema.py`` and the e2e layering.
 
-The module holds the e2e type declarations and imports the standard library
-alone. That property is what lets any layer read a type without paying for
-the scenario table, the schedule table or the validator, so a test asserts
-it on the source rather than trusting a convention.
+The module holds the scenario declaration, and it imports the standard
+library and the standard-library-only engine records alone.
 
 ``LAYER_ORDER`` below states the one direction the e2e and artifact modules
 may import in. It is a declaration and a test at once: a module may import
@@ -41,26 +39,50 @@ LAYERED_PACKAGES = ("benchmarks.e2e", "benchmarks.artifacts", "benchmarks.cli")
 # only the declarations. ``benchmarks.artifacts.manifests`` sits above
 # ``engines`` and below ``runner``, because the runner writes the manifest.
 LAYER_ORDER = (
-    "benchmarks.e2e.megatron_stock",
+    "benchmarks.e2e.engines.megatron_stock.driver",
     "benchmarks.cli.rendering",
     "benchmarks.artifacts.summaries",
+    "benchmarks.e2e.parallelism",
+    "benchmarks.e2e.engines.api",
+    "benchmarks.e2e.data.c4_replay",
+    "benchmarks.e2e.engines.megatron_stock.driver.data",
+    "benchmarks.e2e.engines.torchtitan.plugins.replay",
+    "benchmarks.e2e.engines.torchtitan.plugins.parallelize",
+    "benchmarks.e2e.engines.torchtitan.plugins.config_registry",
+    "benchmarks.e2e.engines.torchtitan.config",
+    "benchmarks.e2e.engines.megatron_stock.config",
+    "benchmarks.e2e.overrides",
     "benchmarks.e2e.schema",
     "benchmarks.artifacts.layout",
     "benchmarks.artifacts.run_state",
-    "benchmarks.e2e.parallelism",
     "benchmarks.e2e.axes",
     "benchmarks.e2e.registry",
-    "benchmarks.e2e.megatron_stock.flags",
     "benchmarks.e2e.passthrough",
-    "benchmarks.e2e.megatron_stock.markers",
-    "benchmarks.e2e.megatron_stock.step_log",
-    "benchmarks.e2e.megatron_stock.dp_marker",
-    "benchmarks.e2e.megatron_stock.train",
-    "benchmarks.e2e.megatron_stock.model_builder",
-    "benchmarks.e2e.launch",
+    "benchmarks.e2e.engines.megatron_stock.profiling",
+    "benchmarks.e2e.engines.megatron_stock.flags",
+    "benchmarks.e2e.engines.megatron_stock.steps",
+    "benchmarks.e2e.engines.megatron_stock.driver.markers",
+    "benchmarks.e2e.engines.megatron_stock.driver.step_log",
+    "benchmarks.e2e.engines.megatron_stock.driver.dp_marker",
+    "benchmarks.e2e.engines.megatron_stock.driver.train",
+    "benchmarks.e2e.engines.megatron_stock.driver.model_builder",
+    "benchmarks.e2e.evidence",
     "benchmarks.e2e.validation",
-    "benchmarks.e2e.engines",
+    "benchmarks.e2e.engines.megatron_stock.evidence",
+    "benchmarks.e2e.engines.megatron_stock.validate",
+    "benchmarks.e2e.engines.torchtitan.profiling",
+    "benchmarks.e2e.engines.torchtitan.mesh",
+    "benchmarks.e2e.engines.torchtitan.flags",
+    "benchmarks.e2e.engines.torchtitan.evidence",
+    "benchmarks.e2e.engines.torchtitan.steps",
+    "benchmarks.e2e.engines.torchtitan.validate",
+    "benchmarks.e2e.engines.torchtitan.engine",
+    "benchmarks.e2e.engines.megatron_stock.engine",
+    "benchmarks.e2e.engines.registry",
+    "benchmarks.artifacts.manifest_v19",
+    "benchmarks.artifacts.manifest_v18",
     "benchmarks.artifacts.manifests",
+    "benchmarks.e2e.checks",
     "benchmarks.e2e.runner",
     "benchmarks.e2e.results",
     "benchmarks.cli.e2e",
@@ -72,11 +94,14 @@ LAYER_ORDER = (
 # The names the module must declare. Listed rather than derived: a moved
 # type that lost its declaration would otherwise make every assertion here
 # vacuous.
-DECLARED_TYPES = (
-    "Workload",
-    "Arm",
-    "Scenario",
+DECLARED_TYPES = ("Scenario",)
+
+STDLIB_ONLY_MODULES = (
+    "benchmarks.e2e.engines.api",
+    "benchmarks.e2e.parallelism",
+    "benchmarks.models.piper_qwen3.shape",
 )
+"""The first-party modules that the schema may import; each imports the standard library alone."""
 
 
 def imported_modules(path: Path) -> tuple[tuple[str, int], ...]:
@@ -100,19 +125,25 @@ class SchemaImportsNothingFirstPartyTest(unittest.TestCase):
         """Negative control: a renamed module makes the rest vacuous."""
         self.assertTrue(SCHEMA_PATH.is_file(), f"{SCHEMA_PATH} is missing")
 
-    def test_schema_imports_no_first_party_module(self):
-        offenders = [
-            f"{name} (line {lineno})"
-            for name, lineno in imported_modules(SCHEMA_PATH)
-            if name.startswith("benchmarks") or name.startswith(".")
-        ]
-        self.assertEqual(
-            offenders,
-            [],
-            "benchmarks/e2e/schema.py imports a first-party module; the "
-            "declarations must cost the standard library alone:\n  "
-            + "\n  ".join(offenders),
-        )
+    def test_schema_imports_the_standard_library_alone(self):
+        """The schema and every first-party module it reaches import only stdlib-only modules."""
+        for path in (SCHEMA_PATH, *(
+            REPO_ROOT / (name.replace(".", "/") + ".py")
+            for name in STDLIB_ONLY_MODULES
+        )):
+            offenders = [
+                f"{name} (line {lineno})"
+                for name, lineno in imported_modules(path)
+                if (name.startswith("benchmarks") or name.startswith("."))
+                and name not in STDLIB_ONLY_MODULES
+            ]
+            with self.subTest(path=path.name):
+                self.assertEqual(
+                    offenders,
+                    [],
+                    f"{path} imports a first-party module that is not "
+                    "standard-library-only:\n  " + "\n  ".join(offenders),
+                )
 
     def test_every_declared_type_is_present(self):
         tree = ast.parse(SCHEMA_PATH.read_text())

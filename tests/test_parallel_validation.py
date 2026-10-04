@@ -26,9 +26,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import logs_by_rank
-from benchmarks.e2e.megatron_stock import markers as stock_markers
+from benchmarks.e2e.engines.megatron_stock.driver import markers as stock_markers
 from benchmarks.e2e.parallelism import ParallelismSpec
-from benchmarks.e2e.schema import Arm
 from benchmarks.e2e.parallelism import (
     TRIVIAL_SPEC,
     n_microbatches,
@@ -37,16 +36,25 @@ from benchmarks.e2e.registry import (
     ENGINES,
     scenario_by_name,
 )
-from benchmarks.e2e.validation import (
-    ALL_REDUCE_MARKER,
-    MEGATRON_STOCK_PROFILE,
-    TORCHTITAN_PROFILE,
-    profile_for_engine,
-    validate_arm,
+from benchmarks.e2e.engines.megatron_stock.evidence import (
+    read_evidence as stock_evidence,
 )
-from benchmarks.execution.environment import LOG_RANK_TEMPLATE
-from benchmarks.execution.paths import RuntimePaths
-from benchmarks.execution.environment import runtime_environment
+from benchmarks.e2e.engines.torchtitan.evidence import (
+    read_evidence as titan_evidence,
+)
+from benchmarks.e2e.engines.torchtitan.validate import (
+    mesh_markers as titan_mesh_markers,
+    required_lines as titan_required_lines,
+)
+from benchmarks.e2e.engines.megatron_stock.validate import (
+    mesh_markers as megatron_mesh_markers,
+    nan_guard_markers,
+    p2p_markers,
+    precision_markers,
+)
+from benchmarks.e2e.validation import ALL_REDUCE_MARKER
+from benchmarks.execution.launcher import LOG_RANK_TEMPLATE, launcher_environment
+from benchmarks.e2e.engines.api import Launch, MeshObserved
 from tests.test_runner import (
     OVERRIDE_ARM,
     PIPER_OPTIMIZED_SWIGLU_OVERRIDE,
@@ -54,6 +62,7 @@ from tests.test_runner import (
     _SIZE_LINE,
     _compiled_line,
 )
+from tests.engine_helpers import configured, run_spec, validate
 
 
 PP2 = ParallelismSpec(pp=2, pp_schedule="1F1B")
@@ -67,7 +76,7 @@ def _prefixed(rank: int, text: str) -> str:
 
 class LogsByRankTests(unittest.TestCase):
     def test_an_unprefixed_log_comes_back_whole(self) -> None:
-        """The megatron arm's log at one rank: no torchrun, no prefix."""
+        """A stored Megatron log at one rank, written before torchrun started every arm."""
         text = "Megatron-LM training loop (mode=default,\nTraining completed\n"
         self.assertEqual(logs_by_rank(text), {0: text})
 
@@ -76,7 +85,7 @@ class LogsByRankTests(unittest.TestCase):
 
         A single-rank titan log already carries ``[rank0]:`` prefixes, and it
         also carries unprefixed lines that belong to no rank: the runner's
-        header, the nvidia-smi block and run_train.sh's shell trace.
+        header, the nvidia-smi block and torchrun's own lines.
         Splitting would drop those and change what every rule reads.
         """
         text = "# scenario=x arm=y\n" + _prefixed(0, "Training completed")
@@ -151,8 +160,8 @@ class LogsByRankTests(unittest.TestCase):
 
         They are not one constant because the reader must also parse
         torchrun's own default, ``[${role_name}${local_rank}]:``, which
-        every single-GPU log already carries through run_train.sh's
-        ``--role rank``.
+        every single-GPU log written before the launcher set the template
+        carries through ``--role rank``.
         """
         rendered = LOG_RANK_TEMPLATE.replace("${rank}", "7")
         text = f"{rendered}alpha\n{rendered.replace('7', '9')}beta\n"
@@ -163,23 +172,17 @@ class LogsByRankTests(unittest.TestCase):
 
 class RankLoggingEnvironmentTests(unittest.TestCase):
     def _environment(self, world_size: int) -> dict[str, str]:
-        paths = RuntimePaths.resolve(environment={"PATH": "/usr/bin"})
-        return runtime_environment(
-            paths, "0", environment={"PATH": "/usr/bin"}, world_size=world_size
+        launch = Launch(target=("-m", "x"), processes="per_rank", pin=True)
+        return launcher_environment(launch, world_size=world_size, gpu="0")
+
+    def test_one_rank_names_rank_zero_and_the_prefix(self) -> None:
+        environment = self._environment(1)
+        self.assertEqual(environment["LOG_RANK"], "0")
+        self.assertEqual(
+            environment["TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE"], LOG_RANK_TEMPLATE
         )
 
-    def test_one_rank_sets_neither_variable(self) -> None:
-        """A single-GPU log stays byte for byte the log it always was."""
-        environment = self._environment(1)
-        self.assertNotIn("LOG_RANK", environment)
-        self.assertNotIn("TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE", environment)
-
     def test_two_ranks_ask_for_every_rank_and_the_global_prefix(self) -> None:
-        """TorchTitan's run_train.sh defaults LOG_RANK to 0.
-
-        Without this, rank 1's output reaches no console and every per-rank
-        rule below has nothing to read.
-        """
         environment = self._environment(2)
         self.assertEqual(environment["LOG_RANK"], "0,1")
         self.assertEqual(
@@ -232,14 +235,12 @@ def _titan_log(spec: ParallelismSpec = PP2) -> str:
     """One rank's titan output: every log line the rules read, and nothing else.
 
     The two parallelism lines are what arm rule 12 matches. They are built
-    here from the same profile the validator uses, so this fixture cannot
+    here from the same functions the validator uses, so this fixture cannot
     drift from the rule -- what it pins is that a rank whose OTHER lines are
     wrong still fails, not the wording of these two.
     """
     markers = "\n".join(
-        TORCHTITAN_PROFILE.parallelism_markers(
-            spec, ENGINES.workload, "stock"
-        )
+        titan_mesh_markers(spec, ENGINES.data)
     )
     return (
         _compiled_line("default").rstrip("\n")
@@ -263,12 +264,11 @@ class PerRankLogRuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary))
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
-            validate_arm(
+            validate(
+                run_spec(parallelism=PP2),
                 ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                ENGINES.workload,
-                parallelism=PP2,
             )
 
     def test_a_fallback_on_rank_one_alone_fails_the_arm(self) -> None:
@@ -288,12 +288,11 @@ class PerRankLogRuleTests(unittest.TestCase):
                 }
             )
             with self.assertRaisesRegex(RuntimeError, "rank 1"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
                 )
 
     def test_a_rank_that_never_finished_fails_the_arm(self) -> None:
@@ -306,12 +305,11 @@ class PerRankLogRuleTests(unittest.TestCase):
                 }
             )
             with self.assertRaisesRegex(RuntimeError, "did not complete"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
                 )
 
     def test_the_override_count_is_the_whole_models_on_every_rank(self) -> None:
@@ -328,28 +326,16 @@ class PerRankLogRuleTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(
-                Path(temporary), markers=arm.trace_kernel_markers
+                Path(temporary), markers=arm.config.trace_kernel_markers
             )
             whole = _TITAN_TAIL + "\n" + applied * 16
             fixture.write({0: whole, 1: whole})
-            validate_arm(
-                arm,
-                fixture.root,
-                fixture.log,
-                ENGINES.workload,
-                parallelism=PP2,
-            )
+            validate(run_spec(parallelism=PP2), arm, fixture.root, fixture.log)
 
             half = _TITAN_TAIL + "\n" + applied * 8
             fixture.write({0: whole, 1: half})
             with self.assertRaisesRegex(RuntimeError, "expected 16 override"):
-                validate_arm(
-                    arm,
-                    fixture.root,
-                    fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
-                )
+                validate(run_spec(parallelism=PP2), arm, fixture.root, fixture.log)
 
 
 class RankCoverageTests(unittest.TestCase):
@@ -360,12 +346,11 @@ class RankCoverageTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary))
             fixture.write({0: _TITAN_TAIL})
             with self.assertRaisesRegex(RuntimeError, "wrote nothing"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
                 )
 
     def test_a_rank_with_no_traces_is_refused(self) -> None:
@@ -378,12 +363,25 @@ class RankCoverageTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
             with self.assertRaisesRegex(RuntimeError, "no trace"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
+                )
+
+    def test_a_rank_outside_the_run_with_traces_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = _ArmFixture(Path(temporary), ranks=(0, 1, 2))
+            fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
+            with self.assertRaisesRegex(
+                RuntimeError, "rank 2 wrote traces under .*, and the run declares 2 ranks"
+            ):
+                validate(
+                    run_spec(parallelism=PP2),
+                    ENGINES.arm("titan_compiled"),
+                    fixture.root,
+                    fixture.log,
                 )
 
     def test_neither_check_fires_at_the_trivial_spec(self) -> None:
@@ -398,12 +396,11 @@ class RankCoverageTests(unittest.TestCase):
             # log, and a trivial run cannot produce it: arm rule 12 refuses a
             # pipeline nobody requested.
             fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
-            validate_arm(
+            validate(
+                run_spec(parallelism=TRIVIAL_SPEC),
                 ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                ENGINES.workload,
-                parallelism=TRIVIAL_SPEC,
             )
 
 
@@ -428,40 +425,39 @@ class ArmRuleTwelveRefusesAnUnrequestedPipelineTests(unittest.TestCase):
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
             fixture.log.write_text(_titan_log(PP2) + "\n")
             with self.assertRaisesRegex(RuntimeError, "declares no pipeline"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=TRIVIAL_SPEC),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=TRIVIAL_SPEC,
                 )
 
     def test_a_titan_trivial_log_still_validates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
             fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
-            validate_arm(
+            validate(
+                run_spec(parallelism=TRIVIAL_SPEC),
                 ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                ENGINES.workload,
-                parallelism=TRIVIAL_SPEC,
             )
 
-    def test_the_megatron_pattern_reads_the_degree_not_the_line(self) -> None:
+    def test_the_megatron_reader_reads_the_degree_not_the_line(self) -> None:
         """``pp=1`` is not a pipeline. Any other degree is."""
-        pattern = MEGATRON_STOCK_PROFILE.pipelined_pattern
-        trivial = "Megatron-LM stock parallelism: dp=1 pp=1 schedule=None"
-        pipelined = "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B"
-        deeper = "Megatron-LM stock parallelism: dp=1 pp=4 schedule=1F1B"
-        self.assertIsNone(pattern.search(trivial))
-        self.assertIsNotNone(pattern.search(pipelined))
-        self.assertIsNotNone(pattern.search(deeper))
+        for pp in (1, 2, 4):
+            with self.subTest(pp=pp):
+                self.assertEqual(
+                    _stock_mesh(
+                        f"Megatron-LM stock parallelism: dp=1 pp={pp} ep=1 "
+                        "schedule=1F1B"
+                    ).pp,
+                    pp,
+                )
 
-    def test_the_titan_pattern_does_not_match_a_one_gpu_mesh_line(self) -> None:
-        pattern = TORCHTITAN_PROFILE.pipelined_pattern
-        self.assertIsNone(pattern.search(_titan_log(TRIVIAL_SPEC)))
-        self.assertIsNotNone(pattern.search(_titan_log(PP2)))
+    def test_the_titan_reader_reads_the_one_gpu_mesh_line(self) -> None:
+        self.assertEqual(_titan_mesh(_titan_log(TRIVIAL_SPEC)).pp, 1)
+        self.assertEqual(_titan_mesh(_titan_log(PP2)).pp, 2)
 
 
 class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
@@ -484,111 +480,98 @@ class ArmRuleTwelveRefusesUnrequestedDataParallelismTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError, "declares no data parallelism"
             ):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=TRIVIAL_SPEC),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=TRIVIAL_SPEC,
                 )
 
     def test_a_titan_trivial_log_still_validates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary), ranks=(0,))
             fixture.log.write_text(_titan_log(TRIVIAL_SPEC) + "\n")
-            validate_arm(
+            validate(
+                run_spec(parallelism=TRIVIAL_SPEC),
                 ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                ENGINES.workload,
-                parallelism=TRIVIAL_SPEC,
             )
 
-    def test_each_pattern_names_two_witnesses(self) -> None:
-        """The engine's own mesh line, and this repo's wrapper line.
-
-        The mesh line is logged whatever this repo's code does, so a degree
-        above 1 shows there even in a run that never reached the wrapper.
-        Either alone must fail the arm.
-        """
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            titan.search(
+    def test_each_reader_takes_two_witnesses(self) -> None:
+        """The engine's own mesh line and this repository's wrapper line each state the degree."""
+        self.assertEqual(
+            _titan_mesh(
                 "Building device mesh with parallelism: pp=1, "
                 "dp_replicate=2, dp_shard=1, cp=1, tp=1, ep=1"
-            )
+            ).dp,
+            2,
         )
-        self.assertIsNotNone(
-            titan.search(
+        self.assertEqual(
+            _titan_mesh(
                 "piper1b data parallel: fully_shard applied "
                 "(dp_replicate=2, dp_shard=1); 17 FSDP units"
-            )
+            ).dp,
+            2,
         )
-        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            megatron.search(
-                "Megatron-LM stock parallelism: dp=2 pp=1 schedule=None "
+        self.assertEqual(
+            _stock_mesh(
+                "Megatron-LM stock parallelism: dp=2 pp=1 ep=1 schedule=1F1B "
                 "microbatches=1 stages=1"
-            )
+            ).dp,
+            2,
         )
-        self.assertIsNotNone(
-            megatron.search(
+        self.assertEqual(
+            _stock_mesh(
                 "Megatron-LM stock data parallel: DistributedDataParallel "
                 "over 2 ranks (overlap_grad_reduce=True, "
-                "grad_reduce_in_fp32=False)"
-            )
+                "grad_reduce_in_fp32=False, sharding_strategy=no_shard, "
+                "expert_parallel=1, "
+                "optimizer=ChainedOptimizer[Float16OptimizerWithFloat16Params])"
+            ),
+            MeshObserved(dp=2, pp=1, ep=1, zero=0),
         )
 
     def test_a_shard_degree_is_data_parallelism_too(self) -> None:
-        """Full parameter sharding is what an omitted shard-degree flag
-        produces.
-
-        ``parallelize_piper1b`` refuses it in the training process. This
-        pattern is what stops such a log being published as single-GPU if
-        the refusal is ever lifted.
-        """
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            titan.search(
+        self.assertEqual(
+            _titan_mesh(
                 "Building device mesh with parallelism: pp=1, "
                 "dp_replicate=1, dp_shard=2, cp=1, tp=1, ep=1"
-            )
+            ),
+            MeshObserved(dp=2, pp=1, ep=1, zero=1),
         )
 
     def test_a_pipeline_only_log_is_not_data_parallel(self) -> None:
-        """Read off the real ``pp 2, dp 1`` logs this harness has written.
-
-        Both engines print their degrees on one line, so a pattern that
-        matched the line rather than the degree would fail every honest
-        pipeline run.
-        """
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNone(
-            titan.search(
+        self.assertEqual(
+            _titan_mesh(
                 "Building device mesh with parallelism: pp=2, "
                 "dp_replicate=1, dp_shard=1, cp=1, tp=1, ep=1"
-            )
+            ).dp,
+            1,
         )
-        self.assertIsNone(titan.search(_titan_log(PP2)))
-        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
-        self.assertIsNone(
-            megatron.search(
-                "Megatron-LM stock parallelism: dp=1 pp=2 schedule=1F1B "
+        self.assertEqual(_titan_mesh(_titan_log(PP2)).dp, 1)
+        self.assertEqual(
+            _stock_mesh(
+                "Megatron-LM stock parallelism: dp=1 pp=2 ep=1 schedule=1F1B "
                 "microbatches=4 stages=2"
-            )
+            ).dp,
+            1,
         )
 
     def test_a_double_digit_degree_is_not_read_as_one(self) -> None:
-        """``dp=1`` must not match ``dp=12``, and the reverse."""
-        megatron = MEGATRON_STOCK_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(
-            megatron.search(
-                "Megatron-LM stock parallelism: dp=12 pp=1 schedule=None"
-            )
+        self.assertEqual(
+            _stock_mesh(
+                "Megatron-LM stock parallelism: dp=12 pp=1 ep=1 schedule=None"
+            ).dp,
+            12,
         )
-        titan = TORCHTITAN_PROFILE.data_parallel_pattern
-        self.assertIsNotNone(titan.search("dp_replicate=10, dp_shard=1,"))
-        self.assertIsNone(titan.search("dp_replicate=1, dp_shard=1,"))
+        self.assertEqual(
+            _titan_mesh(
+                "Building device mesh with parallelism: pp=1, "
+                "dp_replicate=10, dp_shard=1, cp=1, tp=1, ep=1"
+            ).dp,
+            10,
+        )
 
 
 class ArmRuleTwelveTests(unittest.TestCase):
@@ -611,11 +594,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
                 _compiled_line("default") + _SAC_LINE + _SIZE_LINE
                 + "Training completed\n"
             )
-            validate_arm(
+            validate(
+                run_spec(),
                 ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                ENGINES.workload,
             )
 
     def test_a_missing_mesh_line_fails_the_arm(self) -> None:
@@ -628,12 +611,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
             )
             fixture.write({0: without, 1: _TITAN_TAIL})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
                 )
 
     def test_a_mesh_line_naming_another_mesh_fails_the_arm(self) -> None:
@@ -643,12 +625,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
             wrong = _titan_log().replace("pp=2", "pp=1")
             fixture.write({0: wrong, 1: wrong})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
                 )
 
     def test_a_wrong_microbatch_count_fails_the_arm(self) -> None:
@@ -662,18 +643,15 @@ class ArmRuleTwelveTests(unittest.TestCase):
             wrong = _titan_log().replace("with 4 microbatches", "with 2 microbatches")
             fixture.write({0: wrong, 1: wrong})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=PP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=PP2,
                 )
 
     def test_the_titan_markers_name_the_degrees_and_the_schedule(self) -> None:
-        markers = TORCHTITAN_PROFILE.parallelism_markers(
-            PP2, ENGINES.workload, "stock"
-        )
+        markers = titan_mesh_markers(PP2, ENGINES.data)
         self.assertEqual(
             markers,
             (
@@ -694,13 +672,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
         torch into the parent -- so the string is stated twice and this test
         is the link.
         """
-        from benchmarks.models.piper_qwen3.parallelize import (
+        from benchmarks.e2e.engines.torchtitan.plugins.parallelize import (
             DATA_PARALLEL_LINE,
         )
 
-        markers = TORCHTITAN_PROFILE.parallelism_markers(
-            DP2, ENGINES.workload, "stock"
-        )
+        markers = titan_mesh_markers(DP2, ENGINES.data)
         self.assertIn(
             DATA_PARALLEL_LINE.format(replicate=2, shard=1), markers
         )
@@ -713,9 +689,7 @@ class ArmRuleTwelveTests(unittest.TestCase):
         """
         for spec in (TRIVIAL_SPEC, PP2):
             with self.subTest(spec=spec):
-                markers = TORCHTITAN_PROFILE.parallelism_markers(
-                    spec, ENGINES.workload, "stock"
-                )
+                markers = titan_mesh_markers(spec, ENGINES.data)
                 self.assertEqual(
                     [m for m in markers if "data parallel" in m], []
                 )
@@ -736,12 +710,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
             )
             fixture.write({0: unwrapped, 1: unwrapped})
             with self.assertRaisesRegex(RuntimeError, "did not apply"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=DP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=DP2,
                 )
 
     def test_every_rank_must_carry_an_all_reduce_under_dp(self) -> None:
@@ -769,12 +742,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         RuntimeError, f"rank {missing}'s profiler traces"
                     ):
-                        validate_arm(
+                        validate(
+                            run_spec(parallelism=DP2),
                             ENGINES.arm("titan_compiled"),
                             fixture.root,
                             fixture.log,
-                            ENGINES.workload,
-                            parallelism=DP2,
                         )
 
     def test_a_pipeline_only_run_needs_no_all_reduce(self) -> None:
@@ -787,12 +759,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(Path(temporary))
             fixture.write({0: _TITAN_TAIL, 1: _TITAN_TAIL})
-            validate_arm(
+            validate(
+                run_spec(parallelism=PP2),
                 ENGINES.arm("titan_compiled"),
                 fixture.root,
                 fixture.log,
-                ENGINES.workload,
-                parallelism=PP2,
             )
 
     def test_a_pipeline_collective_cannot_satisfy_the_rule(self) -> None:
@@ -817,12 +788,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
             log = _titan_log(DP2)
             fixture.write({0: log, 1: log})
             with self.assertRaisesRegex(RuntimeError, "carry no"):
-                validate_arm(
+                validate(
+                    run_spec(parallelism=DP2),
                     ENGINES.arm("titan_compiled"),
                     fixture.root,
                     fixture.log,
-                    ENGINES.workload,
-                    parallelism=DP2,
                 )
 
     def test_a_dp_run_with_the_marker_on_every_rank_passes(self) -> None:
@@ -844,12 +814,11 @@ class ArmRuleTwelveTests(unittest.TestCase):
                         _write_traces(root, rank, markers=(kernel,))
                     log = _titan_log(DP2)
                     fixture.write({0: log, 1: log})
-                    validate_arm(
+                    validate(
+                        run_spec(parallelism=DP2),
                         ENGINES.arm("titan_compiled"),
                         fixture.root,
                         fixture.log,
-                        ENGINES.workload,
-                        parallelism=DP2,
                     )
 
 
@@ -857,7 +826,7 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     """The ``--megatron-p2p-sync`` half of arm rule 12.
 
     Each megatron driver prints its p2p line off the config it built, on
-    every rank. Above ``pp`` 1 the profile asks for that line with the
+    every rank. Above ``pp`` 1 the validation asks for that line with the
     ``batch_p2p_sync`` token the requested value implies, so a run that
     ignored the flag cannot be published under the label it was asked for.
     """
@@ -865,24 +834,29 @@ class ArmRuleTwelveP2pSyncTests(unittest.TestCase):
     def test_no_line_is_asked_below_a_pipeline(self) -> None:
         """Below ``pp`` 1 there is no message to synchronize, and ``off``
         is refused parent-side; the callable asks for nothing there."""
-        for name in ("megatron_stock", "torchtitan"):
-            for spec in (TRIVIAL_SPEC, DP2):
-                for value in ("on", "off"):
-                    with self.subTest(profile=name, spec=spec, value=value):
-                        self.assertEqual(
-                            profile_for_engine(name).p2p_markers(spec, value),
-                            (),
-                        )
+        for spec in (TRIVIAL_SPEC, DP2):
+            for value in ("on", "off"):
+                with self.subTest(spec=spec, value=value):
+                    self.assertEqual(p2p_markers(spec, value), ())
 
-    def test_the_titan_profile_asks_for_no_line(self) -> None:
-        """The option reaches the megatron command alone.
+    def test_the_titan_engine_asks_for_the_mesh_lines_alone(self) -> None:
+        """The option reaches the megatron command alone."""
+        self.assertEqual(list(_titan_required_lines(PP2)), ["parallelism"])
 
-        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
-        tuple, so an unknown value never reaches a profile.
-        """
-        titan = TORCHTITAN_PROFILE
-        for value in ("on", "off"):
-            self.assertEqual(titan.p2p_markers(PP2, value), ())
+
+def _titan_required_lines(spec: ParallelismSpec) -> dict[str, tuple[str, ...]]:
+    """The lines that the TorchTitan engine asks every rank for at ``spec``."""
+    return titan_required_lines(run_spec(parallelism=spec, local_batch_size=8))
+
+
+def _titan_mesh(text: str):
+    """The mesh that the TorchTitan evidence reader takes from ``text``."""
+    return titan_evidence(0, text + "\nTraining completed\n").mesh
+
+
+def _stock_mesh(text: str):
+    """The mesh that the stock evidence reader takes from ``text``."""
+    return stock_evidence(0, text + "\nTraining completed\n").mesh
 
 
 def _stock_log(
@@ -894,25 +868,22 @@ def _stock_log(
     """One rank's stock-driver output: every line the rules read.
 
     The mesh lines, the p2p line and the precision fields come from the
-    profile the validator uses; the nan guard line is the argument, so a
+    functions the validator uses; the nan guard line is the argument, so a
     test can give a rank the wrong value or no line at all.
 
     ``megatron_precision`` builds the precision fields for a value. The
-    profile asks for them under BOTH values, so a fixture that omitted
+    validation asks for them under BOTH values, so a fixture that omitted
     them would fail every stock arm.
     """
-    profile = MEGATRON_STOCK_PROFILE
-    workload = scenario_by_name("engines").workload
+    data = scenario_by_name("engines").data
     lines = [
         # The first marker is the driver's own line, and the four fields
         # after it are printed on that line, off the arguments Megatron
         # resolved.
-        ", ".join(profile.precision_markers(megatron_precision)),
+        ", ".join(precision_markers(megatron_precision)),
         _SIZE_LINE.rstrip("\n"),
-        *profile.parallelism_markers(
-            spec, workload, megatron_precision
-        ),
-        *profile.p2p_markers(spec, "off"),
+        *megatron_mesh_markers(spec, data, megatron_precision, ()),
+        *p2p_markers(spec, "off"),
     ]
     if nan_guard_line is not None:
         lines.append(nan_guard_line)
@@ -924,7 +895,7 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     """The ``--megatron-nan-guard`` half of arm rule 12.
 
     The stock driver prints ``check_for_nan_in_loss_and_grad`` as Megatron
-    parsed it, on every rank at every mesh. The profile asks for that line
+    parsed it, on every rank at every mesh. The validation asks for that line
     with the token the requested value implies, so a run whose argv lost
     the token cannot be published under the label it was asked for.
     """
@@ -935,20 +906,13 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
     def test_the_stock_line_is_pinned_to_the_driver_constant(self) -> None:
         """The validator and the driver state one line in two places, and
         the line is asked at every mesh."""
-        profile = MEGATRON_STOCK_PROFILE
         for value, line in (("on", self.ON_LINE), ("off", self.OFF_LINE)):
             with self.subTest(value=value):
-                self.assertEqual(profile.nan_guard_markers(value), (line,))
+                self.assertEqual(nan_guard_markers(value), (line,))
 
-    def test_the_titan_profile_asks_for_no_line(self) -> None:
-        """The option reaches the stock megatron command alone.
-
-        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
-        tuple, so an unknown value never reaches a profile.
-        """
-        titan = TORCHTITAN_PROFILE
-        for value in ("on", "off"):
-            self.assertEqual(titan.nan_guard_markers(value), ())
+    def test_the_titan_engine_asks_for_no_line(self) -> None:
+        """The option reaches the stock megatron command alone."""
+        self.assertEqual(_titan_required_lines(TRIVIAL_SPEC), {})
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,
@@ -975,30 +939,16 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
                     fixture = _ArmFixture(
                         Path(temporary),
                         ranks=(0,),
-                        markers=arm.trace_kernel_markers,
+                        markers=arm.config.trace_kernel_markers,
                     )
                     fixture.write({0: _stock_log(TRIVIAL_SPEC, nan_guard_line)})
-                    keywords = dict(
-                        ac_mode="none",
-                        megatron_nan_guard=value,
-                    )
+                    run = run_spec(ac_mode="none")
+                    configured_arm = configured(arm, nan_guard=value)
                     if refused is None:
-                        validate_arm(
-                            arm,
-                            fixture.root,
-                            fixture.log,
-                            scenario.workload,
-                            **keywords,
-                        )
+                        validate(run, configured_arm, fixture.root, fixture.log)
                     else:
                         with self.assertRaisesRegex(RuntimeError, refused):
-                            validate_arm(
-                                arm,
-                                fixture.root,
-                                fixture.log,
-                                scenario.workload,
-                                **keywords,
-                            )
+                            validate(run, configured_arm, fixture.root, fixture.log)
 
     def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
         """The rule runs per rank, so a stage that kept the guard under an
@@ -1007,21 +957,18 @@ class ArmRuleTwelveNanGuardTests(unittest.TestCase):
         arm = scenario.arm("megatron_stock")
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(
-                Path(temporary), markers=arm.trace_kernel_markers
+                Path(temporary), markers=arm.config.trace_kernel_markers
             )
             fixture.write({
                 0: _stock_log(PP2, self.OFF_LINE),
                 1: _stock_log(PP2, self.ON_LINE),
             })
             with self.assertRaisesRegex(RuntimeError, "on rank 1"):
-                validate_arm(
-                    arm,
+                validate(
+                    run_spec(parallelism=PP2, ac_mode="none"),
+                    configured(arm, nan_guard="off"),
                     fixture.root,
                     fixture.log,
-                    scenario.workload,
-                    ac_mode="none",
-                    parallelism=PP2,
-                    megatron_nan_guard="off",
                 )
 
 
@@ -1029,7 +976,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
     """The ``--megatron-precision`` half of arm rule 12.
 
     The stock driver prints the four precision fields off the arguments
-    Megatron resolved, on every rank at every mesh. The profile asks for
+    Megatron resolved, on every rank at every mesh. The validation asks for
     them under BOTH values: a ``stock`` label is a claim about the
     optimizer state exactly as a ``lean`` label is, so a run that gained
     the lean flags must fail a stock label as surely as a run that lost
@@ -1045,9 +992,8 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         """Megatron maps each dtype to a ``torch.dtype``, so the markers
         carry the torch spelling rather than the flag's. The first marker
         is the driver's own line, which rule 8 no longer holds."""
-        profile = MEGATRON_STOCK_PROFILE
         self.assertEqual(
-            profile.precision_markers("stock"),
+            precision_markers("stock"),
             (
                 "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=False",
@@ -1057,7 +1003,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            profile.precision_markers("lean"),
+            precision_markers("lean"),
             (
                 "Megatron-LM stock training loop (",
                 "use_precision_aware_optimizer=True",
@@ -1067,15 +1013,9 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
             ),
         )
 
-    def test_the_titan_profile_asks_for_no_field(self) -> None:
-        """The option reaches the stock megatron command alone.
-
-        ``tests/test_axes.py`` pins the CLI choice list equal to the axis
-        tuple, so an unknown value never reaches a profile.
-        """
-        titan = TORCHTITAN_PROFILE
-        for value in ("stock", "lean"):
-            self.assertEqual(titan.precision_markers(value), ())
+    def test_the_titan_engine_asks_for_no_field(self) -> None:
+        """The option reaches the stock megatron command alone."""
+        self.assertEqual(_titan_required_lines(TRIVIAL_SPEC), {})
 
     def test_a_stock_log_must_carry_the_requested_value_at_one_rank(
         self,
@@ -1095,7 +1035,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
                     fixture = _ArmFixture(
                         Path(temporary),
                         ranks=(0,),
-                        markers=arm.trace_kernel_markers,
+                        markers=arm.config.trace_kernel_markers,
                     )
                     fixture.write({
                         0: _stock_log(
@@ -1104,27 +1044,13 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
                             megatron_precision=logged,
                         )
                     })
-                    keywords = dict(
-                        ac_mode="none",
-                        megatron_precision=requested,
-                    )
+                    run = run_spec(ac_mode="none")
+                    configured_arm = configured(arm, precision=requested)
                     if refused is None:
-                        validate_arm(
-                            arm,
-                            fixture.root,
-                            fixture.log,
-                            scenario.workload,
-                            **keywords,
-                        )
+                        validate(run, configured_arm, fixture.root, fixture.log)
                     else:
                         with self.assertRaisesRegex(RuntimeError, refused):
-                            validate_arm(
-                                arm,
-                                fixture.root,
-                                fixture.log,
-                                scenario.workload,
-                                **keywords,
-                            )
+                            validate(run, configured_arm, fixture.root, fixture.log)
 
     def test_one_rank_with_the_wrong_value_fails_the_arm(self) -> None:
         """The rule runs per rank, so a stage that kept the stock optimizer
@@ -1133,7 +1059,7 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
         arm = scenario.arm("megatron_stock")
         with tempfile.TemporaryDirectory() as temporary:
             fixture = _ArmFixture(
-                Path(temporary), markers=arm.trace_kernel_markers
+                Path(temporary), markers=arm.config.trace_kernel_markers
             )
             fixture.write({
                 0: _stock_log(
@@ -1144,14 +1070,11 @@ class ArmRuleTwelvePrecisionTests(unittest.TestCase):
                 ),
             })
             with self.assertRaisesRegex(RuntimeError, "on rank 1"):
-                validate_arm(
-                    arm,
+                validate(
+                    run_spec(parallelism=PP2, ac_mode="none"),
+                    configured(arm, precision="lean"),
                     fixture.root,
                     fixture.log,
-                    scenario.workload,
-                    ac_mode="none",
-                    parallelism=PP2,
-                    megatron_precision="lean",
                 )
 
 
@@ -1198,7 +1121,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         import torch.nn as nn
         from torchtitan.config import ParallelismConfig, TrainingConfig
 
-        from benchmarks.models.piper_qwen3 import parallelize as module
+        from benchmarks.e2e.engines.torchtitan.plugins import parallelize as module
 
         class _Wrapped(nn.Module):
             pass
@@ -1290,7 +1213,7 @@ class TitanShardDegreeGuardTests(unittest.TestCase):
         import torch.nn as nn
         from torchtitan.config import ParallelismConfig, TrainingConfig
 
-        from benchmarks.models.piper_qwen3 import parallelize as module
+        from benchmarks.e2e.engines.torchtitan.plugins import parallelize as module
 
         sentinel = nn.Linear(2, 2)
         for name, dims in (

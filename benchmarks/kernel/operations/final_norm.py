@@ -243,7 +243,7 @@ def titan_final_norm_module(shape: PiperShape):
     ``self.norm = config.norm.build()``
     (``third_party/torchtitan/torchtitan/models/common/decoder.py:240``), and
     ``_piper_1b_model`` is where our registry sets that node
-    (``benchmarks/models/piper_qwen3/config_registry.py:115``). So the module
+    (``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``). So the module
     below is the production module, configured by the production config, and
     the extraction is one attribute read.
 
@@ -252,7 +252,7 @@ def titan_final_norm_module(shape: PiperShape):
     enough here: there is no per-layer node to select, and no arithmetic over
     ``n_layers`` anywhere in this scenario.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     return _piper_1b_model(fuse_qkv=True, shape=shape).norm.build()
 

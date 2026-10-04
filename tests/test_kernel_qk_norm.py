@@ -467,9 +467,9 @@ class TitanArmTest(unittest.TestCase):
         """
         from torchtitan.models.qwen3 import _qwen3_norm
 
-        from benchmarks.models.piper_qwen3 import config_registry
+        from benchmarks.e2e.engines.torchtitan.plugins import config_registry
 
-        trainer = config_registry.qwen3_piper_1b(size="normal")
+        trainer = config_registry.qwen3_piper_1b_pretokenized(size="normal")
         production = trainer.model_spec.model.layers[0].attention.qk_norm
         self.assertEqual(production, _qwen3_norm(64))
 

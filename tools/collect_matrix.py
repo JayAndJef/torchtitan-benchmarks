@@ -1,20 +1,8 @@
-"""Merge a run_matrix.sh output tree into one table, one row per arm.
+"""Merge the cells of a run_matrix.sh output tree into one table, one row per arm.
 
-Each cell directory under the matrix root holds a ``manifest.json`` and a
-``results.json``. The manifest names the axes the cell was run at and the
-results carry the published figures, so one row joins the two:
+    .venv/bin/python tools/collect_matrix.py out/matrix-<utc> [--size 1b] [--json matrix.json]
 
-    .venv/bin/python tools/collect_matrix.py out/matrix-<utc> \\
-        [--size 1b] [--json matrix.json]
-
-Only ``results.json`` is read for the figures. A profiler trace is written
-under ``--profile`` alone, so a tool that needed one could not report an
-ordinary run at all.
-
-**The results schema is not negotiable.** Every column below is a field of
-schema 6. A file another schema wrote is refused by name rather than read
-with defaulted lookups, because a missing field would render as a blank
-cell and read as a measurement that came out empty.
+The tool reads manifest schemas 18, 19 and 20, and results schema 6 alone.
 """
 
 from __future__ import annotations
@@ -28,6 +16,14 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from benchmarks.artifacts.manifests import (
+    RunRecord,
+    config_json,
+    load_run_record,
+)
+from benchmarks.e2e.engines.registry import engine_for
+from benchmarks.models.piper_qwen3.shape import canonical_size_name
+
 RESULTS_SCHEMA_VERSION = 6
 """The one results schema this tool reads."""
 
@@ -36,6 +32,7 @@ MOVED_ASIDE = (".contaminated-", ".nomanifest-")
 
 COLUMNS = (
     ("cell", "cell"),
+    ("scenario", "scenario"),
     ("arm", "arm"),
     ("model_size", "size"),
     ("ac_mode", "ac"),
@@ -44,8 +41,8 @@ COLUMNS = (
     ("ep", "ep"),
     ("zero", "zero"),
     ("profile", "prof"),
-    ("torchtitan_args", "titan args"),
-    ("megatron_args", "megatron args"),
+    ("engine", "engine"),
+    ("extra_flags", "extra flags"),
     ("stable_tokens_per_second", "tokens/s"),
     ("stable_sample_count", "n"),
     ("step_ms_median", "step ms"),
@@ -57,12 +54,7 @@ COLUMNS = (
 
 
 def cell_dirs(root: Path):
-    """Yield every cell directory under ``root``, in name order.
-
-    A cell is a directory with a manifest directly inside it. The
-    supervisor moves a condemned cell aside under a marked name, and those
-    are skipped: the numbers in them are the ones it decided not to keep.
-    """
+    """Every cell directory under ``root``, in name order; a cell that run_matrix.sh moved aside is skipped."""
     for manifest_path in sorted(root.glob("*/manifest.json")):
         cell_dir = manifest_path.parent
         if any(mark in cell_dir.name for mark in MOVED_ASIDE):
@@ -70,21 +62,27 @@ def cell_dirs(root: Path):
         yield cell_dir
 
 
-def cell_axes(manifest: dict[str, Any]) -> dict[str, Any]:
-    """The axis columns of one cell, read from its manifest."""
-    parallelism = manifest.get("parallelism") or {}
+def cell_axes(record: RunRecord) -> dict[str, Any]:
+    """The run-wide columns of one cell, read from its manifest."""
+    run = record.run
+    spec = run.parallelism
     return {
-        "scenario": manifest.get("scenario"),
-        "model_size": manifest.get("model_size"),
-        "ac_mode": manifest.get("ac_mode"),
-        "profile": manifest.get("profile"),
-        "dp": parallelism.get("dp"),
-        "pp": parallelism.get("pp"),
-        "ep": parallelism.get("ep"),
-        "zero": parallelism.get("zero"),
-        "parallelism": parallelism,
-        "torchtitan_args": " ".join(manifest.get("extra_torchtitan_args") or ()),
-        "megatron_args": " ".join(manifest.get("extra_megatron_args") or ()),
+        "scenario": record.scenario,
+        "model_size": run.shape.name,
+        "ac_mode": run.ac_mode,
+        "profile": run.profile,
+        "dp": spec.dp,
+        "pp": spec.pp,
+        "ep": spec.ep,
+        "zero": spec.zero,
+        "parallelism": {
+            "dp": spec.dp,
+            "pp": spec.pp,
+            "ep": spec.ep,
+            "pp_schedule": spec.pp_schedule,
+            "pp_microbatch_size": spec.pp_microbatch_size,
+            "zero": spec.zero,
+        },
     }
 
 
@@ -105,16 +103,17 @@ def load_results(cell_dir: Path) -> dict[str, Any] | None:
 
 def cell_rows(cell_dir: Path) -> list[dict[str, Any]]:
     """One row per arm of one cell. Empty when the cell has no results."""
-    manifest = json.loads((cell_dir / "manifest.json").read_text())
+    record = load_run_record(cell_dir)
     results = load_results(cell_dir)
     if results is None:
         return []
     marker = cell_dir.with_name(cell_dir.name + ".CONTAMINATED")
-    axes = cell_axes(manifest)
+    axes = cell_axes(record)
     rows = []
     for arm in results.get("arms", []):
         summary = (results.get("results") or {}).get(arm) or {}
         step_ms = summary.get("step_ms") or {}
+        config = record.arm(arm).arm.config
         rows.append(
             {
                 "cell": cell_dir.name,
@@ -122,6 +121,9 @@ def cell_rows(cell_dir: Path) -> list[dict[str, Any]]:
                 "arm": arm,
                 "contaminated": marker.exists(),
                 **axes,
+                "engine": engine_for(record.arm(arm).arm).name,
+                "extra_flags": " ".join(config.extra_flags),
+                "config": config_json(config),
                 "stable_tokens_per_second": summary.get(
                     "stable_tokens_per_second"
                 ),
@@ -136,8 +138,6 @@ def cell_rows(cell_dir: Path) -> list[dict[str, Any]]:
 
 def collect(root: Path, size_filter: str | None) -> list[dict[str, Any]]:
     """Every arm row under ``root``, cells in name order, arms in run order."""
-    from benchmarks.models.piper_qwen3.shape import canonical_size_name
-
     wanted = canonical_size_name(size_filter) if size_filter else None
     rows = []
     for cell_dir in cell_dirs(root):

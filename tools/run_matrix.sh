@@ -31,6 +31,7 @@
 # The output directory is $ROOT/<slug of the cell>, where the slug drops the
 # `--` of each flag and joins the remaining words with `-`. Two cells that
 # slug the same are refused, because they would share one directory.
+# A slug above 200 bytes is cut to 191 bytes and given a hash of the whole slug.
 #
 # Usage
 # -----
@@ -118,10 +119,17 @@ IFS=',' read -r -a GPU_IDS <<<"$GPU"
 
 # The slug names the cell's directory, and --resume of a contaminated cell
 # finds it again by the same name.
+# A slug above 200 bytes keeps its first 191 and a hash of the whole, so the
+# longest derived name, "<slug>.contaminated-<stamp>.log", fits NAME_MAX 255.
 cell_slug() {
-    printf '%s' "$1" \
+    local slug
+    slug=$(printf '%s' "$1" \
         | sed -e 's/--//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-              -e 's/[[:space:]][[:space:]]*/-/g' -e 's/--*/-/g'
+              -e 's/[[:space:]][[:space:]]*/-/g' -e 's/--*/-/g')
+    if [ "${#slug}" -gt 200 ]; then
+        slug="${slug:0:191}-$(printf '%s' "$slug" | sha1sum | cut -c1-8)"
+    fi
+    printf '%s' "$slug"
 }
 
 declare -A SLUG_OF

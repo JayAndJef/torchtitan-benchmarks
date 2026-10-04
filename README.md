@@ -36,19 +36,23 @@ forward-compat driver under `.cuda-compat/`. No action is necessary.
 ./run_bench.sh scenarios                            # list scenarios and arms
 ./run_bench.sh run 0 --model-size 1b                # one GPU
 ./run_bench.sh run 0,1 --pp 2 --pp-schedule 1F1B    # two-GPU pipeline
-./run_bench.sh run 0 --model-size 1b --arm titan_eager
+./run_bench.sh run 0 --model-size 1b --scenario engines --arm titan_eager
 ./run_bench.sh evaluate out/<timestamp>/<scenario>/<hardware>
 ./run_bench.sh run 0 --resume out/<timestamp>/<scenario>/<hardware>
 ```
 
-`run` trains, validates and evaluates the three arms of the `engines`
-scenario:
+`run` trains, validates and evaluates the arms of each scenario. The
+`engines` scenario has three arms:
 
 | arm | treatment |
 |---|---|
 | `titan_compiled` | TorchTitan, whole-block `torch.compile` |
 | `titan_eager` | TorchTitan, eager |
 | `megatron_stock` | Stock Megatron-LM `pretrain` |
+
+The `attention` scenario keeps `titan_compiled` and `megatron_stock`, and
+adds `titan_compiled_fa3`, which replaces TorchTitan's FlexAttention with
+FA3 varlen.
 
 Read these points before you publish a number:
 
@@ -58,11 +62,11 @@ Read these points before you publish a number:
   unfused kernels. `AGENTS.md` lists the four differences. State them
   beside each cross-engine number.
 - **Compare like with like.** Two runs are comparable only when their
-  `manifest.json` files agree on every axis, passthrough list and source
-  revision.
-- **Engine flags pass through by engine.** Use `--torchtitan-arg` and
-  `--megatron-arg`. A perf flag passes. A flag that a harness option owns is
-  refused.
+  `manifest.json` files agree on the `run` block, every arm config and every
+  source revision.
+- **Set an arm's config with `--set`.** Use `--set <arm>.<field>=<value>`,
+  or `--set <arm>.extra_flags+=<flags>` for engine flags. A perf flag
+  passes. A flag that a harness option owns is refused.
 
 `./run_bench.sh run --help` shows every option.
 
@@ -70,7 +74,7 @@ Read these points before you publish a number:
 
 ```text
 out/<timestamp>/<scenario>/<hardware>/
-  manifest.json     # workload, axes, commands, revisions, hardware
+  manifest.json     # run block, arm configs, commands, revisions, hardware
   run_state.json    # resumable status
   results.json      # tokens/s, step time, peak memory, trajectories
   <arm>.log         # training output, every rank
@@ -111,7 +115,8 @@ The suite runs on the CPU in about a minute. The pre-push hook runs it.
 
 | path | contents |
 |---|---|
-| `benchmarks/e2e/` | End-to-end runner, launch, validation and results |
+| `benchmarks/e2e/` | End-to-end runner, checks, validation and results |
+| `benchmarks/e2e/engines/` | One package per training engine, behind one interface |
 | `benchmarks/kernel/` | Kernel-isolation system |
 | `benchmarks/models/piper_qwen3/` | The model port and its shapes |
 | `benchmarks/cli/` | The command line |

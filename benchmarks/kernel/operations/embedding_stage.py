@@ -487,7 +487,7 @@ def titan_embedding_module(shape: PiperShape, device: torch.device):
     config.tok_embeddings.build()``
     (``third_party/torchtitan/torchtitan/models/common/decoder.py:234``), and
     ``_piper_1b_model`` is where our registry sets that node
-    (``benchmarks/models/piper_qwen3/config_registry.py:116-122``). So this is
+    (``_piper_1b_model`` in ``benchmarks/models/piper_qwen3/titan_model.py``). So this is
     the production module built by the production config, and the extraction
     is one attribute read -- there is one embedding whatever ``n_layers`` is,
     so no per-layer selection and no arithmetic over the layer count appears
@@ -500,7 +500,7 @@ def titan_embedding_module(shape: PiperShape, device: torch.device):
     at ``normal`` and 7.0 GiB at ``huge``. The values are overwritten with the
     shared table immediately afterwards.
     """
-    from benchmarks.models.piper_qwen3.config_registry import _piper_1b_model
+    from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
     node = _piper_1b_model(fuse_qkv=True, shape=shape).tok_embeddings
     previous_dtype = torch.get_default_dtype()

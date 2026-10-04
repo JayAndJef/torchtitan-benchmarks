@@ -1,48 +1,4 @@
-"""The end-to-end command family: ``run`` and ``evaluate``.
-
-Everything the declarative scenario runs need from the CLI, and nothing the
-kernel benchmarks do. ``_execution_options`` is the reason this is a module:
-the nineteen options ``run`` takes are the largest single block in the CLI.
-Sitting two hundred lines above ``kernel-bench``'s own option stack it was
-not readable which surface a given ``click.option`` belonged to.
-
-**The duplicate ``--model-size`` is deliberate and must stay duplicated.**
-This module declares it with ``envvar="MODEL_SIZE"`` and no default, so an
-unrequested size reaches ``RunRequest`` as ``None`` -- which is what lets
-``run --resume`` tell "inherit the size recorded in the manifest" from
-"the caller asked for the default". ``benchmarks/cli/kernel.py`` declares
-its own with an explicit default and no envvar, because ``kernel-bench`` takes
-flags only, so that an ``OUT``/``SEQ``/``BATCH`` environment exported for an
-end-to-end shell cannot leak into a kernel measurement. They are two
-different options that share a spelling, and unifying them would change
-behavior on one side or the other. Separating the modules is what makes the
-asymmetry visible instead of hiding it behind two hundred lines.
-
-The commands are declared with plain ``@click.command`` and attached to the
-group by ``benchmarks/cli/main.py`` with ``cli.add_command``. Binding them
-with ``@cli.command`` instead would require importing the group from
-``main``, and then ``from benchmarks.cli.main import cli`` -- what
-``__main__.py`` and both CLI test modules do -- would yield a group holding
-only whichever commands some other import had already loaded.
-
-**``run`` is one command, and it always evaluates.** ``--scenario``
-narrows a default that is every scenario, so an omitted flag runs the whole
-roster rather than one scenario under a label the operator assumed. Three
-options name a single directory -- ``--out``, ``--resume`` and
-``--results`` -- so each one needs exactly one selected scenario.
-``benchmarks/e2e/runner.py`` still holds the rule that a run without a
-scenario name is refused: a resume reads the name from the manifest, and
-this module passes ``None`` for that case alone.
-
-The private helpers are the CLI's whole share of run logic: ``_request``
-turns option keywords into a ``RunRequest``, ``_axes`` builds the run-axis
-record inside it, ``_execute`` narrows the runner's exceptions to
-``ClickException``, ``_evaluate`` renders an evaluation and says where the
-machine-readable copy landed, and ``_run_and_evaluate`` records an evaluation
-failure in ``run_state.json`` so a later ``--resume`` retries it. The tests
-patch ``execute_run`` and ``_evaluate`` at *this* module, because that is
-where those names are bound.
-"""
+"""The end-to-end commands ``run`` and ``evaluate``; ``benchmarks/cli/main.py`` attaches them to the group."""
 
 from __future__ import annotations
 
@@ -57,104 +13,78 @@ from benchmarks.artifacts.layout import run_timestamp
 from benchmarks.artifacts.run_state import record_evaluation_status
 from benchmarks.cli.rendering import _show_event
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
+from benchmarks.e2e.overrides import Override, parse_override
 from benchmarks.e2e.parallelism import (
     DEFAULT_ZERO,
-    MEGATRON_ENGINES,
     PP_SCHEDULE_CHOICES,
     ParallelismSpec,
     ZERO_MODES,
 )
-from benchmarks.e2e.passthrough import reach_refusal
 from benchmarks.e2e.registry import (
     AC_MODES,
     DEFAULT_AC_MODE,
-    DEFAULT_MEGATRON_NAN_GUARD,
-    DEFAULT_MEGATRON_PRECISION,
-    DEFAULT_MEGATRON_P2P_SYNC,
     DEFAULT_MODEL_SIZE,
     DEFAULT_PROFILE,
     DEFAULT_WARMUP_STEPS,
-    MEGATRON_NAN_GUARD_MODES,
-    MEGATRON_PRECISION_MODES,
-    MEGATRON_P2P_SYNC_MODES,
     SCENARIOS,
 )
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
-from benchmarks.e2e.runner import (
-    RunResult,
-    execute_run,
-    megatron_nan_guard_refusal,
-    megatron_precision_refusal,
-)
+from benchmarks.e2e.runner import RunResult, execute_run
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
 
-def _split_passthrough(values: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Split each ``--*-arg`` value with shell rules; ``None`` when none is given."""
-    tokens = tuple(token for value in values for token in shlex.split(value))
-    return tokens or None
+REMOVED_OPTIONS: dict[str, tuple[str, ...]] = {
+    "--megatron-p2p-sync": ("megatron_stock.p2p_sync={}",),
+    "--megatron-nan-guard": ("megatron_stock.nan_guard={}",),
+    "--megatron-precision": ("megatron_stock.precision={}",),
+    "--megatron-arg": ("megatron_stock.extra_flags+={}",),
+    "--torchtitan-arg": (
+        "titan_compiled.extra_flags+={}",
+        "titan_eager.extra_flags+={}",
+    ),
+}
+"""Each removed ``run`` option, and the ``--set`` values that replace one of its values."""
+
+
+def replacement(flag: str, value: str) -> str:
+    """The ``--set`` spelling of one value of the removed option ``flag``; an option of several arms names each one."""
+    spellings = [
+        f"--set {shlex.quote(template.format(value))}"
+        for template in REMOVED_OPTIONS[flag]
+    ]
+    if len(spellings) == 1:
+        return spellings[0]
+    return " or ".join(spellings) + ", once for each selected arm"
+
+
+def _refuse_removed(
+    context: click.Context, parameter: click.Parameter, values: tuple[str, ...]
+) -> None:
+    """Refuse a removed option, and name the ``--set`` spelling of each value."""
+    if not values:
+        return
+    flag = parameter.opts[0]
+    raise click.UsageError(
+        "; ".join(
+            f"{flag} {shlex.quote(value)} is now {replacement(flag, value)}"
+            for value in values
+        ),
+        context,
+    )
+
+
+def _parse_overrides(
+    context: click.Context, parameter: click.Parameter, values: tuple[str, ...]
+) -> tuple[Override, ...]:
+    """The ``--set`` values, parsed; a malformed value is a usage error."""
+    try:
+        return tuple(parse_override(value) for value in values)
+    except ValueError as error:
+        raise click.BadParameter(str(error), context, parameter) from error
 
 
 def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
-    """The option block ``run`` takes beside its own four options.
-
-    **The six parallelism options take no environment variable, and the
-    three older axes do.** The asymmetry is deliberate and the reason is
-    specific: each parallelism value has to agree with the ``<gpu>``
-    positional, which names the device set, and a positional has no
-    environment form. An exported ``PP=2`` would therefore make a plain
-    ``run 0 --scenario X`` fail its own world-size check -- rule 1 of
-    ``benchmarks/e2e/parallelism.py`` compares ``dp * pp`` against the number
-    of devices requested -- and the operator would see a refusal naming a
-    flag they did not pass. ``AC_MODE`` and ``MODEL_SIZE`` have no such
-    partner and stay exported.
-
-    ``--zero`` joins them for the same reason, one step removed. A sharded
-    level says something only above ``dp`` 1, so the level has to agree
-    with the ``<gpu>`` positional too. An exported ``ZERO=3`` would make a
-    plain ``run 0 --scenario X`` carry a level the mesh cannot hold, and
-    the warning would name a flag the operator never passed.
-
-    Each of the six defaults to ``None``, meaning "not requested", exactly
-    as ``--model-size`` does: ``_request`` builds a ``ParallelismSpec`` only
-    when at least one was given, so an untouched command line reaches
-    ``_resolve_run`` with ``parallelism=None`` and resolves to the trivial
-    spec.
-
-    ``--megatron-p2p-sync`` takes no environment variable either, for the
-    reason ``--zero`` gives. Its ``off`` value is legal only above
-    ``pp`` 1 and only beside a megatron arm, so it has to agree with the
-    ``<gpu>`` positional and with ``--arm``. An exported value would make a
-    plain ``run 0 --scenario X`` fail a refusal naming a flag the operator
-    never passed. It defaults to ``None`` for the reason ``--ac`` does: a
-    resume inherits the recorded value, and a fresh run takes ``on``.
-
-    ``--megatron-nan-guard`` takes no environment variable for the same
-    reason. Its ``off`` value is legal beside a stock megatron arm alone,
-    so it has to agree with ``--scenario`` and with ``--arm``, and an
-    exported value would fail a plain titan run on a flag nobody passed.
-    It defaults to ``None`` as the option above does.
-
-    ``--megatron-precision`` takes no environment variable for the same
-    reason again, and it has one more agreement to keep: ``lean`` needs a
-    sharded ``--zero`` level, so an exported value would fail every
-    replicated run on a flag nobody passed.
-
-    ``--profile`` takes no environment variable for the reason the five
-    above give, and its partner is ``--steps``. A profiled run needs at
-    least 40 steps, so an exported ``PROFILE=1`` would refuse a plain
-    ``run 0 --steps 12`` on a flag the operator never passed. It defaults
-    to ``None`` as the options above do: a resume inherits the recorded
-    value, and a fresh run takes ``DEFAULT_PROFILE``.
-
-    ``--warmup-steps`` is the one option of this block that *does* take an
-    environment variable, and the asymmetry costs something: an exported
-    ``WARMUP_STEPS`` refuses every ``--profile`` run, on a flag the
-    operator did not pass. Unset it before a profiled run. It is exported
-    because the matrix supervisor drives many unprofiled cells and one
-    value serves them all, which is the case ``AC_MODE`` and
-    ``MODEL_SIZE`` are exported for.
-    """
+    """The options that ``run`` takes beside its own; the parallelism options and ``--set`` read no environment variable."""
     options = [
         click.option(
             "--hardware",
@@ -265,46 +195,6 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "needs 1. Results are only comparable within one level."
             ),
         ),
-        click.option(
-            "--megatron-p2p-sync",
-            "megatron_p2p_sync",
-            type=click.Choice(MEGATRON_P2P_SYNC_MODES),
-            help=(
-                "Whether Megatron synchronizes the device after every "
-                f"pipeline message [default: {DEFAULT_MEGATRON_P2P_SYNC}]. "
-                "on is stock Megatron, and it needs --pp above 1 and a "
-                "megatron arm; TorchTitan arms receive nothing. Results "
-                "are only comparable within one value."
-            ),
-        ),
-        click.option(
-            "--megatron-nan-guard",
-            "megatron_nan_guard",
-            type=click.Choice(MEGATRON_NAN_GUARD_MODES),
-            help=(
-                "Whether stock Megatron checks every loss and gradient for "
-                f"NaN and Inf [default: {DEFAULT_MEGATRON_NAN_GUARD}]. on "
-                "is stock Megatron. off sends Megatron's own "
-                "--no-check-for-nan-in-loss-and-grad to the stock megatron "
-                "arm, and it needs one; TorchTitan arms receive nothing. "
-                "Results are only comparable within one value."
-            ),
-        ),
-        click.option(
-            "--megatron-precision",
-            "megatron_precision",
-            type=click.Choice(MEGATRON_PRECISION_MODES),
-            help=(
-                "How stock Megatron holds the optimizer state [default: "
-                f"{DEFAULT_MEGATRON_PRECISION}]. stock is --bf16 alone, "
-                "which is 18 bytes per parameter. lean adds the "
-                "precision-aware optimizer with bf16 gradients and bf16 "
-                "Adam moments, which is 10. lean needs --zero 1, because "
-                "Megatron asserts the distributed optimizer under it, and "
-                "it reaches the stock megatron arm alone. Results are only "
-                "comparable within one value."
-            ),
-        ),
         # A boolean pair, so an omitted option reaches RunRequest as None.
         click.option(
             "--profile/--no-profile",
@@ -315,8 +205,8 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 f"{'on' if DEFAULT_PROFILE else 'off'}]. On, both engines "
                 "write <arm>/profiling/traces/iteration_*/ and every trace "
                 "rule applies, and --steps must be at least 40. Off, the "
-                "run writes no trace and the evaluation publishes no kernel "
-                "time. Results are only comparable within one value."
+                "run writes no trace. Results are only comparable within "
+                "one value."
             ),
         ),
         click.option(
@@ -333,6 +223,30 @@ def _execution_options(command: Callable[..., Any]) -> Callable[..., Any]:
                 "within one value."
             ),
         ),
+        click.option(
+            "--set",
+            "overrides",
+            multiple=True,
+            metavar="ARM.FIELD=VALUE",
+            callback=_parse_overrides,
+            help=(
+                "Set one field of one arm's engine config; repeat per field. "
+                "ARM.FIELD+=VALUE appends to a list field, and shell rules "
+                "split VALUE, so 'megatron_stock.extra_flags+=--moe-permute-"
+                "fusion' adds one flag. Results are only comparable within "
+                "one config."
+            ),
+        ),
+        *(
+            click.option(
+                flag,
+                multiple=True,
+                hidden=True,
+                expose_value=False,
+                callback=_refuse_removed,
+            )
+            for flag in REMOVED_OPTIONS
+        ),
     ]
     for option in reversed(options):
         command = option(command)
@@ -347,23 +261,11 @@ _PARALLELISM_OPTIONS = (
     ("pp_microbatch_size", 1),
     ("zero", DEFAULT_ZERO),
 )
-"""The six option names of one ``ParallelismSpec``, each with its default.
-
-``_parallelism`` pops all six, so a renamed option here is a renamed keyword
-there and nowhere else. Five defaults are a second copy of the spec's own,
-which can drift; a test compares every row against ``ParallelismSpec()``.
-"""
+"""The six option names of one ``ParallelismSpec``, each with its default."""
 
 
 def _parallelism(options: dict[str, Any]) -> ParallelismSpec | None:
-    """Pop the six parallelism options and build the spec they describe.
-
-    Returns ``None`` when the operator gave none of them, which is what
-    ``RunRequest.parallelism`` reads as "not requested". A spec built from
-    all six defaults would be the same object, but ``None`` is what lets a
-    later reader tell an untouched command line from one that asked for the
-    trivial spec by name.
-    """
+    """Pop the six parallelism options; ``None`` when the operator gave none of them."""
     given = {
         name: options.pop(name, None) for name, _ in _PARALLELISM_OPTIONS
     }
@@ -378,15 +280,7 @@ def _parallelism(options: dict[str, Any]) -> ParallelismSpec | None:
 
 
 def _refuse_warmup_under_profile(options: dict[str, Any]) -> None:
-    """Refuse ``--warmup-steps`` beside ``--profile``.
-
-    The two name two sample rules for one figure. A profiled run samples
-    the steps of each cycle the profiler is idle on
-    (``benchmarks/e2e/results.py``'s ``stable_tps``), so a warmup count
-    would reach no reader and the manifest would record a rule the
-    evaluation did not use. Refused rather than ignored: a silently
-    dropped option publishes a number the operator did not ask for.
-    """
+    """Refuse ``--warmup-steps`` beside ``--profile``; the two name two sample rules."""
     if options.get("profile") and options.get("warmup_steps") is not None:
         raise click.UsageError(
             "--profile uses the profiler schedule; --warmup-steps applies "
@@ -394,28 +288,12 @@ def _refuse_warmup_under_profile(options: dict[str, Any]) -> None:
         )
 
 
-_AXIS_OPTIONS = (
-    "ac_mode",
-    "model_size",
-    "megatron_p2p_sync",
-    "megatron_nan_guard",
-    "megatron_precision",
-    "profile",
-    "warmup_steps",
-)
-"""The seven option names ``RequestedAxes`` takes directly.
-
-``_parallelism`` builds the spec from six more. ``_axes`` pops all seven, so
-an option renamed here is a keyword renamed there and nowhere else.
-"""
+_AXIS_OPTIONS = ("ac_mode", "model_size", "profile", "warmup_steps")
+"""The option names that ``RequestedAxes`` takes directly."""
 
 
 def _axes(options: dict[str, Any]) -> RequestedAxes:
-    """Pop the axis options and build the record they describe.
-
-    Every value stays as Click delivered it, so an omitted option reaches
-    ``_resolve_run`` as ``None`` and a resume inherits the recorded value.
-    """
+    """Pop the axis options; an omitted option stays ``None``."""
     parallelism = _parallelism(options)
     _refuse_warmup_under_profile(options)
     return RequestedAxes(
@@ -492,25 +370,6 @@ def _evaluate(out_dir: Path, arms: tuple[str, ...], results_path: Path | None) -
     type=click.Path(path_type=Path),
     help="JSON destination; defaults to <output-dir>/results.json.",
 )
-@click.option(
-    "--torchtitan-arg",
-    "torchtitan_args",
-    multiple=True,
-    help=(
-        "Extra TorchTitan argument for the TorchTitan arms; repeat per "
-        "argument. Shell rules split one value, so '--compile.mode "
-        "max-autotune' is two tokens."
-    ),
-)
-@click.option(
-    "--megatron-arg",
-    "megatron_args",
-    multiple=True,
-    help=(
-        "Extra Megatron-LM argument for the stock megatron arm; repeat per "
-        "argument. Shell rules split one value."
-    ),
-)
 @_execution_options
 def run_command(
     gpu: str,
@@ -518,22 +377,24 @@ def run_command(
     arm_names: tuple[str, ...],
     resume_dir: Path | None,
     results_path: Path | None,
-    torchtitan_args: tuple[str, ...],
-    megatron_args: tuple[str, ...],
     **options: Any,
 ) -> None:
     """Run, validate and evaluate arms.
 
-    Every scenario runs unless ``--scenario`` narrows the set. Named
-    scenarios run one at a time, in the order given, and a name may repeat:
-    each repeat is another run of it, under an output directory of its own.
-    The run is fail-fast: the first failing arm stops it, and the scenarios
-    behind it never start.
+    Every scenario runs unless ``--scenario`` narrows the set. A name may
+    repeat, and each repeat is another run. The first failing arm stops the
+    command.
     """
     requested = bool(scenario_names)
     selected = scenario_names if requested else tuple(SCENARIOS)
     _refuse_unknown_scenarios(selected)
-    _refuse_a_missing_arm(selected, arm_names)
+    _refuse_a_missing_arm(
+        selected,
+        (
+            ("--arm", arm_names),
+            ("--set", tuple(override.arm for override in options["overrides"])),
+        ),
+    )
     _refuse_a_single_run_option(
         selected,
         (
@@ -551,12 +412,7 @@ def run_command(
     for name in selected:
         occurrences[name] += 1
         if not requested:
-            reason = _skip_reason(
-                name,
-                options,
-                torchtitan_args=_split_passthrough(torchtitan_args) or (),
-                megatron_args=_split_passthrough(megatron_args) or (),
-            )
+            reason = _skip_reason(name, options)
             if reason is not None:
                 click.echo(f"\n===== scenario: {name} =====\nskipped: {reason}")
                 skipped.append(f"{name}: {reason}")
@@ -568,8 +424,6 @@ def run_command(
         _run_and_evaluate(
             _request(
                 gpu,
-                torchtitan_args=_split_passthrough(torchtitan_args),
-                megatron_args=_split_passthrough(megatron_args),
                 # A resume reads the scenario from the manifest.
                 scenario_name=(
                     name if requested or resume_dir is None else None
@@ -604,34 +458,25 @@ def _refuse_unknown_scenarios(selected: tuple[str, ...]) -> None:
 
 
 def _refuse_a_missing_arm(
-    selected: tuple[str, ...], arm_names: tuple[str, ...]
+    selected: tuple[str, ...], given: tuple[tuple[str, tuple[str, ...]], ...]
 ) -> None:
-    """Refuse an ``--arm`` name that any selected scenario lacks.
-
-    The option applies to every selected scenario, so a name one of them
-    does not declare would run a smaller matrix than the operator asked
-    for. Refused here, before a GPU is claimed.
-    """
+    """Refuse an arm name in ``--arm`` or ``--set`` that a selected scenario lacks."""
     for name in selected:
         available = {arm.name for arm in SCENARIOS[name].arms}
-        missing = [arm for arm in arm_names if arm not in available]
-        if missing:
-            raise click.UsageError(
-                f"scenario {name!r} has no arm(s) "
-                + ", ".join(repr(arm) for arm in missing)
-                + f". Available: {', '.join(sorted(available))}"
-            )
+        for flag, arm_names in given:
+            missing = [arm for arm in dict.fromkeys(arm_names) if arm not in available]
+            if missing:
+                raise click.UsageError(
+                    f"{flag}: scenario {name!r} has no arm(s) "
+                    + ", ".join(repr(arm) for arm in missing)
+                    + f". Available: {', '.join(sorted(available))}"
+                )
 
 
 def _refuse_a_single_run_option(
     selected: tuple[str, ...], given: tuple[tuple[str, Any], ...]
 ) -> None:
-    """Refuse the options that name one directory, above one scenario.
-
-    ``--out``, ``--resume`` and ``--results`` each name a single path. Two
-    scenarios sharing one would overwrite each other's manifest and
-    results, so the count has to be one.
-    """
+    """Refuse ``--out``, ``--resume`` or ``--results`` above one scenario; each names one path."""
     if len(selected) == 1:
         return
     for flag, value in given:
@@ -643,60 +488,16 @@ def _refuse_a_single_run_option(
             )
 
 
-def _skip_reason(
-    name: str,
-    options: dict[str, Any],
-    *,
-    torchtitan_args: tuple[str, ...] = (),
-    megatron_args: tuple[str, ...] = (),
-) -> str | None:
-    """Why a scenario declines one of the global axes, or ``None``.
-
-    A run that selected every scenario skips such a scenario and says why,
-    because the restriction is a declaration and not a fault. A
-    ``--scenario`` that names it gets the matching refusal instead. A run
-    that skips every scenario is refused, because an exit code of 0 would
-    report a measurement that never happened.
-    """
+def _skip_reason(name: str, options: dict[str, Any]) -> str | None:
+    """Why a scenario declines the requested ac mode, or ``None``; a run of every scenario skips that scenario."""
     scenario = SCENARIOS[name]
     ac_mode = options.get("ac_mode") or DEFAULT_AC_MODE
-    megatron_p2p_sync = (
-        options.get("megatron_p2p_sync") or DEFAULT_MEGATRON_P2P_SYNC
-    )
-    megatron_nan_guard = (
-        options.get("megatron_nan_guard") or DEFAULT_MEGATRON_NAN_GUARD
-    )
-    megatron_precision = (
-        options.get("megatron_precision") or DEFAULT_MEGATRON_PRECISION
-    )
-    # Read, not popped: _axes pops it from the per-scenario copy.
-    zero = options.get("zero")
-    if zero is None:
-        zero = DEFAULT_ZERO
-
     if ac_mode not in scenario.supported_ac_modes:
-        reason = (
+        return (
             f"does not support ac mode {ac_mode!r} "
             f"(supported: {', '.join(scenario.supported_ac_modes)})"
         )
-    elif megatron_p2p_sync == "on" and not any(
-        arm.engine in MEGATRON_ENGINES for arm in scenario.arms
-    ):
-        reason = (
-            f"--megatron-p2p-sync {megatron_p2p_sync!r} reaches no arm of "
-            "this scenario (every arm runs on TorchTitan)"
-        )
-    else:
-        reason = (
-            megatron_nan_guard_refusal(scenario.arms, megatron_nan_guard)
-            or megatron_precision_refusal(
-                scenario.arms, megatron_precision, zero
-            )
-            or reach_refusal(
-                scenario.arms, torchtitan_args, megatron_args
-            )
-        )
-    return reason
+    return None
 
 
 @click.command("evaluate")
@@ -718,6 +519,7 @@ def evaluate_command(
 
 
 def _run_and_evaluate(request: RunRequest, results_path: Path | None) -> None:
+    """Run, then evaluate, and record an evaluation failure so that a resume retries it."""
     result = _execute(request)
     click.echo("\nAll arms validated. Evaluating...")
     try:

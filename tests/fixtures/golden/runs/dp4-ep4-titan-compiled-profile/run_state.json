@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "status": "completed",
+  "arms": {
+    "titan_compiled": {
+      "status": "completed",
+      "attempts": 1,
+      "running_at": "2026-09-23T11:07:00Z",
+      "completed_at": "2026-09-23T11:09:38Z"
+    }
+  },
+  "running_at": "2026-09-23T11:07:00Z",
+  "arms_completed_at": "2026-09-23T11:09:38Z",
+  "evaluation": {
+    "status": "completed",
+    "completed_at": "2026-09-23T11:09:38Z"
+  }
+}

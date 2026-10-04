@@ -79,25 +79,41 @@ PARENT_SIDE_MODULES = (
     # registry is: it declares degrees, schedules and the rules that refuse
     # an illegal set, and it resolves none of them against a device.
     "benchmarks.e2e.parallelism",
-    "benchmarks.e2e.launch",
     # The passthrough tables. Parent-side: the refusal runs before launch.
     "benchmarks.e2e.passthrough",
-    # The engine records. Parent-side: each pairs a command builder with a
-    # validation profile, and the parent builds and validates.
-    "benchmarks.e2e.engines",
-    # The stock Megatron-LM command line, as data. ``launch.py``
-    # imports it to build one arm's argv, so it runs in the parent
-    # and must stay as torch-free as the shape registry it reads.
-    "benchmarks.e2e.megatron_stock.flags",
-    # The stock arm's log-line contract. Parent-side: the validator and
-    # its tests read these strings on a host with no Megatron-LM.
-    "benchmarks.e2e.megatron_stock.markers",
+    # The --set overrides and the checks that run before any host probe.
+    "benchmarks.e2e.overrides",
+    "benchmarks.e2e.checks",
+    # The engines' parent side: the records, the configs, the engines and
+    # the registry. The parent builds the command lines and validates.
+    "benchmarks.e2e.engines.api",
+    "benchmarks.e2e.engines.registry",
+    "benchmarks.e2e.engines.torchtitan.config",
+    "benchmarks.e2e.engines.torchtitan.engine",
+    "benchmarks.e2e.engines.torchtitan.evidence",
+    "benchmarks.e2e.engines.torchtitan.flags",
+    "benchmarks.e2e.engines.torchtitan.mesh",
+    "benchmarks.e2e.engines.torchtitan.profiling",
+    "benchmarks.e2e.engines.torchtitan.steps",
+    "benchmarks.e2e.engines.torchtitan.validate",
+    "benchmarks.e2e.engines.megatron_stock.config",
+    "benchmarks.e2e.engines.megatron_stock.engine",
+    "benchmarks.e2e.engines.megatron_stock.evidence",
+    "benchmarks.e2e.engines.megatron_stock.profiling",
+    "benchmarks.e2e.engines.megatron_stock.steps",
+    "benchmarks.e2e.engines.megatron_stock.validate",
+    # The stock Megatron-LM command line, as data. The engine builds one
+    # arm's argv from it in the parent, so it stays torch-free.
+    "benchmarks.e2e.engines.megatron_stock.flags",
     "benchmarks.e2e.runner",
     "benchmarks.e2e.results",
+    "benchmarks.e2e.evidence",
     "benchmarks.e2e.validation",
     "benchmarks.traces.extraction",
     "benchmarks.artifacts.layout",
     "benchmarks.artifacts.manifests",
+    "benchmarks.artifacts.manifest_v18",
+    "benchmarks.artifacts.manifest_v19",
     "benchmarks.artifacts.run_state",
     "benchmarks.artifacts.summaries",
     "benchmarks.execution.affinity",
@@ -107,6 +123,8 @@ PARENT_SIDE_MODULES = (
     "benchmarks.execution.devices",
     "benchmarks.execution.environment",
     "benchmarks.execution.events",
+    # The parent builds each arm's argv and child environment here.
+    "benchmarks.execution.launcher",
     "benchmarks.execution.paths",
     "benchmarks.execution.provenance",
     "benchmarks.kernel.registry",
@@ -135,20 +153,23 @@ PARENT_SIDE_MODULES = (
     # which is why the profile encodes its torch values as strings.
     "benchmarks.models.piper_qwen3.mcore_profiles",
     "benchmarks.models.piper_qwen3.megatron_bootstrap",
-    # The ``--module`` chain. TorchTitan resolves ``--module
-    # benchmarks.models.piper_qwen3`` inside the *training* subprocess, which
-    # executes ``benchmarks/__init__.py``, ``benchmarks/models/__init__.py``
-    # and this package's ``__init__.py`` before anything else. They are
-    # docstring-only by design; listing the package here is what asserts it.
-    "benchmarks.models.piper_qwen3",
+    # The ``--module`` package. TorchTitan imports it inside the training
+    # process before its config_registry, so its ``__init__.py`` and every
+    # parent package's ``__init__.py`` hold a docstring alone.
+    "benchmarks.e2e.engines.torchtitan.plugins",
+    # The data package. Its ``__init__.py`` holds a docstring alone.
+    "benchmarks.e2e.data",
 )
 
 # Modules that import the ML stack at module scope. This is correct and
 # expected -- they run inside the worker -- so the boundary is asserted from
 # the other side: no parent-side module may import them at module scope.
 WORKER_SIDE_MODULES = (
-    "benchmarks.models.piper_qwen3.config_registry",
-    "benchmarks.models.piper_qwen3.parallelize",
+    "benchmarks.e2e.engines.torchtitan.plugins.config_registry",
+    "benchmarks.e2e.engines.torchtitan.plugins.parallelize",
+    "benchmarks.e2e.engines.torchtitan.plugins.replay",
+    # The shared c4_test stream. Each engine's loader materializes it in the training process.
+    "benchmarks.e2e.data.c4_replay",
     "benchmarks.models.piper_qwen3.components.swiglu.combined_swiglu",
     "benchmarks.models.piper_qwen3.components.lm_head.losses",
     "benchmarks.models.piper_qwen3.components.lm_head.te_cross_entropy",
@@ -156,22 +177,22 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.components.lm_head.te_triton_cross_entropy",
     "benchmarks.models.piper_qwen3.components.lm_head.piper_optimized_cross_entropy",
     "benchmarks.models.piper_qwen3.components.rope.te_rope_override",
+    "benchmarks.models.piper_qwen3.components.attention.packed",
+    "benchmarks.models.piper_qwen3.components.attention.fa3_override",
     # The cross-engine weight map. It reshapes and copies tensors, so torch at
     # module scope is what it is, not an oversight -- unlike mcore_profiles,
     # which describes the same model and stays parent-side.
     "benchmarks.models.piper_qwen3.megatron_weights",
-    # The in-process titan build. It imports config_registry, so it reaches
-    # torchtitan at module scope by construction.
+    # The TorchTitan model config for a shape, and the in-process titan build.
     "benchmarks.models.piper_qwen3.titan_model",
-    "benchmarks.e2e.data.piper_qwen3",
-    "benchmarks.e2e.megatron_stock.data",
-    "benchmarks.e2e.megatron_stock.profiling",
+    "benchmarks.e2e.engines.megatron_stock.driver.data",
+    "benchmarks.e2e.engines.megatron_stock.driver.profiling",
     # The counting GPT builder. Megatron's own
     # ``ModelConfig.get_builder_cls`` imports it by dotted path,
     # inside the training process and after ``bootstrap.prepare()``
     # has put Megatron-LM on ``sys.path``, so a module-scope megatron
     # import is correct here.
-    "benchmarks.e2e.megatron_stock.model_builder",
+    "benchmarks.e2e.engines.megatron_stock.driver.model_builder",
     "benchmarks.kernel.operations.attention_core",
     "benchmarks.kernel.operations.attn_out_proj",
     "benchmarks.kernel.operations.attn_residual",
@@ -201,7 +222,7 @@ WORKER_SIDE_MODULES = (
 # module scope, because each defers its heavy imports into a function body.
 # That deferral is load-bearing rather than stylistic:
 #
-# * ``e2e.megatron_stock.train`` is a ``python -m`` entry point, so ``--help``
+# * ``megatron_stock.driver.train`` is a ``python -m`` entry point, so ``--help``
 #   must not pay for torch, exactly as ``kernel.worker`` does not; and
 # * ``models.piper_qwen3.megatron_model`` *cannot* import Megatron at module
 #   scope, because ``megatron_bootstrap`` has to put Megatron on ``sys.path``
@@ -214,17 +235,20 @@ WORKER_SIDE_MODULES = (
 # dynamic ML-free probe that the parent-side modules get -- the deferral is
 # the property worth locking.
 WORKER_SIDE_DEFERRED_MODULES = (
-    # The step line and its training_log shim. Deferred: every torch and
+    # The log lines that the driver prints. The parent validation states
+    # each line again, and a test pins the two.
+    "benchmarks.e2e.engines.megatron_stock.driver.markers",
+    # The step record shim of training_log. Deferred: every torch and
     # megatron import sits inside a function, as the driver's do.
-    "benchmarks.e2e.megatron_stock.step_log",
+    "benchmarks.e2e.engines.megatron_stock.driver.step_log",
     # The data-parallel line, from the wrapper Megatron built. Deferred
     # for the same reason as the step log.
-    "benchmarks.e2e.megatron_stock.dp_marker",
-    "benchmarks.e2e.megatron_stock.train",
+    "benchmarks.e2e.engines.megatron_stock.driver.dp_marker",
+    "benchmarks.e2e.engines.megatron_stock.driver.train",
     # The typing shim and the Megatron path setup. It runs in the
     # worker, it imports no ML stack, and it *cannot*: it is what
     # makes megatron importable at all on this interpreter.
-    "benchmarks.e2e.megatron_stock.bootstrap",
+    "benchmarks.e2e.engines.megatron_stock.driver.bootstrap",
     "benchmarks.models.piper_qwen3.megatron_model",
 )
 
@@ -664,7 +688,7 @@ DECLARATION_MODULES = (
 #
 # The last two entries are first-party and reach the stack one step further
 # out, which is why they are named rather than left to the third-party roots
-# above. ``config_registry`` imports torchtitan at module scope (it is on
+# above. ``titan_model`` imports torchtitan at module scope (it is on
 # WORKER_SIDE_MODULES), and ``megatron_model`` puts Megatron on ``sys.path``
 # and builds a ``GPTModel``, so an operations module that imported either at
 # module scope would pay the same price under a first-party spelling. Naming
@@ -681,7 +705,7 @@ OPERATIONS_DEFERRED_IMPORTS = (
     "triton",
     "helion",
     "benchmarks.models.piper_qwen3.components",
-    "benchmarks.models.piper_qwen3.config_registry",
+    "benchmarks.models.piper_qwen3.titan_model",
     "benchmarks.models.piper_qwen3.megatron_model",
 )
 
@@ -1077,8 +1101,7 @@ class BenchmarksNameShadowingTest(unittest.TestCase):
     """Guards a name collision that is invisible until it silently isn't.
 
     The **training** subprocess -- and only that one -- is exposed. It runs
-    with ``cwd=third_party/torchtitan`` (``benchmarks/e2e/runner.py``, the
-    ``process_runner(..., cwd=paths.titan_dir)`` call) and
+    with ``cwd=third_party/torchtitan`` (each engine's ``Launch.cwd``) and
     ``PYTHONPATH=<repo root>`` (``benchmarks/execution/environment.py``,
     ``runtime_environment``; the root itself is ``BENCH_DIR``, in
     ``benchmarks/execution/paths.py``). ``python -m`` puts the cwd at
