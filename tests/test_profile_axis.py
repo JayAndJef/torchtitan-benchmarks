@@ -335,7 +335,7 @@ class TracelessEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             result = evaluate_run(self._out_dir(Path(temporary)))
         self.assertEqual(
-            result.results["titan_eager"].stable_tokens_per_second, 1000
+            result.results["titan_eager"].tokens_per_second.median, 1000
         )
         self.assertNotIn("gpu_time", result.to_dict())
         self.assertNotIn("gpu kernel time", render_evaluation(result))
