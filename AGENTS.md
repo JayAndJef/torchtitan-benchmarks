@@ -562,8 +562,8 @@ the per-step rates, because each step of one rank holds the same token
 count. TFLOPS and MFU are rates too, so they take the same mean.
 
 The mean of a step time or of a memory figure is the arithmetic mean. A
-host stall pulls the mean below the median, so state which statistic a
-figure is.
+host stall pulls the mean tokens/s below its median and the mean step time
+above its median, so state which statistic a figure is.
 
 `benchmarks.e2e.results:step_ms` derives the step cost from the throughput:
 
@@ -588,9 +588,8 @@ publishes no throughput. The stock driver records a `nan` gradient norm on
 a step that Megatron skipped, so the refusal also refuses a skipped step.
 
 The evaluation warns when the median tokens/s spreads more than 1.15x across
-ranks, and
-when the arms of one run mix pinned and unpinned processes. It also repeats
-the warnings that the runner printed.
+ranks, and when the arms of one run mix pinned and unpinned processes. It
+also repeats the warnings that the runner printed.
 
 **What is deliberately absent.** There is no baseline arm, no ratio, no GPU
 kernel time, no per-region measurement, no launch latency and no
