@@ -107,6 +107,37 @@ class PrePushHookTests(unittest.TestCase):
         self.assertIn("pre-push", source)
 
 
+def _top_level_names(path: Path) -> frozenset[str]:
+    """The names that the module at ``path`` binds at module scope."""
+    names: set[str] = set()
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return frozenset(names)
+
+
+class ToolImportTests(unittest.TestCase):
+    def test_every_repository_import_of_a_tool_resolves(self) -> None:
+        """A module move must not break a tool that no test imports, as it broke ``sync.sh``."""
+        for tool in sorted((REPO_ROOT / "tools").glob("*.py")):
+            for node in ast.walk(ast.parse(tool.read_text())):
+                if not isinstance(node, ast.ImportFrom) or not (
+                    node.module or ""
+                ).startswith("benchmarks."):
+                    continue
+                with self.subTest(tool=tool.name, module=node.module):
+                    path = _module_path(node.module)
+                    self.assertIsNotNone(path, f"{node.module} does not exist")
+                    missing = {a.name for a in node.names} - _top_level_names(path)
+                    self.assertFalse(missing, f"{node.module} lacks {sorted(missing)}")
+
+
 class WorkflowModuleListTests(unittest.TestCase):
     def test_the_workflow_names_at_least_five_modules(self) -> None:
         self.assertGreaterEqual(len(workflow_modules()), 5)
