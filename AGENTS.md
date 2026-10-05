@@ -78,16 +78,16 @@ shares one pre-push hook.
 - The `flash3` group pins nvcc, crt, nvvm and cccl at 13.2.86, the CUDA
   version of the torch runtime. The four pins must agree.
 - torch is pinned to the nightly `2.15.0.dev20260923+cu132`. The nightly
-  index keeps roughly 60 days, so the pin needs a bump eventually. A bump
-  changes the numbers. Rerun the baselines and do not compare across it.
+  index keeps roughly 60 days, so the pin leaves the index near 2026-11-22.
+  After that date, only the per-pin uv cache can sync it. A bump changes
+  the numbers. Rerun the baselines and do not compare across it.
 - The cu132 index has no Python 3.10 build after 20260923. So the next bump
   also needs a Python move, which makes every older number incomparable.
 - The cu132 wheels pin cuBLAS 13.4.1.3. TransformerEngine's cuBLASLt grouped
   GEMM asserts cuBLAS 13.4 or later on Hopper. Keep the pin at cu132 or later.
 - `run_bench.sh` sources `cuda_compat.sh`. On a kernel driver below r595,
   that script stages NVIDIA's CUDA 13.2 forward-compat userspace driver
-  under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`. This
-  host's kernel driver is 570.211.01.
+  under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`.
 - TorchTitan is a submodule at `third_party/torchtitan`, installed editable.
   It is our fork, pinned on the `bench/torchtitan-benchmarks` branch.
 - Megatron-LM is a submodule at `third_party/Megatron-LM`. It is **not**
@@ -330,8 +330,8 @@ unless the engine has a negative form of it.
 Numbers are comparable only within one value of each of these: each key of
 the manifest's `run` block, each arm's `config`, the CPU pinning,
 `torch_version`, `cublaslt_version`, `torchtitan_git_rev`,
-`benchmarks_git_rev` and `megatron_git_rev`. Check each one before you compare against an older
-run.
+`benchmarks_git_rev` and `megatron_git_rev`. Check each one before you
+compare against an older run.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every
 Megatron number published before that flip had both at `on`. State the
