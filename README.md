@@ -50,9 +50,17 @@ forward-compat driver under `.cuda-compat/`. No action is necessary.
 | `titan_eager` | TorchTitan, eager |
 | `megatron_stock` | Stock Megatron-LM `pretrain` |
 
-The `attention` scenario keeps `titan_compiled` and `megatron_stock`, and
-adds `titan_compiled_fa3`, which replaces TorchTitan's FlexAttention with
-FA3 varlen.
+The `overrides` scenario keeps `titan_compiled` and `megatron_stock`. It
+adds three arms that replace TorchTitan kernels through overrides:
+
+| arm | attention kernel | expert GEMM |
+|---|---|---|
+| `titan_compiled_fa3` | FA3 varlen | `torch._grouped_mm` |
+| `titan_compiled_te_gemm` | FlexAttention | TransformerEngine's cuBLASLt grouped GEMM |
+| `titan_compiled_fa3_te_gemm` | FA3 varlen | TransformerEngine's cuBLASLt grouped GEMM |
+
+Each single-axis arm changes one kernel of `titan_compiled`. The stacked arm
+changes both.
 
 Read these points before you publish a number:
 

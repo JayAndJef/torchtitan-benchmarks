@@ -15,21 +15,34 @@ three arms:
 | `titan_eager` | `torchtitan` | the same model, blocks eager |
 | `megatron_stock` | `megatron_stock` | stock `megatron.training.pretrain` |
 
-The `attention` scenario has three arms. It reuses `titan_compiled` and
-`megatron_stock` unchanged, and it adds one arm that replaces the attention
-kernel of `titan_compiled` through an override:
+The `overrides` scenario has five arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged. Its other three arms change `titan_compiled`
+through overrides, in a 2 x 2 grid of the attention kernel and the expert
+GEMM library:
 
-| arm | engine | attention kernel |
-|---|---|---|
-| `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask |
-| `titan_compiled_fa3` | `torchtitan` | FA3 varlen |
-| `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention |
+| arm | engine | attention kernel | expert GEMM |
+|---|---|---|---|
+| `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask | `torch._grouped_mm` |
+| `titan_compiled_fa3` | `torchtitan` | FA3 varlen | `torch._grouped_mm` |
+| `titan_compiled_te_gemm` | `torchtitan` | compiled FlexAttention with a BlockMask | TransformerEngine's cuBLASLt grouped GEMM |
+| `titan_compiled_fa3_te_gemm` | `torchtitan` | FA3 varlen | TransformerEngine's cuBLASLt grouped GEMM |
+| `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention | TransformerEngine's per-expert cuBLAS GEMM |
 
-The FA3 arm sets `packed_offsets`, so the replay loader computes the exact
+Each single-axis arm moves one axis against `titan_compiled`. The stacked
+arm moves both, so it shows whether the two gains add.
+
+Each FA3 arm sets `packed_offsets`, so the replay loader computes the exact
 document offsets of each pipeline microbatch on the CPU. The offsets have no
 cap and no device assert. Their width changes per batch, so the override
 marks that length dynamic. Each block compiles once, with a dynamic offsets
 length.
+
+The TE GEMM arms import the override in
+`benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py`. Its
+split sizes stay on the device, so each GEMM is one launch with no host
+sync. The module raises at import on a cuBLASLt below 13.4. The engine's
+check refuses a TE GEMM arm that selects the `spmd_types` backend, because
+the TE custom op has no SPMD type rule.
 
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
@@ -41,7 +54,7 @@ isolation can be irrelevant once the compiler fuses the graph around it.
 A kernel number is never an end-to-end number, and an end-to-end number is
 never a kernel number. State which system produced a figure.
 
-The `engines` and `attention` scenarios carry four deliberate differences
+The `engines` and `overrides` scenarios carry four deliberate differences
 by default, and each one moves the number. The Megatron arm keeps fp32 master weights and
 reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
 It keeps `--init-method-std 0.01` with no weight transfer. It applies no
