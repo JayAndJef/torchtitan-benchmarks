@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import torch
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.layout import trace_files
@@ -60,6 +62,7 @@ from benchmarks.e2e.engines.torchtitan.plugins.parallelize import (
     skip_data_parallel,
 )
 from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B, PIPER_SHAPES
+from benchmarks.models.piper_qwen3.titan_model import apply_config_overrides
 from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
@@ -1203,6 +1206,29 @@ class OverridesScenarioTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(sent), 1 if targets else 0)
                 self.assertEqual(tuple(parse_cli_imports(sent)), targets)
+
+    def test_each_override_arm_replaces_its_count_of_nodes(self) -> None:
+        """The TE arms import TE, so a CPU-only process counts the FA3 arm alone."""
+        scenario = scenario_by_name("overrides")
+        names = ["titan_compiled_fa3"]
+        if torch.cuda.is_available():
+            names += ["titan_compiled_te_gemm", "titan_compiled_fa3_te_gemm"]
+        for size in ("1b", "30b-a3b"):
+            for name in names:
+                with self.subTest(size=size, arm=name):
+                    config = scenario.arm(name).config
+                    lines = apply_config_overrides(
+                        qwen3_piper_1b_pretokenized(size=size),
+                        config.override_imports,
+                        expected=config.overrides_per_block
+                        * PIPER_SHAPES[size].n_layers,
+                    )
+                    for target in config.override_imports:
+                        prefix = f"[Override] {target}:"
+                        self.assertEqual(
+                            sum(line.startswith(prefix) for line in lines),
+                            PIPER_SHAPES[size].n_layers,
+                        )
 
     def test_the_fa3_arms_send_the_rows_of_one_pipeline_microbatch(self) -> None:
         scenario = scenario_by_name("overrides")
