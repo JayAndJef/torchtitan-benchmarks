@@ -603,7 +603,7 @@ def _titan_arm(
     """The three timed closures every titan arm shares.
 
     All five arms run this same code over their own module, so the comparison
-    measures the four modules and nothing about how each arm was written.
+    measures the five modules and nothing about how each arm was written.
 
     ``module`` is the module *inside* the compile wrapper, because that is
     where the parameters whose gradients are cleared and read actually live.

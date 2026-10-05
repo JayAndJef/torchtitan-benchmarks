@@ -951,8 +951,8 @@ def _attention_core_arm(
     TE's fused-attention autograd function consumes its saved-tensor context
     on the first backward and then raises "ctx must have .tensor_objects",
     and the deleted kernel ``attention`` scenario recorded the same for the
-    titan arms. Dropping the mode from every arm keeps them comparable -- backward
-    cost is still forward_backward minus forward.
+    titan arms. Dropping the mode from every arm keeps them comparable --
+    backward cost is still forward_backward minus forward.
     """
 
     forward_leaves = layout.make_leaves()
