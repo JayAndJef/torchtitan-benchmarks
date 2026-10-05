@@ -25,7 +25,8 @@ if [ "$(printf '%s\n' "$torch_pin" | grep -c .)" -ne 1 ]; then
     echo "sync.sh: expected one torch== pin in pyproject.toml, found: ${torch_pin:-none}" >&2
     exit 1
 fi
-export UV_CACHE_DIR="${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}-${torch_pin#torch==}"
+uv_cache_base="${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}"
+export UV_CACHE_DIR="${uv_cache_base%/}-${torch_pin#torch==}"
 echo "sync.sh: uv cache $UV_CACHE_DIR"
 if [ -f /opt/rh/gcc-toolset-13/enable ]; then
     source /opt/rh/gcc-toolset-13/enable
