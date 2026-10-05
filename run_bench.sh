@@ -11,8 +11,8 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
-# cu130 wheels on a pre-13.0 driver need the forward-compat userspace
-# libcuda; this is a no-op on drivers that already report CUDA 13.0+.
+# cu132 wheels on a pre-r595 driver need the forward-compat userspace
+# libcuda; this is a no-op on drivers that are already r595+.
 source "$BENCH_DIR/cuda_compat.sh"
 
 # A stable, writable datasets cache. HF_HOME can point at a directory another
