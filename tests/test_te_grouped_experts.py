@@ -140,7 +140,9 @@ class TEGroupedExpertsTests(unittest.TestCase):
 
     def _check_parity(self, splits: list[int]) -> None:
         x, split_tensor, dy = _inputs(splits)
-        reference = _run(self.reference, x, split_tensor, dy)
+        reference, _, reference_kernels = _profiled(self.reference, x, split_tensor, dy)
+        self.assertEqual(sum("GroupProblemShape" in n for n in reference_kernels), 9)
+        self.assertEqual([n for n in reference_kernels if "_ptrGroup_" in n], [])
         actual, _, kernels = _profiled(self.te, x, split_tensor, dy)
         self._check_te_path(kernels)
         exact = _fp64(self.reference, x, splits, dy)
@@ -198,6 +200,10 @@ class TEGroupedExpertsTests(unittest.TestCase):
             self.ops.te_grouped_mm(x.float(), w, splits)
         with self.assertRaisesRegex(RuntimeError, "contiguous"):
             self.ops.te_grouped_mm_backward(dy, x, strided, splits)
+        with self.assertRaisesRegex(RuntimeError, "got dy"):
+            self.ops.te_grouped_mm_backward(dy.float(), x, w, splits)
+        with self.assertRaisesRegex(RuntimeError, "got dy"):
+            self.ops.te_grouped_mm_backward(dy[:-1], x, w, splits)
 
     def test_zero_rows(self) -> None:
         x, splits, dy = _inputs([0, 0, 0, 0])
