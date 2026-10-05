@@ -67,15 +67,27 @@ shares one pre-push hook.
 
 - Three default dependency groups: `megatron` (TransformerEngine), `flash3`
   (a CUTLASS sm90a source build) and `fa4`.
-- **Any resolution change rebuilds FA3 from source**, in 15 to 40
-  minutes. Never benchmark during the build, because it saturates the host.
+- A build of FA3 from source takes 15 to 40 minutes. Never benchmark
+  during the build, because it saturates the host.
+- **uv caches a wheel that builds without isolation by its source alone**,
+  and ignores the torch version. So `sync.sh` sets `UV_CACHE_DIR` to one
+  cache per torch pin, and a pin bump rebuilds TE's torch binding and FA3.
+  A plain `uv sync` uses the shared cache and can install the old torch's
+  builds.
 - Skip the long build with `./sync.sh --no-group flash3`.
-- torch is pinned to an exact nightly. The nightly index keeps roughly 60
-  days, so the pin needs a bump eventually. A bump changes the numbers.
-  Rerun the baselines and do not compare across it.
-- `run_bench.sh` sources `cuda_compat.sh`. On a driver below CUDA 13.0,
-  that script stages NVIDIA's forward-compat userspace driver under
-  `.cuda-compat/` and prepends it to `LD_LIBRARY_PATH`.
+- The `flash3` group pins nvcc, crt, nvvm and cccl at 13.2.86, the CUDA
+  version of the torch runtime. The four pins must agree.
+- torch is pinned to the nightly `2.15.0.dev20260923+cu132`. The nightly
+  index keeps roughly 60 days, so the pin needs a bump eventually. A bump
+  changes the numbers. Rerun the baselines and do not compare across it.
+- The cu132 index has no Python 3.10 build after 20260923. So the next bump
+  also needs a Python move, which makes every older number incomparable.
+- The cu132 wheels pin cuBLAS 13.4.1.3. TransformerEngine's cuBLASLt grouped
+  GEMM asserts cuBLAS 13.4 or later on Hopper. Keep the pin at cu132 or later.
+- `run_bench.sh` sources `cuda_compat.sh`. On a kernel driver below r595,
+  that script stages NVIDIA's CUDA 13.2 forward-compat userspace driver
+  under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`. This
+  host's kernel driver is 570.211.01.
 - TorchTitan is a submodule at `third_party/torchtitan`, installed editable.
   It is our fork, pinned on the `bench/torchtitan-benchmarks` branch.
 - Megatron-LM is a submodule at `third_party/Megatron-LM`. It is **not**
@@ -317,8 +329,8 @@ unless the engine has a negative form of it.
 
 Numbers are comparable only within one value of each of these: each key of
 the manifest's `run` block, each arm's `config`, the CPU pinning,
-`torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev` and
-`megatron_git_rev`. Check each one before you compare against an older
+`torch_version`, `cublaslt_version`, `torchtitan_git_rev`,
+`benchmarks_git_rev` and `megatron_git_rev`. Check each one before you compare against an older
 run.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every

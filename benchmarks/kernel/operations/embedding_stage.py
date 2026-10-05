@@ -26,7 +26,7 @@ megatron driver packs a batch as THD, one row of ``[1, batch * seq_len]``
 (``benchmarks/e2e/megatron/data.py:54``), so ``embeddings`` is ``[1, T, D]``
 and the transpose yields ``[T, 1, D]``. PyTorch's contiguity test skips
 size-1 dimensions, so that view is already contiguous and ``.contiguous()``
-returns ``self``. Measured on the pinned torch (2.14.0.dev20260729+cu130) at
+returns ``self``. Measured on torch 2.14.0.dev20260729+cu130 at
 the default workload::
 
     [1,T,D].transpose(0,1) -> (4096, 1, 1024) strides (1024, 4194304, 1)

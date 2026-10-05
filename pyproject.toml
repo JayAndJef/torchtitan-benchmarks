@@ -27,11 +27,9 @@ megatron = [
 # FlashAttention-3 for the attention arms. FA3 is NOT on PyPI (the `flash-attn`
 # package there is FA2) and publishes no prebuilt wheel, so it is a source
 # build of CUTLASS sm90a kernels from the repo's hopper/ subdirectory --
-# 15-40 minutes depending on MAX_JOBS. uv's cache only serves it back on a sync
-# that changes nothing: because it is no-build-isolation it builds inside the
-# project env, so ANY resolution change (adding a group, bumping a pin)
-# invalidates the wheel and pays the build again. TE escapes this as a PyPI
-# sdist whose built wheel is cached independently.
+# 15-40 minutes depending on MAX_JOBS. uv caches the built wheel by its source
+# alone, as it does TE's torch binding, so sync.sh keeps one uv cache per
+# torch pin.
 # The four nvidia packages must share ONE CUDA version: mixing nvcc 13.0 with
 # a 13.3 nvvm makes the frontend emit PTX ISA 9.3 that 13.0 ptxas rejects.
 flash3 = [

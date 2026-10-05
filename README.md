@@ -27,7 +27,7 @@ cd torchtitan-benchmarks
 compiles FlashAttention 3 from source and takes 15 to 40 minutes. To skip
 that build, use `./sync.sh --no-group flash3`.
 
-On a driver older than CUDA 13.0, `run_bench.sh` stages NVIDIA's
+On a kernel driver older than r595, `run_bench.sh` stages NVIDIA's CUDA 13.2
 forward-compat driver under `.cuda-compat/`. No action is necessary.
 
 ## Run
