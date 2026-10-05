@@ -144,8 +144,7 @@ tensor**. ``create_varlen_metadata_for_document`` pads to a fixed multiple
 with trailing full-offset entries, so at the default workload 18 real
 documents become 128 entries, 109 of them zero-length. TransformerEngine
 accepts that -- measured, on all three backends, at the default workload --
-and the titan FA3 arm already consumes the same tensor in the existing
-``attention`` scenario.
+and the ``titan/flash_attention_3`` arm consumes the same tensor.
 
 **The two padding rules differ, and this scenario uses torchtitan's.**
 ``create_varlen_metadata_for_document`` pads to a multiple of
@@ -378,8 +377,8 @@ There is no isolated ``backward`` mode
 The retained-graph trick most scenarios use is unavailable on both sides
 here. TE's fused-attention autograd function consumes its saved-tensor
 context on the first backward and then raises "ctx must have
-.tensor_objects", and the existing ``attention`` scenario records the same
-for its own arms. Both engines therefore declare ``forward`` and
+.tensor_objects", and the deleted kernel ``attention`` scenario recorded the
+same for its own arms. Both engines therefore declare ``forward`` and
 ``forward_backward`` only, which keeps them comparable; backward cost is
 still forward_backward minus forward.
 
@@ -404,16 +403,13 @@ a module-scope import would make this whole module unimportable without the
 megatron arms alone need the submodule on ``sys.path`` and the TE
 environment set before TE loads.
 
-Relationship to the existing ``attention`` scenario
-----------------------------------------------------
+Relationship to the deleted kernel ``attention`` scenario
+-----------------------------------------------------------
 
-The three titan arms here are the re-homed ``baseline``, ``flex_flash`` and
-``flash_attention_3``, renamed ``titan``, ``titan/flex_flash`` and
+The three titan arms here are that scenario's ``baseline``, ``flex_flash``
+and ``flash_attention_3``, renamed ``titan``, ``titan/flex_flash`` and
 ``titan/flash_attention_3``. Their treatment is unchanged, so their numbers
-stay comparable to the older scenario's. This module deliberately shares no
-code with ``benchmarks/kernel/operations/attention.py``: that module is a
-holdover scheduled for removal with its scenario, and an import would make
-the deletion a two-module change. The duplication ends when it does.
+stay comparable to the older scenario's.
 """
 
 from __future__ import annotations
@@ -954,8 +950,8 @@ def _attention_core_arm(
     retained-graph trick other scenarios use re-runs backward over one graph;
     TE's fused-attention autograd function consumes its saved-tensor context
     on the first backward and then raises "ctx must have .tensor_objects",
-    and the existing ``attention`` scenario records the same for the titan
-    arms. Dropping the mode from every arm keeps them comparable -- backward
+    and the deleted kernel ``attention`` scenario recorded the same for the
+    titan arms. Dropping the mode from every arm keeps them comparable -- backward
     cost is still forward_backward minus forward.
     """
 
