@@ -65,6 +65,7 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.override import parse_cli_imports
 from torchtitan.distributed import ParallelDims
 
 
@@ -1126,14 +1127,26 @@ class EnginesScenarioTests(unittest.TestCase):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
 
 
-class AttentionScenarioTests(unittest.TestCase):
+FA3_TARGET = (
+    "benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention"
+)
+TE_GEMM_TARGET = (
+    "benchmarks.models.piper_qwen3.components.moe.te_grouped_experts.te_grouped_experts"
+)
+TE_GEMM_MARKERS = ("setup_grouped_gemm_kernel", "_ptrGroup_")
+"""The TE setup kernel and the cuBLASLt grouped kernel, which each TE grouped GEMM launches."""
+
+
+class OverridesScenarioTests(unittest.TestCase):
     def test_scenario_registration(self) -> None:
-        scenario = scenario_by_name("attention")
+        scenario = scenario_by_name("overrides")
         self.assertEqual(
             [arm.name for arm in scenario.arms],
             [
                 "titan_compiled",
                 "titan_compiled_fa3",
+                "titan_compiled_te_gemm",
+                "titan_compiled_fa3_te_gemm",
                 "megatron_stock",
             ],
         )
@@ -1141,45 +1154,80 @@ class AttentionScenarioTests(unittest.TestCase):
         self.assertEqual(scenario.supported_ac_modes, ("none",))
         self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
         self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
+        self.assertEqual(set(SCENARIOS), {"engines", "overrides"})
 
-    def test_each_kernel_arm_overrides_one_attention_per_block(self) -> None:
-        scenario = scenario_by_name("attention")
-        prefix = "benchmarks.models.piper_qwen3.components.attention"
-        for name, target, marker in (
+    def test_each_override_arm_declares_its_imports_count_and_markers(self) -> None:
+        scenario = scenario_by_name("overrides")
+        for name, targets, per_block, markers, packed in (
+            ("titan_compiled_fa3", (FA3_TARGET,), 1, ("FlashAttnFwdSm90",), True),
+            ("titan_compiled_te_gemm", (TE_GEMM_TARGET,), 1, TE_GEMM_MARKERS, False),
             (
-                "titan_compiled_fa3",
-                f"{prefix}.fa3_override.packed_fa3_attention",
-                "FlashAttnFwdSm90",
+                "titan_compiled_fa3_te_gemm",
+                (FA3_TARGET, TE_GEMM_TARGET),
+                2,
+                ("FlashAttnFwdSm90", *TE_GEMM_MARKERS),
+                True,
             ),
         ):
             with self.subTest(arm=name):
-                config = scenario.arm(name).config
-                self.assertEqual(engine_for(scenario.arm(name)).name, "torchtitan")
+                arm = scenario.arm(name)
+                config = arm.config
+                self.assertEqual(engine_for(arm).name, "torchtitan")
                 self.assertEqual(config.compile, CompileMode.TORCH)
-                self.assertEqual(config.override_imports, (target,))
-                self.assertEqual(config.overrides_per_block, 1)
-                self.assertEqual(config.trace_kernel_markers, (marker,))
+                self.assertEqual(config.override_imports, targets)
+                self.assertEqual(config.overrides_per_block, per_block)
+                self.assertEqual(config.trace_kernel_markers, markers)
+                self.assertIs(config.packed_offsets, packed)
+                self.assertEqual(config.extra_flags, ())
+                self.assertEqual(engine_for(arm).check(run_spec(ac_mode="none"), arm), [])
 
     def test_every_arm_command_builds_at_ac_none(self) -> None:
-        for arm in scenario_by_name("attention").arms:
+        for arm in scenario_by_name("overrides").arms:
             argv = command(run_spec(ac_mode="none"), arm, Path("/out") / arm.name)
             self.assertTrue(argv, arm.name)
 
-    def test_the_fa3_arm_sends_the_rows_of_one_pipeline_microbatch(self) -> None:
-        scenario = scenario_by_name("attention")
+    def test_each_override_arm_sends_its_imports(self) -> None:
+        scenario = scenario_by_name("overrides")
+        for name, targets in (
+            ("titan_compiled", ()),
+            ("titan_compiled_fa3", (FA3_TARGET,)),
+            ("titan_compiled_te_gemm", (TE_GEMM_TARGET,)),
+            ("titan_compiled_fa3_te_gemm", (FA3_TARGET, TE_GEMM_TARGET)),
+        ):
+            with self.subTest(arm=name):
+                argv = command(run_spec(ac_mode="none"), scenario.arm(name), Path("/out"))
+                sent = [
+                    argv[index + 1]
+                    for index, token in enumerate(argv)
+                    if token == "--override.imports"
+                ]
+                self.assertEqual(len(sent), 1 if targets else 0)
+                self.assertEqual(tuple(parse_cli_imports(sent)), targets)
+
+    def test_the_fa3_arms_send_the_rows_of_one_pipeline_microbatch(self) -> None:
+        scenario = scenario_by_name("overrides")
         pp2 = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
         for spec, rows in ((TRIVIAL_SPEC, "8"), (pp2, "2")):
             run = run_spec(ac_mode="none", parallelism=spec, local_batch_size=8)
-            with self.subTest(pp=spec.pp):
-                argv = command(run, scenario.arm("titan_compiled_fa3"), Path("/out"))
-                self.assertEqual(argv[argv.index("--dataloader.offset-rows") + 1], rows)
-                self.assertNotIn(
-                    "--dataloader.offset-rows",
-                    command(run, scenario.arm("titan_compiled"), Path("/out")),
-                )
+            for name in ("titan_compiled_fa3", "titan_compiled_fa3_te_gemm"):
+                with self.subTest(pp=spec.pp, arm=name):
+                    argv = command(run, scenario.arm(name), Path("/out"))
+                    self.assertEqual(
+                        argv[argv.index("--dataloader.offset-rows") + 1], rows
+                    )
+            for name in ("titan_compiled", "titan_compiled_te_gemm"):
+                with self.subTest(pp=spec.pp, arm=name):
+                    self.assertNotIn(
+                        "--dataloader.offset-rows",
+                        command(run, scenario.arm(name), Path("/out")),
+                    )
 
     def test_packed_offsets_without_a_packed_attention_override_is_refused(self) -> None:
-        for imports in ((), ("benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope",)):
+        for imports in (
+            (),
+            ("benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope",),
+            (TE_GEMM_TARGET,),
+        ):
             with self.subTest(imports=imports):
                 arm = configured(
                     ENGINES.arm("titan_compiled"),
@@ -1191,19 +1239,17 @@ class AttentionScenarioTests(unittest.TestCase):
                 self.assertIn("benchmarks.models.piper_qwen3.components.attention.", refusal)
 
     def test_a_packed_attention_override_without_packed_offsets_is_refused(self) -> None:
-        scenario = scenario_by_name("attention")
-        (arm,) = apply_overrides(
-            (scenario.arm("titan_compiled_fa3"),),
-            _overrides("titan_compiled_fa3.packed_offsets=off"),
-        )
-        (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
-        self.assertIn("titan_compiled_fa3: the override import", refusal)
-        self.assertIn("fa3_override.packed_fa3_attention", refusal)
-        self.assertIn("packed_offsets is off", refusal)
-        self.assertEqual(
-            engine_for(arm).check(run_spec(ac_mode="none"), scenario.arm("titan_compiled_fa3")),
-            [],
-        )
+        scenario = scenario_by_name("overrides")
+        for name in ("titan_compiled_fa3", "titan_compiled_fa3_te_gemm"):
+            with self.subTest(arm=name):
+                (arm,) = apply_overrides(
+                    (scenario.arm(name),),
+                    _overrides(f"{name}.packed_offsets=off"),
+                )
+                (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
+                self.assertIn(f"{name}: the override import", refusal)
+                self.assertIn("fa3_override.packed_fa3_attention", refusal)
+                self.assertIn("packed_offsets is off", refusal)
 
 
 class CompilerEnvironmentTests(unittest.TestCase):
