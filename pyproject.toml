@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "End-to-end and kernel benchmarks for the Piper Qwen3-1B TorchTitan port"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.14.0.dev20260729+cu130",
+    "torch==2.15.0.dev20260923+cu132",
     # Declared only so tool.uv.sources can route it; sources ignore transitives.
-    "triton==3.8.0+git10f6be36 ; sys_platform == 'linux'",
+    "triton==3.8.0+gitc01b6774 ; sys_platform == 'linux'",
     "torchtitan",
     "helion==1.4.0",
     "click>=8.1,<9",
@@ -36,11 +36,11 @@ megatron = [
 # a 13.3 nvvm makes the frontend emit PTX ISA 9.3 that 13.0 ptxas rejects.
 flash3 = [
     "flash-attn-3",
-    "nvidia-cuda-nvcc==13.0.88",
-    "nvidia-cuda-crt==13.0.88",
-    "nvidia-nvvm==13.0.88",
+    "nvidia-cuda-nvcc==13.2.86",
+    "nvidia-cuda-crt==13.2.86",
+    "nvidia-nvvm==13.2.86",
     # Ships nv/target, which cuda_fp16.h includes and the cu13 wheel omits.
-    "nvidia-cuda-cccl==13.0.85",
+    "nvidia-cuda-cccl==13.2.86",
     "setuptools>=75",
     "wheel",
 ]
@@ -61,13 +61,13 @@ default-groups = ["megatron", "flash3", "fa4"]
 no-build-isolation-package = ["transformer-engine-torch", "flash-attn-3"]
 
 [[tool.uv.index]]
-name = "pytorch-nightly-cu130"
-url = "https://download.pytorch.org/whl/nightly/cu130"
+name = "pytorch-nightly-cu132"
+url = "https://download.pytorch.org/whl/nightly/cu132"
 explicit = true
 
 [tool.uv.sources]
-# torch's metadata requires triton==3.8.0+git10f6be36, which PyPI cannot host.
-torch = { index = "pytorch-nightly-cu130" }
-triton = { index = "pytorch-nightly-cu130" }
+# torch's metadata requires triton==3.8.0+gitc01b6774, which PyPI cannot host.
+torch = { index = "pytorch-nightly-cu132" }
+triton = { index = "pytorch-nightly-cu132" }
 torchtitan = { path = "third_party/torchtitan", editable = true }
 flash-attn-3 = { git = "https://github.com/Dao-AILab/flash-attention.git", subdirectory = "hopper", rev = "69e1bcbe77c359c84b3a4589e92a7c076e33a202" }
