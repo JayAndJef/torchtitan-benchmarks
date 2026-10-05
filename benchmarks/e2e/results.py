@@ -44,7 +44,7 @@ class StepFigures:
 
 @dataclass(frozen=True)
 class RankStatistic:
-    """One figure of one rank over its sampled steps: the median, and the mean that ``rate_mean`` or ``statistics.fmean`` gives."""
+    """One rate of one rank over its sampled steps: the median, and the mean that ``rate_mean`` gives."""
 
     median: float
     mean: float
