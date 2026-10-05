@@ -157,14 +157,28 @@ class TEGroupedExpertsTests(unittest.TestCase):
         dy = torch.randn(x.shape[0], H, device="cuda").bfloat16()
         w = self.te.w1_EFD.detach()
 
-        def nan_like(t: torch.Tensor) -> torch.Tensor:
-            return torch.full_like(t, float("nan"))
+        def nan_like(t: torch.Tensor, **kwargs) -> torch.Tensor:
+            return torch.full_like(t, float("nan"), **kwargs)
 
         with mock.patch.object(torch, "empty_like", nan_like):
             dx, dw = self.ops.te_grouped_mm_backward(dy, x, w, splits)
         self.assertTrue(bool((dw[0] == 0).all()))
         self.assertFalse(bool(dw.isnan().any()))
         self.assertFalse(bool(dx.isnan().any()))
+
+    def test_the_ops_refuse_operands_that_te_cannot_read(self) -> None:
+        x, splits, _ = _inputs([0, 37, 129, 1])
+        w = self.te.w1_EFD.detach()
+        strided = w.transpose(1, 2).contiguous().transpose(1, 2)
+        dy = torch.randn(x.shape[0], H, device="cuda").bfloat16()
+        with self.assertRaisesRegex(RuntimeError, "contiguous"):
+            self.ops.te_grouped_mm(x, strided, splits)
+        with self.assertRaisesRegex(RuntimeError, "int64 splits"):
+            self.ops.te_grouped_mm(x, w, splits.int())
+        with self.assertRaisesRegex(RuntimeError, "got x"):
+            self.ops.te_grouped_mm(x.float(), w, splits)
+        with self.assertRaisesRegex(RuntimeError, "contiguous"):
+            self.ops.te_grouped_mm_backward(dy, x, strided, splits)
 
     def test_zero_rows(self) -> None:
         x, splits, dy = _inputs([0, 0, 0, 0])
@@ -183,7 +197,7 @@ class TEGroupedExpertsTests(unittest.TestCase):
             self.ops.te_grouped_mm_backward, (dy, x.detach(), w.detach(), splits)
         )
 
-    def test_no_host_sync(self) -> None:
+    def test_no_host_sync_and_only_te_gemm_kernels(self) -> None:
         x, splits, dy = _inputs([0, 37, 129, 1])
         _run(self.te, x, splits, dy)
         torch.cuda.synchronize()
@@ -200,14 +214,23 @@ class TEGroupedExpertsTests(unittest.TestCase):
         finally:
             torch.cuda.set_sync_debug_mode(0)
         events = prof.events()
-        (step,) = [e for e in events if e.name == "te_step"]
+        (step,) = [
+            e
+            for e in events
+            if e.name == "te_step" and e.device_type == torch.autograd.DeviceType.CPU
+        ]
         inside = [
             e.name
             for e in events
             if step.time_range.start <= e.time_range.start <= step.time_range.end
         ]
-        blocking = [n for n in inside if n in SYNC_EVENTS or "DtoH" in n]
-        self.assertEqual(blocking, [])
+        self.assertEqual([n for n in inside if n in SYNC_EVENTS], [])
+        kernels = [e.name for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
+        self.assertEqual([n for n in kernels if "DtoH" in n], [])
+        # Three forward GEMMs and six backward GEMMs, each on TE's grouped path.
+        self.assertEqual(sum("setup_grouped_gemm_kernel" in n for n in kernels), 9)
+        self.assertEqual(sum(n.startswith("nvjet") and "ptrGroup" in n for n in kernels), 9)
+        self.assertEqual([n for n in kernels if "cutlass" in n], [])
 
     def test_compiled_with_a_dynamic_row_count(self) -> None:
         torch._dynamo.reset()
@@ -254,21 +277,22 @@ class TEGroupedExpertsOverrideTests(unittest.TestCase):
             apply_config_overrides,
         )
 
-        stock = _piper_1b_model(fuse_qkv=True, shape=TINY)
-        swapped = _piper_1b_model(fuse_qkv=True, shape=TINY)
-        lines = apply_config_overrides(swapped, [TE_OVERRIDE], expected=TINY.n_layers)
+        config = _piper_1b_model(fuse_qkv=True, shape=TINY)
+        old = {fqn: cfg for fqn, cfg, _, _ in config.traverse(GroupedExperts.Config)}
+        lines = apply_config_overrides(config, [TE_OVERRIDE], expected=TINY.n_layers)
         for line in lines:
             self.assertIn("GroupedExperts.Config -> TEGroupedExperts.Config", line)
-        old = {fqn: cfg for fqn, cfg, _, _ in stock.traverse(GroupedExperts.Config)}
-        new = {fqn: cfg for fqn, cfg, _, _ in swapped.traverse(GroupedExperts.Config)}
+        new = {fqn: cfg for fqn, cfg, _, _ in config.traverse(GroupedExperts.Config)}
         self.assertEqual(len(old), TINY.n_layers)
         self.assertEqual(list(new), list(old))
         for fqn, cfg in new.items():
             with self.subTest(fqn=fqn):
                 self.assertIs(type(old[fqn]), GroupedExperts.Config)
                 self.assertIs(type(cfg), TEGroupedExperts.Config)
-                for field in ("dim", "hidden_dim", "num_experts", "param_init", "sharding_config"):
+                for field in ("dim", "hidden_dim", "num_experts"):
                     self.assertEqual(getattr(cfg, field), getattr(old[fqn], field), field)
+                for field in ("param_init", "sharding_config"):
+                    self.assertIs(getattr(cfg, field), getattr(old[fqn], field), field)
 
     def test_the_built_model_keeps_each_parameter(self) -> None:
         from benchmarks.models.piper_qwen3.components.moe.te_grouped_experts import (

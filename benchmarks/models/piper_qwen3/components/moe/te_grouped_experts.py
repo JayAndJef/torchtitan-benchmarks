@@ -39,6 +39,21 @@ if tex.get_cublasLt_version() < MIN_CUBLASLT_VERSION:
     )
 
 
+def _check_operands(x: torch.Tensor, w: torch.Tensor, splits: torch.Tensor) -> None:
+    """Raise unless TE can read x, w and splits as they are."""
+    if not (x.is_contiguous() and w.is_contiguous()):
+        raise RuntimeError("te_grouped_mm needs a contiguous x and w")
+    if x.dtype != w.dtype:
+        raise RuntimeError(f"te_grouped_mm got x {x.dtype} and w {w.dtype}")
+    if x.ndim != 2 or w.ndim != 3 or x.shape[1] != w.shape[2]:
+        raise RuntimeError(f"te_grouped_mm got x {tuple(x.shape)} and w {tuple(w.shape)}")
+    if splits.dtype != torch.int64 or tuple(splits.shape) != (w.shape[0],):
+        raise RuntimeError(
+            f"te_grouped_mm needs int64 splits of shape ({w.shape[0]},), got "
+            f"{splits.dtype} {tuple(splits.shape)}"
+        )
+
+
 def _packed(
     data: torch.Tensor, splits: torch.Tensor, offsets: torch.Tensor
 ) -> GroupedTensorStorage:
@@ -72,6 +87,7 @@ def _stacked(data: torch.Tensor) -> GroupedTensorStorage:
 )
 def te_grouped_mm(x: torch.Tensor, w: torch.Tensor, splits: torch.Tensor) -> torch.Tensor:
     """Rows of expert e of ``x`` (R, K) times ``w[e].T`` (K, N), as one (R, N) tensor."""
+    _check_operands(x, w, splits)
     y = x.new_empty((x.shape[0], w.shape[1]))
     if x.shape[0] == 0:
         return y
@@ -100,11 +116,17 @@ def te_grouped_mm_backward(
     dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, splits: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The gradients of ``te_grouped_mm`` for x and w."""
-    dx = torch.empty_like(x)
-    dw = torch.empty_like(w)
+    _check_operands(x, w, splits)
+    dy = dy.contiguous()
+    if dy.dtype != x.dtype or tuple(dy.shape) != (x.shape[0], w.shape[1]):
+        raise RuntimeError(
+            f"te_grouped_mm_backward got dy {dy.dtype} {tuple(dy.shape)} for "
+            f"x {x.dtype} {tuple(x.shape)} and w {tuple(w.shape)}"
+        )
+    dx = torch.empty_like(x, memory_format=torch.contiguous_format)
+    dw = torch.empty_like(w, memory_format=torch.contiguous_format)
     if x.shape[0] == 0:
         return dx, dw.zero_()
-    dy = dy.contiguous()
     offsets = tex.splits_to_offsets(splits, 1)
     grouped_dy = _packed(dy, splits, offsets)
     general_grouped_gemm_for_grouped_tensor(
