@@ -987,6 +987,10 @@ The kernel scenarios additionally depend on `HelionCosSinRoPE`,
 `FusedGroupedExperts`, `GroupedExperts`, `QKVLinear`, `FusedQKVLinear`,
 `FlexAttention` and `create_varlen_metadata_for_document`.
 
+`benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py` copies
+the forward of `GroupedExperts`, and it imports `get_spmd_backend`. After a
+bump, compare that forward with the fork's forward again.
+
 Three fork features are no longer load-bearing, and the list above drops
 them. The compile-mode field served the deleted compile-mode axis; the
 TorchTitan engine sends `--compile.enable` alone. The loss-owned LM head
