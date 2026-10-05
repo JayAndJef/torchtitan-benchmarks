@@ -17,6 +17,7 @@ from benchmarks.e2e.engines.api import (
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig
 from benchmarks.e2e.engines.torchtitan.flags import (
     TRAIN_MODULE,
+    flag_value,
     passthrough_refusals,
     trainer_args,
 )
@@ -39,6 +40,12 @@ ZERO2_AT_PP1 = (
 
 PACKED_ATTENTION_PACKAGE = "benchmarks.models.piper_qwen3.components.attention."
 """The prefix of each override import whose attention reads the loader's offsets."""
+
+NO_SPMD_TYPES_MODULE = "benchmarks.models.piper_qwen3.components.moe.te_grouped_experts."
+"""The prefix of each override import whose custom op has no SPMD type rule."""
+
+SPMD_BACKEND_FLAG = "--parallelism.spmd-backend"
+"""The TorchTitan flag that selects the SPMD backend."""
 
 
 class TorchTitanEngine(Engine):
@@ -82,6 +89,18 @@ class TorchTitanEngine(Engine):
             refusals.append(
                 f"{arm.name}: the override import {target} reads the loader's "
                 "offsets, and packed_offsets is off; turn packed_offsets on"
+            )
+        untyped = [
+            target
+            for target in arm.config.override_imports
+            if target.startswith(NO_SPMD_TYPES_MODULE)
+        ]
+        backend = flag_value(arm.config.extra_flags, SPMD_BACKEND_FLAG)
+        if untyped and backend == "spmd_types":
+            refusals.append(
+                f"{arm.name}: the override import {untyped[0]} has no SPMD type "
+                f"rule, and {arm.name}.extra_flags select {SPMD_BACKEND_FLAG} "
+                "spmd_types, so each block raises; choose another backend"
             )
         refusals.extend(passthrough_refusals(arm.name, arm.config.extra_flags))
         return refusals

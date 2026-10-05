@@ -1251,6 +1251,44 @@ class OverridesScenarioTests(unittest.TestCase):
                 self.assertIn("fa3_override.packed_fa3_attention", refusal)
                 self.assertIn("packed_offsets is off", refusal)
 
+    def test_the_te_gemm_override_under_spmd_types_is_refused(self) -> None:
+        scenario = scenario_by_name("overrides")
+        for name in ("titan_compiled_te_gemm", "titan_compiled_fa3_te_gemm"):
+            for flags in (
+                ("--parallelism.spmd-backend", "spmd_types"),
+                ("--parallelism.spmd-backend=spmd_types",),
+                ("--parallelism.spmd_backend", "spmd_types"),
+                (
+                    "--parallelism.spmd-backend",
+                    "default",
+                    "--parallelism.spmd-backend=spmd_types",
+                ),
+            ):
+                with self.subTest(arm=name, flags=flags):
+                    arm = configured(scenario.arm(name), extra_flags=flags)
+                    (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
+                    self.assertIn(f"{name}: the override import {TE_GEMM_TARGET}", refusal)
+                    self.assertIn("no SPMD type rule", refusal)
+                    self.assertIn("--parallelism.spmd-backend spmd_types", refusal)
+
+    def test_the_te_gemm_override_under_another_backend_passes(self) -> None:
+        scenario = scenario_by_name("overrides")
+        for name, flags in (
+            ("titan_compiled_te_gemm", ("--parallelism.spmd-backend", "full_dtensor")),
+            (
+                "titan_compiled_te_gemm",
+                (
+                    "--parallelism.spmd-backend=spmd_types",
+                    "--parallelism.spmd-backend=default",
+                ),
+            ),
+            ("titan_compiled_fa3", ("--parallelism.spmd-backend", "spmd_types")),
+            ("titan_compiled", ("--parallelism.spmd-backend", "spmd_types")),
+        ):
+            with self.subTest(arm=name, flags=flags):
+                arm = configured(scenario.arm(name), extra_flags=flags)
+                self.assertEqual(engine_for(arm).check(run_spec(ac_mode="none"), arm), [])
+
 
 class CompilerEnvironmentTests(unittest.TestCase):
     """The ``requires_gcc_toolset`` branch, against the synthetic arm.

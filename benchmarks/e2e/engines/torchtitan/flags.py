@@ -206,6 +206,19 @@ def flag_name(token: str) -> str | None:
     return name
 
 
+def flag_value(tokens: tuple[str, ...], name: str) -> str | None:
+    """The value that tyro reads for flag ``name`` in ``tokens``: the last one, as ``--flag value`` or ``--flag=value``."""
+    value = None
+    for index, token in enumerate(tokens):
+        if flag_name(token) != name:
+            continue
+        if "=" in token:
+            value = token.split("=", 1)[1]
+        elif index + 1 < len(tokens):
+            value = tokens[index + 1]
+    return value
+
+
 def refusal(token: str) -> str | None:
     """Why ``token`` cannot pass through to TorchTitan, or ``None``."""
     name = flag_name(token)

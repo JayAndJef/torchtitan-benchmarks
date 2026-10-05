@@ -374,6 +374,26 @@ class TitanTableTests(unittest.TestCase):
         (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
         self.assertIn("--training.new-field (not classified", refusal)
 
+    def test_flag_value_reads_the_last_value_in_either_form(self) -> None:
+        name = "--parallelism.spmd-backend"
+        for tokens, value in (
+            ((), None),
+            (("--compile.backend", "inductor"), None),
+            (("--parallelism.spmd-backend", "spmd_types"), "spmd_types"),
+            (("--parallelism.spmd_backend=spmd_types",), "spmd_types"),
+            (
+                (
+                    "--parallelism.spmd-backend=spmd_types",
+                    "--parallelism.spmd-backend",
+                    "default",
+                ),
+                "default",
+            ),
+            (("--parallelism.spmd-backend",), None),
+        ):
+            with self.subTest(tokens=tokens):
+                self.assertEqual(titan_flags.flag_value(tokens, name), value)
+
 
 if __name__ == "__main__":
     unittest.main()
