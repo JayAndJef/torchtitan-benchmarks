@@ -90,6 +90,18 @@ def _run(module, x, splits, dy, dynamic_rows: bool = False):
     }
 
 
+def _profiled(module, x, splits, dy):
+    """The results of ``_run``, the profiler events and the names of the CUDA kernels it launched."""
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    ) as prof:
+        with torch.profiler.record_function("te_step"):
+            result = _run(module, x, splits, dy)
+    events = prof.events()
+    kernels = [e.name for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
+    return result, events, kernels
+
+
 def _fp64(module, x, splits: list[int], dy):
     """The same results in fp64, one expert at a time."""
     w1, w2, w3 = (
@@ -120,10 +132,17 @@ class TEGroupedExpertsTests(unittest.TestCase):
         cls.te = _experts(te_grouped_experts.TEGroupedExperts)
         cls.te.load_state_dict(cls.reference.state_dict())
 
+    def _check_te_path(self, kernels: list[str]) -> None:
+        """Three forward and six backward GEMMs ran on TE's grouped path, and none on torch's CUTLASS grouped kernel."""
+        self.assertEqual(sum("setup_grouped_gemm_kernel" in n for n in kernels), 9)
+        self.assertEqual(sum("_ptrGroup_" in n for n in kernels), 9)
+        self.assertEqual([n for n in kernels if "GroupProblemShape" in n], [])
+
     def _check_parity(self, splits: list[int]) -> None:
         x, split_tensor, dy = _inputs(splits)
         reference = _run(self.reference, x, split_tensor, dy)
-        actual = _run(self.te, x, split_tensor, dy)
+        actual, _, kernels = _profiled(self.te, x, split_tensor, dy)
+        self._check_te_path(kernels)
         exact = _fp64(self.reference, x, splits, dy)
         for name in ("out", "dx", "dw1", "dw2", "dw3"):
             with self.subTest(splits=splits, result=name):
@@ -197,23 +216,15 @@ class TEGroupedExpertsTests(unittest.TestCase):
             self.ops.te_grouped_mm_backward, (dy, x.detach(), w.detach(), splits)
         )
 
-    def test_no_host_sync_and_only_te_gemm_kernels(self) -> None:
+    def test_no_host_sync(self) -> None:
         x, splits, dy = _inputs([0, 37, 129, 1])
         _run(self.te, x, splits, dy)
         torch.cuda.synchronize()
         torch.cuda.set_sync_debug_mode("error")
         try:
-            with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ]
-            ) as prof:
-                with torch.profiler.record_function("te_step"):
-                    _run(self.te, x, splits, dy)
+            _, events, kernels = _profiled(self.te, x, splits, dy)
         finally:
             torch.cuda.set_sync_debug_mode(0)
-        events = prof.events()
         (step,) = [
             e
             for e in events
@@ -225,12 +236,26 @@ class TEGroupedExpertsTests(unittest.TestCase):
             if step.time_range.start <= e.time_range.start <= step.time_range.end
         ]
         self.assertEqual([n for n in inside if n in SYNC_EVENTS], [])
-        kernels = [e.name for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
         self.assertEqual([n for n in kernels if "DtoH" in n], [])
-        # Three forward GEMMs and six backward GEMMs, each on TE's grouped path.
-        self.assertEqual(sum("setup_grouped_gemm_kernel" in n for n in kernels), 9)
-        self.assertEqual(sum(n.startswith("nvjet") and "ptrGroup" in n for n in kernels), 9)
-        self.assertEqual([n for n in kernels if "cutlass" in n], [])
+        self._check_te_path(kernels)
+
+    def test_a_stride_zero_output_gradient(self) -> None:
+        x, splits, _ = _inputs([0, 37, 129, 1])
+        torch._dynamo.reset()
+        for module in (self.te, torch.compile(self.te, fullgraph=True)):
+            self.te.zero_grad(set_to_none=True)
+            leaf = x.detach().clone().requires_grad_()
+            module(leaf, splits).sum().backward()
+            actual = {
+                "dx": leaf.grad,
+                "dw1": self.te.w1_EFD.grad,
+                "dw2": self.te.w2_EDF.grad,
+                "dw3": self.te.w3_EFD.grad,
+            }
+            expected = _run(self.te, x, splits, torch.ones_like(x))
+            for name, value in actual.items():
+                with self.subTest(compiled=module is not self.te, result=name):
+                    self.assertLessEqual(_rel(value, expected[name]), TOLERANCE)
 
     def test_compiled_with_a_dynamic_row_count(self) -> None:
         torch._dynamo.reset()
