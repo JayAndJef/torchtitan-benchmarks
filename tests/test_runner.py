@@ -4,14 +4,13 @@ import gzip
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -1140,6 +1139,41 @@ TE_GEMM_MARKERS = ("setup_grouped_gemm_kernel", "_ptrGroup_")
 """The TE setup kernel and the cuBLASLt grouped kernel, which each TE grouped GEMM launches."""
 
 
+OVERRIDE_COUNT_SIZES = ("1b", "30b-a3b")
+"""The model sizes at which each override arm is counted."""
+
+
+def _override_counts(names: list[str]) -> dict[str, dict[str, dict[str, int]]]:
+    """Per arm, size and override target: the number of nodes it replaced."""
+    scenario = scenario_by_name("overrides")
+    counts: dict[str, dict[str, dict[str, int]]] = {}
+    for name in names:
+        config = scenario.arm(name).config
+        for size in OVERRIDE_COUNT_SIZES:
+            lines = apply_config_overrides(
+                qwen3_piper_1b_pretokenized(size=size),
+                config.override_imports,
+                expected=config.overrides_per_block * PIPER_SHAPES[size].n_layers,
+            )
+            counts.setdefault(name, {})[size] = {
+                target: sum(line.startswith(f"[Override] {target}:") for line in lines)
+                for target in config.override_imports
+            }
+    return counts
+
+
+TE_COUNT_SCRIPT = """
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from tests.test_runner import _override_counts
+
+print(json.dumps(_override_counts(["titan_compiled_te_gemm", "titan_compiled_fa3_te_gemm"])))
+"""
+"""Counts the TE arms in a fresh process and prints the counts as JSON."""
+
+
 class OverridesScenarioTests(unittest.TestCase):
     def test_scenario_registration(self) -> None:
         scenario = scenario_by_name("overrides")
@@ -1207,28 +1241,37 @@ class OverridesScenarioTests(unittest.TestCase):
                 self.assertEqual(len(sent), 1 if targets else 0)
                 self.assertEqual(tuple(parse_cli_imports(sent)), targets)
 
-    def test_each_override_arm_replaces_its_count_of_nodes(self) -> None:
-        """The TE arms import TE, so a CPU-only process counts the FA3 arm alone."""
-        scenario = scenario_by_name("overrides")
-        names = ["titan_compiled_fa3"]
-        if torch.cuda.is_available():
-            names += ["titan_compiled_te_gemm", "titan_compiled_fa3_te_gemm"]
-        for size in ("1b", "30b-a3b"):
-            for name in names:
-                with self.subTest(size=size, arm=name):
-                    config = scenario.arm(name).config
-                    lines = apply_config_overrides(
-                        qwen3_piper_1b_pretokenized(size=size),
-                        config.override_imports,
-                        expected=config.overrides_per_block
-                        * PIPER_SHAPES[size].n_layers,
-                    )
-                    for target in config.override_imports:
-                        prefix = f"[Override] {target}:"
-                        self.assertEqual(
-                            sum(line.startswith(prefix) for line in lines),
-                            PIPER_SHAPES[size].n_layers,
-                        )
+    def test_the_fa3_arm_replaces_its_count_of_nodes(self) -> None:
+        counts = _override_counts(["titan_compiled_fa3"])
+        self._assert_one_node_per_layer(counts)
+
+    def test_the_te_arms_replace_their_count_of_nodes(self) -> None:
+        """A subprocess counts the TE arms, so TE does not patch this process."""
+        repo = Path(__file__).resolve().parent.parent
+        completed = subprocess.run(
+            [sys.executable, "-c", TE_COUNT_SCRIPT, str(repo)],
+            cwd=repo,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        counts = json.loads(completed.stdout.splitlines()[-1])
+        self.assertEqual(
+            sorted(counts), ["titan_compiled_fa3_te_gemm", "titan_compiled_te_gemm"]
+        )
+        self._assert_one_node_per_layer(counts)
+
+    def _assert_one_node_per_layer(self, counts: dict) -> None:
+        for name, sizes in counts.items():
+            self.assertEqual(sorted(sizes), sorted(OVERRIDE_COUNT_SIZES))
+            for size, targets in sizes.items():
+                config = scenario_by_name("overrides").arm(name).config
+                self.assertEqual(sorted(targets), sorted(config.override_imports))
+                for target, count in targets.items():
+                    with self.subTest(arm=name, size=size, target=target):
+                        self.assertEqual(count, PIPER_SHAPES[size].n_layers)
 
     def test_the_fa3_arms_send_the_rows_of_one_pipeline_microbatch(self) -> None:
         scenario = scenario_by_name("overrides")
