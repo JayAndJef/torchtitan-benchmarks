@@ -798,7 +798,7 @@ Read a registered schedule as a declaration, never as a measurement. Only
 ./run_bench.sh kernel-bench <gpu> [OPTIONS]
 ```
 
-The registry declares 17 scenarios, 71 arms and 5 spans. 16 of the scenarios
+The registry declares 17 scenarios, 72 arms and 5 spans. 16 of the scenarios
 are cross-engine: each cuts the model at one component and puts
 megatron-core beside TorchTitan there. `./run_bench.sh scenarios` prints
 every scenario, arm and span with its description, and
