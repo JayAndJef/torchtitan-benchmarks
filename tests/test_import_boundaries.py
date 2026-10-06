@@ -180,6 +180,7 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.components.attention.packed",
     "benchmarks.models.piper_qwen3.components.attention.fa3_override",
     "benchmarks.models.piper_qwen3.components.moe.te_grouped_experts",
+    "benchmarks.models.piper_qwen3.components.moe.host_count_dispatcher",
     # The cross-engine weight map. It reshapes and copies tensors, so torch at
     # module scope is what it is, not an oversight -- unlike mcore_profiles,
     # which describes the same model and stays parent-side.
