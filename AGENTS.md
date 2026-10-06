@@ -4,7 +4,7 @@
 
 Two measurement systems share one CLI. Never mix their numbers.
 
-**End-to-end throughput.** Two scenarios train the same Qwen3 MoE model
+**End-to-end throughput.** Three scenarios train the same Qwen3 MoE model
 on one pre-tokenized c4_test stream. Each publishes tokens/s, step time and
 peak memory. `--model-size` selects the shape. The `engines` scenario has
 three arms:
@@ -15,34 +15,54 @@ three arms:
 | `titan_eager` | `torchtitan` | the same model, blocks eager |
 | `megatron_stock` | `megatron_stock` | stock `megatron.training.pretrain` |
 
-The `overrides` scenario has five arms. It reuses `titan_compiled` and
-`megatron_stock` unchanged. Its other three arms change `titan_compiled`
-through overrides, in a 2 x 2 grid of the attention kernel and the expert
-GEMM library:
+The `attention` scenario has three arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds one arm that replaces the attention
+kernel of `titan_compiled` through an override:
 
-| arm | engine | attention kernel | expert GEMM |
-|---|---|---|---|
-| `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask | `torch._grouped_mm` |
-| `titan_compiled_fa3` | `torchtitan` | FA3 varlen | `torch._grouped_mm` |
-| `titan_compiled_te_gemm` | `torchtitan` | compiled FlexAttention with a BlockMask | TransformerEngine's cuBLASLt grouped GEMM |
-| `titan_compiled_fa3_te_gemm` | `torchtitan` | FA3 varlen | TransformerEngine's cuBLASLt grouped GEMM |
-| `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention | TransformerEngine's per-expert cuBLAS GEMM |
+| arm | engine | attention kernel |
+|---|---|---|
+| `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask |
+| `titan_compiled_fa3` | `torchtitan` | FA3 varlen |
+| `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention |
 
-Each single-axis arm moves one axis against `titan_compiled`. The stacked
-arm moves both, so it shows whether the two gains add.
-
-Each FA3 arm sets `packed_offsets`, so the replay loader computes the exact
+The FA3 arm sets `packed_offsets`, so the replay loader computes the exact
 document offsets of each pipeline microbatch on the CPU. The offsets have no
 cap and no device assert. Their width changes per batch, so the override
 marks that length dynamic. Each block compiles once, with a dynamic offsets
 length.
 
-The TE GEMM arms import the override in
-`benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py`. Its
-split sizes stay on the device, so each GEMM is one launch with no host
-sync. The module raises at import on a cuBLASLt below 13.4. The engine's
-check refuses a TE GEMM arm that selects the `spmd_types` backend, because
-the TE custom op has no SPMD type rule.
+The `experts` scenario has four arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds two arms that replace the expert
+GEMMs of `titan_compiled` through overrides:
+
+| arm | engine | expert GEMM |
+|---|---|---|
+| `titan_compiled` | `torchtitan` | `torch._grouped_mm`, one CUTLASS grouped kernel |
+| `titan_compiled_te_gemm` | `torchtitan` | TransformerEngine's cuBLASLt grouped GEMM |
+| `titan_compiled_te_per_expert` | `torchtitan` | one TransformerEngine cuBLAS GEMM per expert |
+| `megatron_stock` | `megatron_stock` | one TransformerEngine cuBLAS GEMM per expert |
+
+Each TE arm moves the expert GEMM path alone against `titan_compiled`. The
+three TorchTitan arms share their init, seed and data, so their routing
+matches. Megatron routes from another init, so its row is a reference.
+
+- `titan_compiled_te_gemm` imports
+  `benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py`. Its
+  split sizes stay on the device, so each GEMM is one launch with no host
+  sync. The module raises at import on a cuBLASLt below 13.4.
+- `titan_compiled_te_per_expert` imports two overrides.
+  `benchmarks/models/piper_qwen3/components/moe/host_count_dispatcher.py`
+  copies the whole count matrix in the dispatcher's one blocking copy, and
+  it returns the rows of each local expert on the host.
+  `benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py`
+  runs TE's legacy grouped GEMM, the path of Megatron's `GroupedLinear`.
+  TorchTitan has no fp32 `main_grad`, so the arm writes a fresh bf16
+  weight gradient and does not fuse the accumulation as Megatron does.
+  cuBLAS picks the kernel from the rows of each expert, so the arm's trace
+  marker is the custom op name and not a kernel name.
+- The engine's check refuses either per-expert override without the other,
+  and either one at ep 1. It also refuses a TE arm that selects the
+  `spmd_types` backend, because the TE custom ops have no SPMD type rule.
 
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
@@ -54,7 +74,7 @@ isolation can be irrelevant once the compiler fuses the graph around it.
 A kernel number is never an end-to-end number, and an end-to-end number is
 never a kernel number. State which system produced a figure.
 
-The `engines` and `overrides` scenarios carry four deliberate differences
+The `engines`, `attention` and `experts` scenarios carry four deliberate differences
 by default, and each one moves the number. The Megatron arm keeps fp32 master weights and
 reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
 It keeps `--init-method-std 0.01` with no weight transfer. It applies no
@@ -987,9 +1007,21 @@ The kernel scenarios additionally depend on `HelionCosSinRoPE`,
 `FusedGroupedExperts`, `GroupedExperts`, `QKVLinear`, `FusedQKVLinear`,
 `FlexAttention` and `create_varlen_metadata_for_document`.
 
-`benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py` copies
-the forward of `GroupedExperts`, and it imports `get_spmd_backend`. After a
+`benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py` and
+`benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py` copy
+the forward of `GroupedExperts`, and they import `get_spmd_backend`. After a
 bump, compare that forward with the fork's forward again.
+
+`benchmarks/models/piper_qwen3/components/moe/host_count_dispatcher.py`
+subclasses `AllToAllTokenDispatcher`. After a bump, verify these points:
+
+- `_sync_token_count_exchange` keeps its signature and its one blocking
+  copy, and `dispatch` still calls it once.
+- `dispatch` still returns the routed rows, the counts of each local
+  expert and the metadata. `RoutedExperts.forward` passes those counts to
+  `inner_experts` alone.
+- The standard communication backend still builds
+  `AllToAllTokenDispatcher.Config` exactly.
 
 Three fork features are no longer load-bearing, and the list above drops
 them. The compile-mode field served the deleted compile-mode axis; the
