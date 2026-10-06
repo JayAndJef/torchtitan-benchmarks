@@ -1,9 +1,10 @@
 """Structural tests for the developer scripts outside the Python packages.
 
-Two things are pinned here, because both fail silently:
+Three things are pinned here:
 
 * the pre-push hook, which runs the CPU suite before a push leaves the
-  machine, and the ``sync.sh`` step that installs it; and
+  machine, and the ``sync.sh`` step that installs it;
+* the guards of the Slurm matrix driver that need no Slurm and no GPU; and
 * the module list of the continuous-integration workflow, which must name
   test modules that exist and that a host without the machine-learning
   stack can import.
@@ -17,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,6 +30,7 @@ PRE_PUSH = REPO_ROOT / "tools" / "pre-push.sh"
 SYNC = REPO_ROOT / "sync.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "tests.yml"
 RUN_MATRIX = REPO_ROOT / "tools" / "run_matrix.sh"
+RUN_MATRIX_CELL = REPO_ROOT / "tools" / "run_matrix_cell.sh"
 
 FORBIDDEN_IMPORTS = ("torch", "transformer_engine")
 """Module roots that a hosted runner cannot install."""
@@ -136,6 +139,77 @@ class ToolImportTests(unittest.TestCase):
                     self.assertIsNotNone(path, f"{node.module} does not exist")
                     missing = {a.name for a in node.names} - _top_level_names(path)
                     self.assertFalse(missing, f"{node.module} lacks {sorted(missing)}")
+
+
+class MatrixScriptTests(unittest.TestCase):
+    """The refusals of the Slurm matrix driver that need no Slurm and no GPU."""
+
+    def _driver(self, **overrides: str) -> subprocess.CompletedProcess:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("SLURM_")
+        }
+        env.update(DRY_RUN="1", NGPUS="1", TIME="10")
+        env.update(overrides)
+        return subprocess.run(
+            ["bash", str(RUN_MATRIX)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_the_scripts_are_executable_bash(self) -> None:
+        for script in (RUN_MATRIX, RUN_MATRIX_CELL):
+            with self.subTest(script=script.name):
+                self.assertTrue(os.access(script, os.X_OK))
+                first = script.read_text().splitlines()[0]
+                self.assertEqual(first, "#!/usr/bin/env bash")
+                subprocess.run(["bash", "-n", str(script)], check=True)
+
+    def test_the_driver_refuses_the_reserved_partitions(self) -> None:
+        for partition in ("placeholder", "exceptions", "admin"):
+            with self.subTest(partition=partition):
+                result = self._driver(PARTITION=partition)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("run-gpu-job", result.stderr)
+
+    def test_the_driver_refuses_the_physical_gpu_variable(self) -> None:
+        result = self._driver(GPU="4")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("NGPUS", result.stderr)
+
+    def test_the_driver_needs_a_time_limit(self) -> None:
+        result = self._driver(TIME="")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("TIME is required", result.stderr)
+
+    def test_the_cell_runner_refuses_to_run_outside_a_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("SLURM_")
+            }
+            env.update(
+                MATRIX_LOG=f"{tmp}/sweep.log",
+                MATRIX_OUT=f"{tmp}/cell",
+                MATRIX_REV="0" * 40,
+                MATRIX_NGPUS="1",
+                FOREIGN_MEM_MIB="2000",
+                CONTENDED_LOAD="150",
+                WATCH_INTERVAL="15",
+            )
+            result = subprocess.run(
+                ["bash", str(RUN_MATRIX_CELL), "run", "0"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("only inside a Slurm job", result.stdout)
 
 
 class WorkflowModuleListTests(unittest.TestCase):

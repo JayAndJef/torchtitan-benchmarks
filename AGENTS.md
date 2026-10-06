@@ -149,7 +149,7 @@ shares one pre-push hook.
 | `benchmarks/execution/` | The launcher in `benchmarks/execution/launcher.py`, the subprocess environment, device parsing, CPU pinning, provenance and the progress events. A runner prints nothing: it emits events, and `benchmarks/cli/rendering.py` prints them. |
 | `benchmarks/kernel/` | The kernel-isolation system: registry, spans, runner, worker, timing engine, results. |
 | `benchmarks/models/piper_qwen3/` | The model port: `benchmarks/models/piper_qwen3/shape.py`, the TorchTitan model config in `benchmarks/models/piper_qwen3/titan_model.py`, the megatron-core model builder and the kernel components. |
-| `tools/` | `tools/run_matrix.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |
+| `tools/` | `tools/run_matrix.sh` and its in-job half `tools/run_matrix_cell.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |
 | `tests/` | The CPU and GPU test suite. |
 | `third_party/torchtitan/` | Our TorchTitan fork, pinned. |
 | `third_party/Megatron-LM/` | Upstream Megatron-LM, pinned, on `sys.path` only. |
@@ -263,6 +263,9 @@ A Piper package follows these steps, in this order.
 and single commas alone, and the manifest records it as typed. The runner
 sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, `CUDA_VISIBLE_DEVICES` and `NGPU`, so
 the index is stable and the world size follows the request.
+
+Inside a Slurm job, the job sees only its own cards, and their indices
+start at 0. So give `0`, or `0,1` and so on, and never a physical index.
 
 `run` executes, validates and evaluates. It runs every scenario unless
 `--scenario` narrows the set. It checks every selected scenario before the
@@ -466,7 +469,13 @@ binds each training process to the NUMA node of its GPU with
 `numactl --cpunodebind --membind`. The runner finds the node from the PCI
 bus id through sysfs. When that fails, or when the devices sit on two
 nodes, the run proceeds unpinned and `cpu_pinning` records why. Pinned and
-unpinned runs are not comparable. `--resume` refuses to mix them, and
+unpinned runs are not comparable.
+
+A Slurm job can hold part of the node's CPUs, or none of them. When the job
+holds part of them, the runner binds to that part with
+`numactl --physcpubind --membind`. When the job holds none of them, the run
+proceeds unpinned. Both cases record a different `cpu_pinning`, so they are
+not comparable with a run on the whole node. `--resume` refuses to mix them, and
 `results.json` warns when the arms of one run mix them.
 
 ## 6. Validation and evaluation
@@ -954,19 +963,40 @@ Four structural tests deserve naming:
 
 ## 11. Operating rules
 
-- Check `nvidia-smi` for a free GPU first. A shared GPU invalidates the
-  timings.
+- Run GPU work as a Slurm job. Read the admin skill `run-gpu-job` before
+  you submit. It sets the partitions and the time limits.
 - Drive a multi-cell matrix with `tools/run_matrix.sh`, never a loop of
-  `run` calls. It refuses a dirty tree, holds a lock, waits for an idle GPU
-  before each cell, and runs a watchdog during the cell. A cell is a
-  **quoted string of `run` flags**, one per array entry, and the script
-  word-splits it. A cell string may hold no quote and no space inside a
-  value. `MATRIX_CELLS` replaces the built-in list with newline-separated
-  cells. `DRY_RUN=1` prints each command and runs nothing. `GPU` is
-  required.
+  `run` calls. The script submits one Slurm job per cell. It submits the
+  next cell only after the previous job ends.
+- The script refuses a dirty tree and holds a lock. Inside each job,
+  `tools/run_matrix_cell.sh` runs the watchdog and the `run` command.
+- A cell is a **quoted string of `run` flags**, one per array entry, and
+  the script word-splits it. A cell string may hold no quote and no space
+  inside a value. The `dp * pp` of each cell must equal `NGPUS`.
+- The script reads these environment variables. Its header lists the
+  others.
+
+  | variable | default | meaning |
+  |---|---|---|
+  | `NGPUS` | required | The number of cards of each job. |
+  | `TIME` | required | The Slurm time limit of each job. Give a realistic estimate. |
+  | `PARTITION` | `main` | The Slurm partition. The script refuses `placeholder`, `exceptions` and `admin`. |
+  | `GPU_IDX` | none | One specific card, `gpu:idx<n>:1`. It needs `NGPUS=1`. |
+  | `CPUS_PER_GPU` | `32` | The CPUs of each card. |
+  | `MEM_PER_GPU` | `180000` | The host memory of each card, in MB. |
+  | `WAIT_TIMEOUT` | `43200` | The seconds that a job can stay pending. |
+  | `POLL_INTERVAL` | `60` | The seconds between two queue samples. |
+  | `MATRIX_CELLS` | built-in list | Newline-separated cells that replace the built-in list. |
+  | `DRY_RUN` | `0` | `1` prints each `sbatch` command and batch script, and submits nothing. |
+
+- A job has one time limit, and `main` caps it at 2 hours. A cell with
+  every arm of a large shape can need more. Give such a cell one `--arm`.
 - The watchdog flags foreign compute processes, unaccounted GPU memory and
-  host-load spikes. It moves a flagged cell aside, so the next pass redoes
-  it. **Never report a cell it marked `CONTAMINATED`.**
+  host-load spikes. The script moves a flagged cell aside, so the next pass
+  runs it again. **Never report a cell it marked `CONTAMINATED`.**
+- A job that Slurm ends gets the status `SLURM-<state>`, for example
+  `SLURM-TIMEOUT`. A job that stays pending past `WAIT_TIMEOUT` gets
+  `GAVE-UP`, and the script cancels it. The next pass tries both again.
 - `tools/collect_matrix.py <root>` merges a matrix tree into one table, one
   row per arm. It reads the manifest and the results file alone, and it
   refuses a results file another schema wrote.

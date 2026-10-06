@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -51,8 +52,37 @@ def _numa_node(gpu: str, sysfs_root: Path) -> int | CpuPinning:
     return node
 
 
-def resolve_cpu_pinning(gpu: str, *, sysfs_root: Path = Path("/sys")) -> CpuPinning:
-    """The pinning of the devices ``gpu``: their one NUMA node, or none and the reason."""
+def _cpu_list(text: str) -> frozenset[int]:
+    """The CPUs of a sysfs ``cpulist`` such as ``0-63,128-191``."""
+    cpus: set[int] = set()
+    for part in text.strip().split(","):
+        first, _, last = part.partition("-")
+        cpus.update(range(int(first), int(last or first) + 1))
+    return frozenset(cpus)
+
+
+def _cpu_ranges(cpus: frozenset[int]) -> str:
+    """``cpus`` as the compact range list that ``numactl --physcpubind`` reads."""
+    ordered = sorted(cpus)
+    ranges: list[str] = []
+    start = previous = ordered[0]
+    for cpu in ordered[1:] + [None]:
+        if cpu is not None and cpu == previous + 1:
+            previous = cpu
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        if cpu is not None:
+            start = previous = cpu
+    return ",".join(ranges)
+
+
+def resolve_cpu_pinning(
+    gpu: str,
+    *,
+    sysfs_root: Path = Path("/sys"),
+    allowed_cpus: frozenset[int] | None = None,
+) -> CpuPinning:
+    """The pinning of the devices ``gpu``: the CPUs of their one NUMA node that the process may use, or none and the reason."""
     if shutil.which("numactl") is None:
         return CpuPinning((), "none: numactl not available")
     nodes: list[int] = []
@@ -70,6 +100,22 @@ def resolve_cpu_pinning(gpu: str, *, sysfs_root: Path = Path("/sys")) -> CpuPinn
             + ",".join(parse_devices(gpu))
             + " span NUMA nodes "
             + ",".join(str(other) for other in nodes),
+        )
+    node_path = sysfs_root / f"devices/system/node/node{node}/cpulist"
+    try:
+        node_cpus = _cpu_list(node_path.read_text())
+    except (OSError, ValueError):
+        return CpuPinning((), f"none: cannot read {node_path}")
+    if allowed_cpus is None:
+        allowed_cpus = frozenset(os.sched_getaffinity(0))
+    usable = node_cpus & allowed_cpus
+    if not usable:
+        return CpuPinning((), f"none: the process may use no CPU of NUMA node {node}")
+    if usable != node_cpus:
+        cpus = _cpu_ranges(usable)
+        return CpuPinning(
+            ("numactl", f"--physcpubind={cpus}", f"--membind={node}"),
+            f"numactl --physcpubind={cpus} --membind={node}",
         )
     return CpuPinning(
         ("numactl", f"--cpunodebind={node}", f"--membind={node}"),
