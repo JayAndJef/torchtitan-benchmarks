@@ -7,6 +7,7 @@ Activation:
     --override.imports benchmarks.models.piper_qwen3.components.moe.te_per_expert_experts.te_per_expert_experts
 """
 
+import contextlib
 from dataclasses import dataclass
 
 import torch
@@ -24,7 +25,14 @@ from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.moe import GroupedExperts
 
 TRACE_MARKER = "torchtitan_benchmarks::te_per_expert_mm"
-"""The profiler range that each op opens, because the profiler records no event for a custom op."""
+"""The profiler range of each op, for the arm's trace marker; it costs this arm one flag check per call, and one range per call while the profiler records."""
+
+
+def _marker_range(name: str):
+    """A profiler range ``name`` while the profiler records, because the profiler records no event for a custom op."""
+    if torch.autograd._profiler_enabled():
+        return torch.profiler.record_function(name)
+    return contextlib.nullcontext()
 
 
 def _host_splits(x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor) -> list[int]:
@@ -61,7 +69,7 @@ def te_per_expert_mm(
     x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor
 ) -> torch.Tensor:
     """Rows of expert e of ``x`` (R, K) times ``w[e].T`` (K, N), as one (R, N) tensor."""
-    with torch.profiler.record_function(TRACE_MARKER):
+    with _marker_range(TRACE_MARKER):
         splits = _host_splits(x, w, counts)
         y = x.new_empty((x.shape[0], w.shape[1]))
         if x.shape[0] == 0:
@@ -93,8 +101,8 @@ def _te_per_expert_mm_fake(x, w, counts):
 def te_per_expert_mm_backward(
     dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The gradients of ``te_per_expert_mm`` for x and w; the weight gradient of an empty expert is zero."""
-    with torch.profiler.record_function(f"{TRACE_MARKER}_backward"):
+    """The gradients of ``te_per_expert_mm`` for x and w; TE writes zero to the weight gradient of an empty expert."""
+    with _marker_range(f"{TRACE_MARKER}_backward"):
         splits = _host_splits(x, w, counts)
         dy = dy.contiguous()
         if dy.dtype != x.dtype or tuple(dy.shape) != (x.shape[0], w.shape[1]):
@@ -133,10 +141,6 @@ def te_per_expert_mm_backward(
             accumulate=False,
             use_split_accumulator=_2X_ACC_WGRAD,
         )
-        # TE can skip the GEMM of an empty expert, and leave its weight gradient unwritten.
-        for e, rows in enumerate(splits):
-            if rows == 0:
-                dw[e].zero_()
         return dx, dw
 
 
