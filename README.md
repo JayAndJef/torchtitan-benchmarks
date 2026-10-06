@@ -67,11 +67,16 @@ two arms that replace TorchTitan's expert GEMMs through overrides:
 
 The per-expert arm needs `--ep 2` or more.
 
+The `stacked` scenario keeps `titan_compiled` and `megatron_stock`, and
+adds `titan_compiled_fa3_te_per_expert`. That arm runs FA3 varlen and the
+per-expert GEMMs together, so it shows whether the two gains add. It also
+needs `--ep 2` or more.
+
 Read these points before you publish a number:
 
 - **The default shape needs a mesh.** `30b-a3b` does not fit one GPU. Use
   `--model-size 1b` on one GPU, and name the scenarios with `--scenario`,
-  because the `experts` scenario needs `--ep 2` or more.
+  because the `experts` and `stacked` scenarios need `--ep 2` or more.
 - **The Megatron arm differs by design.** It keeps fp32 optimizer state and
   unfused kernels. `AGENTS.md` lists the four differences. State them
   beside each cross-engine number.

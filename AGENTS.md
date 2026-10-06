@@ -4,7 +4,7 @@
 
 Two measurement systems share one CLI. Never mix their numbers.
 
-**End-to-end throughput.** Three scenarios train the same Qwen3 MoE model
+**End-to-end throughput.** Four scenarios train the same Qwen3 MoE model
 on one pre-tokenized c4_test stream. Each publishes tokens/s, step time and
 peak memory. `--model-size` selects the shape. The `engines` scenario has
 three arms:
@@ -65,6 +65,24 @@ matches. Megatron routes from another init, so its row is a reference.
   and either one at ep 1. It also refuses a TE arm that selects the
   `spmd_types` backend, because the TE custom ops have no SPMD type rule.
 
+The `stacked` scenario has three arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds one arm that moves two axes
+together:
+
+| arm | engine | attention kernel | expert GEMM |
+|---|---|---|---|
+| `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask | `torch._grouped_mm` |
+| `titan_compiled_fa3_te_per_expert` | `torchtitan` | FA3 varlen | one TransformerEngine cuBLAS GEMM per expert |
+| `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention | one TransformerEngine cuBLAS GEMM per expert |
+
+The stacked arm moves the attention kernel and the expert GEMM path
+against `titan_compiled`. It answers whether the two gains add. FA3 alone
+is the `attention` arm `titan_compiled_fa3`. The per-expert GEMM alone is
+the `experts` arm `titan_compiled_te_per_expert`. The stacked arm imports
+the three overrides of those two arms, sets `packed_offsets`, and carries
+the trace markers of both. So it needs `--ep 2` or more, as the per-expert
+arm does.
+
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
 
@@ -75,7 +93,7 @@ isolation can be irrelevant once the compiler fuses the graph around it.
 A kernel number is never an end-to-end number, and an end-to-end number is
 never a kernel number. State which system produced a figure.
 
-The `engines`, `attention` and `experts` scenarios carry four deliberate differences
+The `engines`, `attention`, `experts` and `stacked` scenarios carry four deliberate differences
 by default, and each one moves the number. The Megatron arm keeps fp32 master weights and
 reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
 It keeps `--init-method-std 0.01` with no weight transfer. It applies no
@@ -272,9 +290,10 @@ start at 0. So give `0`, or `0,1` and so on, and never a physical index.
 first arm starts, so one refused scenario stops the whole command. It stops
 at the first arm that fails.
 
-At ep 1 the `experts` scenario refuses `titan_compiled_te_per_expert`. So a
+At ep 1 the `experts` scenario refuses `titan_compiled_te_per_expert`, and
+the `stacked` scenario refuses `titan_compiled_fa3_te_per_expert`. So a
 one-GPU run names its scenarios with `--scenario`. A one-GPU run of
-`experts` also names its arms with `--arm`.
+`experts` or `stacked` also names its arms with `--arm`.
 
 Named scenarios run one at a time, in the order given. A name may repeat,
 and each repeat is another run with a `-run<n>` suffix on its scenario
