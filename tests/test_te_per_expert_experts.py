@@ -141,11 +141,15 @@ class TEPerExpertExpertsTests(unittest.TestCase):
         cls.te.load_state_dict(cls.reference.state_dict())
 
     def _check_per_expert_path(self, kernels: list[str], splits: list[int]) -> None:
-        """Each of the nine GEMMs ran as one nvjet kernel per non-empty expert, and no grouped kernel ran."""
+        """Each of the nine GEMMs ran as one cuBLAS kernel per non-empty expert, and no grouped kernel ran."""
         gemms = _gemm_kernels(kernels)
         print(f"splits={splits} GEMM kernels: {sorted(set(gemms))}")
         self.assertEqual(len(gemms), 9 * sum(n > 0 for n in splits), gemms)
-        self.assertTrue(all("nvjet" in n for n in gemms), gemms)
+        # cuBLAS can pick its own sm75 CUTLASS kernel for a one-row GEMM.
+        self.assertEqual(
+            [n for n in gemms if "nvjet" not in n and "cutlass_75_tensorop" not in n], []
+        )
+        self.assertTrue(any("nvjet" in n for n in gemms), gemms)
         self.assertEqual([n for n in kernels if "_ptrGroup_" in n], [])
         self.assertEqual([n for n in kernels if "GroupProblemShape" in n], [])
         self.assertEqual([n for n in kernels if "setup_grouped_gemm" in n], [])
@@ -277,8 +281,8 @@ class TEPerExpertExpertsTests(unittest.TestCase):
         """One fullgraph compile serves every split set: the row count is unbacked and the counts live on the host."""
         torch._dynamo.reset()
 
-        def step(x_full, counts):
-            rows = counts.sum().item()
+        def step(x_full, counts, total):
+            rows = total.item()
             torch._check(rows >= 0)
             torch._check(rows <= x_full.shape[0])
             return self.te(x_full[:rows], counts)
@@ -293,7 +297,7 @@ class TEPerExpertExpertsTests(unittest.TestCase):
                         [x, torch.zeros(padded_rows - x.shape[0], D, device="cuda").bfloat16()]
                     ).requires_grad_()
                     self.te.zero_grad(set_to_none=True)
-                    out = compiled(padded, host)
+                    out = compiled(padded, host, torch.tensor(x.shape[0]))
                     out.backward(dy)
                     actual = {
                         "out": out.detach(),
