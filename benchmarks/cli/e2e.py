@@ -440,7 +440,7 @@ def run_command(
     for name, request in planned:
         try:
             check_request(request)
-        except ValueError as error:
+        except (OSError, ValueError, RuntimeError) as error:
             raise click.ClickException(f"scenario {name!r}: {error}") from error
     for name, request in planned:
         if len(selected) > 1:
