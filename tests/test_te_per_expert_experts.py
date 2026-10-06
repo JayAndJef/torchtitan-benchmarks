@@ -21,7 +21,7 @@ EXPERTS_OVERRIDE = f"{MOE}.te_per_expert_experts.te_per_expert_experts"
 DISPATCHER_OVERRIDE = f"{MOE}.host_count_dispatcher.host_count_dispatcher"
 
 TRACE_MARKER = "torchtitan_benchmarks::te_per_expert_mm"
-"""The trace marker of the experts scenario's per-expert arm."""
+"""The trace marker of the experts scenario's per-expert arm; tests/test_runner.py ties it to the op module."""
 
 TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 
@@ -334,6 +334,29 @@ class TEPerExpertExpertsTests(unittest.TestCase):
                     eager = _run(self.te, x, host, dy)
                     for name, value in eager.items():
                         self.assertLessEqual(_rel(actual[name], value), TOLERANCE, name)
+
+
+@unittest.skipIf(not torch.cuda.is_available(), "needs CUDA")
+class HostTokenCountsTests(unittest.TestCase):
+    def test_the_op_returns_the_splits_and_the_rows_of_each_local_expert(self) -> None:
+        from benchmarks.models.piper_qwen3.components.moe.host_count_dispatcher import (
+            host_token_counts,
+        )
+
+        local = torch.tensor([3, 0, 5, 1, 2, 2, 0, 7], device="cuda")
+        received = torch.tensor([[4, 0, 9, 1], [2, 0, 0, 6]], device="cuda")
+        input_splits, output_splits, rows = host_token_counts(local, received)
+        for tensor in (input_splits, output_splits, rows):
+            self.assertEqual(tensor.device.type, "cpu")
+            self.assertEqual(tensor.dtype, torch.int64)
+        self.assertEqual(input_splits.tolist(), [9, 11])
+        self.assertEqual(output_splits.tolist(), [14, 8])
+        self.assertEqual(rows.tolist(), [6, 0, 9, 7])
+        torch.library.opcheck(host_token_counts, (local, received))
+        with self.assertRaisesRegex(RuntimeError, "int64 counts"):
+            host_token_counts(local.int(), received)
+        with self.assertRaisesRegex(RuntimeError, "local counts"):
+            host_token_counts(local[:4], received)
 
 
 @unittest.skipIf(SKIP_REASON is not None, SKIP_REASON or "")

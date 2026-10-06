@@ -1,5 +1,6 @@
 """CPU-only tests for benchmark scenario construction and validation helpers."""
 
+import ast
 import gzip
 import json
 import os
@@ -1308,6 +1309,23 @@ class ExpertsScenarioTests(unittest.TestCase):
             for other in TE_GEMM_MARKERS:
                 self.assertNotIn(marker, other)
                 self.assertNotIn(other, marker)
+
+    def test_the_per_expert_marker_is_the_range_that_its_ops_open(self) -> None:
+        """The source is parsed, so TE stays out of this process."""
+        source = Path(__file__).resolve().parent.parent / (
+            "benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py"
+        )
+        (value,) = [
+            node.value.value
+            for node in ast.parse(source.read_text()).body
+            if isinstance(node, ast.Assign)
+            and [t.id for t in node.targets if isinstance(t, ast.Name)] == ["TRACE_MARKER"]
+        ]
+        self.assertEqual(PER_EXPERT_MARKERS, (value,))
+        self.assertEqual(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert").config.trace_kernel_markers,
+            (value,),
+        )
 
     def test_every_arm_command_builds_at_ac_none(self) -> None:
         run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
