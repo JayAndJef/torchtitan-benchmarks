@@ -212,6 +212,14 @@ command line and the child environment. The command line is the pinning
 prefix, then the interpreter, then the torchrun flags, then the target. A
 `per_rank` launch uses torchrun at every world size, also at one rank.
 
+The torchrun flags start with `-u`. Torchrun tees each rank into the arm
+log through a thread of its own, and all the threads write to one stream.
+With a buffered stream, a thread race in CPython 3.10 loses lines and
+writes NUL bytes in their place. With `-u`, each line is one write. The
+flag applies to the torchrun agent alone. It sets no environment variable,
+so the workers keep their own buffering. Keep `-u`, and
+`tests/test_rank_log.py` checks it.
+
 The launcher owns six environment keys: `CUDA_DEVICE_ORDER`,
 `CUDA_VISIBLE_DEVICES`, `NGPU`, `LOG_RANK`,
 `TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE` and `PYTORCH_ALLOC_CONF`. The
@@ -468,12 +476,13 @@ unpinned runs are not comparable. `--resume` refuses to mix them, and
 
 `benchmarks.e2e.validation:validate_arm` gates every arm before the harness
 publishes its numbers. It splits `<arm>.log` by rank, because one log holds
-every rank's output. The split drops NUL bytes first, because a concurrent
-write can put NUL bytes in front of a rank prefix. The arm's engine reads
-one `RankEvidence` from each rank's log. Then `validate_arm` checks the
-harness facts and runs the engine's `validate`. It raises one error that
-lists every failure. A step line that does not parse, and a step that does
-not follow the previous step of its rank, also fail the arm.
+every rank's output. The split drops NUL bytes first, because a log that
+torchrun wrote without `-u` can put NUL bytes in front of a rank prefix.
+The arm's engine reads one `RankEvidence` from each rank's log. Then
+`validate_arm` checks the harness facts and runs the engine's `validate`.
+It raises one error that lists every failure. A step line that does not
+parse, and a step that does not follow the previous step of its rank, also
+fail the arm.
 
 The four harness facts live in `benchmarks/e2e/evidence.py`. They apply to
 every engine:

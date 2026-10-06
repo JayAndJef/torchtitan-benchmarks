@@ -335,6 +335,12 @@ def _megatron_driver_moves_into_the_engine_package(record: dict[str, Any]) -> No
             argv[argv.index(OLD_MEGATRON_DRIVER)] = MEGATRON_DRIVER
 
 
+def _torchrun_runs_unbuffered(record: dict[str, Any]) -> None:
+    for _, argv in _argvs(record):
+        if "torch.distributed.run" in argv:
+            argv.insert(argv.index("torch.distributed.run") - 1, "-u")
+
+
 EXECUTION_MODEL_SENTENCES = (
     " The manifest's execution_model reads plain-bf16 because it is "
     "composed from the parallelism spec; it describes the TorchTitan arms "
@@ -436,6 +442,12 @@ ACCEPTED_DIFFERENCES = (
         "model, so the scenario description and the Megatron arm description "
         "drop the sentence about the top-level execution model.",
         _descriptions_drop_the_execution_model,
+    ),
+    AcceptedDifference(
+        "The launcher starts torchrun with '-u'. The tee threads of torchrun "
+        "shared one buffered stream, and a thread race in it lost lines of "
+        "the arm log and wrote NUL bytes in their place.",
+        _torchrun_runs_unbuffered,
     ),
 )
 """The changes from the baseline that the plan names or that the review accepted."""

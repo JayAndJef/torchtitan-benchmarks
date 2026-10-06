@@ -68,6 +68,7 @@ class ArgvTests(unittest.TestCase):
         self.assertEqual(
             torchrun_flags(2),
             (
+                "-u",
                 "-m",
                 "torch.distributed.run",
                 "--nproc-per-node=2",

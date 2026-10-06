@@ -544,9 +544,10 @@ class StockArgvTests(unittest.TestCase):
             _stock_arm(), parallelism=MESH, local_batch_size=32
         )
         self.assertEqual(
-            command[:15],
+            command[:16],
             [
                 sys.executable,
+                "-u",
                 "-m",
                 "torch.distributed.run",
                 "--nproc-per-node=8",
@@ -563,7 +564,7 @@ class StockArgvTests(unittest.TestCase):
                 "-m",
             ],
         )
-        self.assertEqual(command[15], DRIVER_MODULE)
+        self.assertEqual(command[16], DRIVER_MODULE)
 
     def test_the_mesh_argv_is_exactly_its_two_parts(self) -> None:
         command = _command(

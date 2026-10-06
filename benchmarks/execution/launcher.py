@@ -67,8 +67,9 @@ class LaunchedCommand:
 
 
 def torchrun_flags(world_size: int) -> tuple[str, ...]:
-    """The torchrun arguments: one process per rank, and every rank's output teed."""
+    """The torchrun arguments: one process per rank, every rank's output teed, and ``-u``, so that the tee threads of torchrun write each line in one call and lose no line."""
     return (
+        "-u",
         "-m",
         TORCHRUN_MODULE,
         f"--nproc-per-node={world_size}",
