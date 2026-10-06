@@ -1,7 +1,8 @@
 """The all-to-all token dispatcher with the rows of each local expert on the host, as a TorchTitan override.
 
-The stock dispatcher already copies the (ep, e) count matrix to the host once per layer. This one
-copies the whole matrix in that one blocking copy, so the experts get their counts with no new sync.
+The stock dispatcher already makes one blocking copy per layer and microbatch: the row sums of the
+(ep, e) count matrix. This one copies the whole matrix in that copy, so the experts get their counts
+with no new sync.
 
 Activation:
     --override.imports benchmarks.models.piper_qwen3.components.moe.host_count_dispatcher.host_count_dispatcher
