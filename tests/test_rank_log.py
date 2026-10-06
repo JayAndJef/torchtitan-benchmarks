@@ -72,7 +72,10 @@ class TeedLogTests(unittest.TestCase):
             world_size=RANKS,
             gpu=",".join(str(rank) for rank in range(RANKS)),
             pinning=CpuPinning((), "unpinned"),
-            base_env={**os.environ, "TMPDIR": str(self.root)},
+            base_env={
+                **{key: value for key, value in os.environ.items() if key != "PYTHONUNBUFFERED"},
+                "TMPDIR": str(self.root),
+            },
         )
         self.assertIn("-u", self.launched.argv)
 

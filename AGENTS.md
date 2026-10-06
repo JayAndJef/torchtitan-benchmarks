@@ -215,10 +215,9 @@ prefix, then the interpreter, then the torchrun flags, then the target. A
 The torchrun flags start with `-u`. Torchrun tees each rank into the arm
 log through a thread of its own, and all the threads write to one stream.
 With a buffered stream, a thread race in CPython 3.10 loses lines and
-writes NUL bytes in their place. With `-u`, each line is one write. The
-flag applies to the torchrun agent alone. It sets no environment variable,
-so the workers keep their own buffering. Keep `-u`, and
-`tests/test_rank_log.py` checks it.
+writes NUL bytes in their place. With `-u`, each line is one write.
+Torchrun already starts its workers with `-u`, so the flag now also applies
+to the torchrun agent. Keep `-u`, and `tests/test_rank_log.py` checks it.
 
 The launcher owns six environment keys: `CUDA_DEVICE_ORDER`,
 `CUDA_VISIBLE_DEVICES`, `NGPU`, `LOG_RANK`,
@@ -565,7 +564,8 @@ under the names that the engine gives them.
   that the stored run directories hold.
 
 Every rank writes to one log, so a torn write can join the lines of two
-ranks:
+ranks. A tee thread can read a partial line between two writes of a worker,
+and `-u` does not stop this:
 
 - When the prefix of another rank cuts a step line, the reader drops the
   step line. `results.json` records a warning that names the arm, the rank,
