@@ -59,7 +59,8 @@ matches. Megatron routes from another init, so its row is a reference.
   TorchTitan has no fp32 `main_grad`, so the arm writes a fresh bf16
   weight gradient and does not fuse the accumulation as Megatron does.
   cuBLAS picks the kernel from the rows of each expert, so the arm's trace
-  marker is the custom op name and not a kernel name.
+  marker is not a kernel name. It is the profiler range that each op opens,
+  `torchtitan_benchmarks::te_per_expert_mm`.
 - The engine's check refuses either per-expert override without the other,
   and either one at ep 1. It also refuses a TE arm that selects the
   `spmd_types` backend, because the TE custom ops have no SPMD type rule.
