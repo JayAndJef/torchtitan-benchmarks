@@ -1083,21 +1083,23 @@ def build_attention_core_titan_flash3(
 ) -> BuiltArm:
     """FlashAttention-3 varlen over the same packed documents.
 
-    ``VarlenAttention``'s constructor activates FA3, so building this arm at
-    all requires the ``flash3`` dependency group; without it torch's registry
-    raises rather than silently falling back. ``FA3_MARKER`` guards the other
-    direction: FA3 degrades to FA2 rather than raising when it declines to
-    register, and an FA2 kernel under an FA3 label is the failure this
-    scenario exists to prevent.
+    The arm builds the e2e override's ``PackedFA3Attention``, so the two
+    cannot drift. Its constructor activates FA3 and raises without it, and
+    its forward allows the flash backend alone, because torch 2.15
+    ``varlen_attn`` selects an eligible cuDNN backend first. ``FA3_MARKER``
+    guards the other direction: FA3 degrades to FA2 rather than raising when
+    it declines to register, and an FA2 kernel under an FA3 label is the
+    failure this scenario exists to prevent.
     """
-    from torchtitan.models.common.attention import (
-        VarlenAttention,
-        VarlenMetadata,
+    from torchtitan.models.common.attention import VarlenMetadata
+
+    from benchmarks.models.piper_qwen3.components.attention.fa3_override import (
+        PackedFA3Attention,
     )
 
     # Compiled explicitly: titan and titan/flex_flash are compiled too, by
     # FlexAttention's class-level compile. This one carries no autotune.
-    module = _compile_module(VarlenAttention.Config().build())
+    module = _compile_module(PackedFA3Attention.Config().build())
     enable_gqa = shape.n_heads > shape.n_kv_heads
     layout = _titan_layout(inputs)
     metadata = VarlenMetadata(
