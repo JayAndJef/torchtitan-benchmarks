@@ -94,6 +94,12 @@ ENGINES = Scenario(
 
 ATTENTION_OVERRIDES = "benchmarks.models.piper_qwen3.components.attention"
 
+FA3_ATTENTION = f"{ATTENTION_OVERRIDES}.fa3_override.packed_fa3_attention"
+"""The override import of FA3 varlen attention on the loader's packed document offsets."""
+
+FA3_MARKERS = ("FlashAttnFwdSm90",)
+"""The trace marker of FA3 varlen attention: its Hopper forward kernel."""
+
 ATTENTION = Scenario(
     name="attention",
     description=(
@@ -120,10 +126,8 @@ ATTENTION = Scenario(
             config=TorchTitanConfig(
                 compile=CompileMode.TORCH,
                 overrides_per_block=1,
-                override_imports=(
-                    f"{ATTENTION_OVERRIDES}.fa3_override.packed_fa3_attention",
-                ),
-                trace_kernel_markers=("FlashAttnFwdSm90",),
+                override_imports=(FA3_ATTENTION,),
+                trace_kernel_markers=FA3_MARKERS,
                 packed_offsets=True,
             ),
         ),
@@ -205,7 +209,57 @@ EXPERTS = Scenario(
 """The expert GEMM comparison: what each expert GEMM path costs, at the same routing; it refuses ``--ac sac``."""
 
 
-SCENARIOS = {"engines": ENGINES, "attention": ATTENTION, "experts": EXPERTS}
+STACKED = Scenario(
+    name="stacked",
+    description=(
+        "Compiled TorchTitan with FA3 varlen attention and one "
+        "TransformerEngine cuBLAS GEMM per expert together, against "
+        "titan_compiled and stock Megatron-LM. The stacked arm moves two "
+        "axes against titan_compiled, the attention kernel and the expert "
+        "GEMM path, so it answers whether the two gains add. FA3 alone is "
+        "the attention arm titan_compiled_fa3, and the per-expert GEMM alone "
+        "is the experts arm titan_compiled_te_per_expert. The stacked arm "
+        "needs an expert-parallel degree above 1. The Megatron arm carries "
+        "the four differences of the engines scenario: fp32 master weights "
+        "and an fp32 gradient reduction, unfused native cross entropy, "
+        "--init-method-std 0.01 with no weight transfer, and no permutation "
+        "fusion. State all four beside every cross-engine number."
+    ),
+    data=C4_REPLAY_DATA,
+    window=ProfileWindow(),
+    supported_ac_modes=("none",),
+    arms=(
+        ENGINES.arm("titan_compiled"),
+        Arm(
+            name="titan_compiled_fa3_te_per_expert",
+            description=(
+                "titan_compiled with FA3 varlen attention on packed documents "
+                "and the expert GEMMs as one TE cuBLAS GEMM per expert"
+            ),
+            config=TorchTitanConfig(
+                compile=CompileMode.TORCH,
+                overrides_per_block=3,
+                override_imports=(
+                    FA3_ATTENTION,
+                    HOST_COUNT_DISPATCHER,
+                    TE_PER_EXPERT_EXPERTS,
+                ),
+                trace_kernel_markers=(*FA3_MARKERS, *TE_PER_EXPERT_MARKERS),
+                packed_offsets=True,
+            ),
+        ),
+        ENGINES.arm("megatron_stock"),
+    ),
+)
+"""The stacked comparison: whether the FA3 and the per-expert GEMM gains add; it refuses ``--ac sac``."""
+
+
+SCENARIOS = {
+    "engines": ENGINES,
+    "attention": ATTENTION,
+    "experts": EXPERTS,
+    "stacked": STACKED,
+}
 """Every end-to-end scenario, by name."""
 
 

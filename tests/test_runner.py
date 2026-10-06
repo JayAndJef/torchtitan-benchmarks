@@ -1231,9 +1231,11 @@ OVERRIDE_COUNT_SIZES = ("1b", "30b-a3b")
 """The model sizes at which each override arm is counted."""
 
 
-def _override_counts(names: list[str]) -> dict[str, dict[str, dict[str, int]]]:
-    """Per experts arm, size and override target: the number of nodes it replaced."""
-    scenario = scenario_by_name("experts")
+def _override_counts(
+    scenario_name: str, names: list[str]
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Per arm of ``scenario_name``, size and override target: the number of nodes it replaced."""
+    scenario = scenario_by_name(scenario_name)
     counts: dict[str, dict[str, dict[str, int]]] = {}
     for name in names:
         config = scenario.arm(name).config
@@ -1257,9 +1259,24 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from tests.test_runner import _override_counts
 
-print(json.dumps(_override_counts(["titan_compiled_te_gemm", "titan_compiled_te_per_expert"])))
+print(json.dumps(_override_counts(sys.argv[2], sys.argv[3:])))
 """
-"""Counts the TE arms in a fresh process and prints the counts as JSON."""
+"""Counts the arms ``argv[3:]`` of the scenario ``argv[2]`` in a fresh process and prints the counts as JSON."""
+
+
+def _count_in_subprocess(test: unittest.TestCase, scenario: str, names: list[str]) -> dict:
+    """The ``_override_counts`` of ``names`` from a fresh process, so TE does not patch this process."""
+    repo = Path(__file__).resolve().parent.parent
+    completed = subprocess.run(
+        [sys.executable, "-c", TE_COUNT_SCRIPT, str(repo), scenario, *names],
+        cwd=repo,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    test.assertEqual(completed.returncode, 0, completed.stderr)
+    return json.loads(completed.stdout.splitlines()[-1])
 
 
 class ExpertsScenarioTests(unittest.TestCase):
@@ -1278,7 +1295,7 @@ class ExpertsScenarioTests(unittest.TestCase):
         self.assertEqual(scenario.supported_ac_modes, ("none",))
         self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
         self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
-        self.assertEqual(set(SCENARIOS), {"engines", "attention", "experts"})
+        self.assertEqual(set(SCENARIOS), {"engines", "attention", "experts", "stacked"})
 
     def test_each_override_arm_declares_its_imports_count_and_markers(self) -> None:
         scenario = scenario_by_name("experts")
@@ -1354,17 +1371,9 @@ class ExpertsScenarioTests(unittest.TestCase):
 
     def test_the_te_arms_replace_their_count_of_nodes(self) -> None:
         """A subprocess counts the TE arms, so TE does not patch this process."""
-        repo = Path(__file__).resolve().parent.parent
-        completed = subprocess.run(
-            [sys.executable, "-c", TE_COUNT_SCRIPT, str(repo)],
-            cwd=repo,
-            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
-            capture_output=True,
-            text=True,
-            timeout=600,
+        counts = _count_in_subprocess(
+            self, "experts", ["titan_compiled_te_gemm", "titan_compiled_te_per_expert"]
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        counts = json.loads(completed.stdout.splitlines()[-1])
         self.assertEqual(
             sorted(counts), ["titan_compiled_te_gemm", "titan_compiled_te_per_expert"]
         )
@@ -1475,6 +1484,123 @@ class ExpertsScenarioTests(unittest.TestCase):
             with self.subTest(arm=name, flags=flags):
                 arm = configured(scenario.arm(name), extra_flags=flags)
                 self.assertEqual(engine_for(arm).check(run, arm), [])
+
+
+FA3_TARGET = "benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention"
+
+FA3_MARKERS = ("FlashAttnFwdSm90",)
+"""The Hopper forward kernel of FA3 varlen attention."""
+
+STACKED_ARM = "titan_compiled_fa3_te_per_expert"
+
+
+class StackedScenarioTests(unittest.TestCase):
+    def test_scenario_registration(self) -> None:
+        scenario = scenario_by_name("stacked")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            ["titan_compiled", STACKED_ARM, "megatron_stock"],
+        )
+        self.assertIs(scenario.data, C4_REPLAY_DATA)
+        self.assertEqual(scenario.supported_ac_modes, ("none",))
+        self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
+        self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
+
+    def test_the_stacked_arm_declares_its_imports_count_markers_and_offsets(self) -> None:
+        arm = scenario_by_name("stacked").arm(STACKED_ARM)
+        config = arm.config
+        self.assertEqual(engine_for(arm).name, "torchtitan")
+        self.assertEqual(config.compile, CompileMode.TORCH)
+        self.assertEqual(
+            config.override_imports, (FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET)
+        )
+        self.assertEqual(config.overrides_per_block, 3)
+        self.assertEqual(config.trace_kernel_markers, (*FA3_MARKERS, *PER_EXPERT_MARKERS))
+        self.assertIs(config.packed_offsets, True)
+        self.assertEqual(config.extra_flags, ())
+
+    def test_the_stacked_arm_joins_the_fa3_arm_and_the_per_expert_arm(self) -> None:
+        stacked = scenario_by_name("stacked").arm(STACKED_ARM).config
+        fa3 = scenario_by_name("attention").arm("titan_compiled_fa3").config
+        per_expert = scenario_by_name("experts").arm("titan_compiled_te_per_expert").config
+        self.assertEqual(
+            stacked.override_imports, (*fa3.override_imports, *per_expert.override_imports)
+        )
+        self.assertEqual(
+            stacked.overrides_per_block,
+            fa3.overrides_per_block + per_expert.overrides_per_block,
+        )
+        self.assertEqual(
+            stacked.trace_kernel_markers,
+            (*fa3.trace_kernel_markers, *per_expert.trace_kernel_markers),
+        )
+        self.assertEqual(stacked.packed_offsets, fa3.packed_offsets)
+        self.assertEqual(stacked.compile, per_expert.compile)
+
+    def test_the_engine_accepts_the_stacked_arm_at_ep_4_and_refuses_it_at_ep_1(self) -> None:
+        arm = scenario_by_name("stacked").arm(STACKED_ARM)
+        ep4 = ParallelismSpec(dp=4, ep=4, zero=1)
+        self.assertEqual(engine_for(arm).check(run_spec(ac_mode="none", parallelism=ep4), arm), [])
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=4, zero=1)):
+            with self.subTest(dp=spec.dp):
+                (refusal,) = engine_for(arm).check(
+                    run_spec(ac_mode="none", parallelism=spec), arm
+                )
+                self.assertIn(f"{STACKED_ARM}: the override import {HOST_COUNT_TARGET}", refusal)
+                self.assertIn("needs an expert-parallel mesh", refusal)
+
+    def test_the_stacked_arm_under_spmd_types_is_refused(self) -> None:
+        arm = configured(
+            scenario_by_name("stacked").arm(STACKED_ARM),
+            extra_flags=("--parallelism.spmd-backend", "spmd_types"),
+        )
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn(f"{STACKED_ARM}: the override import {HOST_COUNT_TARGET}", refusal)
+        self.assertIn("no SPMD type rule", refusal)
+
+    def test_the_stacked_arm_without_packed_offsets_is_refused(self) -> None:
+        (arm,) = apply_overrides(
+            (scenario_by_name("stacked").arm(STACKED_ARM),),
+            _overrides(f"{STACKED_ARM}.packed_offsets=off"),
+        )
+        (refusal,) = engine_for(arm).check(run_spec(ac_mode="none", parallelism=EP2_SPEC), arm)
+        self.assertIn(f"{STACKED_ARM}: the override import {FA3_TARGET}", refusal)
+        self.assertIn("packed_offsets is off", refusal)
+
+    def test_every_arm_command_builds_at_ac_none(self) -> None:
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for arm in scenario_by_name("stacked").arms:
+            argv = command(run, arm, Path("/out") / arm.name)
+            self.assertTrue(argv, arm.name)
+
+    def test_the_stacked_arm_sends_its_imports_and_the_rows_of_one_microbatch(self) -> None:
+        scenario = scenario_by_name("stacked")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC, local_batch_size=8)
+        argv = command(run, scenario.arm(STACKED_ARM), Path("/out"))
+        sent = [
+            argv[index + 1] for index, token in enumerate(argv) if token == "--override.imports"
+        ]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            tuple(parse_cli_imports(sent)), (FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET)
+        )
+        self.assertEqual(argv[argv.index("--dataloader.offset-rows") + 1], "8")
+
+    def test_the_stacked_arm_replaces_its_count_of_nodes(self) -> None:
+        """A subprocess counts the stacked arm, so TE does not patch this process."""
+        counts = _count_in_subprocess(self, "stacked", [STACKED_ARM])
+        self.assertEqual(sorted(counts), [STACKED_ARM])
+        sizes = counts[STACKED_ARM]
+        self.assertEqual(sorted(sizes), sorted(OVERRIDE_COUNT_SIZES))
+        for size, targets in sizes.items():
+            self.assertEqual(
+                sorted(targets), sorted((FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET))
+            )
+            for target, count in targets.items():
+                with self.subTest(size=size, target=target):
+                    self.assertEqual(count, PIPER_SHAPES[size].n_layers)
+            self.assertEqual(sum(targets.values()), 3 * PIPER_SHAPES[size].n_layers)
 
 
 class CompilerEnvironmentTests(unittest.TestCase):

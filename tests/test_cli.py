@@ -779,12 +779,18 @@ class CheckEveryScenarioFirstTests(unittest.TestCase):
         execute.assert_not_called()
 
     def test_a_refused_later_scenario_stops_the_earlier_one(self) -> None:
-        result, execute = self._invoke(
-            "0", "--model-size", "1b", "--scenario", "engines", "--scenario", "experts"
-        )
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("scenario 'experts'", result.output)
-        execute.assert_not_called()
+        for later, arm in (
+            ("experts", "titan_compiled_te_per_expert"),
+            ("stacked", "titan_compiled_fa3_te_per_expert"),
+        ):
+            with self.subTest(scenario=later):
+                result, execute = self._invoke(
+                    "0", "--model-size", "1b", "--scenario", "engines", "--scenario", later
+                )
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn(f"scenario '{later}': {arm}", result.output)
+                self.assertIn("needs an expert-parallel mesh", result.output)
+                execute.assert_not_called()
 
     def test_named_scenarios_that_pass_their_checks_run(self) -> None:
         result, execute = self._invoke(
