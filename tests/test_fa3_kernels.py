@@ -30,7 +30,7 @@ SKIP_REASON = _fa3_status()
 FA3_FORWARD = "FlashAttnFwdSm90"
 FA3_BACKWARD = "FlashAttnBwdSm90"
 CUDNN = "cudnn"
-"""A substring of every cuDNN kernel name, the SDPA kernels included."""
+"""A substring of the cuDNN SDPA kernel names, compared in lower case."""
 
 ROWS = [[700, 1300, 48, 2048], [4096]]
 OTHER_ROWS = [[17, 4000, 79], [1, 1, 4094]]
@@ -53,16 +53,15 @@ def _kernels(step) -> list[str]:
 
 @unittest.skipIf(SKIP_REASON is not None, SKIP_REASON or "")
 class FA3KernelTests(unittest.TestCase):
-    """One attention module of a model with the override, forward and backward."""
+    """One block of a model with the override, forward and backward."""
 
     @classmethod
     def setUpClass(cls) -> None:
         model = build_titan_model(shape=GQA_PROBE, overrides=[FA3_OVERRIDE], overrides_per_block=1)
-        cls.norm = model.layers["0"].attention_norm
-        cls.attention = model.layers["0"].attention
+        cls.block = model.layers["0"]
 
     def _step(self, module, rows: list[list[int]]):
-        """A step of ``module`` on ``rows``, which returns nothing so that the profiler sees the backward."""
+        """A closure that runs one forward and backward of ``module`` on ``rows``."""
         cpu_positions = positions_from_docs(rows)
         positions = cpu_positions.cuda()
         offsets = microbatch_offsets(cpu_positions, len(rows)).cuda()
@@ -72,28 +71,28 @@ class FA3KernelTests(unittest.TestCase):
         ).bfloat16()
 
         def step() -> None:
-            self.attention.zero_grad(set_to_none=True)
-            module(self.norm(x), offsets, positions).float().square().mean().backward()
+            self.block.zero_grad(set_to_none=True)
+            module(x, offsets, positions).float().square().mean().backward()
 
         return step
 
     def _assert_fa3(self, kernels: list[str]) -> None:
         self.assertTrue(any(FA3_FORWARD in name for name in kernels), kernels)
         self.assertTrue(any(FA3_BACKWARD in name for name in kernels), kernels)
-        self.assertEqual([name for name in kernels if CUDNN in name], [])
+        self.assertEqual([name for name in kernels if CUDNN in name.lower()], [])
 
     def test_eager_runs_fa3(self) -> None:
-        step = self._step(self.attention, ROWS)
+        step = self._step(self.block, ROWS)
         step()
         self._assert_fa3(_kernels(step))
 
     def test_compiled_with_a_dynamic_offsets_length_runs_fa3(self) -> None:
-        """The import of the override marks the offsets length dynamic, as in the arm."""
+        """The block compiles as the fork's ``apply_compile`` compiles it, and the import of the override marks the offsets length dynamic."""
         torch._dynamo.reset()
-        compiled = torch.compile(self.attention, fullgraph=True)
-        with torch._dynamo.config.patch(error_on_recompile=True):
+        compiled = torch.compile(self.block, fullgraph=True)
+        with torch._dynamo.config.patch(capture_scalar_outputs=True, error_on_recompile=True):
             for rows in (ROWS, OTHER_ROWS):
-                with self.subTest(offsets=len(rows)):
+                with self.subTest(documents=sum(len(row) for row in rows)):
                     step = self._step(compiled, rows)
                     step()
                     self._assert_fa3(_kernels(step))
