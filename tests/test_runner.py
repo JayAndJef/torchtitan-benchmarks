@@ -1129,23 +1129,110 @@ class EnginesScenarioTests(unittest.TestCase):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
 
 
-FA3_TARGET = (
-    "benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention"
-)
-TE_GEMM_TARGET = (
-    "benchmarks.models.piper_qwen3.components.moe.te_grouped_experts.te_grouped_experts"
-)
+class AttentionScenarioTests(unittest.TestCase):
+    def test_scenario_registration(self) -> None:
+        scenario = scenario_by_name("attention")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            [
+                "titan_compiled",
+                "titan_compiled_fa3",
+                "megatron_stock",
+            ],
+        )
+        self.assertIs(scenario.data, C4_REPLAY_DATA)
+        self.assertEqual(scenario.supported_ac_modes, ("none",))
+        self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
+        self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
+
+    def test_each_kernel_arm_overrides_one_attention_per_block(self) -> None:
+        scenario = scenario_by_name("attention")
+        prefix = "benchmarks.models.piper_qwen3.components.attention"
+        for name, target, marker in (
+            (
+                "titan_compiled_fa3",
+                f"{prefix}.fa3_override.packed_fa3_attention",
+                "FlashAttnFwdSm90",
+            ),
+        ):
+            with self.subTest(arm=name):
+                config = scenario.arm(name).config
+                self.assertEqual(engine_for(scenario.arm(name)).name, "torchtitan")
+                self.assertEqual(config.compile, CompileMode.TORCH)
+                self.assertEqual(config.override_imports, (target,))
+                self.assertEqual(config.overrides_per_block, 1)
+                self.assertEqual(config.trace_kernel_markers, (marker,))
+
+    def test_every_arm_command_builds_at_ac_none(self) -> None:
+        for arm in scenario_by_name("attention").arms:
+            argv = command(run_spec(ac_mode="none"), arm, Path("/out") / arm.name)
+            self.assertTrue(argv, arm.name)
+
+    def test_the_fa3_arm_sends_the_rows_of_one_pipeline_microbatch(self) -> None:
+        scenario = scenario_by_name("attention")
+        pp2 = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
+        for spec, rows in ((TRIVIAL_SPEC, "8"), (pp2, "2")):
+            run = run_spec(ac_mode="none", parallelism=spec, local_batch_size=8)
+            with self.subTest(pp=spec.pp):
+                argv = command(run, scenario.arm("titan_compiled_fa3"), Path("/out"))
+                self.assertEqual(argv[argv.index("--dataloader.offset-rows") + 1], rows)
+                self.assertNotIn(
+                    "--dataloader.offset-rows",
+                    command(run, scenario.arm("titan_compiled"), Path("/out")),
+                )
+
+    def test_packed_offsets_without_a_packed_attention_override_is_refused(self) -> None:
+        for imports in ((), ("benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope",)):
+            with self.subTest(imports=imports):
+                arm = configured(
+                    ENGINES.arm("titan_compiled"),
+                    packed_offsets=True,
+                    override_imports=imports,
+                )
+                (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
+                self.assertIn("titan_compiled: packed_offsets is on", refusal)
+                self.assertIn("benchmarks.models.piper_qwen3.components.attention.", refusal)
+
+    def test_a_packed_attention_override_without_packed_offsets_is_refused(self) -> None:
+        scenario = scenario_by_name("attention")
+        (arm,) = apply_overrides(
+            (scenario.arm("titan_compiled_fa3"),),
+            _overrides("titan_compiled_fa3.packed_offsets=off"),
+        )
+        (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
+        self.assertIn("titan_compiled_fa3: the override import", refusal)
+        self.assertIn("fa3_override.packed_fa3_attention", refusal)
+        self.assertIn("packed_offsets is off", refusal)
+        self.assertEqual(
+            engine_for(arm).check(run_spec(ac_mode="none"), scenario.arm("titan_compiled_fa3")),
+            [],
+        )
+
+
+MOE_PACKAGE = "benchmarks.models.piper_qwen3.components.moe"
+
+TE_GEMM_TARGET = f"{MOE_PACKAGE}.te_grouped_experts.te_grouped_experts"
+
 TE_GEMM_MARKERS = ("setup_grouped_gemm_kernel", "_ptrGroup_")
 """The TE setup kernel and the cuBLASLt grouped kernel, which each TE grouped GEMM launches."""
 
+HOST_COUNT_TARGET = f"{MOE_PACKAGE}.host_count_dispatcher.host_count_dispatcher"
+
+PER_EXPERT_TARGET = f"{MOE_PACKAGE}.te_per_expert_experts.te_per_expert_experts"
+
+PER_EXPERT_MARKERS = ("torchtitan_benchmarks::te_per_expert_mm",)
+"""The custom op of the per-expert GEMMs, which the profiler records at every shape."""
+
+EP2_SPEC = ParallelismSpec(dp=2, ep=2, zero=1)
+"""A mesh at which every arm of the experts scenario can run."""
 
 OVERRIDE_COUNT_SIZES = ("1b", "30b-a3b")
 """The model sizes at which each override arm is counted."""
 
 
 def _override_counts(names: list[str]) -> dict[str, dict[str, dict[str, int]]]:
-    """Per arm, size and override target: the number of nodes it replaced."""
-    scenario = scenario_by_name("overrides")
+    """Per experts arm, size and override target: the number of nodes it replaced."""
+    scenario = scenario_by_name("experts")
     counts: dict[str, dict[str, dict[str, int]]] = {}
     for name in names:
         config = scenario.arm(name).config
@@ -1169,21 +1256,20 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from tests.test_runner import _override_counts
 
-print(json.dumps(_override_counts(["titan_compiled_te_gemm", "titan_compiled_fa3_te_gemm"])))
+print(json.dumps(_override_counts(["titan_compiled_te_gemm", "titan_compiled_te_per_expert"])))
 """
 """Counts the TE arms in a fresh process and prints the counts as JSON."""
 
 
-class OverridesScenarioTests(unittest.TestCase):
+class ExpertsScenarioTests(unittest.TestCase):
     def test_scenario_registration(self) -> None:
-        scenario = scenario_by_name("overrides")
+        scenario = scenario_by_name("experts")
         self.assertEqual(
             [arm.name for arm in scenario.arms],
             [
                 "titan_compiled",
-                "titan_compiled_fa3",
                 "titan_compiled_te_gemm",
-                "titan_compiled_fa3_te_gemm",
+                "titan_compiled_te_per_expert",
                 "megatron_stock",
             ],
         )
@@ -1191,19 +1277,17 @@ class OverridesScenarioTests(unittest.TestCase):
         self.assertEqual(scenario.supported_ac_modes, ("none",))
         self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
         self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
-        self.assertEqual(set(SCENARIOS), {"engines", "overrides"})
+        self.assertEqual(set(SCENARIOS), {"engines", "attention", "experts"})
 
     def test_each_override_arm_declares_its_imports_count_and_markers(self) -> None:
-        scenario = scenario_by_name("overrides")
-        for name, targets, per_block, markers, packed in (
-            ("titan_compiled_fa3", (FA3_TARGET,), 1, ("FlashAttnFwdSm90",), True),
-            ("titan_compiled_te_gemm", (TE_GEMM_TARGET,), 1, TE_GEMM_MARKERS, False),
+        scenario = scenario_by_name("experts")
+        for name, targets, per_block, markers in (
+            ("titan_compiled_te_gemm", (TE_GEMM_TARGET,), 1, TE_GEMM_MARKERS),
             (
-                "titan_compiled_fa3_te_gemm",
-                (FA3_TARGET, TE_GEMM_TARGET),
+                "titan_compiled_te_per_expert",
+                (HOST_COUNT_TARGET, PER_EXPERT_TARGET),
                 2,
-                ("FlashAttnFwdSm90", *TE_GEMM_MARKERS),
-                True,
+                PER_EXPERT_MARKERS,
             ),
         ):
             with self.subTest(arm=name):
@@ -1214,25 +1298,33 @@ class OverridesScenarioTests(unittest.TestCase):
                 self.assertEqual(config.override_imports, targets)
                 self.assertEqual(config.overrides_per_block, per_block)
                 self.assertEqual(config.trace_kernel_markers, markers)
-                self.assertIs(config.packed_offsets, packed)
+                self.assertIs(config.packed_offsets, False)
                 self.assertEqual(config.extra_flags, ())
-                self.assertEqual(engine_for(arm).check(run_spec(ac_mode="none"), arm), [])
+                run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+                self.assertEqual(engine_for(arm).check(run, arm), [])
+
+    def test_no_marker_of_one_expert_gemm_path_names_another(self) -> None:
+        for marker in PER_EXPERT_MARKERS:
+            for other in TE_GEMM_MARKERS:
+                self.assertNotIn(marker, other)
+                self.assertNotIn(other, marker)
 
     def test_every_arm_command_builds_at_ac_none(self) -> None:
-        for arm in scenario_by_name("overrides").arms:
-            argv = command(run_spec(ac_mode="none"), arm, Path("/out") / arm.name)
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for arm in scenario_by_name("experts").arms:
+            argv = command(run, arm, Path("/out") / arm.name)
             self.assertTrue(argv, arm.name)
 
     def test_each_override_arm_sends_its_imports(self) -> None:
-        scenario = scenario_by_name("overrides")
+        scenario = scenario_by_name("experts")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
         for name, targets in (
             ("titan_compiled", ()),
-            ("titan_compiled_fa3", (FA3_TARGET,)),
             ("titan_compiled_te_gemm", (TE_GEMM_TARGET,)),
-            ("titan_compiled_fa3_te_gemm", (FA3_TARGET, TE_GEMM_TARGET)),
+            ("titan_compiled_te_per_expert", (HOST_COUNT_TARGET, PER_EXPERT_TARGET)),
         ):
             with self.subTest(arm=name):
-                argv = command(run_spec(ac_mode="none"), scenario.arm(name), Path("/out"))
+                argv = command(run, scenario.arm(name), Path("/out"))
                 sent = [
                     argv[index + 1]
                     for index, token in enumerate(argv)
@@ -1240,10 +1332,7 @@ class OverridesScenarioTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(sent), 1 if targets else 0)
                 self.assertEqual(tuple(parse_cli_imports(sent)), targets)
-
-    def test_the_fa3_arm_replaces_its_count_of_nodes(self) -> None:
-        counts = _override_counts(["titan_compiled_fa3"])
-        self._assert_one_node_per_layer(counts)
+                self.assertNotIn("--dataloader.offset-rows", argv)
 
     def test_the_te_arms_replace_their_count_of_nodes(self) -> None:
         """A subprocess counts the TE arms, so TE does not patch this process."""
@@ -1259,70 +1348,80 @@ class OverridesScenarioTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         counts = json.loads(completed.stdout.splitlines()[-1])
         self.assertEqual(
-            sorted(counts), ["titan_compiled_fa3_te_gemm", "titan_compiled_te_gemm"]
+            sorted(counts), ["titan_compiled_te_gemm", "titan_compiled_te_per_expert"]
         )
-        self._assert_one_node_per_layer(counts)
-
-    def _assert_one_node_per_layer(self, counts: dict) -> None:
         for name, sizes in counts.items():
             self.assertEqual(sorted(sizes), sorted(OVERRIDE_COUNT_SIZES))
+            config = scenario_by_name("experts").arm(name).config
             for size, targets in sizes.items():
-                config = scenario_by_name("overrides").arm(name).config
                 self.assertEqual(sorted(targets), sorted(config.override_imports))
                 for target, count in targets.items():
                     with self.subTest(arm=name, size=size, target=target):
                         self.assertEqual(count, PIPER_SHAPES[size].n_layers)
 
-    def test_the_fa3_arms_send_the_rows_of_one_pipeline_microbatch(self) -> None:
-        scenario = scenario_by_name("overrides")
-        pp2 = ParallelismSpec(pp=2, pp_schedule="1F1B", pp_microbatch_size=2)
-        for spec, rows in ((TRIVIAL_SPEC, "8"), (pp2, "2")):
-            run = run_spec(ac_mode="none", parallelism=spec, local_batch_size=8)
-            for name in ("titan_compiled_fa3", "titan_compiled_fa3_te_gemm"):
-                with self.subTest(pp=spec.pp, arm=name):
-                    argv = command(run, scenario.arm(name), Path("/out"))
-                    self.assertEqual(
-                        argv[argv.index("--dataloader.offset-rows") + 1], rows
-                    )
-            for name in ("titan_compiled", "titan_compiled_te_gemm"):
-                with self.subTest(pp=spec.pp, arm=name):
-                    self.assertNotIn(
-                        "--dataloader.offset-rows",
-                        command(run, scenario.arm(name), Path("/out")),
-                    )
+    def test_packed_offsets_on_a_te_arm_is_refused(self) -> None:
+        scenario = scenario_by_name("experts")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for name in ("titan_compiled_te_gemm", "titan_compiled_te_per_expert"):
+            with self.subTest(arm=name):
+                arm = configured(scenario.arm(name), packed_offsets=True)
+                (refusal,) = engine_for(arm).check(run, arm)
+                self.assertIn(f"{name}: packed_offsets is on", refusal)
 
-    def test_packed_offsets_without_a_packed_attention_override_is_refused(self) -> None:
-        for imports in (
-            (),
-            ("benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope",),
-            (TE_GEMM_TARGET,),
-        ):
+    def test_the_per_expert_experts_without_the_host_count_dispatcher_is_refused(self) -> None:
+        arm = configured(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
+            overrides_per_block=1,
+            override_imports=(PER_EXPERT_TARGET,),
+        )
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn(f"titan_compiled_te_per_expert: the override import {PER_EXPERT_TARGET}", refusal)
+        self.assertIn("add the host count dispatcher", refusal)
+
+    def test_the_host_count_dispatcher_without_the_per_expert_experts_is_refused(self) -> None:
+        for imports in ((HOST_COUNT_TARGET,), (HOST_COUNT_TARGET, TE_GEMM_TARGET)):
             with self.subTest(imports=imports):
                 arm = configured(
-                    ENGINES.arm("titan_compiled"),
-                    packed_offsets=True,
+                    scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
+                    overrides_per_block=len(imports),
                     override_imports=imports,
                 )
-                (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
-                self.assertIn("titan_compiled: packed_offsets is on", refusal)
-                self.assertIn("benchmarks.models.piper_qwen3.components.attention.", refusal)
-
-    def test_a_packed_attention_override_without_packed_offsets_is_refused(self) -> None:
-        scenario = scenario_by_name("overrides")
-        for name in ("titan_compiled_fa3", "titan_compiled_fa3_te_gemm"):
-            with self.subTest(arm=name):
-                (arm,) = apply_overrides(
-                    (scenario.arm(name),),
-                    _overrides(f"{name}.packed_offsets=off"),
+                run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+                (refusal,) = engine_for(arm).check(run, arm)
+                self.assertIn(
+                    f"titan_compiled_te_per_expert: the override import {HOST_COUNT_TARGET}",
+                    refusal,
                 )
-                (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
-                self.assertIn(f"{name}: the override import", refusal)
-                self.assertIn("fa3_override.packed_fa3_attention", refusal)
-                self.assertIn("packed_offsets is off", refusal)
+                self.assertIn("add the per-expert experts", refusal)
 
-    def test_the_te_gemm_override_under_spmd_types_is_refused(self) -> None:
-        scenario = scenario_by_name("overrides")
-        for name in ("titan_compiled_te_gemm", "titan_compiled_fa3_te_gemm"):
+    def test_either_host_count_override_at_ep_1_is_refused(self) -> None:
+        arm = scenario_by_name("experts").arm("titan_compiled_te_per_expert")
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
+            for imports in (
+                (HOST_COUNT_TARGET, PER_EXPERT_TARGET),
+                (PER_EXPERT_TARGET,),
+                (HOST_COUNT_TARGET,),
+            ):
+                with self.subTest(dp=spec.dp, imports=imports):
+                    swapped = configured(arm, override_imports=imports)
+                    refusals = engine_for(swapped).check(
+                        run_spec(ac_mode="none", parallelism=spec), swapped
+                    )
+                    (refusal,) = [r for r in refusals if "ep 1" in r]
+                    self.assertIn(f"the override import {imports[0]}", refusal)
+                    self.assertIn("needs an expert-parallel mesh", refusal)
+        self.assertEqual(
+            engine_for(arm).check(run_spec(ac_mode="none", parallelism=EP2_SPEC), arm), []
+        )
+
+    def test_a_te_override_under_spmd_types_is_refused(self) -> None:
+        scenario = scenario_by_name("experts")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for name, target in (
+            ("titan_compiled_te_gemm", TE_GEMM_TARGET),
+            ("titan_compiled_te_per_expert", HOST_COUNT_TARGET),
+        ):
             for flags in (
                 ("--parallelism.spmd-backend", "spmd_types"),
                 ("--parallelism.spmd-backend=spmd_types",),
@@ -1335,15 +1434,17 @@ class OverridesScenarioTests(unittest.TestCase):
             ):
                 with self.subTest(arm=name, flags=flags):
                     arm = configured(scenario.arm(name), extra_flags=flags)
-                    (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
-                    self.assertIn(f"{name}: the override import {TE_GEMM_TARGET}", refusal)
+                    (refusal,) = engine_for(arm).check(run, arm)
+                    self.assertIn(f"{name}: the override import {target}", refusal)
                     self.assertIn("no SPMD type rule", refusal)
                     self.assertIn("--parallelism.spmd-backend spmd_types", refusal)
 
-    def test_the_te_gemm_override_under_another_backend_passes(self) -> None:
-        scenario = scenario_by_name("overrides")
+    def test_a_te_override_under_another_backend_passes(self) -> None:
+        scenario = scenario_by_name("experts")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
         for name, flags in (
             ("titan_compiled_te_gemm", ("--parallelism.spmd-backend", "full_dtensor")),
+            ("titan_compiled_te_per_expert", ("--parallelism.spmd-backend", "full_dtensor")),
             (
                 "titan_compiled_te_gemm",
                 (
@@ -1351,12 +1452,11 @@ class OverridesScenarioTests(unittest.TestCase):
                     "--parallelism.spmd-backend=default",
                 ),
             ),
-            ("titan_compiled_fa3", ("--parallelism.spmd-backend", "spmd_types")),
             ("titan_compiled", ("--parallelism.spmd-backend", "spmd_types")),
         ):
             with self.subTest(arm=name, flags=flags):
                 arm = configured(scenario.arm(name), extra_flags=flags)
-                self.assertEqual(engine_for(arm).check(run_spec(ac_mode="none"), arm), [])
+                self.assertEqual(engine_for(arm).check(run, arm), [])
 
 
 class CompilerEnvironmentTests(unittest.TestCase):

@@ -94,30 +94,14 @@ ENGINES = Scenario(
 
 ATTENTION_OVERRIDES = "benchmarks.models.piper_qwen3.components.attention"
 
-MOE_OVERRIDES = "benchmarks.models.piper_qwen3.components.moe"
-
-FA3_ATTENTION = f"{ATTENTION_OVERRIDES}.fa3_override.packed_fa3_attention"
-"""The override import of FA3 varlen attention, which reads the loader's offsets."""
-
-TE_GROUPED_EXPERTS = f"{MOE_OVERRIDES}.te_grouped_experts.te_grouped_experts"
-"""The override import of the routed-expert GEMMs on TE's cuBLASLt grouped GEMM."""
-
-FA3_MARKERS = ("FlashAttnFwdSm90",)
-"""The trace markers of FA3 varlen attention."""
-
-TE_GROUPED_GEMM_MARKERS = ("setup_grouped_gemm_kernel", "_ptrGroup_")
-"""The trace markers of TE's grouped GEMM: its setup kernel and the cuBLASLt grouped kernel."""
-
-OVERRIDES = Scenario(
-    name="overrides",
+ATTENTION = Scenario(
+    name="attention",
     description=(
-        "Compiled TorchTitan in a 2 x 2 grid of overrides, against stock "
-        "Megatron-LM. One axis is the attention kernel: FlexAttention or FA3 "
-        "varlen, which reads the exact document offsets of each microbatch "
-        "from the loader. The other axis is the expert GEMM library: torch's "
-        "_grouped_mm or TransformerEngine's cuBLASLt grouped GEMM. Each "
-        "single-axis arm moves one axis against titan_compiled, and the "
-        "stacked arm moves both. The Megatron arm carries the four "
+        "Compiled TorchTitan with two attention kernels, FlexAttention and FA3 "
+        "varlen, against stock Megatron-LM, which runs TransformerEngine's "
+        "cuDNN attention. The FA3 arm reads the exact document offsets of "
+        "each microbatch, which the loader computes on the CPU. The "
+        "Megatron arm carries the four "
         "differences of the engines scenario: fp32 master weights and an fp32 "
         "gradient reduction, unfused native cross entropy, "
         "--init-method-std 0.01 with no weight transfer, and no permutation "
@@ -136,11 +120,58 @@ OVERRIDES = Scenario(
             config=TorchTitanConfig(
                 compile=CompileMode.TORCH,
                 overrides_per_block=1,
-                override_imports=(FA3_ATTENTION,),
-                trace_kernel_markers=FA3_MARKERS,
+                override_imports=(
+                    f"{ATTENTION_OVERRIDES}.fa3_override.packed_fa3_attention",
+                ),
+                trace_kernel_markers=("FlashAttnFwdSm90",),
                 packed_offsets=True,
             ),
         ),
+        ENGINES.arm("megatron_stock"),
+    ),
+)
+"""The attention comparison: whether a fused varlen kernel closes the attention gap between the engines; it refuses ``--ac sac``."""
+
+
+MOE_OVERRIDES = "benchmarks.models.piper_qwen3.components.moe"
+
+TE_GROUPED_EXPERTS = f"{MOE_OVERRIDES}.te_grouped_experts.te_grouped_experts"
+"""The override import of the routed-expert GEMMs on TE's cuBLASLt grouped GEMM."""
+
+TE_GROUPED_GEMM_MARKERS = ("setup_grouped_gemm_kernel", "_ptrGroup_")
+"""The trace markers of TE's grouped GEMM: its setup kernel and the cuBLASLt grouped kernel."""
+
+HOST_COUNT_DISPATCHER = f"{MOE_OVERRIDES}.host_count_dispatcher.host_count_dispatcher"
+"""The override import of the all-to-all dispatcher that returns the rows of each local expert on the host."""
+
+TE_PER_EXPERT_EXPERTS = f"{MOE_OVERRIDES}.te_per_expert_experts.te_per_expert_experts"
+"""The override import of the routed-expert GEMMs as one TE cuBLAS GEMM per expert; it needs HOST_COUNT_DISPATCHER."""
+
+TE_PER_EXPERT_MARKERS = ("torchtitan_benchmarks::te_per_expert_mm",)
+"""The trace marker of the per-expert GEMMs: the custom op, because cuBLAS picks its kernel from the rows of each expert."""
+
+EXPERTS = Scenario(
+    name="experts",
+    description=(
+        "Compiled TorchTitan with three expert GEMM paths, against stock "
+        "Megatron-LM: torch's _grouped_mm, TransformerEngine's cuBLASLt "
+        "grouped GEMM with the split sizes on the device, and one "
+        "TransformerEngine cuBLAS GEMM per expert with the split sizes on "
+        "the host, as Megatron's GroupedLinear runs them. Each TE arm moves "
+        "the expert GEMM path alone against titan_compiled. The TorchTitan "
+        "arms share their init, seed and data, so their routing matches. "
+        "The per-expert arm needs an expert-parallel degree above 1. The "
+        "Megatron arm carries the four differences of the engines scenario: "
+        "fp32 master weights and an fp32 gradient reduction, unfused native "
+        "cross entropy, --init-method-std 0.01 with no weight transfer, and "
+        "no permutation fusion. State all four beside every cross-engine "
+        "number."
+    ),
+    data=C4_REPLAY_DATA,
+    window=ProfileWindow(),
+    supported_ac_modes=("none",),
+    arms=(
+        ENGINES.arm("titan_compiled"),
         Arm(
             name="titan_compiled_te_gemm",
             description=(
@@ -155,26 +186,26 @@ OVERRIDES = Scenario(
             ),
         ),
         Arm(
-            name="titan_compiled_fa3_te_gemm",
+            name="titan_compiled_te_per_expert",
             description=(
-                "titan_compiled with FA3 varlen attention on packed documents "
-                "and the expert GEMMs on TE's cuBLASLt grouped GEMM"
+                "titan_compiled with the expert GEMMs as one TE cuBLAS GEMM "
+                "per expert, which reads the rows of each expert from the "
+                "dispatcher's one host copy"
             ),
             config=TorchTitanConfig(
                 compile=CompileMode.TORCH,
                 overrides_per_block=2,
-                override_imports=(FA3_ATTENTION, TE_GROUPED_EXPERTS),
-                trace_kernel_markers=FA3_MARKERS + TE_GROUPED_GEMM_MARKERS,
-                packed_offsets=True,
+                override_imports=(HOST_COUNT_DISPATCHER, TE_PER_EXPERT_EXPERTS),
+                trace_kernel_markers=TE_PER_EXPERT_MARKERS,
             ),
         ),
         ENGINES.arm("megatron_stock"),
     ),
 )
-"""The override comparison: what each attention kernel and each expert GEMM library costs, alone and stacked; it refuses ``--ac sac``."""
+"""The expert GEMM comparison: what each expert GEMM path costs, at the same routing; it refuses ``--ac sac``."""
 
 
-SCENARIOS = {"engines": ENGINES, "overrides": OVERRIDES}
+SCENARIOS = {"engines": ENGINES, "attention": ATTENTION, "experts": EXPERTS}
 """Every end-to-end scenario, by name."""
 
 

@@ -41,11 +41,51 @@ ZERO2_AT_PP1 = (
 PACKED_ATTENTION_PACKAGE = "benchmarks.models.piper_qwen3.components.attention."
 """The prefix of each override import whose attention reads the loader's offsets."""
 
-NO_SPMD_TYPES_MODULE = "benchmarks.models.piper_qwen3.components.moe.te_grouped_experts."
-"""The prefix of each override import whose custom op has no SPMD type rule."""
+MOE_PACKAGE = "benchmarks.models.piper_qwen3.components.moe."
+
+HOST_COUNT_DISPATCHER_MODULE = f"{MOE_PACKAGE}host_count_dispatcher."
+"""The prefix of the override import whose dispatcher returns the rows of each local expert on the host."""
+
+PER_EXPERT_MODULE = f"{MOE_PACKAGE}te_per_expert_experts."
+"""The prefix of the override import whose experts read the rows of each expert from the host."""
+
+NO_SPMD_TYPES_MODULES = (
+    f"{MOE_PACKAGE}te_grouped_experts.",
+    HOST_COUNT_DISPATCHER_MODULE,
+    PER_EXPERT_MODULE,
+)
+"""The prefixes of the override imports whose custom ops have no SPMD type rule."""
 
 SPMD_BACKEND_FLAG = "--parallelism.spmd-backend"
 """The TorchTitan flag that selects the SPMD backend."""
+
+
+def _host_count_refusals(run: RunSpec, arm: Arm) -> list[str]:
+    """Why the host count dispatcher and the per-expert experts of ``arm`` cannot run: each needs the other, and ep > 1."""
+    imports = arm.config.override_imports
+    dispatchers = [t for t in imports if t.startswith(HOST_COUNT_DISPATCHER_MODULE)]
+    experts = [t for t in imports if t.startswith(PER_EXPERT_MODULE)]
+    refusals = []
+    if experts and not dispatchers:
+        refusals.append(
+            f"{arm.name}: the override import {experts[0]} reads the rows of "
+            f"each expert from the host, and no override import starts with "
+            f"{HOST_COUNT_DISPATCHER_MODULE}; add the host count dispatcher"
+        )
+    if dispatchers and not experts:
+        refusals.append(
+            f"{arm.name}: the override import {dispatchers[0]} gives the rows "
+            "of each expert on the host, and no override import starts with "
+            f"{PER_EXPERT_MODULE}, so the stock experts get host counts; add "
+            "the per-expert experts"
+        )
+    if (dispatchers or experts) and run.parallelism.ep == 1:
+        refusals.append(
+            f"{arm.name}: the override import {(dispatchers or experts)[0]} "
+            "needs an expert-parallel mesh, and the run asks for ep 1; pass "
+            "--ep 2 or more, or leave the arm out"
+        )
+    return refusals
 
 
 class TorchTitanEngine(Engine):
@@ -90,10 +130,11 @@ class TorchTitanEngine(Engine):
                 f"{arm.name}: the override import {target} reads the loader's "
                 "offsets, and packed_offsets is off; turn packed_offsets on"
             )
+        refusals.extend(_host_count_refusals(run, arm))
         untyped = [
             target
             for target in arm.config.override_imports
-            if target.startswith(NO_SPMD_TYPES_MODULE)
+            if target.startswith(NO_SPMD_TYPES_MODULES)
         ]
         backend = flag_value(arm.config.extra_flags, SPMD_BACKEND_FLAG)
         if untyped and backend == "spmd_types":

@@ -30,7 +30,8 @@ from tests.engine_helpers import configured, run_spec
 
 PARALLEL_SPEC = ParallelismSpec(dp=2, pp=2, ep=2, zero=1, pp_schedule="1F1B")
 ENGINES = scenario_by_name("engines")
-OVERRIDES = scenario_by_name("overrides")
+ATTENTION = scenario_by_name("attention")
+EXPERTS = scenario_by_name("experts")
 OVERRIDE_ARM = Arm(
     name="override_arm",
     description="an arm with an override import",
@@ -112,12 +113,9 @@ def _megatron_argvs() -> list[list[str]]:
 def _titan_argvs() -> list[list[str]]:
     argvs = []
     override_arms = (
-        OVERRIDES.arm(name)
-        for name in (
-            "titan_compiled_fa3",
-            "titan_compiled_te_gemm",
-            "titan_compiled_fa3_te_gemm",
-        )
+        ATTENTION.arm("titan_compiled_fa3"),
+        EXPERTS.arm("titan_compiled_te_gemm"),
+        EXPERTS.arm("titan_compiled_te_per_expert"),
     )
     for arm in (*ENGINES.arms, *override_arms, OVERRIDE_ARM):
         if engine_for(arm).name != "torchtitan":
