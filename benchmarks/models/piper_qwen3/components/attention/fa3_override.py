@@ -7,7 +7,7 @@ Activation:
 from dataclasses import dataclass
 
 import torch
-from torch.nn.attention import current_flash_attention_impl
+from torch.nn.attention import SDPBackend, current_flash_attention_impl, sdpa_kernel
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.attention import GQAttention, VarlenAttention
@@ -45,11 +45,22 @@ class PackedFA3Attention(VarlenAttention):
 
     def __init__(self, config: "PackedFA3Attention.Config"):
         super().__init__(config)
-        if current_flash_attention_impl() != "FA3":
-            raise RuntimeError(
-                "PackedFA3Attention needs FA3, but the active flash attention "
-                f"is {current_flash_attention_impl()!r}"
-            )
+        _require_fa3()
+
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        """The parent's forward with flash as the only SDPA backend, because ``varlen_attn`` prefers an eligible cuDNN backend."""
+        _require_fa3()
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            return super().forward(*args, **kwargs)
+
+
+def _require_fa3() -> None:
+    """Raise unless FA3 is the active flash attention, which the flash backend of ``varlen_attn`` calls."""
+    if current_flash_attention_impl() != "FA3":
+        raise RuntimeError(
+            "PackedFA3Attention needs FA3, but the active flash attention "
+            f"is {current_flash_attention_impl()!r}"
+        )
 
 
 @override(
