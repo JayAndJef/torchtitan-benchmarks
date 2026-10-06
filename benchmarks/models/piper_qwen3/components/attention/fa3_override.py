@@ -4,13 +4,14 @@ Activation:
     --override.imports benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from torch.nn.attention import SDPBackend, current_flash_attention_impl, sdpa_kernel
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import GQAttention, VarlenAttention
+from torchtitan.models.common.attention import GQAttention, VarlenAttention, VarlenMetadata
 from torchtitan.protocols.module import Module
 
 from benchmarks.models.piper_qwen3.components.attention.packed import PackedGQAttention
@@ -47,11 +48,29 @@ class PackedFA3Attention(VarlenAttention):
         super().__init__(config)
         _require_fa3()
 
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        """The parent's forward with flash as the only SDPA backend, because ``varlen_attn`` prefers an eligible cuDNN backend."""
+    def forward(
+        self,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
+        *,
+        attention_masks: VarlenMetadata,
+        scale: float | None = None,
+        out_transform: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """The parent's forward with flash as the only SDPA backend, because ``varlen_attn`` prefers an eligible cuDNN backend; the signature is the parent's, because the fork's input redistribution reads the positional names from it."""
         _require_fa3()
         with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            return super().forward(*args, **kwargs)
+            return super().forward(
+                q_BLNH,
+                k_BLNH,
+                v_BLNH,
+                attention_masks=attention_masks,
+                scale=scale,
+                out_transform=out_transform,
+                **kwargs,
+            )
 
 
 def _require_fa3() -> None:

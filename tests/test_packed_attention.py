@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 from torchtitan.config import derive
+from torchtitan.protocols.module import Module
 
 from benchmarks.models.piper_qwen3.components.attention.packed import (
     PackedGQAttention,
@@ -85,6 +86,12 @@ class MicrobatchOffsetsTests(unittest.TestCase):
             microbatch_offsets(positions_from_docs([[8], [8], [8]]), 2)
 
 
+def _positional_names(forward) -> list[str]:
+    """The positional names that ``Module._cache_pos_arg_names`` reads from a class with this ``forward``."""
+    probe = type("Probe", (), {"forward": forward, "_pos_arg_list": None})()
+    return Module._cache_pos_arg_names(probe)
+
+
 class OverrideTests(unittest.TestCase):
     def test_the_override_replaces_one_attention_per_block(self) -> None:
         sentinel = object()
@@ -146,6 +153,15 @@ class OverrideTests(unittest.TestCase):
         with mock.patch.object(torch.compiler, "config", SimpleNamespace()):
             with self.assertRaisesRegex(RuntimeError, "no torch.compiler.config.dynamic_sources"):
                 module.mark_offsets_length_dynamic()
+
+    def test_the_fa3_forward_names_the_positional_inputs_of_the_parent(self) -> None:
+        """The fork's input redistribution maps positional inputs by these names, so a ``*args`` forward loses them above one data-parallel rank."""
+        from torchtitan.models.common.attention import VarlenAttention
+
+        module = importlib.import_module(FA3_OVERRIDE.rpartition(".")[0])
+        names = _positional_names(module.PackedFA3Attention.forward)
+        self.assertEqual(names, ["q_BLNH", "k_BLNH", "v_BLNH"])
+        self.assertEqual(names, _positional_names(VarlenAttention.forward))
 
     @unittest.skipIf(torch.cuda.is_available(), "a GPU may have FA3")
     def test_the_fa3_override_refuses_to_build_without_fa3(self) -> None:
