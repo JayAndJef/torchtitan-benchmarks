@@ -4,6 +4,7 @@ import importlib.util
 import os
 import socket
 import sys
+import tempfile
 import unittest
 import warnings
 from pathlib import Path
@@ -18,6 +19,9 @@ from benchmarks.models.piper_qwen3.shape import PiperShape
 MOE = "benchmarks.models.piper_qwen3.components.moe"
 EXPERTS_OVERRIDE = f"{MOE}.te_per_expert_experts.te_per_expert_experts"
 DISPATCHER_OVERRIDE = f"{MOE}.host_count_dispatcher.host_count_dispatcher"
+
+TRACE_MARKER = "torchtitan_benchmarks::te_per_expert_mm"
+"""The trace marker of the experts scenario's per-expert arm."""
 
 TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)
 
@@ -103,6 +107,14 @@ def _profiled(module, x, counts, dy):
     events = prof.events()
     kernels = [e.name for e in events if e.device_type == torch.autograd.DeviceType.CUDA]
     return result, events, kernels
+
+
+def _trace_text(prof) -> str:
+    """The Chrome trace of ``prof`` as text, which the e2e trace marker rule searches."""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "trace.json"
+        prof.export_chrome_trace(str(path))
+        return path.read_text()
 
 
 def _fp64(module, x, splits: list[int], dy):
@@ -276,6 +288,9 @@ class TEPerExpertExpertsTests(unittest.TestCase):
         self.assertEqual([n for n in inside if n in SYNC_EVENTS], [])
         self.assertEqual([n for n in kernels if "DtoH" in n], [])
         self._check_per_expert_path(kernels, [0, 37, 129, 1])
+        names = [e.name for e in events if e.device_type == torch.autograd.DeviceType.CPU]
+        self.assertEqual(names.count(TRACE_MARKER), 3)
+        self.assertEqual(names.count(f"{TRACE_MARKER}_backward"), 3)
 
     def test_compiled_with_an_unbacked_row_count_and_host_counts(self) -> None:
         """One fullgraph compile serves every split set: the row count is unbacked and the counts live on the host."""
@@ -297,8 +312,17 @@ class TEPerExpertExpertsTests(unittest.TestCase):
                         [x, torch.zeros(padded_rows - x.shape[0], D, device="cuda").bfloat16()]
                     ).requires_grad_()
                     self.te.zero_grad(set_to_none=True)
-                    out = compiled(padded, host, torch.tensor(x.shape[0]))
-                    out.backward(dy)
+                    with torch.profiler.profile(
+                        activities=[
+                            torch.profiler.ProfilerActivity.CPU,
+                            torch.profiler.ProfilerActivity.CUDA,
+                        ]
+                    ) as prof:
+                        out = compiled(padded, host, torch.tensor(x.shape[0]))
+                        out.backward(dy)
+                    trace = _trace_text(prof)
+                    self.assertIn(f'"{TRACE_MARKER}"', trace)
+                    self.assertIn(f'"{TRACE_MARKER}_backward"', trace)
                     actual = {
                         "out": out.detach(),
                         "dx": padded.grad[: x.shape[0]],
