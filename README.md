@@ -67,7 +67,8 @@ The per-expert arm needs `--ep 2` or more.
 Read these points before you publish a number:
 
 - **The default shape needs a mesh.** `30b-a3b` does not fit one GPU. Use
-  `--model-size 1b` on one GPU.
+  `--model-size 1b` on one GPU, and name the scenarios with `--scenario`,
+  because the `experts` scenario needs `--ep 2` or more.
 - **The Megatron arm differs by design.** It keeps fp32 optimizer state and
   unfused kernels. `AGENTS.md` lists the four differences. State them
   beside each cross-engine number.

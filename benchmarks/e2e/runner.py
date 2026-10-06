@@ -18,6 +18,7 @@ from benchmarks.artifacts.manifests import (
     config_json,
     host_mismatches,
     load_manifest,
+    RunRecord,
     run_record,
     write_manifest,
 )
@@ -165,13 +166,30 @@ class ResolvedRun:
         return {name: list(record.command) for name, record in self.records.items()}
 
 
-def _resolve_run(
-    request: RunRequest,
-    environment: Mapping[str, str],
-    *,
-    event_handler: EventHandler | None = None,
-) -> ResolvedRun:
-    """Resolve and check one request; the result is a run that can start."""
+@dataclass(frozen=True)
+class _CheckedRun:
+    """One request, resolved and checked before any host probe."""
+
+    paths: RuntimePaths
+    scenario: Scenario
+    run: RunSpec
+    arms: tuple[Arm, ...]
+    recorded: RunRecord | None
+    """The run record of the manifest that a resume continues."""
+    resumed_manifest: dict[str, Any] | None
+
+
+def check_request(
+    request: RunRequest, *, environment: Mapping[str, str] | None = None
+) -> None:
+    """Raise ``ValueError`` when the request cannot run; it probes no host and starts no arm."""
+    _check_request(request, dict(environment or os.environ))
+
+
+def _check_request(
+    request: RunRequest, environment: Mapping[str, str]
+) -> _CheckedRun:
+    """Resolve and check one request, before any host probe."""
     requested = request.axes
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
@@ -256,6 +274,33 @@ def _resolve_run(
         arms,
         device_count=len(parse_devices(request.gpu)),
         resumed=resumed_manifest,
+    )
+    return _CheckedRun(
+        paths=paths,
+        scenario=scenario,
+        run=run,
+        arms=arms,
+        recorded=recorded,
+        resumed_manifest=resumed_manifest,
+    )
+
+
+def _resolve_run(
+    request: RunRequest,
+    environment: Mapping[str, str],
+    *,
+    event_handler: EventHandler | None = None,
+) -> ResolvedRun:
+    """Resolve and check one request; the result is a run that can start."""
+    checked = _check_request(request, environment)
+    paths = checked.paths
+    scenario = checked.scenario
+    run = checked.run
+    arms = checked.arms
+    recorded = checked.recorded
+    resumed_manifest = checked.resumed_manifest
+    resume_dir = (
+        None if request.resume_dir is None else request.resume_dir.expanduser().resolve()
     )
     # Printed before the host probe, so the operator reads them before the run claims a GPU.
     for warning in run_warnings(run, arms):

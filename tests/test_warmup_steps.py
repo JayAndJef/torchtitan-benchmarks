@@ -156,6 +156,10 @@ class ResumeTests(unittest.TestCase):
 class CliRefusalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
+        # These tests patch the runner, so they also patch its checks.
+        check = mock.patch("benchmarks.cli.e2e.check_request")
+        self.addCleanup(check.stop)
+        check.start()
         self.completed = SimpleNamespace(
             out_dir=Path("/tmp/output"),
             selected_arms=(ENGINES.arm("titan_eager"),),

@@ -258,7 +258,13 @@ sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, `CUDA_VISIBLE_DEVICES` and `NGPU`, so
 the index is stable and the world size follows the request.
 
 `run` executes, validates and evaluates. It runs every scenario unless
-`--scenario` narrows the set. It stops at the first arm that fails.
+`--scenario` narrows the set. It checks every selected scenario before the
+first arm starts, so one refused scenario stops the whole command. It stops
+at the first arm that fails.
+
+At ep 1 the `experts` scenario refuses `titan_compiled_te_per_expert`. So a
+one-GPU run names its scenarios with `--scenario`. A one-GPU run of
+`experts` also names its arms with `--arm`.
 
 Named scenarios run one at a time, in the order given. A name may repeat,
 and each repeat is another run with a `-run<n>` suffix on its scenario

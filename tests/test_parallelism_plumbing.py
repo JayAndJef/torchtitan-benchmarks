@@ -187,6 +187,12 @@ class ExecutionOptionTests(unittest.TestCase):
 class RequestTests(unittest.TestCase):
     """What the CLI hands ``RunRequest``."""
 
+    def setUp(self) -> None:
+        # These tests patch the runner, so they also patch its checks.
+        check = mock.patch("benchmarks.cli.e2e.check_request")
+        self.addCleanup(check.stop)
+        check.start()
+
     def _request(self, *arguments: str) -> RunRequest:
         seen = []
 

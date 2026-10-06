@@ -39,6 +39,11 @@ class CliTests(unittest.TestCase):
         evaluate = mock.patch("benchmarks.cli.e2e._evaluate")
         self.addCleanup(evaluate.stop)
         evaluate.start()
+        # The plumbing tests patch the runner, so they also patch its checks.
+        # CheckEveryScenarioFirstTests runs the real checks.
+        check = mock.patch("benchmarks.cli.e2e.check_request")
+        self.addCleanup(check.stop)
+        check.start()
 
     def _two_scenarios(self) -> dict:
         """The registry with a second scenario, for the multi-scenario rules.
@@ -754,6 +759,42 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(state["status"], "evaluation_failed")
         self.assertIn("bad trace", state["evaluation"]["error"])
+
+
+class CheckEveryScenarioFirstTests(unittest.TestCase):
+    """A refused scenario stops the command before the first arm of any scenario starts."""
+
+    def _invoke(self, *arguments: str):
+        with mock.patch("benchmarks.cli.e2e.execute_run") as execute, mock.patch(
+            "benchmarks.cli.e2e._evaluate"
+        ), mock.patch("benchmarks.cli.e2e.record_evaluation_status"):
+            result = CliRunner().invoke(cli, ["run", *arguments])
+        return result, execute
+
+    def test_an_omitted_scenario_at_ep_1_refuses_before_any_arm(self) -> None:
+        result, execute = self._invoke("0", "--model-size", "1b", "--ac", "none")
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("scenario 'experts': titan_compiled_te_per_expert", result.output)
+        self.assertIn("needs an expert-parallel mesh", result.output)
+        execute.assert_not_called()
+
+    def test_a_refused_later_scenario_stops_the_earlier_one(self) -> None:
+        result, execute = self._invoke(
+            "0", "--model-size", "1b", "--scenario", "engines", "--scenario", "experts"
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("scenario 'experts'", result.output)
+        execute.assert_not_called()
+
+    def test_named_scenarios_that_pass_their_checks_run(self) -> None:
+        result, execute = self._invoke(
+            "0", "--model-size", "1b", "--scenario", "engines", "--scenario", "attention"
+        )
+        self.assertEqual(result.exit_code, 0, f"{result.output}{result.exception!r}")
+        self.assertEqual(
+            [call.args[0].scenario_name for call in execute.call_args_list],
+            ["engines", "attention"],
+        )
 
 
 if __name__ == "__main__":
