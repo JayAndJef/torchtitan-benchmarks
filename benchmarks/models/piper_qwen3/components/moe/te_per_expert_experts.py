@@ -23,6 +23,9 @@ from torchtitan.config import derive, override
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.moe import GroupedExperts
 
+TRACE_MARKER = "torchtitan_benchmarks::te_per_expert_mm"
+"""The profiler range that each op opens, because the profiler records no event for a custom op."""
+
 
 def _host_splits(x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor) -> list[int]:
     """The rows of each expert as a list; raise unless TE can read x, w and counts as they are."""
@@ -58,22 +61,23 @@ def te_per_expert_mm(
     x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor
 ) -> torch.Tensor:
     """Rows of expert e of ``x`` (R, K) times ``w[e].T`` (K, N), as one (R, N) tensor."""
-    splits = _host_splits(x, w, counts)
-    y = x.new_empty((x.shape[0], w.shape[1]))
-    if x.shape[0] == 0:
+    with torch.profiler.record_function(TRACE_MARKER):
+        splits = _host_splits(x, w, counts)
+        y = x.new_empty((x.shape[0], w.shape[1]))
+        if x.shape[0] == 0:
+            return y
+        num = w.shape[0]
+        general_grouped_gemm(
+            list(w.unbind(0)),
+            list(torch.split(x, splits)),
+            [y],
+            [None] * num,
+            x.dtype,
+            single_output=True,
+            m_splits=splits,
+            use_split_accumulator=_2X_ACC_FPROP,
+        )
         return y
-    num = w.shape[0]
-    general_grouped_gemm(
-        list(w.unbind(0)),
-        list(torch.split(x, splits)),
-        [y],
-        [None] * num,
-        x.dtype,
-        single_output=True,
-        m_splits=splits,
-        use_split_accumulator=_2X_ACC_FPROP,
-    )
-    return y
 
 
 @te_per_expert_mm.register_fake
@@ -90,49 +94,50 @@ def te_per_expert_mm_backward(
     dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The gradients of ``te_per_expert_mm`` for x and w; the weight gradient of an empty expert is zero."""
-    splits = _host_splits(x, w, counts)
-    dy = dy.contiguous()
-    if dy.dtype != x.dtype or tuple(dy.shape) != (x.shape[0], w.shape[1]):
-        raise RuntimeError(
-            f"te_per_expert_mm_backward got dy {dy.dtype} {tuple(dy.shape)} for "
-            f"x {x.dtype} {tuple(x.shape)} and w {tuple(w.shape)}"
+    with torch.profiler.record_function(f"{TRACE_MARKER}_backward"):
+        splits = _host_splits(x, w, counts)
+        dy = dy.contiguous()
+        if dy.dtype != x.dtype or tuple(dy.shape) != (x.shape[0], w.shape[1]):
+            raise RuntimeError(
+                f"te_per_expert_mm_backward got dy {dy.dtype} {tuple(dy.shape)} for "
+                f"x {x.dtype} {tuple(x.shape)} and w {tuple(w.shape)}"
+            )
+        dx = torch.empty_like(x, memory_format=torch.contiguous_format)
+        dw = torch.empty_like(w, memory_format=torch.contiguous_format)
+        if x.shape[0] == 0:
+            return dx, dw.zero_()
+        num = w.shape[0]
+        none = [None] * num
+        dy_parts = list(torch.split(dy, splits))
+        general_grouped_gemm(
+            list(w.unbind(0)),
+            dy_parts,
+            [dx],
+            none,
+            x.dtype,
+            single_output=True,
+            layout="NN",
+            m_splits=splits,
+            grad=True,
+            use_split_accumulator=_2X_ACC_DGRAD,
         )
-    dx = torch.empty_like(x, memory_format=torch.contiguous_format)
-    dw = torch.empty_like(w, memory_format=torch.contiguous_format)
-    if x.shape[0] == 0:
-        return dx, dw.zero_()
-    num = w.shape[0]
-    none = [None] * num
-    dy_parts = list(torch.split(dy, splits))
-    general_grouped_gemm(
-        list(w.unbind(0)),
-        dy_parts,
-        [dx],
-        none,
-        x.dtype,
-        single_output=True,
-        layout="NN",
-        m_splits=splits,
-        grad=True,
-        use_split_accumulator=_2X_ACC_DGRAD,
-    )
-    general_grouped_gemm(
-        list(torch.split(x, splits)),
-        dy_parts,
-        list(dw.unbind(0)),
-        none,
-        x.dtype,
-        layout="NT",
-        m_splits=splits,
-        grad=True,
-        accumulate=False,
-        use_split_accumulator=_2X_ACC_WGRAD,
-    )
-    # TE can skip the GEMM of an empty expert, and leave its weight gradient unwritten.
-    for e, rows in enumerate(splits):
-        if rows == 0:
-            dw[e].zero_()
-    return dx, dw
+        general_grouped_gemm(
+            list(torch.split(x, splits)),
+            dy_parts,
+            list(dw.unbind(0)),
+            none,
+            x.dtype,
+            layout="NT",
+            m_splits=splits,
+            grad=True,
+            accumulate=False,
+            use_split_accumulator=_2X_ACC_WGRAD,
+        )
+        # TE can skip the GEMM of an empty expert, and leave its weight gradient unwritten.
+        for e, rows in enumerate(splits):
+            if rows == 0:
+                dw[e].zero_()
+        return dx, dw
 
 
 @te_per_expert_mm_backward.register_fake
