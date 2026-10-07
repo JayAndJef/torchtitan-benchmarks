@@ -14,9 +14,10 @@
 # flags. Inside a job, Slurm numbers the cards of the job from 0, so the
 # device list is job-local, for example 0,1,2,3.
 #
-# A cell whose <root>/<name>/results.json exists is done, and the script
-# skips it. So a resubmit of the same job file runs only the cells that are
-# not OK. A rerun always starts with --out, never with --resume.
+# A cell is done when <root>/<name>/results.json exists and <name>.status
+# holds an OK state. The script skips a done cell. So a resubmit of the same
+# job file runs only the cells that are not OK. A rerun always starts with
+# --out, never with --resume.
 #
 # Environment (MATRIX_REV is required; the others have defaults):
 #   MATRIX_REV       the commit that the job must run, `git rev-parse HEAD`
@@ -41,17 +42,24 @@
 #
 # The states:
 #   OK               the run passed, and the watchdog flagged nothing
-#   OK(existing)     results.json was already there; nothing ran
+#   OK(existing:S)   the cell was done with the state S; nothing ran. This
+#                    state goes to sweep.log alone, and <name>.status keeps S
 #   OK(load-flagged) as OK, but the load gate timed out before the run;
 #                    check the step times by hand before you report the cell
-#   FAIL(rc=N)       the run exited with N; the cell moves aside
-#   FAIL(no-results) the run exited with 0 but wrote no results.json; the cell moves aside
-#   CONTAMINATED     the watchdog flagged the cell; the cell moves aside
-#   PLACEMENT        the job holds no CPU on the NUMA node of some card; nothing ran
+#   FAIL(rc=N)       the run exited with N; the script renames the cell as failed
+#   FAIL(no-results) the run exited with 0 but wrote no results.json; the
+#                    script renames the cell as failed
+#   CONTAMINATED     the watchdog flagged the cell, or it could not read the
+#                    cards; the script renames the cell as contaminated
+#   PLACEMENT        the job holds no CPU on the NUMA node of some card, or
+#                    the node of some card is unknown; nothing ran
 #   ERROR            a check failed; nothing ran
 #
-# A cell that moves aside becomes <name>.failed-<stamp>* or
-# <name>.contaminated-<stamp>*: the directory, the log, the .watch and the .rc.
+# The script renames a cell to <name>.failed-<stamp>* or
+# <name>.contaminated-<stamp>*: the directory, the log, the .watch and the
+# .rc. The stamp is the UTC time and the job id, and the script refuses a
+# rename onto a name that exists. A partial cell of an earlier attempt, or a
+# results.json without an OK status, is renamed as failed before the run.
 # The script exits 0 for an OK state alone.
 set -uo pipefail
 
@@ -61,7 +69,7 @@ die() { echo "run_matrix_cell.sh: $*" >&2; exit 2; }
 [ -d "$1" ] || die "the output root '$1' is not a directory"
 ROOT="$(cd "$1" && pwd)"
 NAME="$2"
-[[ "$NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "the cell name '$NAME' must match [A-Za-z0-9._-]+"
+[[ "$NAME" =~ ^[A-Za-z0-9_-]+$ ]] || die "the cell name '$NAME' must match [A-Za-z0-9_-]+"
 shift 2
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -100,9 +108,12 @@ for setting in IDLE_LOAD IDLE_SETTLE IDLE_POLL IDLE_MAX_WAIT CONTENDED_LOAD \
 done
 [ -r "$MATRIX_LOADAVG" ] || fail "MATRIX_LOADAVG '$MATRIX_LOADAVG' is not readable"
 
+# The .status file keeps the state of the run, so OK(load-flagged) stays.
 if [ -f "$OUT/results.json" ]; then
-    finish "OK(existing)"
-    exit 0
+    previous="$(cat "$OUT.status" 2>/dev/null)"
+    case "$previous" in
+        OK*) say "STATUS $NAME OK(existing:$previous)"; exit 0 ;;
+    esac
 fi
 
 [ -n "${SLURM_JOB_ID:-}" ] || fail "this file runs only inside a Slurm job"
@@ -114,11 +125,22 @@ rev="$(git -C "$REPO" rev-parse HEAD)"
 [ -z "$(git -C "$REPO" status --porcelain)" ] || fail "the working tree is dirty"
 
 # The job-local indices are correct only when Slurm hides the other cards.
+command -v nvidia-smi >/dev/null || fail "nvidia-smi is not on PATH"
+listed="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>&1)" \
+    || fail "nvidia-smi --query-gpu=index failed: $listed"
+mapfile -t GPU_IDS < <(tr -d ' ' <<<"$listed" | grep .)
 IFS=',' read -r -a wanted <<<"$DEVICES"
-seen="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | grep -c .)"
-[ "$seen" = "${#wanted[@]}" ] \
-    || fail "nvidia-smi sees $seen cards, but the device list $DEVICES names ${#wanted[@]}"
-mapfile -t GPU_IDS < <(nvidia-smi --query-gpu=index --format=csv,noheader | tr -d ' ')
+[ "${#GPU_IDS[@]}" = "${#wanted[@]}" ] \
+    || fail "nvidia-smi sees ${#GPU_IDS[@]} cards (${GPU_IDS[*]}), but the device list $DEVICES names ${#wanted[@]}"
+declare -A named=()
+for device in "${wanted[@]}"; do
+    [ -z "${named[$device]:-}" ] || fail "the device list $DEVICES names card $device twice"
+    named[$device]=1
+    printf '%s\n' "${GPU_IDS[@]}" | grep -qx "$device" \
+        || fail "nvidia-smi sees no card $device; it sees ${GPU_IDS[*]}"
+done
+buses="$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>&1)" \
+    || fail "nvidia-smi --query-gpu=pci.bus_id failed: $buses"
 
 # The harness binds each rank to the NUMA node of its card. That node can
 # hold few or none of the CPUs of the job, so the log records the overlap.
@@ -148,7 +170,7 @@ cpu_report() {
         else
             echo "${bus:4}->node?"
         fi
-    done < <(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader)
+    done <<<"$buses"
 }
 
 SUPERVISOR_PID=$$
@@ -162,9 +184,10 @@ say "  $NAME: numactl $(command -v numactl || echo 'NOT AVAILABLE (runs will be 
 say "  $NAME: hf cache ${HF_DATASETS_CACHE:-unset; run_bench.sh sets its default}"
 
 # A card whose node holds none of the CPUs of the job runs unpinned, and an
-# unpinned rank measures scheduler placement. A partial overlap runs.
-if grep -Eq -- '->node[0-9]+:0cpus$' <<<"$cpus"; then
-    say "  $NAME: the job holds no CPU on the NUMA node of some card"
+# unpinned rank measures scheduler placement. So does a card whose node is
+# unknown. A partial overlap runs.
+if grep -Eq -- '->node([0-9]+:0cpus|\?)$' <<<"$cpus"; then
+    say "  $NAME: the job holds no CPU on the NUMA node of some card, or the node is unknown"
     finish PLACEMENT
     exit 3
 fi
@@ -175,9 +198,11 @@ load1() { awk '{printf "%.0f", $1}' "$MATRIX_LOADAVG"; }
 # IDLE_MAX_WAIT seconds it runs anyway, and an OK becomes OK(load-flagged).
 load_flagged=0
 idle=0
+load_max=0
 gate_start=$SECONDS
 while :; do
     load=$(load1)
+    [ "$load" -gt "$load_max" ] && load_max=$load
     if [ "$load" -le "$IDLE_LOAD" ]; then
         idle=$((idle + 1))
         [ "$idle" -ge "$IDLE_SETTLE" ] && break
@@ -185,7 +210,7 @@ while :; do
         idle=0
     fi
     if [ $((SECONDS - gate_start)) -ge "$IDLE_MAX_WAIT" ]; then
-        say "  $NAME: LOAD-GATE-TIMEOUT load1=$load (limit $IDLE_LOAD, waited ${IDLE_MAX_WAIT}s)"
+        say "  $NAME: LOAD-GATE-TIMEOUT load1=$load max=$load_max (limit $IDLE_LOAD, waited $((SECONDS - gate_start))s)"
         load_flagged=1
         break
     fi
@@ -194,19 +219,31 @@ done
 [ "$load_flagged" -eq 1 ] \
     || say "  $NAME: load gate open after $((SECONDS - gate_start))s, load1=$load"
 
-# A job that ended inside this cell left a partial directory, and `run`
-# refuses an --out that exists. The leftovers move aside as a failed attempt.
-stamp=$(date -u +%Y%m%dT%H%M%SZ)
-move_aside() {   # $1 is failed or contaminated
-    local kind="$1" suffix
+# Renames the directory, the log, the .watch and the .rc of the cell. A
+# rename onto a name that exists would nest a directory or replace a log.
+rename_cell() {   # $1 is failed or contaminated
+    local kind="$1" stamp suffix
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)-j$SLURM_JOB_ID"
     for suffix in "" .log .watch .rc; do
-        [ -e "$OUT$suffix" ] && mv "$OUT$suffix" "$OUT.$kind-$stamp$suffix"
+        if [ -e "$OUT$suffix" ] && [ -e "$OUT.$kind-$stamp$suffix" ]; then
+            fail "$OUT.$kind-$stamp$suffix exists, so $OUT$suffix keeps its name"
+        fi
     done
-    say "  $NAME: moved aside to $OUT.$kind-$stamp"
+    for suffix in "" .log .watch .rc; do
+        if [ -e "$OUT$suffix" ]; then
+            mv -T "$OUT$suffix" "$OUT.$kind-$stamp$suffix" \
+                || fail "mv could not rename $OUT$suffix"
+        fi
+    done
+    say "  $NAME: renamed the cell to $OUT.$kind-$stamp"
 }
+
+# A job that ended inside this cell left a partial directory, and `run`
+# refuses an --out that exists. A results.json without an OK status was
+# never sorted. Both are renamed as a failed attempt.
 if [ -e "$OUT" ] || [ -e "$OUT.log" ]; then
-    say "  $NAME: an earlier attempt ended early"
-    move_aside failed
+    say "  $NAME: an earlier attempt left $OUT without an OK status"
+    rename_cell failed
 fi
 
 say "  $NAME: ./run_bench.sh $* --out $OUT"
@@ -245,6 +282,7 @@ gpu_mem() {   # summed over every card of the job; -1 when unreadable
 # watchdog uses two independent signals:
 #   FOREIGN_PID  a compute PID that is not a descendant of the batch script
 #   FOREIGN_MEM  GPU memory that no PID of ours explains
+# A failed query writes WATCH-BLIND, because a blind watchdog proves nothing.
 # The load average is host-wide, so it also includes the jobs of other users.
 # The workload is host-bound, so host load corrupts tokens/s.
 watchdog() {
@@ -252,8 +290,16 @@ watchdog() {
     local mem load pid used ours residual id mem_streak=0 noted=0
     while :; do
         mem=$(gpu_mem); load=$(load1)
+        [ "$mem" = "-1" ] && \
+            echo "WATCH-BLIND memory.used is unreadable $(date -u +%T)" >>"$watch_file"
         ours=0
         for id in "${GPU_IDS[@]}"; do
+            if ! apps="$(nvidia-smi --id="$id" --query-compute-apps=pid,used_memory \
+                         --format=csv,noheader 2>&1)"; then
+                echo "WATCH-BLIND compute-apps gpu=$id: $(head -n 1 <<<"$apps") $(date -u +%T)" \
+                    >>"$watch_file"
+                continue
+            fi
             while IFS=',' read -r pid used; do
                 pid=$(echo "$pid" | tr -d ' ')
                 used=$(echo "$used" | tr -d ' MiB')
@@ -270,8 +316,7 @@ watchdog() {
                          "sid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ') mem=${used}MiB $(date -u +%T)" \
                         >>"$watch_file"
                 fi
-            done < <(nvidia-smi --id="$id" --query-compute-apps=pid,used_memory \
-                     --format=csv,noheader 2>/dev/null)
+            done <<<"$apps"
         done
         if [ "$noted" -eq 0 ] && [ "$ours" -gt 0 ]; then
             # This line is information, not a flag. It shows that the
@@ -313,7 +358,9 @@ kill "$watch_pid" 2>/dev/null; wait "$watch_pid" 2>/dev/null
 
 # Memory that stays on the cards after our processes end is foreign.
 after=$(gpu_mem)
-if [ "$after" != "-1" ] && [ "$after" -gt "$FOREIGN_MEM_MIB" ]; then
+if [ "$after" = "-1" ]; then
+    echo "WATCH-BLIND memory.used is unreadable after the run $(date -u +%T)" >>"$watch_file"
+elif [ "$after" -gt "$FOREIGN_MEM_MIB" ]; then
     echo "RESIDUAL_MEM after=${after}MiB (limit ${FOREIGN_MEM_MIB}) $(date -u +%T)" >>"$watch_file"
 fi
 
@@ -321,22 +368,21 @@ echo "$rc" >"$OUT.rc"
 say "  $NAME: end rc=$rc gpu after=${after}MiB"
 
 # A contaminated cell still writes a results.json, so the bad numbers stay
-# unless the cell moves aside. The next submission runs it again.
-stamp=$(date -u +%Y%m%dT%H%M%SZ)
+# unless the script renames the cell. The next submission runs it again.
 if [ -s "$watch_file" ]; then
     head -3 "$watch_file" | sed 's/^/    /' | tee -a "$LOG"
-    move_aside contaminated
+    rename_cell contaminated
     finish CONTAMINATED
     exit 1
 fi
 if [ "$rc" -ne 0 ]; then
     tail -5 "$OUT.log" | sed 's/^/    /' | tee -a "$LOG"
-    move_aside failed
+    rename_cell failed
     finish "FAIL(rc=$rc)"
     exit "$rc"
 fi
 if [ ! -f "$OUT/results.json" ]; then
-    move_aside failed
+    rename_cell failed
     finish "FAIL(no-results)"
     exit 1
 fi
@@ -346,7 +392,8 @@ fi
 warn=$(.venv/bin/python -c "
 import json,sys
 w=json.load(open(sys.argv[1])).get('warnings') or []
-print('; '.join(w))" "$OUT/results.json") || fail "results.json is not readable JSON"
+print('; '.join(w))" "$OUT/results.json") \
+    || { rename_cell failed; fail "the warnings of results.json are not readable"; }
 [ -n "$warn" ] && say "  $NAME: results.json warnings: $warn"
 if [ "$load_flagged" -eq 1 ]; then
     finish "OK(load-flagged)"
