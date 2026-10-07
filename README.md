@@ -34,7 +34,7 @@ forward-compat driver under `.cuda-compat/`. No action is necessary.
 
 ```bash
 ./run_bench.sh scenarios                            # list scenarios and arms
-./run_bench.sh run 0 --model-size 1b                # one GPU
+./run_bench.sh run 0 --model-size 1b --scenario engines   # one GPU
 ./run_bench.sh run 0,1 --pp 2 --pp-schedule 1F1B    # two-GPU pipeline
 ./run_bench.sh run 0 --model-size 1b --scenario engines --arm titan_eager
 ./run_bench.sh evaluate out/<timestamp>/<scenario>/<hardware>

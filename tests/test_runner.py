@@ -1130,6 +1130,13 @@ class EnginesScenarioTests(unittest.TestCase):
             execute_run(request, environment={"PATH": os.environ["PATH"]})
 
 
+FA3_TARGET = "benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention"
+"""The override that replaces each block's attention with FA3 varlen attention."""
+
+FA3_MARKERS = ("FlashAttnFwdSm90",)
+"""The Hopper forward kernel of FA3 varlen attention."""
+
+
 class AttentionScenarioTests(unittest.TestCase):
     def test_scenario_registration(self) -> None:
         scenario = scenario_by_name("attention")
@@ -1147,22 +1154,13 @@ class AttentionScenarioTests(unittest.TestCase):
         self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
 
     def test_each_kernel_arm_overrides_one_attention_per_block(self) -> None:
-        scenario = scenario_by_name("attention")
-        prefix = "benchmarks.models.piper_qwen3.components.attention"
-        for name, target, marker in (
-            (
-                "titan_compiled_fa3",
-                f"{prefix}.fa3_override.packed_fa3_attention",
-                "FlashAttnFwdSm90",
-            ),
-        ):
-            with self.subTest(arm=name):
-                config = scenario.arm(name).config
-                self.assertEqual(engine_for(scenario.arm(name)).name, "torchtitan")
-                self.assertEqual(config.compile, CompileMode.TORCH)
-                self.assertEqual(config.override_imports, (target,))
-                self.assertEqual(config.overrides_per_block, 1)
-                self.assertEqual(config.trace_kernel_markers, (marker,))
+        arm = scenario_by_name("attention").arm("titan_compiled_fa3")
+        config = arm.config
+        self.assertEqual(engine_for(arm).name, "torchtitan")
+        self.assertEqual(config.compile, CompileMode.TORCH)
+        self.assertEqual(config.override_imports, (FA3_TARGET,))
+        self.assertEqual(config.overrides_per_block, 1)
+        self.assertEqual(config.trace_kernel_markers, FA3_MARKERS)
 
     def test_every_arm_command_builds_at_ac_none(self) -> None:
         for arm in scenario_by_name("attention").arms:
@@ -1225,7 +1223,7 @@ PER_EXPERT_MARKERS = ("torchtitan_benchmarks::te_per_expert_mm",)
 """The profiler range that each per-expert op opens, at every shape."""
 
 EP2_SPEC = ParallelismSpec(dp=2, ep=2, zero=1)
-"""A mesh at which every arm of the experts scenario can run."""
+"""A two-GPU mesh at ep 2, at which every arm of the experts and stacked scenarios can run."""
 
 OVERRIDE_COUNT_SIZES = ("1b", "30b-a3b")
 """The model sizes at which each override arm is counted."""
@@ -1252,7 +1250,7 @@ def _override_counts(
     return counts
 
 
-TE_COUNT_SCRIPT = """
+OVERRIDE_COUNT_SCRIPT = """
 import json
 import sys
 
@@ -1268,7 +1266,7 @@ def _count_in_subprocess(test: unittest.TestCase, scenario: str, names: list[str
     """The ``_override_counts`` of ``names`` from a fresh process, so TE does not patch this process."""
     repo = Path(__file__).resolve().parent.parent
     completed = subprocess.run(
-        [sys.executable, "-c", TE_COUNT_SCRIPT, str(repo), scenario, *names],
+        [sys.executable, "-c", OVERRIDE_COUNT_SCRIPT, str(repo), scenario, *names],
         cwd=repo,
         env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
         capture_output=True,
@@ -1486,11 +1484,6 @@ class ExpertsScenarioTests(unittest.TestCase):
                 self.assertEqual(engine_for(arm).check(run, arm), [])
 
 
-FA3_TARGET = "benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention"
-
-FA3_MARKERS = ("FlashAttnFwdSm90",)
-"""The Hopper forward kernel of FA3 varlen attention."""
-
 STACKED_ARM = "titan_compiled_fa3_te_per_expert"
 
 
@@ -1508,16 +1501,17 @@ class StackedScenarioTests(unittest.TestCase):
 
     def test_the_stacked_arm_declares_its_imports_count_markers_and_offsets(self) -> None:
         arm = scenario_by_name("stacked").arm(STACKED_ARM)
-        config = arm.config
         self.assertEqual(engine_for(arm).name, "torchtitan")
-        self.assertEqual(config.compile, CompileMode.TORCH)
         self.assertEqual(
-            config.override_imports, (FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET)
+            arm.config,
+            TorchTitanConfig(
+                compile=CompileMode.TORCH,
+                overrides_per_block=3,
+                override_imports=(FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET),
+                trace_kernel_markers=(*FA3_MARKERS, *PER_EXPERT_MARKERS),
+                packed_offsets=True,
+            ),
         )
-        self.assertEqual(config.overrides_per_block, 3)
-        self.assertEqual(config.trace_kernel_markers, (*FA3_MARKERS, *PER_EXPERT_MARKERS))
-        self.assertIs(config.packed_offsets, True)
-        self.assertEqual(config.extra_flags, ())
 
     def test_the_stacked_arm_joins_the_fa3_arm_and_the_per_expert_arm(self) -> None:
         stacked = scenario_by_name("stacked").arm(STACKED_ARM).config

@@ -80,8 +80,8 @@ against `titan_compiled`. It answers whether the two gains add. FA3 alone
 is the `attention` arm `titan_compiled_fa3`. The per-expert GEMM alone is
 the `experts` arm `titan_compiled_te_per_expert`. The stacked arm imports
 the three overrides of those two arms, sets `packed_offsets`, and carries
-the trace markers of both. So it needs `--ep 2` or more, as the per-expert
-arm does.
+the trace markers of both. It imports the per-expert overrides, so it needs
+`--ep 2` or more.
 
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
@@ -93,9 +93,9 @@ isolation can be irrelevant once the compiler fuses the graph around it.
 A kernel number is never an end-to-end number, and an end-to-end number is
 never a kernel number. State which system produced a figure.
 
-The `engines`, `attention`, `experts` and `stacked` scenarios carry four deliberate differences
-by default, and each one moves the number. The Megatron arm keeps fp32 master weights and
-reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
+The `engines`, `attention`, `experts` and `stacked` scenarios carry four
+deliberate differences by default, and each one moves the number. The
+Megatron arm keeps fp32 master weights and reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
 It keeps `--init-method-std 0.01` with no weight transfer. It applies no
 permutation fusion. A `megatron_stock.extra_flags` value can remove the two
 fusion differences, and the manifest records it. State the four differences
