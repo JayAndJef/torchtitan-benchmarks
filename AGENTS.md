@@ -865,12 +865,17 @@ Four structural tests deserve naming:
   you submit. It sets the partitions and the time limits.
 - Run a multi-cell matrix as one Slurm job, never as a loop of `run`
   calls. Make a new output root under `out/`. Copy `tools/matrix_job.sbatch`
-  into it, and edit the copy. The template is a working example of a
-  seven-cell matrix.
+  into it, and edit the copy. The template is a working example: six
+  dp4 x ep4 cells of the `engines` and `attention` arms, with one arm twice.
 - The copy holds the `#SBATCH` lines, `ROOT` (the output root), the
   job-local device list, the shared flags and one `cell <name> <run flags>`
-  line per cell. The `dp * pp` of each cell must equal the number of cards.
-  The job word-splits the flags, so a value may hold no quote and no space.
+  line per cell. A cell name holds only letters, digits, `_` and `-`.
+- Each cell needs exactly one `--scenario`. The `dp * pp` of each cell must
+  equal the number of cards. The job word-splits the flags, so a value may
+  hold no quote and no space.
+- The `--time` of the job must cover the sum of the run times of the cells.
+  It must also cover up to `IDLE_MAX_WAIT` seconds of load gate per cell.
+  A copy can lower `IDLE_MAX_WAIT`, as the template does.
 - Submit the copy from the repository root, on a clean tree. The output
   root must exist, because `sbatch` does not make the directory of its log.
 
@@ -882,9 +887,9 @@ Four structural tests deserve naming:
   `out/<root>/<name>`. It adds the output option itself, so a cell must not
   send one. A failed cell does not stop the job.
 - Before each cell, the runner checks the commit, the clean tree and the
-  number of cards. It also checks that the job holds some CPU on the NUMA node
-  of each card. Then it waits for an idle host, and it runs the watchdog
-  during the cell.
+  cards of the device list. It also checks that the job holds some CPU on
+  the NUMA node of each card. Then it waits for an idle host, and it runs
+  the watchdog during the cell.
 - The runner reads these environment variables:
 
   | variable | default | meaning |
@@ -899,27 +904,35 @@ Four structural tests deserve naming:
   | `WATCH_INTERVAL` | `15` | The seconds between two watchdog samples. |
 
 - Each cell writes one line `STATUS <name> <state>` to
-  `out/<root>/sweep.log`, and the state to `out/<root>/<name>.status`:
+  `out/<root>/sweep.log`, and the state to `out/<root>/<name>.status`. Read
+  the `.status` files, or the last `STATUS` line of each cell:
 
   | state | meaning |
   |---|---|
   | `OK` | The run passed, and the watchdog flagged nothing. |
-  | `OK(existing)` | The cell had a `results.json`, so nothing ran. |
   | `OK(load-flagged)` | The run passed, but the load gate timed out before it. |
-  | `FAIL(rc=N)` | The run exited with `N`. The cell moves aside. |
-  | `FAIL(no-results)` | The run exited with 0 and wrote no `results.json`. The cell moves aside. |
-  | `CONTAMINATED` | The watchdog flagged the cell. The cell moves aside. |
-  | `PLACEMENT` | The job holds no CPU on the node of some card. Nothing ran. |
+  | `OK(existing:<state>)` | The cell was done, so nothing ran. This state goes to `sweep.log` alone. |
+  | `FAIL(rc=N)` | The run exited with `N`. The runner renames the cell as failed. |
+  | `FAIL(no-results)` | The run exited with 0 and wrote no `results.json`. The runner renames the cell as failed. |
+  | `CONTAMINATED` | The watchdog flagged the cell, or it could not read the cards. The runner renames the cell as contaminated. |
+  | `PLACEMENT` | The job holds no CPU on the node of some card, or that node is unknown. Nothing ran. |
   | `ERROR` | A check failed. Nothing ran. |
 
-- A cell that moves aside becomes `<name>.failed-<stamp>` or
-  `<name>.contaminated-<stamp>`, with its log, its watch file and its exit
-  code. A partial cell from a job that ended early moves aside as failed.
+- A cell is done when it has a `results.json` and an OK state. The runner
+  renames a failed cell to `<name>.failed-<stamp>`, and a contaminated cell
+  to `<name>.contaminated-<stamp>`. The log, the watch file and the exit
+  code get the same name. The stamp holds the UTC time and the job id.
+- A cell that is not done, but has a directory or a log, gets the failed
+  name before its run. So a cell that a time limit stopped runs again.
 - To retry the cells that are not OK, submit the same copy again. The
-  runner skips each cell that has a `results.json`. Retry a cell at most
-  3 times.
-- The watchdog flags foreign compute processes, unaccounted GPU memory and
-  host-load spikes. **Never report a cell it marked `CONTAMINATED`.**
+  runner skips each done cell. Retry only a coincidental failure, and
+  retry a cell at most 3 times.
+- `ERROR`, `PLACEMENT` and a `FAIL` that repeats with the same message are
+  deterministic. Fix the copy or the code, and do not resubmit the same
+  copy.
+- The watchdog flags foreign compute processes, unaccounted GPU memory,
+  host-load spikes and a failed card query. **Never report a cell it marked
+  `CONTAMINATED`.**
 - An `OK(load-flagged)` cell ran on a busy host. Check its step times by
   hand before you report it.
 - A job has one time limit, and `main` caps it at 2 hours. All cells of
