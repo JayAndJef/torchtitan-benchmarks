@@ -123,7 +123,7 @@ The suite runs on the CPU in about a minute. The pre-push hook runs it.
 | `benchmarks/kernel/` | Kernel-isolation system |
 | `benchmarks/models/piper_qwen3/` | The model port and its shapes |
 | `benchmarks/cli/` | The command line |
-| `tools/` | Slurm matrix runner, matrix collector, pre-push hook |
+| `tools/` | Slurm matrix job template and cell runner, matrix collector, pre-push hook |
 | `third_party/` | Pinned TorchTitan fork and Megatron-LM |
 
 ## Licenses
