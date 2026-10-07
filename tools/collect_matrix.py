@@ -1,4 +1,6 @@
-"""Merge the cells of a run_matrix.sh output tree into one table, one row per arm.
+"""Merge the cells of a matrix output tree into one table, one row per arm.
+
+tools/run_matrix_cell.sh writes one cell directory per cell of the tree.
 
     .venv/bin/python tools/collect_matrix.py out/matrix-<utc> [--size 1b] [--json matrix.json]
 
@@ -27,8 +29,8 @@ from benchmarks.models.piper_qwen3.shape import canonical_size_name
 RESULTS_SCHEMA_VERSION = 6
 """The one results schema this tool reads."""
 
-MOVED_ASIDE = (".contaminated-", ".nomanifest-")
-"""Directory-name marks that run_matrix.sh puts on an abandoned cell."""
+MOVED_ASIDE = (".contaminated-", ".failed-", ".nomanifest-")
+"""Directory-name marks that run_matrix_cell.sh puts on an abandoned cell; older trees also hold ``.nomanifest-``."""
 
 COLUMNS = (
     ("cell", "cell"),
@@ -54,7 +56,7 @@ COLUMNS = (
 
 
 def cell_dirs(root: Path):
-    """Every cell directory under ``root``, in name order; a cell that run_matrix.sh moved aside is skipped."""
+    """Every cell directory under ``root``, in name order; a cell that run_matrix_cell.sh moved aside is skipped."""
     for manifest_path in sorted(root.glob("*/manifest.json")):
         cell_dir = manifest_path.parent
         if any(mark in cell_dir.name for mark in MOVED_ASIDE):
