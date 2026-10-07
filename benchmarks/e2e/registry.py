@@ -139,12 +139,6 @@ ATTENTION = Scenario(
 
 MOE_OVERRIDES = "benchmarks.models.piper_qwen3.components.moe"
 
-TE_GROUPED_EXPERTS = f"{MOE_OVERRIDES}.te_grouped_experts.te_grouped_experts"
-"""The override import of the routed-expert GEMMs on TE's cuBLASLt grouped GEMM."""
-
-TE_GROUPED_GEMM_MARKERS = ("setup_grouped_gemm_kernel", "_ptrGroup_")
-"""The trace markers of TE's grouped GEMM: its setup kernel and the cuBLASLt grouped kernel."""
-
 HOST_COUNT_DISPATCHER = f"{MOE_OVERRIDES}.host_count_dispatcher.host_count_dispatcher"
 """The override import of the all-to-all dispatcher that returns the rows of each local expert on the host."""
 
@@ -157,12 +151,12 @@ TE_PER_EXPERT_MARKERS = ("torchtitan_benchmarks::te_per_expert_mm",)
 EXPERTS = Scenario(
     name="experts",
     description=(
-        "Compiled TorchTitan with three expert GEMM paths, against stock "
-        "Megatron-LM: torch's _grouped_mm, TransformerEngine's cuBLASLt "
-        "grouped GEMM with the split sizes on the device, and one "
+        "Compiled TorchTitan with two expert GEMM paths, against stock "
+        "Megatron-LM: torch's _grouped_mm in titan_compiled, and one "
         "TransformerEngine cuBLAS GEMM per expert with the split sizes on "
-        "the host, as Megatron's GroupedLinear runs them. Each TE arm moves "
-        "the expert GEMM path alone against titan_compiled. The TorchTitan "
+        "the host in titan_compiled_te_per_expert, as Megatron's "
+        "GroupedLinear runs them. The per-expert arm moves the expert GEMM "
+        "path alone against titan_compiled. The TorchTitan "
         "arms share their init, seed and data, so their routing matches. "
         "The per-expert arm needs an expert-parallel degree above 1. The "
         "Megatron arm carries the four differences of the engines scenario: "
@@ -176,19 +170,6 @@ EXPERTS = Scenario(
     supported_ac_modes=("none",),
     arms=(
         ENGINES.arm("titan_compiled"),
-        Arm(
-            name="titan_compiled_te_gemm",
-            description=(
-                "titan_compiled with the expert GEMMs on TE's cuBLASLt "
-                "grouped GEMM"
-            ),
-            config=TorchTitanConfig(
-                compile=CompileMode.TORCH,
-                overrides_per_block=1,
-                override_imports=(TE_GROUPED_EXPERTS,),
-                trace_kernel_markers=TE_GROUPED_GEMM_MARKERS,
-            ),
-        ),
         Arm(
             name="titan_compiled_te_per_expert",
             description=(

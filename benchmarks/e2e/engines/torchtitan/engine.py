@@ -50,7 +50,6 @@ PER_EXPERT_MODULE = f"{MOE_PACKAGE}te_per_expert_experts."
 """The prefix of the override import whose experts read the rows of each expert from the host."""
 
 NO_SPMD_TYPES_MODULES = (
-    f"{MOE_PACKAGE}te_grouped_experts.",
     HOST_COUNT_DISPATCHER_MODULE,
     PER_EXPERT_MODULE,
 )

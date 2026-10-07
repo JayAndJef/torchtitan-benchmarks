@@ -2165,7 +2165,7 @@ DISPATCH_PERMUTE = KernelScenario(
 )
 
 
-# The fp64 gate every TorchTitan arm carries. The five titan arms compute the
+# The fp64 gate every TorchTitan arm carries. The four titan arms compute the
 # expert MLP WITHOUT the routing probabilities, because titan's dispatcher
 # applies them in combine, so they are gated on the reference's unweighted
 # names.
@@ -2241,7 +2241,7 @@ EXPERT_MLP = KernelScenario(
     description=(
         "The routed-expert MLP itself: TorchTitan's inner_experts "
         "(GroupedExperts) against megatron-core's experts call "
-        "(TEGroupedMLP), plus three megatron variants and four TorchTitan "
+        "(TEGroupedMLP), plus three megatron variants and three TorchTitan "
         "ones. THIS SCENARIO PUBLISHES NO CROSS-ENGINE RATIO, AND NO READER "
         "MAY FORM ONE BY DIVIDING TWO MEDIANS. The routing probabilities are "
         "applied on opposite sides of this boundary -- megatron folds them "
@@ -2269,12 +2269,8 @@ EXPERT_MLP = KernelScenario(
         "ratio near 1.0 on that row may be a real fusion gain cancelled by a "
         "lost activation fusion rather than a fusion that bought nothing. "
         "Read it as upstream's fused expert layer against upstream's unfused "
-        "one, and attribute nothing in it to the GEMM count. The other three "
-        "titan rows move one axis each. The titan/te_grouped_gemm vs titan "
-        "row moves the GEMM library alone, including each library's own "
-        "setup kernels: CUTLASS torch._grouped_mm against TransformerEngine's "
-        "cuBLASLt grouped GEMM, with the same parameters and the same "
-        "plain-ops SwiGLU. THE NUMBER IS DEVICE "
+        "one, and attribute nothing in it to the GEMM count. The other two "
+        "titan rows move one axis each. THE NUMBER IS DEVICE "
         "TIME ON BOTH SIDES: megatron's tokens_per_expert.tolist() would be a "
         "blocking sync on a device tensor, but its allgather dispatcher has "
         "already moved that tensor to the host, so the inputs builder hands "
@@ -2282,7 +2278,7 @@ EXPERT_MLP = KernelScenario(
         "receives in production. Neither engine pays a layout conversion "
         "here; both consume the same (rows, dim) permuted batch. All four "
         "megatron arms run EAGER, because megatron compiles no whole "
-        "transformer layer, and all five TorchTitan arms run under "
+        "transformer layer, and all four TorchTitan arms run under "
         "torch.compile(fullgraph=True), because that is what they face end "
         "to end -- but no published row crosses that difference. This "
         "scenario REPLACED the retired swiglu scenario, whose three arms are "
@@ -2328,14 +2324,12 @@ EXPERT_MLP = KernelScenario(
     # and not three: it was checked by constructing the scenario with
     # comparisons=None and reading comparison_pairs() back.
     #
-    # Seven rows, and every one of them within one engine:
+    # Six rows, and every one of them within one engine:
     #
     #   * three megatron deltas against the megatron base, which is the
     #     within-megatron fusion and implementation question; and
     #   * TorchTitan's own w13 fusion against unfused experts, then each Piper
-    #     layout against that fusion, which is what each of them modified; and
-    #   * TE's cuBLASLt grouped GEMM against unfused experts, which changes
-    #     the GEMM library and nothing else.
+    #     layout against that fusion, which is what each of them modified.
     #
     # The row the retired swiglu scenario published -- a Piper arm against
     # unfused experts -- is
@@ -2353,7 +2347,6 @@ EXPERT_MLP = KernelScenario(
         ("titan/fused_grouped_experts", "titan"),
         ("titan/piper_optimized_triton", "titan/fused_grouped_experts"),
         ("titan/piper_optimized_inductor", "titan/fused_grouped_experts"),
-        ("titan/te_grouped_gemm", "titan"),
     ),
     arms=(
         # ---- megatron-core -------------------------------------------------
@@ -2620,31 +2613,6 @@ EXPERT_MLP = KernelScenario(
                 CorrectnessCheck(
                     kind="tolerance",
                     reference="titan/fused_grouped_experts",
-                    outputs=EXPERT_MLP_TITAN_OUTPUTS,
-                    max_rel_l2=2e-2,
-                ),
-            ),
-        ),
-        KernelArm(
-            name="titan/te_grouped_gemm",
-            description=(
-                "TorchTitan GroupedExperts with each of its three grouped "
-                "GEMMs on TransformerEngine's cuBLASLt grouped GEMM "
-                "(TEGroupedExperts): the same parameters, the same plain-ops "
-                "SwiGLU and the split sizes on the device. Its opponent is "
-                "titan, so its ratio is what the GEMM library buys"
-            ),
-            builder=(
-                "benchmarks.kernel.operations.expert_mlp"
-                ":build_expert_mlp_titan_te_grouped_gemm"
-            ),
-            modes=MODES,
-            compiled=True,
-            correctness=(
-                EXPERT_MLP_TITAN_GATE,
-                CorrectnessCheck(
-                    kind="tolerance",
-                    reference="titan",
                     outputs=EXPERT_MLP_TITAN_OUTPUTS,
                     max_rel_l2=2e-2,
                 ),

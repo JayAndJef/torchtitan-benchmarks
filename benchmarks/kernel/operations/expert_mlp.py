@@ -113,7 +113,7 @@ megatron failure at *build* time, because ``gate_outputs``
 (``benchmarks/kernel/engine/run.py:289-298``) builds every arm of the scenario
 in one interpreter with no ``try``/``except``, and ``resolve_arm_skips``
 (``benchmarks/kernel/runner.py:281-319``) only pre-skips on
-``requires_gcc_toolset``, which none of these nine arms declares. So a TE that
+``requires_gcc_toolset``, which none of these eight arms declares. So a TE that
 fails to import takes down the correctness pass, no timing worker launches, and
 **every** arm lands at ``status: skipped`` -- ``titan`` included. Anchoring on
 the titan side does not save the TorchTitan ranking from that; nothing in the
@@ -165,7 +165,7 @@ and TransformerEngine's ``GroupedLinear`` backward calls
 ``clear_tensor_data(*inputmats)``
 (``transformer_engine/pytorch/module/grouped_linear.py:1129``), which replaces
 each saved input with an empty tensor, so a second pass would read cleared
-storage; TE's ``SwiGLU`` operation clears its saved tensors too. The five titan
+storage; TE's ``SwiGLU`` operation clears its saved tensors too. The four titan
 arms keep the mode, because this scenario publishes no cross-engine row: no
 table compares a titan ``backward`` against a megatron one, so dropping it from
 both -- which ``qkv_prep``, ``ffn_norm`` and ``attn_out_proj`` do, and must,
@@ -232,7 +232,7 @@ from benchmarks.models.piper_qwen3.mcore_profiles import (
 from benchmarks.models.piper_qwen3.shape import PiperShape
 
 
-# The nine arm names, spelled as the partition spells them. The slash says
+# The eight arm names, spelled as the partition spells them. The slash says
 # which engine an arm is and which profile of that engine, and it reaches a
 # filename through ``benchmarks/kernel/runner.py``, which routes it through
 # ``schema.fragment_stem``.
@@ -244,7 +244,6 @@ TITAN_ARM = "titan"
 TITAN_FUSED_ARM = "titan/fused_grouped_experts"
 TITAN_PIPER_TRITON_ARM = "titan/piper_optimized_triton"
 TITAN_PIPER_INDUCTOR_ARM = "titan/piper_optimized_inductor"
-TITAN_TE_ARM = "titan/te_grouped_gemm"
 
 # The layer the megatron arms read their expert layer from. Every layer holds
 # the same module class at ``moe_layer_freq=1`` and the weights are overwritten
@@ -273,7 +272,7 @@ MCORE_WEIGHT_COMPONENT = "experts"
 # The three keys of the shared fp32 weight state. They are the names
 # ``GroupedExperts`` exposes, and the names all three fused titan modules
 # accept through their ``load_state_dict`` merge hooks, which is what lets one
-# state dict load into all five titan arms.
+# state dict load into all four titan arms.
 TITAN_STATE_KEYS = ("w1_EFD", "w2_EDF", "w3_EFD")
 
 # The expert-module class each megatron arm must build. ``moe_grouped_gemm``
@@ -602,8 +601,8 @@ def _titan_arm(
 ) -> BuiltArm:
     """The three timed closures every titan arm shares.
 
-    All five arms run this same code over their own module, so the comparison
-    measures the five modules and nothing about how each arm was written.
+    All four arms run this same code over their own module, so the comparison
+    measures the four modules and nothing about how each arm was written.
 
     ``module`` is the module *inside* the compile wrapper, because that is
     where the parameters whose gradients are cleared and read actually live.
@@ -728,29 +727,6 @@ def build_expert_mlp_titan(
     module = _build_titan_module(GroupedExperts, shape, inputs)
     return _titan_arm(
         TITAN_ARM, module, _compile_module(module), inputs, _stock_weight_grads
-    )
-
-
-def build_expert_mlp_titan_te_grouped_gemm(
-    shape: PiperShape, workload: KernelWorkload, inputs: ExpertMlpInputs
-) -> BuiltArm:
-    """``GroupedExperts`` with each grouped GEMM on TE's cuBLASLt grouped GEMM.
-
-    The parameters and the plain-ops SwiGLU are those of ``titan``, so the row
-    against it moves the GEMM library alone.
-    """
-    from benchmarks.models.piper_qwen3.components.moe.te_grouped_experts import (
-        TEGroupedExperts,
-    )
-
-    module = _build_titan_module(TEGroupedExperts, shape, inputs)
-    if type(module) is not TEGroupedExperts:
-        raise RuntimeError(
-            f"{TITAN_TE_ARM}: the config built {type(module).__name__}, "
-            "not TEGroupedExperts"
-        )
-    return _titan_arm(
-        TITAN_TE_ARM, module, _compile_module(module), inputs, _stock_weight_grads
     )
 
 

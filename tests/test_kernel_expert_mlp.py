@@ -359,7 +359,7 @@ class ReferenceTests(unittest.TestCase):
 
 
 class TitanClosureTests(unittest.TestCase):
-    """The closures all five titan arms share, over stand-in modules."""
+    """The closures all four titan arms share, over stand-in modules."""
 
     def _arm(self, inputs: ExpertMlpInputs, fused: bool = False):
         module = _loaded(
@@ -988,7 +988,7 @@ class RegisteredShapeTests(unittest.TestCase):
         )
         self.assertAlmostEqual(3 * per_tensor_bytes / 2**30, 23.6, places=1)
         # And the fp64 reference's weight gradients, which the correctness
-        # worker holds resident while it builds all nine arms.
+        # worker holds resident while it builds all eight arms.
         self.assertAlmostEqual(3 * per_tensor_bytes * 2 / 2**30, 47.3, places=1)
 
 

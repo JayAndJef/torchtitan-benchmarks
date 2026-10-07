@@ -179,7 +179,6 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.components.rope.te_rope_override",
     "benchmarks.models.piper_qwen3.components.attention.packed",
     "benchmarks.models.piper_qwen3.components.attention.fa3_override",
-    "benchmarks.models.piper_qwen3.components.moe.te_grouped_experts",
     "benchmarks.models.piper_qwen3.components.moe.host_count_dispatcher",
     "benchmarks.models.piper_qwen3.components.moe.te_per_expert_experts",
     # The cross-engine weight map. It reshapes and copies tensors, so torch at

@@ -1210,11 +1210,6 @@ class AttentionScenarioTests(unittest.TestCase):
 
 MOE_PACKAGE = "benchmarks.models.piper_qwen3.components.moe"
 
-TE_GEMM_TARGET = f"{MOE_PACKAGE}.te_grouped_experts.te_grouped_experts"
-
-TE_GEMM_MARKERS = ("setup_grouped_gemm_kernel", "_ptrGroup_")
-"""The TE setup kernel and the cuBLASLt grouped kernel, which each TE grouped GEMM launches."""
-
 HOST_COUNT_TARGET = f"{MOE_PACKAGE}.host_count_dispatcher.host_count_dispatcher"
 
 PER_EXPERT_TARGET = f"{MOE_PACKAGE}.te_per_expert_experts.te_per_expert_experts"
@@ -1284,7 +1279,6 @@ class ExpertsScenarioTests(unittest.TestCase):
             [arm.name for arm in scenario.arms],
             [
                 "titan_compiled",
-                "titan_compiled_te_gemm",
                 "titan_compiled_te_per_expert",
                 "megatron_stock",
             ],
@@ -1295,35 +1289,18 @@ class ExpertsScenarioTests(unittest.TestCase):
         self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
         self.assertEqual(set(SCENARIOS), {"engines", "attention", "experts", "stacked"})
 
-    def test_each_override_arm_declares_its_imports_count_and_markers(self) -> None:
-        scenario = scenario_by_name("experts")
-        for name, targets, per_block, markers in (
-            ("titan_compiled_te_gemm", (TE_GEMM_TARGET,), 1, TE_GEMM_MARKERS),
-            (
-                "titan_compiled_te_per_expert",
-                (HOST_COUNT_TARGET, PER_EXPERT_TARGET),
-                2,
-                PER_EXPERT_MARKERS,
-            ),
-        ):
-            with self.subTest(arm=name):
-                arm = scenario.arm(name)
-                config = arm.config
-                self.assertEqual(engine_for(arm).name, "torchtitan")
-                self.assertEqual(config.compile, CompileMode.TORCH)
-                self.assertEqual(config.override_imports, targets)
-                self.assertEqual(config.overrides_per_block, per_block)
-                self.assertEqual(config.trace_kernel_markers, markers)
-                self.assertIs(config.packed_offsets, False)
-                self.assertEqual(config.extra_flags, ())
-                run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
-                self.assertEqual(engine_for(arm).check(run, arm), [])
-
-    def test_no_marker_of_one_expert_gemm_path_names_another(self) -> None:
-        for marker in PER_EXPERT_MARKERS:
-            for other in TE_GEMM_MARKERS:
-                self.assertNotIn(marker, other)
-                self.assertNotIn(other, marker)
+    def test_the_override_arm_declares_its_imports_count_and_markers(self) -> None:
+        arm = scenario_by_name("experts").arm("titan_compiled_te_per_expert")
+        config = arm.config
+        self.assertEqual(engine_for(arm).name, "torchtitan")
+        self.assertEqual(config.compile, CompileMode.TORCH)
+        self.assertEqual(config.override_imports, (HOST_COUNT_TARGET, PER_EXPERT_TARGET))
+        self.assertEqual(config.overrides_per_block, 2)
+        self.assertEqual(config.trace_kernel_markers, PER_EXPERT_MARKERS)
+        self.assertIs(config.packed_offsets, False)
+        self.assertEqual(config.extra_flags, ())
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        self.assertEqual(engine_for(arm).check(run, arm), [])
 
     def test_the_per_expert_marker_is_the_range_that_its_ops_open(self) -> None:
         """The source is parsed, so TE stays out of this process."""
@@ -1353,7 +1330,6 @@ class ExpertsScenarioTests(unittest.TestCase):
         run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
         for name, targets in (
             ("titan_compiled", ()),
-            ("titan_compiled_te_gemm", (TE_GEMM_TARGET,)),
             ("titan_compiled_te_per_expert", (HOST_COUNT_TARGET, PER_EXPERT_TARGET)),
         ):
             with self.subTest(arm=name):
@@ -1367,14 +1343,10 @@ class ExpertsScenarioTests(unittest.TestCase):
                 self.assertEqual(tuple(parse_cli_imports(sent)), targets)
                 self.assertNotIn("--dataloader.offset-rows", argv)
 
-    def test_the_te_arms_replace_their_count_of_nodes(self) -> None:
-        """A subprocess counts the TE arms, so TE does not patch this process."""
-        counts = _count_in_subprocess(
-            self, "experts", ["titan_compiled_te_gemm", "titan_compiled_te_per_expert"]
-        )
-        self.assertEqual(
-            sorted(counts), ["titan_compiled_te_gemm", "titan_compiled_te_per_expert"]
-        )
+    def test_the_te_arm_replaces_its_count_of_nodes(self) -> None:
+        """A subprocess counts the TE arm, so TE does not patch this process."""
+        counts = _count_in_subprocess(self, "experts", ["titan_compiled_te_per_expert"])
+        self.assertEqual(sorted(counts), ["titan_compiled_te_per_expert"])
         for name, sizes in counts.items():
             self.assertEqual(sorted(sizes), sorted(OVERRIDE_COUNT_SIZES))
             config = scenario_by_name("experts").arm(name).config
@@ -1384,14 +1356,14 @@ class ExpertsScenarioTests(unittest.TestCase):
                     with self.subTest(arm=name, size=size, target=target):
                         self.assertEqual(count, PIPER_SHAPES[size].n_layers)
 
-    def test_packed_offsets_on_a_te_arm_is_refused(self) -> None:
-        scenario = scenario_by_name("experts")
+    def test_packed_offsets_on_the_te_arm_is_refused(self) -> None:
+        arm = configured(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
+            packed_offsets=True,
+        )
         run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
-        for name in ("titan_compiled_te_gemm", "titan_compiled_te_per_expert"):
-            with self.subTest(arm=name):
-                arm = configured(scenario.arm(name), packed_offsets=True)
-                (refusal,) = engine_for(arm).check(run, arm)
-                self.assertIn(f"{name}: packed_offsets is on", refusal)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn("titan_compiled_te_per_expert: packed_offsets is on", refusal)
 
     def test_the_per_expert_experts_without_the_host_count_dispatcher_is_refused(self) -> None:
         arm = configured(
@@ -1405,20 +1377,18 @@ class ExpertsScenarioTests(unittest.TestCase):
         self.assertIn("add the host count dispatcher", refusal)
 
     def test_the_host_count_dispatcher_without_the_per_expert_experts_is_refused(self) -> None:
-        for imports in ((HOST_COUNT_TARGET,), (HOST_COUNT_TARGET, TE_GEMM_TARGET)):
-            with self.subTest(imports=imports):
-                arm = configured(
-                    scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
-                    overrides_per_block=len(imports),
-                    override_imports=imports,
-                )
-                run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
-                (refusal,) = engine_for(arm).check(run, arm)
-                self.assertIn(
-                    f"titan_compiled_te_per_expert: the override import {HOST_COUNT_TARGET}",
-                    refusal,
-                )
-                self.assertIn("add the per-expert experts", refusal)
+        arm = configured(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
+            overrides_per_block=1,
+            override_imports=(HOST_COUNT_TARGET,),
+        )
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn(
+            f"titan_compiled_te_per_expert: the override import {HOST_COUNT_TARGET}",
+            refusal,
+        )
+        self.assertIn("add the per-expert experts", refusal)
 
     def test_either_host_count_override_at_ep_1_is_refused(self) -> None:
         arm = scenario_by_name("experts").arm("titan_compiled_te_per_expert")
@@ -1441,37 +1411,32 @@ class ExpertsScenarioTests(unittest.TestCase):
         )
 
     def test_a_te_override_under_spmd_types_is_refused(self) -> None:
-        scenario = scenario_by_name("experts")
+        name = "titan_compiled_te_per_expert"
         run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
-        for name, target in (
-            ("titan_compiled_te_gemm", TE_GEMM_TARGET),
-            ("titan_compiled_te_per_expert", HOST_COUNT_TARGET),
+        for flags in (
+            ("--parallelism.spmd-backend", "spmd_types"),
+            ("--parallelism.spmd-backend=spmd_types",),
+            ("--parallelism.spmd_backend", "spmd_types"),
+            (
+                "--parallelism.spmd-backend",
+                "default",
+                "--parallelism.spmd-backend=spmd_types",
+            ),
         ):
-            for flags in (
-                ("--parallelism.spmd-backend", "spmd_types"),
-                ("--parallelism.spmd-backend=spmd_types",),
-                ("--parallelism.spmd_backend", "spmd_types"),
-                (
-                    "--parallelism.spmd-backend",
-                    "default",
-                    "--parallelism.spmd-backend=spmd_types",
-                ),
-            ):
-                with self.subTest(arm=name, flags=flags):
-                    arm = configured(scenario.arm(name), extra_flags=flags)
-                    (refusal,) = engine_for(arm).check(run, arm)
-                    self.assertIn(f"{name}: the override import {target}", refusal)
-                    self.assertIn("no SPMD type rule", refusal)
-                    self.assertIn("--parallelism.spmd-backend spmd_types", refusal)
+            with self.subTest(flags=flags):
+                arm = configured(scenario_by_name("experts").arm(name), extra_flags=flags)
+                (refusal,) = engine_for(arm).check(run, arm)
+                self.assertIn(f"{name}: the override import {HOST_COUNT_TARGET}", refusal)
+                self.assertIn("no SPMD type rule", refusal)
+                self.assertIn("--parallelism.spmd-backend spmd_types", refusal)
 
     def test_a_te_override_under_another_backend_passes(self) -> None:
         scenario = scenario_by_name("experts")
         run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
         for name, flags in (
-            ("titan_compiled_te_gemm", ("--parallelism.spmd-backend", "full_dtensor")),
             ("titan_compiled_te_per_expert", ("--parallelism.spmd-backend", "full_dtensor")),
             (
-                "titan_compiled_te_gemm",
+                "titan_compiled_te_per_expert",
                 (
                     "--parallelism.spmd-backend=spmd_types",
                     "--parallelism.spmd-backend=default",

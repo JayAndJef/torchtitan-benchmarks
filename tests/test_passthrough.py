@@ -115,7 +115,6 @@ def _titan_argvs() -> list[list[str]]:
     argvs = []
     override_arms = (
         ATTENTION.arm("titan_compiled_fa3"),
-        EXPERTS.arm("titan_compiled_te_gemm"),
         EXPERTS.arm("titan_compiled_te_per_expert"),
         STACKED.arm("titan_compiled_fa3_te_per_expert"),
     )
