@@ -73,7 +73,7 @@ shares one pre-push hook.
   and ignores the torch version. So `sync.sh` appends the torch pin to
   `UV_CACHE_DIR`, and a pin bump rebuilds TE's torch binding and FA3. A
   plain `uv sync` uses the shared cache and can install the old torch's
-  builds. Each pin's cache holds about 6.4 GiB. After a bump, delete the
+  builds. Each pin's cache holds several GiB. After a bump, delete the
   old pin's cache when no venv still syncs from it.
 - Skip the long build with `./sync.sh --no-group flash3`.
 - torch is pinned to the stable `2.14.1` build from PyPI, which uses CUDA

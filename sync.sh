@@ -11,7 +11,8 @@
 # uv caches both builds by their source alone and ignores the torch they built
 # against. The first pass also uninstalls both, so the second pass reinstalls
 # them from the cache. So each torch pin gets its own uv cache, and a pin bump
-# rebuilds both against the new torch. Delete the old pin's cache (~6.4 GiB).
+# rebuilds both against the new torch. Delete the old pin's cache, which holds
+# several GiB.
 #
 # The first pass installs torch and the header wheels; the second builds both.
 # Skip the long one with:  ./sync.sh --no-group flash3
