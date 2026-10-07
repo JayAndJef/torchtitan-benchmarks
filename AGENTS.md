@@ -869,11 +869,10 @@ CUDA is unavailable. Run it after any change under `benchmarks/`.
 shares it. Bypass it with `git push --no-verify` or `PRE_PUSH_SKIP=1`.
 
 `.github/workflows/tests.yml` runs a named module list rather than
-`discover`. Three properties of this repository make discovery unrunnable on
-a hosted runner: the torch pin installs gigabytes of CUDA wheels, the engines
-are submodules the job does not fetch, and the kernel tests need a GPU. The
-workflow runs `tests/test_axes.py`, `tests/test_cli.py`,
-`tests/test_docstrings.py`, `tests/test_engines.py`,
+`discover`. Two properties of this repository make discovery unrunnable on
+a hosted runner: the engines are submodules the job does not fetch, and the
+kernel tests need a GPU. The workflow runs `tests/test_axes.py`,
+`tests/test_cli.py`, `tests/test_docstrings.py`, `tests/test_engines.py`,
 `tests/test_evidence.py`, `tests/test_golden.py`,
 `tests/test_import_boundaries.py`, `tests/test_launcher.py`,
 `tests/test_overrides.py`, `tests/test_parallelism_plumbing.py`,
