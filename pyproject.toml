@@ -5,6 +5,7 @@ description = "End-to-end and kernel benchmarks for the Piper Qwen3-1B TorchTita
 requires-python = ">=3.10"
 dependencies = [
     "torch==2.14.1",
+    # Pinned with torch, so that a new resolution cannot move triton.
     "triton==3.8.0 ; sys_platform == 'linux'",
     "torchtitan",
     "helion==1.4.0",
