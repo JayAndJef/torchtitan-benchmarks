@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.e2e.registry import SCENARIOS
 from tests.test_import_boundaries import REPO_ROOT
 
 PRE_PUSH = REPO_ROOT / "tools" / "pre-push.sh"
@@ -141,6 +142,33 @@ class MatrixScriptTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("set ROOT", result.stderr)
+
+    def test_every_template_cell_names_one_known_scenario_and_known_arms(self) -> None:
+        """A cell that names an arm the branch lacks fails only in the job."""
+        text = MATRIX_JOB.read_text()
+        variables = dict(re.findall(r'^([A-Z]+)="([^"]*)"$', text, re.M))
+        cells = re.findall(r"^cell (.+)$", text, re.M)
+        self.assertGreater(len(cells), 0)
+        names = []
+        for cell in cells:
+            words = re.sub(
+                r"\$([A-Z]+)", lambda match: variables[match.group(1)], cell
+            ).split()
+            name, flags = words[0], words[1:]
+            names.append(name)
+            with self.subTest(cell=name):
+                self.assertRegex(name, r"\A[A-Za-z0-9_-]+\Z")
+                self.assertFalse(
+                    [flag for flag in flags if flag.startswith(("--scenario=", "--arm="))]
+                )
+                self.assertEqual(flags.count("--scenario"), 1)
+                scenario = flags[flags.index("--scenario") + 1]
+                self.assertIn(scenario, sorted(SCENARIOS))
+                arms = sorted(arm.name for arm in SCENARIOS[scenario].arms)
+                for index, flag in enumerate(flags):
+                    if flag == "--arm":
+                        self.assertIn(flags[index + 1], arms)
+        self.assertEqual(len(names), len(set(names)), "two cells share a name")
 
 
 STUB_RUN_BENCH = """#!/usr/bin/env bash
