@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # uv sync wrapper. Two dependency groups build CUDA code without isolation
-# against the pinned torch nightly and need the venv's bundled NVIDIA headers
+# against the pinned torch and need the venv's bundled NVIDIA headers
 # plus a C++20 host compiler:
 #
 #   megatron  transformer-engine-torch (prebuilt core wheel, torch binding

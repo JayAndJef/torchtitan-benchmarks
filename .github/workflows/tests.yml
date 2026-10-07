@@ -3,8 +3,8 @@
 # The list of modules below is explicit, not `unittest discover`. Three
 # properties of this repository make discovery unrunnable here:
 #
-#   * torch is pinned to an exact nightly build, which no hosted runner can
-#     install in a reasonable time;
+#   * the torch pin installs gigabytes of CUDA wheels, which no hosted runner
+#     can install in a reasonable time;
 #   * the training engines are git submodules that this job does not fetch;
 #     and
 #   * the kernel tests need a GPU.
