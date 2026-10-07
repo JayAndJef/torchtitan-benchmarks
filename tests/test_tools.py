@@ -32,6 +32,7 @@ SYNC = REPO_ROOT / "sync.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "tests.yml"
 RUN_MATRIX = REPO_ROOT / "tools" / "run_matrix.sh"
 RUN_MATRIX_CELL = REPO_ROOT / "tools" / "run_matrix_cell.sh"
+MATRIX_JOB = REPO_ROOT / "tools" / "matrix_job.sbatch"
 
 FORBIDDEN_IMPORTS = ("torch", "transformer_engine")
 """Module roots that a hosted runner cannot install."""
@@ -131,12 +132,29 @@ class MatrixScriptTests(unittest.TestCase):
         )
 
     def test_the_scripts_are_executable_bash(self) -> None:
-        for script in (RUN_MATRIX, RUN_MATRIX_CELL):
+        for script in (RUN_MATRIX, RUN_MATRIX_CELL, MATRIX_JOB):
             with self.subTest(script=script.name):
                 self.assertTrue(os.access(script, os.X_OK))
                 first = script.read_text().splitlines()[0]
                 self.assertEqual(first, "#!/usr/bin/env bash")
                 subprocess.run(["bash", "-n", str(script)], check=True)
+
+    def test_the_job_template_refuses_its_placeholder_root(self) -> None:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("SLURM_")
+        }
+        env["SLURM_SUBMIT_DIR"] = str(REPO_ROOT)
+        result = subprocess.run(
+            ["bash", str(MATRIX_JOB)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("set ROOT", result.stderr)
 
     def test_the_driver_refuses_the_reserved_partitions(self) -> None:
         for partition in ("placeholder", "exceptions", "admin"):
