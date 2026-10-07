@@ -67,8 +67,14 @@ shares one pre-push hook.
 
 - Three default dependency groups: `megatron` (TransformerEngine), `flash3`
   (a CUTLASS sm90a source build) and `fa4`.
-- **Any resolution change rebuilds FA3 from source**, in 15 to 40
-  minutes. Never benchmark during the build, because it saturates the host.
+- A build of FA3 from source takes 15 to 40 minutes. Never benchmark
+  during the build, because it saturates the host.
+- **uv caches a wheel that builds without isolation by its source alone**,
+  and ignores the torch version. So `sync.sh` appends the torch pin to
+  `UV_CACHE_DIR`, and a pin bump rebuilds TE's torch binding and FA3. A
+  plain `uv sync` uses the shared cache and can install the old torch's
+  builds. Each pin's cache holds about 6.4 GiB. After a bump, delete the
+  old pin's cache when no venv still syncs from it.
 - Skip the long build with `./sync.sh --no-group flash3`.
 - torch is pinned to an exact nightly. The nightly index keeps roughly 60
   days, so the pin needs a bump eventually. A bump changes the numbers.
