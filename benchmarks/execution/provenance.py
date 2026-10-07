@@ -29,6 +29,35 @@ def _te_version() -> str:
         return "unavailable: transformer-engine not installed"
 
 
+_CUBLASLT_PROBE = """
+import ctypes, os
+import torch  # Loads the libcublasLt that TransformerEngine then binds.
+def mapped():
+    for line in open("/proc/self/maps"):
+        if "libcublasLt.so" in line:
+            return os.path.realpath(line.rsplit(" ", 1)[-1].strip())
+path = mapped()
+if path is None:
+    try:
+        ctypes.CDLL("libcublasLt.so.13")
+    except OSError as error:
+        print(f"unavailable: {error}")
+        raise SystemExit
+    path = mapped()
+if path is None:
+    print("unavailable: libcublasLt not mapped after load")
+    raise SystemExit
+library = ctypes.CDLL(path)
+library.cublasLtGetVersion.restype = ctypes.c_size_t
+print(f"{library.cublasLtGetVersion()} {path}")
+"""
+
+
+def _cublaslt_version() -> str:
+    """The cuBLASLt version and path that the process binds after it imports torch, as TransformerEngine does."""
+    return run_text([sys.executable, "-c", _CUBLASLT_PROBE]).strip()
+
+
 _CUDNN_LOADER_PROBE = """
 import ctypes, ctypes.util, os
 name = ctypes.util.find_library("cudnn") or "libcudnn.so.9"
@@ -116,6 +145,7 @@ def hardware_metadata(
         # Recorded for every run, and cheap because nothing imports megatron.
         "megatron_git_rev": _megatron_git_rev(),
         "te_version": _te_version(),
+        "cublaslt_version": _cublaslt_version(),
         "cudnn_torch_build": _cudnn_torch_build(),
         "cudnn_loader_resolves": _cudnn_loader_resolves(),
     }
