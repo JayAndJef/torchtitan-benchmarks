@@ -57,15 +57,10 @@ The `attention` scenario keeps `titan_compiled` and `megatron_stock`, and
 adds `titan_compiled_fa3`, which replaces TorchTitan's FlexAttention with
 FA3 varlen.
 
-The `experts` scenario keeps `titan_compiled` and `megatron_stock`. It adds
-two arms that replace TorchTitan's expert GEMMs through overrides:
-
-| arm | expert GEMM |
-|---|---|
-| `titan_compiled_te_gemm` | TransformerEngine's cuBLASLt grouped GEMM |
-| `titan_compiled_te_per_expert` | One TransformerEngine cuBLAS GEMM per expert, as Megatron runs them |
-
-The per-expert arm needs `--ep 2` or more.
+The `experts` scenario keeps `titan_compiled` and `megatron_stock`, and
+adds `titan_compiled_te_per_expert`. That arm replaces TorchTitan's expert
+GEMMs with one TransformerEngine cuBLAS GEMM per expert, as Megatron runs
+them. It needs `--ep 2` or more.
 
 The `stacked` scenario keeps `titan_compiled` and `megatron_stock`, and
 adds `titan_compiled_fa3_te_per_expert`. That arm runs FA3 varlen and the

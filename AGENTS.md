@@ -31,25 +31,21 @@ cap and no device assert. Their width changes per batch, so the override
 marks that length dynamic. Each block compiles once, with a dynamic offsets
 length.
 
-The `experts` scenario has four arms. It reuses `titan_compiled` and
-`megatron_stock` unchanged, and it adds two arms that replace the expert
+The `experts` scenario has three arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds one arm that replaces the expert
 GEMMs of `titan_compiled` through overrides:
 
 | arm | engine | expert GEMM |
 |---|---|---|
 | `titan_compiled` | `torchtitan` | `torch._grouped_mm`, one CUTLASS grouped kernel |
-| `titan_compiled_te_gemm` | `torchtitan` | TransformerEngine's cuBLASLt grouped GEMM |
 | `titan_compiled_te_per_expert` | `torchtitan` | one TransformerEngine cuBLAS GEMM per expert |
 | `megatron_stock` | `megatron_stock` | one TransformerEngine cuBLAS GEMM per expert |
 
-Each TE arm moves the expert GEMM path alone against `titan_compiled`. The
-three TorchTitan arms share their init, seed and data, so their routing
-matches. Megatron routes from another init, so its row is a reference.
+The per-expert arm moves the expert GEMM path alone against
+`titan_compiled`. The two TorchTitan arms share their init, seed and data,
+so their routing matches. Megatron routes from another init, so its row is
+a reference.
 
-- `titan_compiled_te_gemm` imports
-  `benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py`. Its
-  split sizes stay on the device, so each GEMM is one launch with no host
-  sync. The module raises at import on a cuBLASLt below 13.4.
 - `titan_compiled_te_per_expert` imports two overrides.
   `benchmarks/models/piper_qwen3/components/moe/host_count_dispatcher.py`
   copies the whole count matrix in the dispatcher's one blocking copy, and
@@ -62,8 +58,9 @@ matches. Megatron routes from another init, so its row is a reference.
   marker is not a kernel name. It is the profiler range that each op opens,
   `torchtitan_benchmarks::te_per_expert_mm`.
 - The engine's check refuses either per-expert override without the other,
-  and either one at ep 1. It also refuses a TE arm that selects the
-  `spmd_types` backend, because the TE custom ops have no SPMD type rule.
+  and either one at ep 1. It also refuses an arm with either override that
+  selects the `spmd_types` backend, because their custom ops have no SPMD
+  type rule.
 
 The `stacked` scenario has three arms. It reuses `titan_compiled` and
 `megatron_stock` unchanged, and it adds one arm that moves two axes
@@ -862,7 +859,7 @@ Read a registered schedule as a declaration, never as a measurement. Only
 ./run_bench.sh kernel-bench <gpu> [OPTIONS]
 ```
 
-The registry declares 17 scenarios, 72 arms and 5 spans. 16 of the scenarios
+The registry declares 17 scenarios, 71 arms and 5 spans. 16 of the scenarios
 are cross-engine: each cuts the model at one component and puts
 megatron-core beside TorchTitan there. `./run_bench.sh scenarios` prints
 every scenario, arm and span with its description, and
@@ -1072,10 +1069,9 @@ The kernel scenarios additionally depend on `HelionCosSinRoPE`,
 `FusedGroupedExperts`, `GroupedExperts`, `QKVLinear`, `FusedQKVLinear`,
 `FlexAttention` and `create_varlen_metadata_for_document`.
 
-`benchmarks/models/piper_qwen3/components/moe/te_grouped_experts.py` and
-`benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py` copy
-the forward of `GroupedExperts`, and they import `get_spmd_backend`. After a
-bump, compare that forward with the fork's forward again.
+`benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py`
+copies the forward of `GroupedExperts`, and it imports `get_spmd_backend`.
+After a bump, compare that forward with the fork's forward again.
 
 `benchmarks/models/piper_qwen3/components/moe/host_count_dispatcher.py`
 subclasses `AllToAllTokenDispatcher`. After a bump, verify these points:
