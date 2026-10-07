@@ -78,6 +78,8 @@ shares one pre-push hook.
 - Skip the long build with `./sync.sh --no-group flash3`.
 - torch is pinned to the stable `2.14.1` build from PyPI, which uses CUDA
   13.0. A stable release stays on PyPI, so the pin has no index expiry.
+  `torch.__version__`, and so the manifest's `torch_version`, reads
+  `2.14.1+cu130`.
 - The `flash3` group pins nvcc, crt and nvvm at 13.0.88 and cccl at
   13.0.85. All four must come from CUDA 13.0, the CUDA version of the torch
   runtime.
