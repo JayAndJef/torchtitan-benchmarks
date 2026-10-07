@@ -1085,8 +1085,9 @@ def build_attention_core_titan_flash3(
 
     The arm builds the e2e override's ``PackedFA3Attention``, so the two
     cannot drift. Its constructor activates FA3 and raises without it, and
-    its forward allows the flash backend alone, because torch 2.15
-    ``varlen_attn`` selects an eligible cuDNN backend first. ``FA3_MARKER``
+    its forward allows the flash backend alone. Torch 2.14.1 never picks
+    cuDNN for this causal call. The wrap guards against a torch whose
+    ``varlen_attn`` picks an eligible cuDNN backend first. ``FA3_MARKER``
     guards the other direction: FA3 degrades to FA2 rather than raising when
     it declines to register, and an FA2 kernel under an FA3 label is the
     failure this scenario exists to prevent.

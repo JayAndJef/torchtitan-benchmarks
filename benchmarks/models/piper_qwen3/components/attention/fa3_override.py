@@ -59,7 +59,7 @@ class PackedFA3Attention(VarlenAttention):
         out_transform: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        """The parent's forward under the flash SDPA backend alone, because ``varlen_attn`` prefers cuDNN."""
+        """The parent's forward under the flash SDPA backend alone, so a torch whose ``varlen_attn`` picks cuDNN first still runs FA3."""
         _require_fa3()
         with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
             return super().forward(
