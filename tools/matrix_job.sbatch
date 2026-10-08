@@ -12,6 +12,7 @@
 # cell lines. Read the admin skill run-gpu-job for the partition and the
 # time limit. The `dp * pp` of each cell must equal the number of cards.
 # Each cell needs exactly one --scenario, and a name of [A-Za-z0-9_-]+.
+# tests/test_tools.py runs the run checks on each cell of this template.
 #
 # The --time must cover the sum of the run times of the cells, plus up to
 # IDLE_MAX_WAIT seconds of load gate per cell. With the default of 1200 s,

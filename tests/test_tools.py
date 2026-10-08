@@ -25,9 +25,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from click.testing import CliRunner
+
+from benchmarks.cli.main import cli
 from benchmarks.e2e.registry import SCENARIOS
 from tests.test_import_boundaries import REPO_ROOT
 
@@ -41,6 +45,34 @@ FORBIDDEN_IMPORTS = ("torch", "transformer_engine")
 """Module roots that a hosted runner cannot install."""
 
 _MODULE_REFERENCE = re.compile(r"\btests\.(test_\w+)\b")
+
+
+RUN_ENVIRONMENT = (
+    "AC_MODE",
+    "BATCH",
+    "BENCH_COMPILER_ENV",
+    "BENCHMARK_CACHE_ROOT",
+    "MODEL_SIZE",
+    "OUT",
+    "SEQ",
+    "STEPS",
+    "WARMUP_STEPS",
+)
+"""The environment variables that ``run`` reads; the template test unsets them, as the job unsets two."""
+
+
+def template_cells() -> tuple[str, list[tuple[str, list[str]]]]:
+    """The device list of the job template, and the name and the run flags of each of its cells."""
+    text = MATRIX_JOB.read_text()
+    variables = dict(re.findall(r'^([A-Z]+)="([^"]*)"$', text, re.M))
+    devices = re.search(r"^DEVICES=(\S+)$", text, re.M).group(1)
+    cells = []
+    for cell in re.findall(r"^cell (.+)$", text, re.M):
+        words = re.sub(
+            r"\$([A-Z]+)", lambda match: variables[match.group(1)], cell
+        ).split()
+        cells.append((words[0], words[1:]))
+    return devices, cells
 
 
 def workflow_modules() -> tuple[str, ...]:
@@ -176,16 +208,10 @@ class MatrixScriptTests(unittest.TestCase):
 
     def test_every_template_cell_names_one_known_scenario_and_known_arms(self) -> None:
         """A cell that names an arm the branch lacks fails only in the job."""
-        text = MATRIX_JOB.read_text()
-        variables = dict(re.findall(r'^([A-Z]+)="([^"]*)"$', text, re.M))
-        cells = re.findall(r"^cell (.+)$", text, re.M)
+        _, cells = template_cells()
         self.assertGreater(len(cells), 0)
         names = []
-        for cell in cells:
-            words = re.sub(
-                r"\$([A-Z]+)", lambda match: variables[match.group(1)], cell
-            ).split()
-            name, flags = words[0], words[1:]
+        for name, flags in cells:
             names.append(name)
             with self.subTest(cell=name):
                 self.assertRegex(name, r"\A[A-Za-z0-9_-]+\Z")
@@ -200,6 +226,21 @@ class MatrixScriptTests(unittest.TestCase):
                     if flag == "--arm":
                         self.assertIn(flags[index + 1], arms)
         self.assertEqual(len(names), len(set(names)), "two cells share a name")
+
+    def test_every_template_cell_passes_the_run_checks(self) -> None:
+        """A cell that the parallelism rules or an engine check refuse fails only in the job, after the queue wait."""
+
+        class Checked(Exception):
+            """The run reached the host probe, so every check before it passed."""
+
+        devices, cells = template_cells()
+        runner = CliRunner(env={name: None for name in RUN_ENVIRONMENT})
+        for name, flags in cells:
+            with self.subTest(cell=name), mock.patch(
+                "benchmarks.e2e.runner.hardware_metadata", side_effect=Checked
+            ):
+                result = runner.invoke(cli, ["run", devices, *flags])
+                self.assertIsInstance(result.exception, Checked, result.output)
 
 
 STUB_RUN_BENCH = """#!/usr/bin/env bash
