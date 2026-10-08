@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -58,21 +59,31 @@ def _cublaslt_version() -> str:
     return run_text([sys.executable, "-c", _CUBLASLT_PROBE]).strip()
 
 
-_CUDNN_LOADER_PROBE = """
-import ctypes, ctypes.util, os
-name = ctypes.util.find_library("cudnn") or "libcudnn.so.9"
+CUDNN_LOADER_PROBE = """
+import json, os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # The TransformerEngine import touches no card.
+def directories():
+    found = set()
+    for line in open("/proc/self/maps"):
+        if "libcudnn" in line:
+            found.add(os.path.dirname(os.path.realpath(line.rsplit(" ", 1)[-1].strip())))
+    return sorted(found)
+import torch
+bundled = directories()
+import transformer_engine.pytorch
+major, minor, patch = torch._C._cudnn.getCompileVersion()
 try:
-    ctypes.CDLL(name)
-except OSError as error:
-    print(f"unavailable: {error}")
-    raise SystemExit
-for line in open("/proc/self/maps"):
-    if "libcudnn.so" in line:
-        print(os.path.realpath(line.rsplit(" ", 1)[-1].strip()))
-        break
-else:
-    print("unavailable: libcudnn not mapped after load")
+    runtime = str(torch.backends.cudnn.version())
+except RuntimeError as error:
+    runtime = f"raises: {error}"
+print(json.dumps({
+    "bundled": bundled,
+    "loaded": directories(),
+    "build": str(major * 10000 + minor * 100 + patch),
+    "runtime": runtime,
+}))
 """
+"""A probe that prints, as one JSON line, the cuDNN directories after ``import torch`` and after the TransformerEngine import, torch's cuDNN build and ``torch.backends.cudnn.version()``."""
 
 
 def _cudnn_torch_build() -> str:
@@ -87,9 +98,31 @@ def _cudnn_torch_build() -> str:
     ).strip()
 
 
+def cudnn_loader_resolves(output: str) -> str:
+    """The cuDNN directories of one ``CUDNN_LOADER_PROBE`` output; a cuDNN beside torch's own, or another runtime version than torch's build, raises."""
+    if output.startswith("unavailable:"):
+        return output
+    lines = [line for line in output.splitlines() if line.startswith("{")]
+    if not lines:
+        raise ValueError(f"the cuDNN loader probe printed no JSON line: {output}")
+    probe = json.loads(lines[-1])
+    foreign = [path for path in probe["loaded"] if path not in probe["bundled"]]
+    if foreign or probe["runtime"] != probe["build"]:
+        raise ValueError(
+            f"TransformerEngine maps the cuDNN in {', '.join(foreign) or 'none'} "
+            f"beside torch's cuDNN in {', '.join(probe['bundled']) or 'none'}, and "
+            f"torch.backends.cudnn.version() gives {probe['runtime']!r} against "
+            f"the build {probe['build']}; run through ./run_bench.sh, which "
+            "sources cudnn_env.sh"
+        )
+    return ", ".join(probe["loaded"])
+
+
 def _cudnn_loader_resolves() -> str:
-    """The cuDNN library that the dynamic loader binds, which TransformerEngine uses."""
-    return run_text([sys.executable, "-c", _CUDNN_LOADER_PROBE]).strip()
+    """The cuDNN directories that a process maps after it imports TransformerEngine."""
+    return cudnn_loader_resolves(
+        run_text([sys.executable, "-c", CUDNN_LOADER_PROBE]).strip()
+    )
 
 
 def run_text(command: list[str], *, cwd: Path | None = None) -> str:

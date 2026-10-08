@@ -473,7 +473,9 @@ converts a schema 19 manifest to schema 20. It gives each TorchTitan arm
 refuses any other version by name.
 
 A provenance probe that fails records `unavailable: <error>` and does not
-stop the run. A device list of two GPU models stops it.
+stop the run. A device list of two GPU models stops it. A TransformerEngine
+process that maps a second cuDNN beside torch's also stops it, and
+`cudnn_loader_resolves` records the cuDNN directory.
 
 The tokens/s of a step sample, and each tokens/s figure of `results.json`,
 are **per device**. Both engines divide one rank's token count by `cp * tp * pp`. The

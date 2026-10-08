@@ -70,7 +70,7 @@ METADATA = {
     "megatron_git_rev": "59b72fa57f2059e858cb4bb5c094e62cc590754f",
     "te_version": "2.17.1",
     "cudnn_torch_build": "9.24.0",
-    "cudnn_loader_resolves": "/usr/lib64/libcudnn.so.9.23.2",
+    "cudnn_loader_resolves": "/venv/lib/python3.10/site-packages/nvidia/cudnn/lib",
 }
 """The provenance block the stubbed host probe returns."""
 

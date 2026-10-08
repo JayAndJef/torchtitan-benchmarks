@@ -366,7 +366,9 @@ class ProvenanceDeviceTests(unittest.TestCase):
                 return query
             return "stub"
 
-        with mock.patch.object(provenance, "run_text", fake_run_text):
+        with mock.patch.object(
+            provenance, "run_text", fake_run_text
+        ), mock.patch.object(provenance, "_cudnn_loader_resolves", return_value="stub"):
             return hardware_metadata(mock.Mock(), gpu, "auto")
 
     def test_one_device_records_the_line_and_the_label(self) -> None:
