@@ -34,7 +34,7 @@ class RuntimePaths:
         environment: Mapping[str, str] | None = None,
     ) -> RuntimePaths:
         """The paths of a run: each argument, else its environment variable, else the fallback."""
-        environment = environment or os.environ
+        environment = os.environ if environment is None else environment
         cache = cache_root or _optional_path(environment.get("BENCHMARK_CACHE_ROOT"))
         if cache is None:
             cache = Path(tempfile.gettempdir()) / "torchtitan-benchmarks"

@@ -32,8 +32,14 @@ from benchmarks.e2e.engines.megatron_stock.config import MegatronStockConfig
 from benchmarks.e2e.engines.torchtitan import mesh
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec, describe
 from benchmarks.e2e.registry import DEFAULT_AC_MODE, ENGINES
-from benchmarks.e2e.runner import _resolve_run, execute_run
-from tests.engine_helpers import TEST_METADATA, configured, run_spec, write_run_manifest
+from benchmarks.e2e.runner import _resolve_run, check_request, execute_run
+from tests.engine_helpers import (
+    TEST_METADATA,
+    configured,
+    patch_cli_check,
+    run_spec,
+    write_run_manifest,
+)
 from benchmarks.execution import affinity, provenance
 from benchmarks.execution.affinity import CpuPinning, resolve_cpu_pinning
 from benchmarks.execution.devices import parse_devices
@@ -189,15 +195,15 @@ class RequestTests(unittest.TestCase):
 
     def setUp(self) -> None:
         # These tests patch the runner, so they also patch its checks.
-        check = mock.patch("benchmarks.cli.e2e.check_request")
+        check = patch_cli_check()
         self.addCleanup(check.stop)
         check.start()
 
     def _request(self, *arguments: str) -> RunRequest:
         seen = []
 
-        def capture(request, **kwargs):
-            seen.append(request)
+        def capture(checked, **kwargs):
+            seen.append(checked.request)
             raise SystemExit(0)
 
         with mock.patch("benchmarks.cli.e2e.execute_run", side_effect=capture):
@@ -304,8 +310,8 @@ class RequestTests(unittest.TestCase):
         """
         seen = []
 
-        def capture(request, **kwargs):
-            seen.append(request)
+        def capture(checked, **kwargs):
+            seen.append(checked.request)
             return mock.Mock(out_dir=Path("/tmp/out"))
 
         with mock.patch(
@@ -806,7 +812,7 @@ _AXIS_KEYWORDS = tuple(field.name for field in fields(RequestedAxes))
 
 
 class ResolveRunTests(unittest.TestCase):
-    """``_resolve_run`` resolves the mesh."""
+    """``check_request`` resolves the mesh."""
 
     def _resolve(self, scenario_name: str = "engines", **kwargs):
         kwargs.setdefault("ac_mode", "none")
@@ -826,8 +832,10 @@ class ResolveRunTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return _resolve_run(
-                RunRequest(scenario_name=scenario_name, axes=axes, **kwargs),
-                {"PATH": os.environ["PATH"]},
+                check_request(
+                    RunRequest(scenario_name=scenario_name, axes=axes, **kwargs),
+                    environment={"PATH": os.environ["PATH"]},
+                ),
             )
 
     def test_a_single_gpu_run_resolves_to_the_trivial_spec(self) -> None:
@@ -864,8 +872,10 @@ class ResolveRunTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 _resolve_run(
-                    RunRequest(gpu="0,1", scenario_name="engines"),
-                    {"PATH": os.environ["PATH"]},
+                    check_request(
+                        RunRequest(gpu="0,1", scenario_name="engines"),
+                        environment={"PATH": os.environ["PATH"]},
+                    ),
                 )
 
 
@@ -908,12 +918,14 @@ class RunBannerTests(unittest.TestCase):
             )
             with self.assertRaises(RuntimeError):
                 execute_run(
-                    request,
+                    check_request(
+                        request,
+                        environment={"PATH": os.environ["PATH"]},
+                    ),
                     event_handler=lambda event: events.append(
                         event.message if event.kind == "summary" else ""
                     ),
                     process_runner=failing_process,
-                    environment={"PATH": os.environ["PATH"]},
                 )
         return [message for message in events if message]
 

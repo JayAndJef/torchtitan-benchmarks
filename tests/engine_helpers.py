@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from benchmarks.artifacts.manifests import ArmRecord, write_manifest
@@ -46,6 +47,14 @@ def run_spec(
         window=window,
         warmup_steps=warmup_steps,
         seed=seed,
+    )
+
+
+def patch_cli_check() -> mock._patch:
+    """A patch of the CLI's ``check_request`` that returns a stand-in holding the request, valid only when ``execute_run`` is also patched."""
+    return mock.patch(
+        "benchmarks.cli.e2e.check_request",
+        side_effect=lambda request: SimpleNamespace(request=request),
     )
 
 

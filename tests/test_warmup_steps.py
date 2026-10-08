@@ -37,7 +37,7 @@ from benchmarks.e2e.registry import (
 )
 from benchmarks.e2e.engines.api import StepSample
 from benchmarks.e2e.results import evaluate_run, measured_samples, stable_samples
-from tests.engine_helpers import titan_step_line, write_run_manifest
+from tests.engine_helpers import patch_cli_check, titan_step_line, write_run_manifest
 from benchmarks.models.piper_qwen3.shape import PIPER_1B
 
 
@@ -157,7 +157,7 @@ class CliRefusalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
         # These tests patch the runner, so they also patch its checks.
-        check = mock.patch("benchmarks.cli.e2e.check_request")
+        check = patch_cli_check()
         self.addCleanup(check.stop)
         check.start()
         self.completed = SimpleNamespace(
@@ -182,17 +182,17 @@ class CliRefusalTests(unittest.TestCase):
     def test_each_option_alone_is_accepted(self) -> None:
         result, execute = self._run("--profile")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIs(execute.call_args.args[0].axes.profile, True)
-        self.assertIsNone(execute.call_args.args[0].axes.warmup_steps)
+        self.assertIs(execute.call_args.args[0].request.axes.profile, True)
+        self.assertIsNone(execute.call_args.args[0].request.axes.warmup_steps)
 
         result, execute = self._run("--warmup-steps", "2")
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].axes.warmup_steps, 2)
+        self.assertEqual(execute.call_args.args[0].request.axes.warmup_steps, 2)
 
     def test_an_unrequested_count_reaches_the_request_as_none(self) -> None:
         result, execute = self._run()
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].axes.warmup_steps)
+        self.assertIsNone(execute.call_args.args[0].request.axes.warmup_steps)
 
 
 class EvaluationPicksTheRuleTests(unittest.TestCase):

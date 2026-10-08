@@ -44,6 +44,7 @@ from benchmarks.e2e.engines.api import ProfileWindow, StepSample
 from benchmarks.e2e.results import arm_steps, stable_samples
 from benchmarks.e2e.runner import (
     _resolve_run,
+    check_request,
     execute_run,
     select_arms,
 )
@@ -115,13 +116,13 @@ class ScenarioTests(unittest.TestCase):
 
         A default could only be reached by an omission, and it would then
         measure one scenario under whatever label the operator assumed --
-        a wrong result rather than a missing one. ``_resolve_run`` holds the
+        a wrong result rather than a missing one. ``check_request`` holds the
         rule, so the CLI and every programmatic caller inherit it, and no
         scenario name is written anywhere as a default.
 
         The two patches prove the refusal lands before any work starts.
         ``hardware_metadata`` is the first host probe ``_resolve_run`` makes
-        after it resolves the scenario, and ``process_runner`` launches the
+        after the check resolves the scenario, and ``process_runner`` launches the
         training subprocess; neither may run.
         """
 
@@ -134,12 +135,34 @@ class ScenarioTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError) as caught:
                 execute_run(
-                    RunRequest(gpu="0"),
+                    check_request(
+                        RunRequest(gpu="0"),
+                        environment={"PATH": os.environ["PATH"]},
+                    ),
                     process_runner=never,
-                    environment={"PATH": os.environ["PATH"]},
                 )
         self.assertIn("no scenario requested", str(caught.exception))
         self.assertIn("--scenario", str(caught.exception))
+
+    def test_the_check_reads_the_given_environment_even_when_it_is_empty(self) -> None:
+        request = RunRequest(
+            axes=RequestedAxes(ac_mode="none", model_size="1b"),
+            gpu="0",
+            scenario_name="engines",
+            out_dir=Path("/tmp/check-environment-test"),
+        )
+        cache_root = Path("/tmp/check-environment-cache")
+        with mock.patch.dict(
+            os.environ, {"STEPS": "77", "BENCHMARK_CACHE_ROOT": str(cache_root)}
+        ):
+            checked = check_request(request, environment={})
+            inherited = check_request(request)
+        self.assertEqual(inherited.run.data.steps, 77)
+        self.assertEqual(inherited.paths.cache_root, cache_root)
+        self.assertEqual(checked.environment, {})
+        self.assertIs(checked.request, request)
+        self.assertEqual(checked.run.data.steps, ENGINES.data.steps)
+        self.assertNotEqual(checked.paths.cache_root, cache_root)
 
     def test_the_stock_config_uses_plain_cross_entropy(self) -> None:
         self.assertIsInstance(
@@ -180,7 +203,7 @@ class UncompiledScheduleRefusalTests(unittest.TestCase):
     PyTorch's zero-bubble and DualPipeV classes call
     ``_check_torch_compile_compatibility``, which raises on a compiled
     stage module. Compile is a property of each arm, so a spec alone
-    cannot answer this: ``_resolve_run`` reads the selected arms and names
+    cannot answer this: ``check_request`` reads the selected arms and names
     the one that compiles.
     """
 
@@ -205,18 +228,20 @@ class UncompiledScheduleRefusalTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
-                        parallelism=self.ZBV,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode="none",
+                            parallelism=self.ZBV,
+                        ),
+                        gpu="0,1",
+                        scenario_name="engines",
+                        arm_names=names,
+                        out_dir=Path(temporary) / "run",
+                        batch=8,
                     ),
-                    gpu="0,1",
-                    scenario_name="engines",
-                    arm_names=names,
-                    out_dir=Path(temporary) / "run",
-                    batch=8,
+                    environment={"PATH": os.environ["PATH"]},
                 ),
-                {"PATH": os.environ["PATH"]},
             )
 
     def test_a_compiled_arm_is_refused_and_named(self) -> None:
@@ -281,7 +306,12 @@ class SelectedArmTests(unittest.TestCase):
             arm_names=names,
             out_dir=Path("/tmp/selected-arm-test"),
         )
-        return _resolve_run(request, {"PATH": os.environ["PATH"]})
+        return _resolve_run(
+            check_request(
+                request,
+                environment={"PATH": os.environ["PATH"]},
+            ),
+        )
 
     def test_every_subset_resolves_and_keeps_its_order(self) -> None:
         cases = (
@@ -325,17 +355,19 @@ class SelectedArmTests(unittest.TestCase):
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             out_dir = Path(temporary) / "run"
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode="none",
+                        ),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("titan_eager", "titan_compiled"),
+                        out_dir=out_dir,
                     ),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("titan_eager", "titan_compiled"),
-                    out_dir=out_dir,
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             state = json.loads((out_dir / "run_state.json").read_text())
@@ -350,13 +382,15 @@ class SelectedArmTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "existing manifest: arms$"):
                 execute_run(
-                    RunRequest(
-                        gpu="0",
-                        arm_names=("titan_compiled", "titan_eager"),
-                        resume_dir=out_dir,
+                    check_request(
+                        RunRequest(
+                            gpu="0",
+                            arm_names=("titan_compiled", "titan_eager"),
+                            resume_dir=out_dir,
+                        ),
+                        environment={"PATH": os.environ["PATH"]},
                     ),
                     process_runner=fake_process,
-                    environment={"PATH": os.environ["PATH"]},
                 )
 
 
@@ -411,19 +445,21 @@ def _resolve(
         return_value=CpuPinning((), "none: test"),
     ):
         return _resolve_run(
-            RunRequest(
-                axes=RequestedAxes(
-                    ac_mode=None if resume_dir else "none",
-                    parallelism=parallelism,
+            check_request(
+                RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode=None if resume_dir else "none",
+                        parallelism=parallelism,
+                    ),
+                    gpu=gpu,
+                    scenario_name=None if resume_dir else "engines",
+                    arm_names=names,
+                    out_dir=None if resume_dir else Path("/tmp/override-test"),
+                    resume_dir=resume_dir,
+                    overrides=_overrides(*overrides),
                 ),
-                gpu=gpu,
-                scenario_name=None if resume_dir else "engines",
-                arm_names=names,
-                out_dir=None if resume_dir else Path("/tmp/override-test"),
-                resume_dir=resume_dir,
-                overrides=_overrides(*overrides),
+                environment={"PATH": os.environ["PATH"]},
             ),
-            {"PATH": os.environ["PATH"]},
         )
 
 
@@ -440,15 +476,17 @@ def _refused_before_any_probe(
     ):
         with test.assertRaisesRegex(ValueError, pattern):
             _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none", **keywords),
-                    gpu="0,1" if keywords.get("parallelism") else "0",
-                    scenario_name="engines",
-                    arm_names=names,
-                    out_dir=Path("/tmp/override-test"),
-                    overrides=_overrides(*overrides),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none", **keywords),
+                        gpu="0,1" if keywords.get("parallelism") else "0",
+                        scenario_name="engines",
+                        arm_names=names,
+                        out_dir=Path("/tmp/override-test"),
+                        overrides=_overrides(*overrides),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
-                {"PATH": os.environ["PATH"]},
             )
 
 
@@ -559,16 +597,18 @@ class OverrideResolutionTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none"),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("megatron_stock",),
-                    out_dir=Path(temporary) / "run",
-                    overrides=_overrides("megatron_stock.nan_guard=on"),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none"),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("megatron_stock",),
+                        out_dir=Path(temporary) / "run",
+                        overrides=_overrides("megatron_stock.nan_guard=on"),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
         self.assertEqual(validate.call_count, 1)
         arm = validate.call_args.args[1]
@@ -591,18 +631,20 @@ class OverrideResolutionTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 execute_run(
-                    RunRequest(
-                        axes=RequestedAxes(ac_mode="none"),
-                        gpu="0",
-                        scenario_name="engines",
-                        arm_names=("megatron_stock",),
-                        out_dir=Path(temporary) / "run",
+                    check_request(
+                        RunRequest(
+                            axes=RequestedAxes(ac_mode="none"),
+                            gpu="0",
+                            scenario_name="engines",
+                            arm_names=("megatron_stock",),
+                            out_dir=Path(temporary) / "run",
+                        ),
+                        environment={"PATH": os.environ["PATH"]},
                     ),
                     event_handler=lambda event: events.append(
                         event.message if event.kind == "summary" else ""
                     ),
                     process_runner=failing_process,
-                    environment={"PATH": os.environ["PATH"]},
                 )
         (line,) = [event for event in events if event.startswith("config ")]
         self.assertIn("config megatron_stock: megatron_stock {", line)
@@ -621,16 +663,18 @@ class OverrideResumeTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none", parallelism=parallelism),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("megatron_stock",),
-                    out_dir=out_dir,
-                    overrides=_overrides(*overrides),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none", parallelism=parallelism),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("megatron_stock",),
+                        out_dir=out_dir,
+                        overrides=_overrides(*overrides),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=lambda command, **kwargs: SimpleNamespace(returncode=0),
-                environment={"PATH": os.environ["PATH"]},
             )
 
     def test_an_omitted_field_inherits_the_recorded_value(self) -> None:
@@ -1127,7 +1171,12 @@ class EnginesScenarioTests(unittest.TestCase):
             scenario_name="engines",
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
-            execute_run(request, environment={"PATH": os.environ["PATH"]})
+            execute_run(
+                check_request(
+                    request,
+                    environment={"PATH": os.environ["PATH"]},
+                ),
+            )
 
 
 FA3_TARGET = "benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention"
@@ -1600,15 +1649,17 @@ class CompilerEnvironmentTests(unittest.TestCase):
             "benchmarks.e2e.runner.scenario_by_name", return_value=scenario
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none"),
-                    gpu="0",
-                    scenario_name="engines",
-                    out_dir=Path(temporary) / "run",
-                    compiler_env=compiler_env,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none"),
+                        gpu="0",
+                        scenario_name="engines",
+                        out_dir=Path(temporary) / "run",
+                        compiler_env=compiler_env,
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
         return captured
 
@@ -1714,16 +1765,18 @@ class ManifestTests(unittest.TestCase):
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             out_dir = Path(temporary) / "run"
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none", model_size="1b"),
-                    gpu="3",
-                    scenario_name="engines",
-                    arm_names=("titan_eager",),
-                    out_dir=out_dir,
-                    overrides=_overrides(f"titan_eager.extra_flags+={extra}"),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none", model_size="1b"),
+                        gpu="3",
+                        scenario_name="engines",
+                        arm_names=("titan_eager",),
+                        out_dir=out_dir,
+                        overrides=_overrides(f"titan_eager.extra_flags+={extra}"),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=lambda command, **kwargs: SimpleNamespace(returncode=0),
-                environment={"PATH": os.environ["PATH"]},
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
@@ -1795,18 +1848,20 @@ class EagerArmTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        model_size="1b",
-                        ac_mode="none",
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            model_size="1b",
+                            ac_mode="none",
+                        ),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("titan_eager",),
+                        out_dir=out_dir,
                     ),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("titan_eager",),
-                    out_dir=out_dir,
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
         return json.loads((out_dir / "manifest.json").read_text())
 
@@ -2097,9 +2152,11 @@ class ResumeTests(unittest.TestCase):
                 overrides=_overrides("titan_compiled.extra_flags+=--debug.deterministic"),
             )
             execute_run(
-                request,
+                check_request(
+                    request,
+                    environment=environment,
+                ),
                 process_runner=fake_process,
-                environment=environment,
             )
 
             resumed = RunRequest(
@@ -2110,9 +2167,11 @@ class ResumeTests(unittest.TestCase):
             )
             process = mock.Mock(side_effect=fake_process)
             execute_run(
-                resumed,
+                check_request(
+                    resumed,
+                    environment=environment,
+                ),
                 process_runner=process,
-                environment=environment,
                 event_handler=events.append,
             )
             process.assert_not_called()
@@ -2121,9 +2180,11 @@ class ResumeTests(unittest.TestCase):
             (out_dir / "titan_compiled.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
-                resumed,
+                check_request(
+                    resumed,
+                    environment=environment,
+                ),
                 process_runner=retry_process,
-                environment=environment,
             )
             retry_command = retry_process.call_args.args[0]
             self.assertEqual(
@@ -2155,9 +2216,11 @@ class ResumeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "existing manifest: run.data$"):
                 execute_run(
-                    incompatible,
+                    check_request(
+                        incompatible,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_args = RunRequest(
@@ -2171,9 +2234,11 @@ class ResumeTests(unittest.TestCase):
                 ValueError, "existing manifest: titan_compiled.config.extra_flags$"
             ):
                 execute_run(
-                    conflicting_args,
+                    check_request(
+                        conflicting_args,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_size = RunRequest(
@@ -2187,9 +2252,11 @@ class ResumeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "existing manifest: run.shape$"):
                 execute_run(
-                    conflicting_size,
+                    check_request(
+                        conflicting_size,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_profile = RunRequest(
@@ -2205,9 +2272,11 @@ class ResumeTests(unittest.TestCase):
                 "run.warmup_steps$",
             ):
                 execute_run(
-                    conflicting_profile,
+                    check_request(
+                        conflicting_profile,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_profile_and_args = RunRequest(
@@ -2224,9 +2293,11 @@ class ResumeTests(unittest.TestCase):
                 "run.warmup_steps, titan_compiled.config.extra_flags$",
             ):
                 execute_run(
-                    conflicting_profile_and_args,
+                    check_request(
+                        conflicting_profile_and_args,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             manifest_path = out_dir / "manifest.json"
@@ -2237,9 +2308,11 @@ class ResumeTests(unittest.TestCase):
                 ValueError, "warmup_steps 10 does not match profile True"
             ):
                 execute_run(
-                    resumed,
+                    check_request(
+                        resumed,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
     def test_resume_rehydrates_the_recorded_ac_mode(self) -> None:
@@ -2269,18 +2342,20 @@ class ResumeTests(unittest.TestCase):
             out_dir = Path(temporary) / "run"
             environment = {"PATH": os.environ["PATH"]}
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        model_size="1b",
-                        ac_mode=mode,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            model_size="1b",
+                            ac_mode=mode,
+                        ),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("titan_eager",),
+                        out_dir=out_dir,
                     ),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("titan_eager",),
-                    out_dir=out_dir,
+                    environment=environment,
                 ),
                 process_runner=fake_process,
-                environment=environment,
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             self.assertEqual(manifest["run"]["ac_mode"], mode)
@@ -2288,14 +2363,16 @@ class ResumeTests(unittest.TestCase):
             (out_dir / "titan_eager.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
-                RunRequest(
-                    gpu="0",
-                    scenario_name=None,
-                    arm_names=("titan_eager",),
-                    resume_dir=out_dir,
+                check_request(
+                    RunRequest(
+                        gpu="0",
+                        scenario_name=None,
+                        arm_names=("titan_eager",),
+                        resume_dir=out_dir,
+                    ),
+                    environment=environment,
                 ),
                 process_runner=retry_process,
-                environment=environment,
             )
             retry_command = retry_process.call_args.args[0]
             self.assertNotIn("--compile.enable", retry_command)

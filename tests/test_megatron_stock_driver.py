@@ -2594,7 +2594,7 @@ class DataParallelMarkerTest(unittest.TestCase):
         ):
             # ``lean`` needs a sharded level: Megatron asserts
             # use_distributed_optimizer under the precision-aware
-            # optimizer, and ``_resolve_run`` refuses the other pair.
+            # optimizer, and ``check_request`` refuses the other pair.
             precisions = (
                 ("stock",) if spec.zero == 0 else ("stock", "lean")
             )

@@ -40,7 +40,7 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
     scenario_by_name,
 )
-from benchmarks.e2e.runner import _resolve_run
+from benchmarks.e2e.runner import _resolve_run, check_request
 from benchmarks.e2e.engines.megatron_stock.evidence import (
     COMPLETION_LINE,
     read_evidence,
@@ -1412,16 +1412,18 @@ class StockRunResolutionTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode=ac_mode,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode=ac_mode,
+                        ),
+                        gpu="0",
+                        scenario_name=SCENARIO_NAME,
+                        arm_names=names,
+                        out_dir=Path(temporary) / "run",
                     ),
-                    gpu="0",
-                    scenario_name=SCENARIO_NAME,
-                    arm_names=names,
-                    out_dir=Path(temporary) / "run",
+                    environment={"PATH": os.environ["PATH"]},
                 ),
-                {"PATH": os.environ["PATH"]},
             )
 
     def test_sac_is_refused_for_the_whole_scenario(self) -> None:

@@ -167,29 +167,30 @@ class ResolvedRun:
 
 
 @dataclass(frozen=True)
-class _CheckedRun:
+class CheckedRun:
     """One request, resolved and checked before any host probe."""
 
+    request: RunRequest
+    environment: Mapping[str, str]
+    """The environment that the check read; the run reads it too."""
     paths: RuntimePaths
     scenario: Scenario
     run: RunSpec
     arms: tuple[Arm, ...]
+    """The arms in the order the operator asked for, with the ``--set`` overrides applied."""
+    resume_dir: Path | None
+    """The output directory that a resume continues."""
     recorded: RunRecord | None
     """The run record of the manifest that a resume continues."""
     resumed_manifest: dict[str, Any] | None
+    """The manifest that a resume continues."""
 
 
 def check_request(
     request: RunRequest, *, environment: Mapping[str, str] | None = None
-) -> None:
-    """Raise ``ValueError`` when the request cannot run; it probes no host and starts no arm."""
-    _check_request(request, dict(environment or os.environ))
-
-
-def _check_request(
-    request: RunRequest, environment: Mapping[str, str]
-) -> _CheckedRun:
-    """Resolve and check one request, before any host probe."""
+) -> CheckedRun:
+    """Resolve and check one request, or raise ``ValueError``; it probes no host and starts no arm."""
+    environment = dict(os.environ if environment is None else environment)
     requested = request.axes
     paths = RuntimePaths.resolve(
         cache_root=request.cache_root,
@@ -275,64 +276,56 @@ def _check_request(
         device_count=len(parse_devices(request.gpu)),
         resumed=resumed_manifest,
     )
-    return _CheckedRun(
+    return CheckedRun(
+        request=request,
+        environment=environment,
         paths=paths,
         scenario=scenario,
         run=run,
         arms=arms,
+        resume_dir=resume_dir,
         recorded=recorded,
         resumed_manifest=resumed_manifest,
     )
 
 
 def _resolve_run(
-    request: RunRequest,
-    environment: Mapping[str, str],
-    *,
-    event_handler: EventHandler | None = None,
+    checked: CheckedRun, *, event_handler: EventHandler | None = None
 ) -> ResolvedRun:
-    """Resolve and check one request; the result is a run that can start."""
-    checked = _check_request(request, environment)
-    paths = checked.paths
-    scenario = checked.scenario
-    run = checked.run
-    arms = checked.arms
-    recorded = checked.recorded
-    resumed_manifest = checked.resumed_manifest
-    resume_dir = (
-        None if request.resume_dir is None else request.resume_dir.expanduser().resolve()
-    )
+    """Probe the host for one checked request; the result is a run that can start."""
     # Printed before the host probe, so the operator reads them before the run claims a GPU.
-    for warning in run_warnings(run, arms):
+    for warning in run_warnings(checked.run, checked.arms):
         _emit(event_handler, "summary", f"WARNING: {warning}")
 
-    requested_hardware = request.hardware
-    if recorded is not None and requested_hardware == "auto":
-        requested_hardware = recorded.hardware
-    hardware, metadata = hardware_metadata(paths, request.gpu, requested_hardware)
-    pinning = resolve_cpu_pinning(request.gpu)
+    requested_hardware = checked.request.hardware
+    if checked.recorded is not None and requested_hardware == "auto":
+        requested_hardware = checked.recorded.hardware
+    hardware, metadata = hardware_metadata(
+        checked.paths, checked.request.gpu, requested_hardware
+    )
+    pinning = resolve_cpu_pinning(checked.request.gpu)
     metadata = {**metadata, "cpu_pinning": pinning.description}
-    if resumed_manifest is not None:
+    if checked.resumed_manifest is not None:
         mismatches = host_mismatches(
-            resumed_manifest, hardware=hardware, metadata=metadata
+            checked.resumed_manifest, hardware=hardware, metadata=metadata
         )
         if mismatches:
             raise ValueError(
                 "resume request does not match the existing manifest: "
                 + ", ".join(mismatches)
             )
-    out_dir = resume_dir or _default_output_dir(
-        scenario,
+    out_dir = checked.resume_dir or _default_output_dir(
+        checked.scenario,
         hardware,
-        request.out_dir,
-        environment,
-        request.timestamp,
-        request.occurrence,
+        checked.request.out_dir,
+        checked.environment,
+        checked.request.timestamp,
+        checked.request.occurrence,
     )
-    world_size = run.parallelism.world_size
+    world_size = checked.run.parallelism.world_size
     launches = {
-        arm.name: engine_for(arm).launch(run, arm, out_dir / arm.name)
-        for arm in arms
+        arm.name: engine_for(arm).launch(checked.run, arm, out_dir / arm.name)
+        for arm in checked.arms
     }
     records = {
         arm.name: ArmRecord(
@@ -341,25 +334,25 @@ def _resolve_run(
                 launches[arm.name], world_size=world_size, pinning=pinning
             ),
             env_delta=environment_delta(
-                launches[arm.name], world_size=world_size, gpu=request.gpu
+                launches[arm.name], world_size=world_size, gpu=checked.request.gpu
             ),
             cpu_pinning=pinning_record(launches[arm.name], pinning),
-            execution_model=engine_for(arm).execution_model(run, arm),
+            execution_model=engine_for(arm).execution_model(checked.run, arm),
         )
-        for arm in arms
+        for arm in checked.arms
     }
     return ResolvedRun(
-        paths=paths,
-        scenario=scenario,
-        run=run,
-        arms=arms,
+        paths=checked.paths,
+        scenario=checked.scenario,
+        run=checked.run,
+        arms=checked.arms,
         hardware=hardware,
         metadata=metadata,
         out_dir=out_dir,
         launches=launches,
         pinning=pinning,
         records=records,
-        resumed=recorded is not None,
+        resumed=checked.recorded is not None,
     )
 
 
@@ -391,15 +384,13 @@ def _banner(resolved: ResolvedRun, gpu: str) -> list[str]:
 
 
 def execute_run(
-    request: RunRequest,
+    checked: CheckedRun,
     *,
     event_handler: EventHandler | None = None,
     process_runner: ProcessRunner = subprocess.run,
-    environment: Mapping[str, str] | None = None,
 ) -> RunResult:
-    """Start and validate the selected arms, and keep a state file that a resume reads."""
-    host_environment = dict(environment or os.environ)
-    resolved = _resolve_run(request, host_environment, event_handler=event_handler)
+    """Start and validate the selected arms of a checked request, and keep a state file that a resume reads."""
+    resolved = _resolve_run(checked, event_handler=event_handler)
     arms = resolved.arms
     out_dir = resolved.out_dir
 
@@ -419,11 +410,11 @@ def execute_run(
         state = initial_run_state(arms)
         update_run_state(out_dir, state, status="running")
 
-    for line in _banner(resolved, request.gpu):
+    for line in _banner(resolved, checked.request.gpu):
         _emit(event_handler, "summary", line)
 
     base_environment = runtime_environment(
-        resolved.paths, environment=host_environment
+        resolved.paths, environment=checked.environment
     )
     for arm in arms:
         arm_dir = out_dir / arm.name
@@ -466,14 +457,14 @@ def execute_run(
             launched = build_command(
                 launch,
                 world_size=resolved.run.parallelism.world_size,
-                gpu=request.gpu,
+                gpu=checked.request.gpu,
                 pinning=resolved.pinning,
                 base_env=arm_environment,
             )
             with log_path.open("w") as log:
                 log.write(
                     f"# scenario={resolved.scenario.name} arm={arm.name} "
-                    f"gpu_pci_index={request.gpu} "
+                    f"gpu_pci_index={checked.request.gpu} "
                     f"{dt.datetime.now(dt.timezone.utc):%FT%TZ}\n"
                 )
                 log.write(resolved.metadata["nvidia_smi"] + "\n")

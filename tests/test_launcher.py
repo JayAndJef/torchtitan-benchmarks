@@ -23,7 +23,7 @@ from benchmarks.execution.launcher import (
     command_line,
     torchrun_flags,
 )
-from benchmarks.e2e.runner import execute_run
+from benchmarks.e2e.runner import check_request, execute_run
 from tests.engine_helpers import run_spec
 from tests.test_golden import HARDWARE, HOST_ENVIRONMENT, METADATA, PINNING
 
@@ -198,14 +198,16 @@ class RunnerRefusalTests(unittest.TestCase):
             out_dir = Path(temporary) / "run"
             with self.assertRaisesRegex(ValueError, "NGPU, which the launcher owns"):
                 execute_run(
-                    RunRequest(
-                        gpu="0",
-                        scenario_name="engines",
-                        out_dir=out_dir,
-                        axes=RequestedAxes(model_size="1b", profile=False),
+                    check_request(
+                        RunRequest(
+                            gpu="0",
+                            scenario_name="engines",
+                            out_dir=out_dir,
+                            axes=RequestedAxes(model_size="1b", profile=False),
+                        ),
+                        environment=dict(HOST_ENVIRONMENT),
                     ),
                     process_runner=process_runner,
-                    environment=dict(HOST_ENVIRONMENT),
                 )
             process_runner.assert_not_called()
             self.assertFalse(out_dir.exists())

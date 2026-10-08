@@ -36,7 +36,7 @@ from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.overrides import parse_override
 from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.results import RESULTS_SCHEMA_VERSION, evaluate_run
-from benchmarks.e2e.runner import execute_run
+from benchmarks.e2e.runner import check_request, execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.execution.launcher import LAUNCHER_KEYS
 from benchmarks.execution.paths import BENCH_DIR
@@ -242,9 +242,11 @@ def capture_launch(case: dict[str, Any]) -> dict[str, Any]:
     ):
         out_dir = Path(temporary) / "run"
         execute_run(
-            _request(case, out_dir),
+            check_request(
+                _request(case, out_dir),
+                environment=dict(HOST_ENVIRONMENT),
+            ),
             process_runner=process_runner,
-            environment=dict(HOST_ENVIRONMENT),
         )
         manifest = json.loads((out_dir / "manifest.json").read_text())
         return _neutral(
