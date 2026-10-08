@@ -14,46 +14,121 @@ from benchmarks.artifacts.layout import atomic_write_json, logs_by_rank
 from benchmarks.artifacts.manifests import ArmRecord, load_run_record
 from benchmarks.artifacts.summaries import _value
 from benchmarks.e2e.checks import run_warnings
-from benchmarks.e2e.engines.api import Arm, ProfileWindow, StepRead, StepSample
+from benchmarks.e2e.engines.api import (
+    Arm,
+    ProfileWindow,
+    RunSpec,
+    StepRead,
+    StepSample,
+)
 from benchmarks.e2e.engines.registry import engine_for
 from benchmarks.e2e.evidence import non_finite_refusals, rank_steps
 from benchmarks.execution.affinity import is_pinned
 from benchmarks.execution.launcher import RANK_PREFIX
 
 
+RESULTS_SCHEMA_VERSION = 7
+"""The schema of ``results.json``."""
+
+
 @dataclass(frozen=True)
-class StepMs:
+class StepFigures:
+    """The figures of one sampled step of one rank."""
+
+    step: int
+    tokens_per_second: float
+    step_ms: float
+    peak_memory_gib: float
+    extras: dict[str, float]
+
+
+@dataclass(frozen=True)
+class RankStatistic:
+    """One rate of one rank over its sampled steps: the median, and the mean that ``rate_mean`` gives."""
+
+    median: float
+    mean: float
+
+
+@dataclass(frozen=True)
+class RankStepMs:
     """The step cost of one rank, in milliseconds; ``p95`` is a nearest-rank value, so it is always a measured step."""
 
-    mean: float | None
-    median: float | None
-    p95: float | None
-    series: tuple[float, ...]
+    median: float
+    mean: float
+    p95: float
 
 
 @dataclass(frozen=True)
-class RankThroughput:
+class RankMemory:
+    """The peak memory of one rank, in GiB: the maximum over every step, and the median and the mean over the sampled steps."""
+
+    max: float
+    median: float
+    mean: float
+
+
+@dataclass(frozen=True)
+class RankResult:
     """One rank's own figures, before any reduction across ranks."""
 
     rank: int
-    stable_tokens_per_second: float | None
-    stable_sample_count: int
-    step_ms: StepMs
+    tokens_per_second: RankStatistic
+    step_ms: RankStepMs
+    peak_memory_gib: RankMemory
+    extras: dict[str, RankStatistic]
+    """The engine's other figures, under the names that the engine gives them."""
+    steps: tuple[StepFigures, ...]
+    """The sampled steps, in step order."""
+
+
+@dataclass(frozen=True)
+class Statistic:
+    """One rate of one arm: the median and the mean, each at the rank with the lowest value."""
+
+    median: float
+    median_rank: int
+    mean: float
+    mean_rank: int
+
+
+@dataclass(frozen=True)
+class StepMsStatistic:
+    """The step cost of one arm, in milliseconds; each statistic is at the rank with the highest value."""
+
+    median: float
+    median_rank: int
+    mean: float
+    mean_rank: int
+    p95: float
+    p95_rank: int
+
+
+@dataclass(frozen=True)
+class MemoryStatistic:
+    """The peak memory of one arm, in GiB; each statistic is at the rank with the highest value."""
+
+    max: float
+    max_rank: int
+    median: float
+    median_rank: int
+    mean: float
+    mean_rank: int
 
 
 @dataclass(frozen=True)
 class ArmResult:
-    """One arm's published figures: the slowest rank's throughput and step cost, and the peak memory of every rank."""
+    """One arm's published figures: each statistic of each figure at its own worst rank, and every rank's own figures."""
 
-    stable_tokens_per_second: float | None
-    stable_sample_count: int
-    peak_memory_gib: float | None
-    step_ms: StepMs
+    sample_count: int
+    """The sampled steps of each rank; every rank holds the same steps."""
+    tokens_per_second: Statistic
+    step_ms: StepMsStatistic
+    peak_memory_gib: MemoryStatistic
+    extras: dict[str, dict[str, Statistic]]
+    """The engine's other figures, under the engine's name; each statistic is at the rank with the lowest value."""
     rank_reduction: str
-    published_rank: int
-    per_rank: tuple[RankThroughput, ...]
-    extras: dict[str, dict[str, float]]
-    """The engine's other figures, each the median over the published rank's samples, under the engine's name."""
+    per_rank: tuple[RankResult, ...]
 
 
 @dataclass(frozen=True)
@@ -71,7 +146,7 @@ class EvaluationResult:
 
     def to_dict(self) -> dict[str, Any]:
         value = {
-            "schema_version": 6,
+            "schema_version": RESULTS_SCHEMA_VERSION,
             "scenario": self.scenario,
             "hardware": self.hardware,
             "output_dir": self.output_dir,
@@ -172,16 +247,21 @@ def refuse_non_finite_trajectories(
         )
 
 
+SLOW_FIRST_STEP = 2
+"""The first step that the profiled rule would take; it runs slower than the steps after it in every measured arm."""
+
+
+def _stable_step(step: int, window: ProfileWindow) -> bool:
+    """Whether the profiled rule takes ``step``."""
+    wait = window.freq - window.warmup - window.active
+    return 2 <= ((step - 1) % window.freq) + 1 <= wait and step != SLOW_FIRST_STEP
+
+
 def stable_samples(
     samples: Sequence[StepSample], window: ProfileWindow
 ) -> list[StepSample]:
-    """The samples of a profiled run: the steps of each profiler cycle that carry no profiler cost."""
-    wait = window.freq - window.warmup - window.active
-    return [
-        sample
-        for sample in samples
-        if 2 <= ((sample.step - 1) % window.freq) + 1 <= wait
-    ]
+    """The samples of a profiled run: the steps of each profiler cycle that carry no profiler cost, without ``SLOW_FIRST_STEP``."""
+    return [sample for sample in samples if _stable_step(sample.step, window)]
 
 
 def measured_samples(
@@ -191,41 +271,118 @@ def measured_samples(
     return [sample for sample in samples if sample.step > warmup_steps]
 
 
-def extras_medians(samples: Sequence[StepSample]) -> dict[str, float]:
-    """The median of each extra figure over the samples that state it."""
-    names = sorted({name for sample in samples for name in sample.extras})
-    return {
-        name: statistics.median(
-            sample.extras[name] for sample in samples if name in sample.extras
+def run_samples(run: RunSpec, samples: Sequence[StepSample]) -> list[StepSample]:
+    """The samples that the run's own rule takes: ``stable_samples`` when the run is profiled, else ``measured_samples``."""
+    if run.profile:
+        return stable_samples(samples, run.window)
+    return measured_samples(samples, run.warmup_steps)
+
+
+def sampled_steps(run: RunSpec) -> tuple[int, ...]:
+    """The steps that the run's rule takes from a rank that logs every step, from step 1 to the run's last step."""
+    if run.profile:
+        return tuple(
+            step
+            for step in range(1, run.data.steps + 1)
+            if _stable_step(step, run.window)
         )
-        for name in names
-    }
+    return tuple(range(run.warmup_steps + 1, run.data.steps + 1))
 
 
-def _slowest_rank(per_rank: dict[int, float | None]) -> int:
-    """The rank with the lowest throughput; a tie goes to the lower rank, and a rank with no sample sorts last."""
-    if not per_rank:
-        return 0
-    measured = {
-        rank: value for rank, value in per_rank.items() if value is not None
-    }
-    if not measured:
-        return min(per_rank)
-    return min(measured, key=lambda rank: (measured[rank], rank))
+def lost_step_refusals(
+    run: RunSpec, sampled: Mapping[int, Sequence[StepSample]]
+) -> list[str]:
+    """The first lost sampled step of each rank, or its first sampled step past the run; a rank absent from ``sampled`` logged none."""
+    expected = sampled_steps(run)
+    if not expected:
+        return [f"the sample rule takes none of the run's {run.data.steps} steps"]
+    refusals = []
+    for rank in sorted(set(range(run.parallelism.world_size)) | set(sampled)):
+        found = {sample.step for sample in sampled.get(rank, ())}
+        lost = [step for step in expected if step not in found]
+        extra = sorted(found.difference(expected))
+        if lost:
+            refusals.append(f"rank {rank} lacks sampled step {lost[0]}")
+        elif extra:
+            refusals.append(
+                f"rank {rank} logs sampled step {extra[0]}, and the run has "
+                f"{run.data.steps} steps"
+            )
+    return refusals
 
 
-def _throughput_spread(per_rank: dict[int, float | None]) -> float | None:
-    """The highest rank throughput over the lowest; ``None`` below two ranks with a throughput."""
-    values = [value for value in per_rank.values() if value]
-    if len(values) < 2:
+def refuse_lost_steps(
+    arm: str, run: RunSpec, sampled: Mapping[int, Sequence[StepSample]], log_path: Path
+) -> None:
+    """Raise ``ValueError`` when a rank lacks a step that the sample rule takes, so that every rank holds the same sampled steps."""
+    refusals = lost_step_refusals(run, sampled)
+    if refusals:
+        raise ValueError(
+            f"{arm}: {'; '.join(refusals)}; every rank must log every sampled "
+            f"step, so no results.json is written for it (see {log_path})"
+        )
+
+
+def rate_mean(rates: Sequence[float]) -> float:
+    """The mean of per-step rates whose steps each do the same work: the total work over the total time, which is the harmonic mean.
+
+    Each step of one rank holds the same token count, so the mean tokens/s
+    of a rank is its total tokens over its total step time.
+    """
+    return statistics.harmonic_mean(rates)
+
+
+def extras_statistics(samples: Sequence[StepSample]) -> dict[str, RankStatistic]:
+    """The median and the ``rate_mean`` of each extra figure over the samples that state it.
+
+    The extras of both engines are rates: TFLOPS and MFU are each the step's
+    tokens/s times a constant, so the mean of a rate is its total over the
+    total time.
+    """
+    names = sorted({name for sample in samples for name in sample.extras})
+    figures = {}
+    for name in names:
+        values = [sample.extras[name] for sample in samples if name in sample.extras]
+        figures[name] = RankStatistic(
+            median=statistics.median(values), mean=rate_mean(values)
+        )
+    return figures
+
+
+def _worst_rank(values: Mapping[int, float], *, highest: bool) -> int:
+    """The rank with the highest value when ``highest`` is true, else the lowest; a tie goes to the lower rank."""
+    sign = -1 if highest else 1
+    return min(values, key=lambda rank: (sign * values[rank], rank))
+
+
+def _worst(
+    figures: Mapping[int, Any], name: str, *, highest: bool
+) -> tuple[float, int]:
+    """The worst value of the field ``name`` over the ranks' ``figures``, and its rank."""
+    values = {rank: getattr(each, name) for rank, each in figures.items()}
+    rank = _worst_rank(values, highest=highest)
+    return values[rank], rank
+
+
+def _statistic(figures: Mapping[int, RankStatistic]) -> Statistic:
+    """The median and the mean of one rate over the ranks, each at the rank with the lowest value."""
+    median, median_rank = _worst(figures, "median", highest=False)
+    mean, mean_rank = _worst(figures, "mean", highest=False)
+    return Statistic(
+        median=median, median_rank=median_rank, mean=mean, mean_rank=mean_rank
+    )
+
+
+def _throughput_spread(per_rank: Mapping[int, float]) -> float | None:
+    """The highest rank throughput over the lowest; ``None`` below two ranks."""
+    if len(per_rank) < 2:
         return None
-    return max(values) / min(values)
+    return max(per_rank.values()) / min(per_rank.values())
 
 
-def _rank_throughput_summary(per_rank: dict[int, float | None]) -> str:
+def _rank_throughput_summary(per_rank: Mapping[int, float]) -> str:
     return ", ".join(
-        f"rank {rank} {value:,.0f}" if value else f"rank {rank} none"
-        for rank, value in sorted(per_rank.items())
+        f"rank {rank} {value:,.0f}" for rank, value in sorted(per_rank.items())
     )
 
 
@@ -236,20 +393,124 @@ def _nearest_rank_percentile(values: list[float], fraction: float) -> float:
     return ordered[max(index, 1) - 1]
 
 
+def _step_cost(tps: float, *, tokens_per_step: int, pp: int) -> float:
+    """The milliseconds of one step at ``tps`` tokens/s per device."""
+    return 1000.0 * tokens_per_step / (tps * pp)
+
+
 def step_ms(
-    samples: list[float], *, tokens_per_step: int, pp: int
-) -> StepMs:
-    """The step costs of one rank's tokens/s samples; a sample of zero has no cost and is dropped."""
-    series = tuple(
-        1000.0 * tokens_per_step / (tps * pp) for tps in samples if tps > 0
-    )
-    if not series:
-        return StepMs(mean=None, median=None, p95=None, series=())
-    return StepMs(
-        mean=statistics.fmean(series),
+    samples: Sequence[float], *, tokens_per_step: int, pp: int
+) -> RankStepMs:
+    """The step costs of one rank's tokens/s samples: the median, the arithmetic mean and the p95."""
+    series = [
+        _step_cost(tps, tokens_per_step=tokens_per_step, pp=pp) for tps in samples
+    ]
+    return RankStepMs(
         median=statistics.median(series),
-        p95=_nearest_rank_percentile(list(series), 0.95),
-        series=series,
+        mean=statistics.fmean(series),
+        p95=_nearest_rank_percentile(series, 0.95),
+    )
+
+
+def rank_result(
+    arm: str,
+    rank: int,
+    steps: Sequence[StepSample],
+    sampled: Sequence[StepSample],
+    *,
+    tokens_per_step: int,
+    pp: int,
+) -> RankResult:
+    """The figures of one rank: ``sampled`` gives every statistic, and ``steps`` gives the memory maximum; a sampled rate that is not positive and finite raises ``ValueError``."""
+    for sample in sampled:
+        for figure, value in (
+            ("tokens/s", sample.tokens_per_second),
+            *sample.extras.items(),
+        ):
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(
+                    f"{arm}: rank {rank} logs {figure} {value} at sampled step "
+                    f"{sample.step}; each rate of a sampled step must be "
+                    "positive and finite"
+                )
+    rates = [sample.tokens_per_second for sample in sampled]
+    memory = [sample.peak_memory_gib for sample in sampled]
+    return RankResult(
+        rank=rank,
+        tokens_per_second=RankStatistic(
+            median=statistics.median(rates), mean=rate_mean(rates)
+        ),
+        step_ms=step_ms(rates, tokens_per_step=tokens_per_step, pp=pp),
+        peak_memory_gib=RankMemory(
+            max=max(sample.peak_memory_gib for sample in steps),
+            median=statistics.median(memory),
+            mean=statistics.fmean(memory),
+        ),
+        extras=extras_statistics(sampled),
+        steps=tuple(
+            StepFigures(
+                step=sample.step,
+                tokens_per_second=sample.tokens_per_second,
+                step_ms=_step_cost(
+                    sample.tokens_per_second, tokens_per_step=tokens_per_step, pp=pp
+                ),
+                peak_memory_gib=sample.peak_memory_gib,
+                extras=dict(sample.extras),
+            )
+            for sample in sampled
+        ),
+    )
+
+
+def arm_result(
+    per_rank: Sequence[RankResult], *, engine: str, sample_count: int
+) -> ArmResult:
+    """The published figures of one arm: the worst rank of each statistic, the lowest for a rate and the highest for a cost or a memory figure."""
+    by_rank = {each.rank: each for each in per_rank}
+    step_costs = {rank: each.step_ms for rank, each in by_rank.items()}
+    ms_median, ms_median_rank = _worst(step_costs, "median", highest=True)
+    ms_mean, ms_mean_rank = _worst(step_costs, "mean", highest=True)
+    ms_p95, ms_p95_rank = _worst(step_costs, "p95", highest=True)
+    memory = {rank: each.peak_memory_gib for rank, each in by_rank.items()}
+    memory_max, memory_max_rank = _worst(memory, "max", highest=True)
+    memory_median, memory_median_rank = _worst(memory, "median", highest=True)
+    memory_mean, memory_mean_rank = _worst(memory, "mean", highest=True)
+    extra_names = sorted({name for each in per_rank for name in each.extras})
+    return ArmResult(
+        sample_count=sample_count,
+        tokens_per_second=_statistic(
+            {rank: each.tokens_per_second for rank, each in by_rank.items()}
+        ),
+        step_ms=StepMsStatistic(
+            median=ms_median,
+            median_rank=ms_median_rank,
+            mean=ms_mean,
+            mean_rank=ms_mean_rank,
+            p95=ms_p95,
+            p95_rank=ms_p95_rank,
+        ),
+        peak_memory_gib=MemoryStatistic(
+            max=memory_max,
+            max_rank=memory_max_rank,
+            median=memory_median,
+            median_rank=memory_median_rank,
+            mean=memory_mean,
+            mean_rank=memory_mean_rank,
+        ),
+        extras={
+            engine: {
+                name: _statistic(
+                    {
+                        rank: each.extras[name]
+                        for rank, each in by_rank.items()
+                        if name in each.extras
+                    }
+                )
+                for name in extra_names
+            }
+        },
+        rank_reduction="slowest_rank_per_statistic",
+        per_rank=tuple(per_rank),
     )
 
 
@@ -292,86 +553,39 @@ def evaluate_run(
         arm: {rank: list(read.samples) for rank, read in by_rank.items()}
         for arm, by_rank in reads.items()
     }
-    if run.profile:
-        def _samples(samples: list[StepSample]) -> list[StepSample]:
-            return stable_samples(samples, run.window)
-    else:
-        warmup_steps = run.warmup_steps
-
-        def _samples(samples: list[StepSample]) -> list[StepSample]:
-            return measured_samples(samples, warmup_steps)
-
     sampled = {
-        arm: {rank: _samples(samples) for rank, samples in by_rank.items()}
+        arm: {rank: run_samples(run, samples) for rank, samples in by_rank.items()}
         for arm, by_rank in steps.items()
     }
-    tps_samples = {
-        arm: {
-            rank: [sample.tokens_per_second for sample in samples]
-            for rank, samples in by_rank.items()
-        }
-        for arm, by_rank in sampled.items()
-    }
-    throughput = {
-        arm: {
-            rank: statistics.median(samples) if samples else None
-            for rank, samples in by_rank.items()
-        }
-        for arm, by_rank in tps_samples.items()
-    }
-    published_throughput_rank = {
-        arm: _slowest_rank(by_rank) for arm, by_rank in throughput.items()
-    }
+    for arm in arms:
+        refuse_lost_steps(arm, run, sampled[arm], out_dir / f"{arm}.log")
     tokens_per_step = run.data.local_batch_size * run.data.seq_len
     pp = run.parallelism.pp
-    rank_step_ms = {
-        arm: {
-            rank: step_ms(samples, tokens_per_step=tokens_per_step, pp=pp)
-            for rank, samples in by_rank.items()
-        }
-        for arm, by_rank in tps_samples.items()
-    }
+    sample_count = len(sampled_steps(run))
     results = {}
     for arm in arms:
-        rank = published_throughput_rank[arm]
-        median_tps = throughput[arm].get(rank)
-        peak_memory = max(
-            (
-                sample.peak_memory_gib
-                for samples in steps[arm].values()
-                for sample in samples
-            ),
-            default=None,
+        per_rank = [
+            rank_result(
+                arm,
+                rank,
+                steps[arm][rank],
+                samples,
+                tokens_per_step=tokens_per_step,
+                pp=pp,
+            )
+            for rank, samples in sorted(sampled[arm].items())
+        ]
+        results[arm] = arm_result(
+            per_rank,
+            engine=engine_for(record.arm(arm).arm).name,
+            sample_count=sample_count,
         )
-        results[arm] = ArmResult(
-            stable_tokens_per_second=median_tps,
-            stable_sample_count=len(tps_samples[arm].get(rank, ())),
-            peak_memory_gib=peak_memory,
-            step_ms=rank_step_ms[arm].get(
-                rank, StepMs(mean=None, median=None, p95=None, series=())
-            ),
-            rank_reduction="min_over_ranks",
-            published_rank=rank,
-            per_rank=tuple(
-                RankThroughput(
-                    rank=each,
-                    stable_tokens_per_second=throughput[arm][each],
-                    stable_sample_count=len(tps_samples[arm][each]),
-                    step_ms=rank_step_ms[arm][each],
-                )
-                for each in sorted(throughput[arm])
-            ),
-            extras={
-                engine_for(record.arm(arm).arm).name: extras_medians(
-                    sampled[arm].get(rank, ())
-                )
-            },
-        )
-        spread = _throughput_spread(throughput[arm])
+        medians = {each.rank: each.tokens_per_second.median for each in per_rank}
+        spread = _throughput_spread(medians)
         if spread is not None and spread > 1.15:
             warnings.append(
-                f"{arm}: tokens/s varies {spread:.2f}x across ranks "
-                f"({_rank_throughput_summary(throughput[arm])}); a schedule "
+                f"{arm}: median tokens/s varies {spread:.2f}x across ranks "
+                f"({_rank_throughput_summary(medians)}); a schedule "
                 "holds the ranks in step, so a spread this wide means one "
                 "rank is starved or the ranks are not running one job"
             )
@@ -424,22 +638,29 @@ def render_evaluation(result: EvaluationResult) -> str:
         "",
         "benchmark summary:",
         "  "
-        + f"{'arm':22s} {'tokens/s':>12s} {'n':>4s} "
-        + f"{'step ms':>9s} {'p95 ms':>9s} {'peak GiB':>9s}",
+        + f"{'arm':22s} {'tokens/s':>12s} {'mean tok/s':>12s} {'n':>4s} "
+        + f"{'step ms':>9s} {'mean ms':>9s} {'p95 ms':>9s} {'peak GiB':>9s}",
     ]
     for arm in result.arms:
         summary = result.results[arm]
         lines.append(
             f"  {arm:22s} "
-            f"{_value(summary.stable_tokens_per_second, 12)} "
-            f"{summary.stable_sample_count:4d} "
+            f"{_value(summary.tokens_per_second.median, 12)} "
+            f"{_value(summary.tokens_per_second.mean, 12)} "
+            f"{summary.sample_count:4d} "
             f"{_value(summary.step_ms.median, 9, 2)} "
+            f"{_value(summary.step_ms.mean, 9, 2)} "
             f"{_value(summary.step_ms.p95, 9, 2)} "
-            f"{_value(summary.peak_memory_gib, 9, 2)}"
+            f"{_value(summary.peak_memory_gib.max, 9, 2)}"
         )
-    lines.append(
-        "tokens/s is per device, taken at the slowest rank; 'step ms' is "
-        "that rank's median step."
+    lines.extend(
+        [
+            "tokens/s and 'step ms' are medians over the sampled steps. "
+            "'mean tok/s' is the total tokens over the total time, and "
+            "'mean ms' is the arithmetic mean of the step times.",
+            "tokens/s is per device. Each statistic is taken at its own "
+            "slowest rank; 'peak GiB' is the maximum over every step and rank.",
+        ]
     )
 
     lines.extend(["", "loss trajectories (sanity check, not a measurement):"])

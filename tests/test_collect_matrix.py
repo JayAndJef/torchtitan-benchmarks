@@ -25,7 +25,7 @@ _SPEC.loader.exec_module(collect_matrix)
 
 
 GOLDEN_RUN = REPO_ROOT / "tests" / "fixtures" / "golden" / "runs" / "dp1-1b"
-"""A schema 18 run directory with a results file."""
+"""A schema 18 run directory."""
 
 
 def write_manifest(cell: Path, *, model_size: str, dp: int, zero: int) -> None:
@@ -48,25 +48,50 @@ def write_manifest(cell: Path, *, model_size: str, dp: int, zero: int) -> None:
     )
 
 
-def results(*, tokens_per_second: float) -> dict:
-    """A schema-6 results payload with two arms."""
+def arm_results(*, tokens_per_second: float, scale: float = 1.0) -> dict:
+    """The schema 7 figures of one arm that the tool reads."""
     return {
-        "schema_version": 6,
+        "sample_count": 70,
+        "tokens_per_second": {
+            "median": tokens_per_second,
+            "median_rank": 1,
+            "mean": tokens_per_second * 0.9,
+            "mean_rank": 0,
+        },
+        "step_ms": {
+            "median": 99.0 * scale,
+            "median_rank": 1,
+            "mean": 100.0 * scale,
+            "mean_rank": 0,
+            "p95": 110.0 * scale,
+            "p95_rank": 0,
+        },
+        "peak_memory_gib": {
+            "max": 41.5 * scale,
+            "max_rank": 0,
+            "median": 41.0 * scale,
+            "median_rank": 0,
+            "mean": 40.5 * scale,
+            "mean_rank": 0,
+        },
+    }
+
+
+def results(
+    *,
+    tokens_per_second: float,
+    arms: tuple[str, ...] = ("titan_compiled", "megatron_stock"),
+) -> dict:
+    """A schema 7 results payload; each arm after the first runs at half the rate of the one before it."""
+    return {
+        "schema_version": 7,
         "scenario": "engines",
-        "arms": ["titan_compiled", "megatron_stock"],
+        "arms": list(arms),
         "results": {
-            "titan_compiled": {
-                "stable_tokens_per_second": tokens_per_second,
-                "stable_sample_count": 70,
-                "peak_memory_gib": 41.5,
-                "step_ms": {"mean": 100.0, "median": 99.0, "p95": 110.0},
-            },
-            "megatron_stock": {
-                "stable_tokens_per_second": tokens_per_second / 2,
-                "stable_sample_count": 68,
-                "peak_memory_gib": 63.25,
-                "step_ms": {"mean": 200.0, "median": 198.0, "p95": 220.0},
-            },
+            arm: arm_results(
+                tokens_per_second=tokens_per_second / 2**index, scale=2**index
+            )
+            for index, arm in enumerate(arms)
         },
         "warnings": [],
     }
@@ -119,11 +144,16 @@ class CollectTests(unittest.TestCase):
     def test_row_carries_the_published_figures(self) -> None:
         rows = collect_matrix.collect(self.root, None)
         row = rows[0]
-        self.assertEqual(row["stable_tokens_per_second"], 12000.0)
-        self.assertEqual(row["stable_sample_count"], 70)
+        self.assertEqual(row["tokens_per_second_median"], 12000.0)
+        self.assertEqual(row["tokens_per_second_median_rank"], 1)
+        self.assertEqual(row["tokens_per_second_mean"], 10800.0)
+        self.assertEqual(row["tokens_per_second_mean_rank"], 0)
+        self.assertEqual(row["sample_count"], 70)
         self.assertEqual(row["step_ms_median"], 99.0)
+        self.assertEqual(row["step_ms_mean"], 100.0)
         self.assertEqual(row["step_ms_p95"], 110.0)
         self.assertEqual(row["peak_memory_gib"], 41.5)
+        self.assertEqual(rows[1]["tokens_per_second_median"], 6000.0)
         self.assertFalse(row["contaminated"])
 
     def test_row_carries_the_cell_axes(self) -> None:
@@ -148,8 +178,15 @@ class CollectTests(unittest.TestCase):
     def test_a_schema_18_cell_is_read(self) -> None:
         cell = self.root / "golden"
         cell.mkdir()
-        for name in ("manifest.json", "results.json"):
-            shutil.copy(GOLDEN_RUN / name, cell / name)
+        shutil.copy(GOLDEN_RUN / "manifest.json", cell / "manifest.json")
+        (cell / "results.json").write_text(
+            json.dumps(
+                results(
+                    tokens_per_second=1000.0,
+                    arms=("titan_compiled", "titan_eager", "megatron_stock"),
+                )
+            )
+        )
         rows = [
             row
             for row in collect_matrix.collect(self.root, None)
@@ -169,9 +206,7 @@ class CollectTests(unittest.TestCase):
             REPO_ROOT / "tests/fixtures/manifest_v19/titan-compiled-fa3-dp4-ep4.json",
             cell / "manifest.json",
         )
-        payload = results(tokens_per_second=1000.0)
-        payload["arms"] = ["titan_compiled_fa3"]
-        payload["results"] = {"titan_compiled_fa3": payload["results"]["titan_compiled"]}
+        payload = results(tokens_per_second=1000.0, arms=("titan_compiled_fa3",))
         (cell / "results.json").write_text(json.dumps(payload))
         rows = [
             row
@@ -229,20 +264,22 @@ class CollectTests(unittest.TestCase):
 
     def test_another_results_schema_is_refused_by_name(self) -> None:
         payload = results(tokens_per_second=1.0)
-        payload["schema_version"] = 5
+        payload["schema_version"] = 6
         (self.root / "model-size-1b-ac-none" / "results.json").write_text(
             json.dumps(payload)
         )
         with self.assertRaises(ValueError) as caught:
             collect_matrix.collect(self.root, None)
-        self.assertIn("schema 5", str(caught.exception))
         self.assertIn("schema 6", str(caught.exception))
+        self.assertIn("schema 7", str(caught.exception))
 
     def test_table_prints_one_line_per_row(self) -> None:
         rows = collect_matrix.collect(self.root, None)
         lines = collect_matrix.render(rows).splitlines()
         self.assertEqual(len(lines), len(rows) + 2)
         self.assertIn("tokens/s", lines[0])
+        self.assertIn("mean tok/s", lines[0])
+        self.assertIn("mean ms", lines[0])
         self.assertIn("zero", lines[0])
 
     def test_json_output_holds_the_same_rows(self) -> None:

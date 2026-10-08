@@ -79,12 +79,14 @@ Read these points before you publish a number:
 out/<timestamp>/<scenario>/<hardware>/
   manifest.json     # run block, arm configs, commands, revisions, hardware
   run_state.json    # resumable status
-  results.json      # tokens/s, step time, peak memory, trajectories
+  results.json      # schema 7: tokens/s, step time, peak memory, per-step tables, trajectories
   <arm>.log         # training output, every rank
 ```
 
-The evaluation reads the logs alone. It publishes absolute numbers for the
-slowest rank. It gives no baseline and no ratio.
+The evaluation reads the logs alone. It publishes the median and the mean
+of each figure, each at the slowest rank for that statistic. The mean
+tokens/s is the total tokens over the total time. It gives no baseline and
+no ratio.
 
 Put reports and notes in `reports/`, which git ignores. Keep results out of
 this file.

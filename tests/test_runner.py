@@ -38,7 +38,7 @@ from tests.engine_helpers import (
     titan_step_line,
     validate,
 )
-from benchmarks.e2e.engines.api import ProfileWindow
+from benchmarks.e2e.engines.api import ProfileWindow, StepSample
 from benchmarks.e2e.results import arm_steps, stable_samples
 from benchmarks.e2e.runner import (
     _resolve_run,
@@ -1595,6 +1595,7 @@ class ValidationTests(unittest.TestCase):
 
 class TrainingMetricsTests(unittest.TestCase):
     def test_stable_samples_exclude_compile_and_profiler_steps(self) -> None:
+        # Step 2 also leaves, because the profiled rule drops the slow first step.
         with tempfile.TemporaryDirectory() as temporary:
             log = Path(temporary) / "arm.log"
             log.write_text(
@@ -1619,8 +1620,32 @@ class TrainingMetricsTests(unittest.TestCase):
                     samples, ProfileWindow(freq=20, warmup=5, active=5)
                 )
             ],
-            [9900, 10100, 10000],
+            [10100, 10000],
         )
+
+    def test_stable_samples_exclude_the_slow_first_step(self) -> None:
+        samples = [
+            StepSample(
+                rank=0,
+                step=step,
+                tokens_per_second=1000,
+                peak_memory_gib=3.0,
+                loss=1.0,
+                grad_norm=2.0,
+            )
+            for step in range(1, 81)
+        ]
+        stable = stable_samples(samples, ProfileWindow(freq=20, warmup=5, active=5))
+        self.assertEqual(
+            [sample.step for sample in stable],
+            [
+                *range(3, 11),
+                *range(22, 31),
+                *range(42, 51),
+                *range(62, 71),
+            ],
+        )
+        self.assertEqual(len(stable), 35)
 
 
 def _write_block_traces(arm_dir: Path) -> None:

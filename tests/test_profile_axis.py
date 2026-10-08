@@ -318,11 +318,12 @@ class TracelessEvaluationTests(unittest.TestCase):
                 warmup_steps=3,
                 seq_len=1024,
                 local_batch_size=4,
+                steps=5,
             ),
             (ENGINES.arm("titan_eager"),),
         )
         (root / "titan_eager.log").write_text(
-            "".join(titan_step_line(step) for step in range(2, 6))
+            "".join(titan_step_line(step) for step in range(1, 6))
         )
         return root
 
@@ -334,7 +335,7 @@ class TracelessEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             result = evaluate_run(self._out_dir(Path(temporary)))
         self.assertEqual(
-            result.results["titan_eager"].stable_tokens_per_second, 1000
+            result.results["titan_eager"].tokens_per_second.median, 1000
         )
         self.assertNotIn("gpu_time", result.to_dict())
         self.assertNotIn("gpu kernel time", render_evaluation(result))

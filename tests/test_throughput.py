@@ -32,6 +32,7 @@ from benchmarks.artifacts.manifests import (  # noqa: E402
 from benchmarks.e2e.engines.megatron_stock.driver.step_log import (  # noqa: E402
     tokens_per_second,
 )
+from benchmarks.e2e.engines.megatron_stock.steps import step_record  # noqa: E402
 from benchmarks.e2e.parallelism import TRIVIAL_SPEC, ParallelismSpec  # noqa: E402
 from benchmarks.e2e.engines.api import (  # noqa: E402
     Arm,
@@ -39,18 +40,25 @@ from benchmarks.e2e.engines.api import (  # noqa: E402
     DroppedLine,
     RunSpec,
     StepRead,
+    StepSample,
 )
 from benchmarks.e2e.engines.torchtitan.config import TorchTitanConfig  # noqa: E402
-from benchmarks.e2e.registry import SCENARIOS, SEED  # noqa: E402
+from benchmarks.e2e.registry import ENGINES, SCENARIOS, SEED  # noqa: E402
 from benchmarks.models.piper_qwen3.shape import PIPER_1B  # noqa: E402
 from benchmarks.e2e.results import (  # noqa: E402
     arm_steps,
     dropped_line_warnings,
     evaluate_run,
     pinning_warnings,
+    RESULTS_SCHEMA_VERSION,
+    extras_statistics,
     loss_visible_rank,
+    lost_step_refusals,
+    rank_result,
+    rate_mean,
     refuse_non_finite_trajectories,
     render_evaluation,
+    sampled_steps,
     step_ms,
     trajectory,
     write_results,
@@ -61,11 +69,12 @@ from tests.engine_helpers import (  # noqa: E402
     TEST_METADATA,
     run_spec,
     titan_step_line,
+    write_run_manifest,
 )
 
 
-FIXTURE_RUN = run_spec(seq_len=1024, local_batch_size=4)
-"""A profiled run at sequence length 1024 and local batch 4."""
+FIXTURE_RUN = run_spec(seq_len=1024, local_batch_size=4, steps=10)
+"""A profiled run of 10 steps at sequence length 1024 and local batch 4; its rule takes steps 3 to 10."""
 
 
 TITAN_ARM = Arm(
@@ -81,11 +90,11 @@ def _samples(arm: Arm, log: Path) -> dict:
     return {rank: read.samples for rank, read in arm_steps(arm, log).items()}
 
 
-def _step_lines(*, tps: int, first_step: int = 2, count: int = 4) -> str:
-    """Step lines a rank prints, inside the stable window rule."""
+def _step_lines(*, tps: int) -> str:
+    """The step lines that a rank prints for every step of ``FIXTURE_RUN``."""
     return "".join(
         titan_step_line(step, tps=tps)
-        for step in range(first_step, first_step + count)
+        for step in range(1, FIXTURE_RUN.data.steps + 1)
     )
 
 
@@ -166,7 +175,7 @@ class PerRankLogParsingTests(unittest.TestCase):
             by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(list(by_rank), [0])
         self.assertEqual(
-            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 4
+            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 10
         )
 
     def test_two_ranks_do_not_pool_into_one_series(self) -> None:
@@ -179,10 +188,10 @@ class PerRankLogParsingTests(unittest.TestCase):
             by_rank = arm_steps(TITAN_ARM, log)
         self.assertEqual(sorted(by_rank), [0, 1])
         self.assertEqual(
-            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 4
+            [sample.tokens_per_second for sample in by_rank[0].samples], [1000] * 10
         )
         self.assertEqual(
-            [sample.tokens_per_second for sample in by_rank[1].samples], [800] * 4
+            [sample.tokens_per_second for sample in by_rank[1].samples], [800] * 10
         )
         self.assertEqual({sample.rank for sample in by_rank[1].samples}, {1})
 
@@ -270,8 +279,8 @@ class SingleRankIsUnchangedTests(unittest.TestCase):
     def test_one_rank_publishes_the_median_it_always_published(self) -> None:
         result, _ = self._evaluate({"world_size": 1, "pp": 1})
         summary = result.results["baseline"]
-        self.assertEqual(summary.stable_tokens_per_second, 1000)
-        self.assertEqual(summary.published_rank, 0)
+        self.assertEqual(summary.tokens_per_second.median, 1000)
+        self.assertEqual(summary.tokens_per_second.median_rank, 0)
         self.assertEqual([row.rank for row in summary.per_rank], [0])
 
     def test_one_rank_prints_one_row_per_arm_and_raises_no_warning(self) -> None:
@@ -416,10 +425,10 @@ class NoArmIsSpecialTests(unittest.TestCase):
             report = render_evaluation(result)
 
         self.assertEqual(
-            result.results["titan_compiled"].stable_tokens_per_second, 1100
+            result.results["titan_compiled"].tokens_per_second.median, 1100
         )
         self.assertEqual(
-            result.results["megatron_stock"].stable_tokens_per_second, 1200
+            result.results["megatron_stock"].tokens_per_second.median, 1200
         )
         self.assertNotIn("ratio", report)
         self.assertNotIn("vs base", report)
@@ -442,31 +451,37 @@ class TwoRanksPublishTheSlowestTests(unittest.TestCase):
             result = evaluate_run(out_dir)
             return result, render_evaluation(result)
 
-    def test_the_published_figure_is_the_minimum_and_never_the_mean(self) -> None:
+    def test_the_published_figure_is_the_minimum_and_never_the_mean_over_ranks(
+        self,
+    ) -> None:
         result, _ = self._evaluate(1000, 900)
         summary = result.results["baseline"]
-        self.assertEqual(summary.stable_tokens_per_second, 900)
-        self.assertEqual(summary.published_rank, 1)
-        self.assertEqual(summary.rank_reduction, "min_over_ranks")
-        # The mean would be 950, which no device achieved.
-        self.assertNotEqual(summary.stable_tokens_per_second, 950)
+        self.assertEqual(summary.tokens_per_second.median, 900)
+        self.assertEqual(summary.tokens_per_second.median_rank, 1)
+        self.assertEqual(summary.tokens_per_second.mean, 900)
+        self.assertEqual(summary.tokens_per_second.mean_rank, 1)
+        self.assertEqual(summary.rank_reduction, "slowest_rank_per_statistic")
+        # The mean over the ranks would be 950, which no device achieved.
+        self.assertNotEqual(summary.tokens_per_second.median, 950)
 
     def test_every_rank_reaches_the_file_beside_the_published_one(self) -> None:
         result, _ = self._evaluate(1000, 900)
         summary = result.results["baseline"]
         self.assertEqual(
-            [(row.rank, row.stable_tokens_per_second) for row in summary.per_rank],
+            [(row.rank, row.tokens_per_second.median) for row in summary.per_rank],
             [(0, 1000), (1, 900)],
         )
-        self.assertEqual([row.stable_sample_count for row in summary.per_rank], [4, 4])
+        self.assertEqual([len(row.steps) for row in summary.per_rank], [8, 8])
+        self.assertEqual(summary.sample_count, 8)
 
-    def test_the_published_step_cost_is_the_published_rank_own(self) -> None:
+    def test_the_published_step_cost_is_the_slowest_rank_own(self) -> None:
         result, _ = self._evaluate(1000, 900)
         summary = result.results["baseline"]
         # pp 2 halves the per-rank step cost of 4 x 1024 tokens.
         self.assertAlmostEqual(
             summary.step_ms.median, 1000.0 * 4 * 1024 / (900 * 2)
         )
+        self.assertEqual(summary.step_ms.median_rank, 1)
         self.assertAlmostEqual(
             summary.per_rank[0].step_ms.median, 1000.0 * 4 * 1024 / (1000 * 2)
         )
@@ -489,60 +504,73 @@ class TwoRanksPublishTheSlowestTests(unittest.TestCase):
     def test_the_written_file_carries_the_per_rank_rows(self) -> None:
         result, _ = self._evaluate(1000, 900)
         machine = result.to_dict()["results"]["baseline"]
-        self.assertEqual(machine["rank_reduction"], "min_over_ranks")
+        self.assertEqual(machine["rank_reduction"], "slowest_rank_per_statistic")
         self.assertEqual([row["rank"] for row in machine["per_rank"]], [0, 1])
 
 
-class ARankWithNoSampleDoesNotWinTests(unittest.TestCase):
-    """"No sample" is a measurement that did not happen, not a slow rank."""
+class ARankWithNoSampleRefusesTheArmTests(unittest.TestCase):
+    """"No sample" is a measurement that did not happen, so the arm publishes nothing."""
 
-    def test_a_silent_rank_does_not_become_the_published_zero(self) -> None:
+    def _refusal(self, logs: str) -> str:
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             _RunFixture.build(
-                out_dir,
-                {
-                    "baseline": _prefixed(_step_lines(tps=1000), 0)
-                    + "[rank1]:starting up\n"
-                },
-                {"world_size": 2, "pp": 2},
+                out_dir, {"baseline": logs}, {"world_size": 2, "pp": 2}
             )
-            summary = evaluate_run(out_dir).results["baseline"]
-        self.assertEqual(summary.published_rank, 0)
-        self.assertEqual(summary.stable_tokens_per_second, 1000)
-        self.assertEqual([row.rank for row in summary.per_rank], [0, 1])
-        self.assertIsNone(summary.per_rank[1].stable_tokens_per_second)
-        self.assertIsNone(summary.per_rank[1].step_ms.median)
-        self.assertEqual(summary.per_rank[1].step_ms.series, ())
+            with self.assertRaises(ValueError) as caught:
+                evaluate_run(out_dir)
+            self.assertFalse((out_dir / "results.json").exists())
+        return str(caught.exception)
+
+    def test_a_silent_rank_refuses_the_arm(self) -> None:
+        refusal = self._refusal(
+            _prefixed(_step_lines(tps=1000), 0) + "[rank1]:starting up\n"
+        )
+        self.assertIn("baseline: rank 1 lacks sampled step 3", refusal)
+
+    def test_a_rank_absent_from_the_log_refuses_the_arm(self) -> None:
+        refusal = self._refusal(_prefixed(_step_lines(tps=1000), 0))
+        self.assertIn("baseline: rank 1 lacks sampled step 3", refusal)
 
 
 class TornStepLineTests(unittest.TestCase):
     """A step line that another rank's prefix cut is dropped, and results.json names it."""
 
+    def _lines(self, cut_step: int) -> str:
+        """Both ranks' step lines of every step, with rank 1's line of ``cut_step`` cut by a rank prefix."""
+        cut = titan_step_line(cut_step)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        return "".join(
+            f"[rank0]:{titan_step_line(step)}"
+            + f"[rank1]:{cut if step == cut_step else titan_step_line(step)}"
+            for step in range(1, FIXTURE_RUN.data.steps + 1)
+        )
+
     def test_the_warning_names_the_arm_the_rank_the_step_and_the_log_line(
         self,
     ) -> None:
-        cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"
-        lines = [
-            "[rank0]:" + titan_step_line(2),
-            "[rank1]:" + titan_step_line(2),
-            "[rank0]:" + titan_step_line(3),
-            "[rank1]:" + cut,
-            "[rank0]:" + titan_step_line(4),
-            "[rank1]:" + titan_step_line(4),
-        ]
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             _RunFixture.build(
-                out_dir, {"baseline": "".join(lines)}, {"world_size": 2, "pp": 2}
+                out_dir, {"baseline": self._lines(1)}, {"world_size": 2, "pp": 2}
             )
             result = evaluate_run(out_dir)
         self.assertIn(
-            "baseline: rank 1 step 3: a rank prefix cut the step line "
-            "at line 4 of baseline.log, so the evaluation drops that step",
+            "baseline: rank 1 step 1: a rank prefix cut the step line "
+            "at line 2 of baseline.log, so the evaluation drops that step",
             result.warnings,
         )
-        self.assertEqual(result.results["baseline"].per_rank[1].stable_sample_count, 2)
+        self.assertEqual(len(result.results["baseline"].per_rank[1].steps), 8)
+
+    def test_a_cut_sampled_step_refuses_the_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir, {"baseline": self._lines(4)}, {"world_size": 2, "pp": 2}
+            )
+            with self.assertRaisesRegex(
+                ValueError, r"^baseline: rank 1 lacks sampled step 4; "
+            ):
+                evaluate_run(out_dir)
 
     def test_a_step_that_the_cut_removed_reads_as_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -557,18 +585,116 @@ class TornStepLineTests(unittest.TestCase):
         )
 
     def test_the_log_line_of_a_one_rank_log_is_its_own(self) -> None:
-        cut = titan_step_line(3)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        cut = titan_step_line(2)[:-60] + "[rank0]:USDT: profiler_stop\n"
+        rest = "".join(
+            titan_step_line(step) for step in range(3, FIXTURE_RUN.data.steps + 1)
+        )
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             _RunFixture.build(
                 out_dir,
-                {"baseline": "header\n" + titan_step_line(2) + cut},
+                {"baseline": "header\n" + titan_step_line(1) + cut + rest},
                 {"world_size": 1, "pp": 1},
             )
             warnings = evaluate_run(out_dir).warnings
         self.assertTrue(
-            any("rank 0 step 3" in w and "at line 3 of" in w for w in warnings),
+            any("rank 0 step 2" in w and "at line 3 of" in w for w in warnings),
             warnings,
+        )
+
+
+def _megatron_record(step: int, *, tps: int = 1000) -> str:
+    """One step record of the stock Megatron driver."""
+    return (
+        step_record(
+            step=step,
+            tokens_per_second=tps,
+            peak_memory_gib=3.0,
+            loss=1.0,
+            grad_norm=2.0,
+            tflops=12.5,
+            mfu=1.26,
+        )
+        + "\n"
+    )
+
+
+STEP_LINES = {"titan_eager": titan_step_line, "megatron_stock": _megatron_record}
+"""The step line of each engine, by arm."""
+
+
+class LostStepTests(unittest.TestCase):
+    """A rank that lacks a sampled step refuses the arm, whichever engine reads the log."""
+
+    RUN = run_spec(
+        ac_mode="none",
+        seq_len=1024,
+        local_batch_size=4,
+        steps=10,
+        parallelism=ParallelismSpec(dp=2),
+    )
+
+    def _evaluate(self, arm: str, lost: int | None):
+        """Evaluate a two-rank run of ``arm`` in which rank 1 does not log step ``lost``."""
+        line = STEP_LINES[arm]
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            write_run_manifest(out_dir, self.RUN, (ENGINES.arm(arm),))
+            (out_dir / f"{arm}.log").write_text(
+                "".join(
+                    f"[rank{rank}]:{line(step)}"
+                    for step in range(1, self.RUN.data.steps + 1)
+                    for rank in (0, 1)
+                    if not (rank == 1 and step == lost)
+                )
+            )
+            return evaluate_run(out_dir)
+
+    def test_each_engine_refuses_a_rank_that_lacks_a_sampled_step(self) -> None:
+        for arm in STEP_LINES:
+            with self.subTest(arm=arm), self.assertRaisesRegex(
+                ValueError, rf"^{arm}: rank 1 lacks sampled step 7; "
+            ):
+                self._evaluate(arm, 7)
+
+    def test_a_lost_step_outside_the_rule_refuses_nothing(self) -> None:
+        for arm in STEP_LINES:
+            with self.subTest(arm=arm):
+                result = self._evaluate(arm, 2)
+                self.assertEqual(
+                    [len(row.steps) for row in result.results[arm].per_rank], [8, 8]
+                )
+
+    def test_the_profiled_rule_takes_35_steps_of_80(self) -> None:
+        steps = sampled_steps(run_spec(steps=80))
+        self.assertEqual(
+            steps,
+            (*range(3, 11), *range(22, 31), *range(42, 51), *range(62, 71)),
+        )
+        self.assertEqual(len(steps), 35)
+
+    def test_the_unprofiled_rule_takes_every_step_after_the_warmup(self) -> None:
+        self.assertEqual(
+            sampled_steps(run_spec(profile=False, warmup_steps=10, steps=40)),
+            tuple(range(11, 41)),
+        )
+
+    def test_a_sampled_step_past_the_run_is_refused(self) -> None:
+        run = run_spec(steps=10)
+        samples = [
+            StepSample(
+                rank=0,
+                step=step,
+                tokens_per_second=1000,
+                peak_memory_gib=3.0,
+                loss=1.0,
+                grad_norm=2.0,
+            )
+            for step in (*range(3, 11), 22)
+        ]
+        self.assertEqual(
+            lost_step_refusals(run, {0: samples}),
+            ["rank 0 logs sampled step 22, and the run has 10 steps"],
         )
 
 
@@ -588,7 +714,7 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
                 loss=loss if step == at else 1.0,
                 grad_norm=grad_norm if step == at else 2.0,
             )
-            for step in range(2, 6)
+            for step in range(1, FIXTURE_RUN.data.steps + 1)
         )
 
     def _evaluate(self, logs: dict[str, str], parallelism=None):
@@ -648,8 +774,8 @@ class NonFiniteTrajectoryTests(unittest.TestCase):
             )
             result = evaluate_run(out_dir)
             steps = arm_steps(TITAN_ARM, out_dir / "baseline.log")
-        self.assertEqual(result.losses["baseline"][1], (3, 1.0))
-        self.assertIsNone(steps[0].samples[1].loss)
+        self.assertEqual(result.losses["baseline"][2], (3, 1.0))
+        self.assertIsNone(steps[0].samples[2].loss)
 
     def test_the_guard_reads_the_samples_directly(self) -> None:
         """Callable on its own, so a reader of an old directory can ask."""
@@ -698,22 +824,26 @@ class WholeEvaluationTests(unittest.TestCase):
             machine = json.loads(results_path.read_text())
             report = render_evaluation(result)
 
-        self.assertEqual(machine["schema_version"], 6)
+        self.assertEqual(machine["schema_version"], RESULTS_SCHEMA_VERSION)
+        self.assertEqual(RESULTS_SCHEMA_VERSION, 7)
         self.assertEqual(
-            machine["results"]["megatron_stock"]["stable_tokens_per_second"],
+            machine["results"]["megatron_stock"]["tokens_per_second"]["median"],
             1200,
         )
         self.assertEqual(machine["losses"]["megatron_stock"][0]["value"], 1.0)
         self.assertIn("tokens/s", report)
+        self.assertIn("mean tok/s", report)
         self.assertIn("step ms", report)
+        self.assertIn("mean ms", report)
+        self.assertIn("total tokens over the total time", report)
         self.assertIn("p95 ms", report)
         self.assertIn("peak GiB", report)
         self.assertNotIn("gpu kernel time", report)
 
-    def test_the_payload_carries_the_schema_six_keys_and_no_others(
+    def test_the_payload_carries_the_schema_seven_keys_and_no_others(
         self,
     ) -> None:
-        """The exact key tree, top level and per arm."""
+        """The exact key tree, top level, per arm and per rank."""
         with tempfile.TemporaryDirectory() as temporary:
             out_dir = Path(temporary)
             _RunFixture.build(
@@ -724,54 +854,237 @@ class WholeEvaluationTests(unittest.TestCase):
             machine = evaluate_run(out_dir).to_dict()
 
         self.assertEqual(
-            sorted(machine),
-            sorted(
-                [
-                    "schema_version",
-                    "scenario",
-                    "hardware",
-                    "output_dir",
-                    "arms",
-                    "results",
-                    "losses",
-                    "gradient_norms",
-                    "warnings",
-                ]
-            ),
+            list(machine),
+            [
+                "schema_version",
+                "scenario",
+                "hardware",
+                "output_dir",
+                "arms",
+                "results",
+                "losses",
+                "gradient_norms",
+                "warnings",
+            ],
         )
         arm = machine["results"]["titan_compiled"]
         self.assertEqual(
-            sorted(arm),
-            sorted(
-                [
-                    "stable_tokens_per_second",
-                    "stable_sample_count",
-                    "peak_memory_gib",
-                    "step_ms",
-                    "rank_reduction",
-                    "published_rank",
-                    "per_rank",
-                    "extras",
-                ]
-            ),
+            list(arm),
+            [
+                "sample_count",
+                "tokens_per_second",
+                "step_ms",
+                "peak_memory_gib",
+                "extras",
+                "rank_reduction",
+                "per_rank",
+            ],
         )
         self.assertEqual(
-            arm["extras"], {"torchtitan": {"mfu": 1.26, "tflops": 12.5}}
+            list(arm["tokens_per_second"]),
+            ["median", "median_rank", "mean", "mean_rank"],
         )
         self.assertEqual(
-            sorted(arm["step_ms"]), ["mean", "median", "p95", "series"]
+            list(arm["step_ms"]),
+            ["median", "median_rank", "mean", "mean_rank", "p95", "p95_rank"],
         )
         self.assertEqual(
-            sorted(arm["per_rank"][0]),
-            sorted(
-                [
-                    "rank",
-                    "stable_tokens_per_second",
-                    "stable_sample_count",
-                    "step_ms",
-                ]
-            ),
+            list(arm["peak_memory_gib"]),
+            ["max", "max_rank", "median", "median_rank", "mean", "mean_rank"],
         )
+        self.assertEqual(list(arm["extras"]), ["torchtitan"])
+        self.assertEqual(
+            arm["extras"]["torchtitan"]["tflops"],
+            {"median": 12.5, "median_rank": 0, "mean": 12.5, "mean_rank": 0},
+        )
+        self.assertEqual(sorted(arm["extras"]["torchtitan"]), ["mfu", "tflops"])
+        (rank,) = arm["per_rank"]
+        self.assertEqual(
+            list(rank),
+            [
+                "rank",
+                "tokens_per_second",
+                "step_ms",
+                "peak_memory_gib",
+                "extras",
+                "steps",
+            ],
+        )
+        self.assertEqual(list(rank["tokens_per_second"]), ["median", "mean"])
+        self.assertEqual(list(rank["step_ms"]), ["median", "mean", "p95"])
+        self.assertEqual(list(rank["peak_memory_gib"]), ["max", "median", "mean"])
+        self.assertEqual(rank["extras"]["mfu"], {"median": 1.26, "mean": 1.26})
+        self.assertEqual([step["step"] for step in rank["steps"]], list(range(3, 11)))
+        self.assertEqual(
+            rank["steps"][0],
+            {
+                "step": 3,
+                "tokens_per_second": 1000,
+                "step_ms": 1000.0 * 4 * 1024 / 1000,
+                "peak_memory_gib": 3.0,
+                "extras": {"tflops": 12.5, "mfu": 1.26},
+            },
+        )
+
+
+class MeanAndMedianTests(unittest.TestCase):
+    """Each figure publishes a median and a mean, and each statistic names its own slowest rank."""
+
+    def _evaluate(self, logs: dict[int, str]):
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {"baseline": "".join(_prefixed(text, rank) for rank, text in logs.items())},
+                {"world_size": len(logs), "pp": len(logs)},
+            )
+            return evaluate_run(out_dir).results["baseline"]
+
+    @staticmethod
+    def _lines(tps: dict[int, int], memory: dict[int, float] | None = None) -> str:
+        """Every step line of ``FIXTURE_RUN`` at 1000 tokens/s and 3 GiB, except the steps that ``tps`` and ``memory`` name."""
+        memory = memory or {}
+        return "".join(
+            titan_step_line(step, tps=tps.get(step, 1000), memory=memory.get(step, 3.0))
+            for step in range(1, FIXTURE_RUN.data.steps + 1)
+        )
+
+    def test_the_rate_mean_is_the_total_tokens_over_the_total_time(self) -> None:
+        # Seven sampled steps at 1000 tokens/s and one at 250: 8 steps of
+        # one token count take 7/1000 + 1/250 = 0.011 s per token.
+        summary = self._evaluate({0: self._lines({6: 250})})
+        self.assertEqual(summary.tokens_per_second.median, 1000)
+        self.assertAlmostEqual(summary.tokens_per_second.mean, 8 / 0.011)
+        # pp 1: one step holds 4 x 1024 tokens.
+        tokens = 4 * 1024
+        self.assertAlmostEqual(
+            summary.step_ms.mean, (7 * tokens + tokens * 4) / 8
+        )
+        self.assertAlmostEqual(
+            summary.step_ms.mean, 1000.0 * tokens / summary.tokens_per_second.mean
+        )
+        self.assertAlmostEqual(summary.step_ms.median, 1000.0 * tokens / 1000)
+        self.assertAlmostEqual(summary.step_ms.p95, 1000.0 * tokens / 250)
+
+    def test_the_rate_mean_is_the_harmonic_mean(self) -> None:
+        self.assertAlmostEqual(rate_mean([1000, 1000, 1000, 250]), 4 / 0.007)
+
+    def test_an_extra_takes_the_rate_mean(self) -> None:
+        samples = [
+            StepSample(
+                rank=0,
+                step=step,
+                tokens_per_second=1000,
+                peak_memory_gib=3.0,
+                loss=1.0,
+                grad_norm=2.0,
+                extras={"tflops": tflops},
+            )
+            for step, tflops in ((3, 100.0), (4, 100.0), (5, 25.0))
+        ]
+        (tflops,) = extras_statistics(samples).values()
+        self.assertEqual(tflops.median, 100.0)
+        self.assertAlmostEqual(tflops.mean, 3 / (2 / 100 + 1 / 25))
+
+    def test_the_median_and_the_mean_can_name_different_ranks(self) -> None:
+        # Rank 0 runs every step at 900. Rank 1 runs at 1000 with one stall
+        # at 200, so its median is higher and its mean is lower than rank 0's.
+        summary = self._evaluate(
+            {
+                0: self._lines({step: 900 for step in range(1, 11)}),
+                1: self._lines({5: 200}),
+            }
+        )
+        tps = summary.tokens_per_second
+        self.assertEqual((tps.median, tps.median_rank), (900, 0))
+        self.assertAlmostEqual(tps.mean, 8 / (7 / 1000 + 1 / 200))
+        self.assertEqual(tps.mean_rank, 1)
+        cost = summary.step_ms
+        self.assertEqual((cost.median_rank, cost.mean_rank, cost.p95_rank), (0, 1, 1))
+        self.assertEqual(
+            [row.tokens_per_second.median for row in summary.per_rank], [900, 1000]
+        )
+
+    def test_a_tie_goes_to_the_lower_rank(self) -> None:
+        summary = self._evaluate({0: self._lines({}), 1: self._lines({})})
+        self.assertEqual(summary.tokens_per_second.median_rank, 0)
+        self.assertEqual(summary.step_ms.mean_rank, 0)
+        self.assertEqual(summary.peak_memory_gib.max_rank, 0)
+
+    def test_the_memory_maximum_reads_every_step_and_names_its_rank(self) -> None:
+        # Step 1 is outside the sample rule, and it still holds the peak.
+        summary = self._evaluate(
+            {
+                0: self._lines({}, {step: 5.0 for step in range(3, 11)}),
+                1: self._lines({}, {1: 50.0, 7: 9.0}),
+            }
+        )
+        memory = summary.peak_memory_gib
+        self.assertEqual((memory.max, memory.max_rank), (50.0, 1))
+        self.assertEqual((memory.median, memory.median_rank), (5.0, 0))
+        self.assertEqual(memory.mean_rank, 0)
+        self.assertAlmostEqual(summary.per_rank[1].peak_memory_gib.mean, (7 * 3.0 + 9.0) / 8)
+
+    def test_the_spread_warning_reads_the_medians(self) -> None:
+        # Rank 1's mean falls below 1/1.15 of rank 0's, and its median does not.
+        with tempfile.TemporaryDirectory() as temporary:
+            out_dir = Path(temporary)
+            _RunFixture.build(
+                out_dir,
+                {
+                    "baseline": _prefixed(self._lines({}), 0)
+                    + _prefixed(self._lines({5: 100}), 1)
+                },
+                {"world_size": 2, "pp": 2},
+            )
+            warnings = evaluate_run(out_dir).warnings
+        self.assertEqual(
+            [warning for warning in warnings if "across ranks" in warning], []
+        )
+
+    def test_a_sampled_step_without_a_rate_is_refused(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, r"baseline: rank 0 logs tokens/s 0 at sampled step 4; "
+        ):
+            self._evaluate({0: self._lines({4: 0})})
+
+    def _rank_result(self, tokens_per_second: float, extras: dict[str, float]):
+        sample = StepSample(
+            rank=0,
+            step=4,
+            tokens_per_second=tokens_per_second,
+            peak_memory_gib=3.0,
+            loss=1.0,
+            grad_norm=2.0,
+            extras=extras,
+        )
+        return rank_result(
+            "baseline", 0, [sample], [sample], tokens_per_step=4096, pp=1
+        )
+
+    def test_a_non_finite_tokens_per_second_is_refused(self) -> None:
+        for value in (float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                rf"^baseline: rank 0 logs tokens/s {value} at sampled step 4; ",
+            ):
+                self._rank_result(value, {"tflops": 12.5})
+
+    def test_an_extra_that_is_not_a_positive_finite_rate_is_refused(self) -> None:
+        for value in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                rf"^baseline: rank 0 logs mfu {value} at sampled step 4; ",
+            ):
+                self._rank_result(1000, {"tflops": 12.5, "mfu": value})
+
+    def test_a_zero_extra_on_an_unsampled_step_refuses_nothing(self) -> None:
+        # Step 1 is outside the sample rule.
+        first = titan_step_line(1).replace("mfu: 1.26%", "mfu: 0.00%")
+        self.assertNotEqual(first, titan_step_line(1))
+        lines = self._lines({}).replace(titan_step_line(1), first)
+        summary = self._evaluate({0: lines})
+        self.assertEqual(summary.extras["torchtitan"]["mfu"].median, 1.26)
 
 
 class StepMsArithmeticTests(unittest.TestCase):
@@ -781,19 +1094,13 @@ class StepMsArithmeticTests(unittest.TestCase):
         summary = step_ms(
             [1000, 2000, 4000], tokens_per_step=4 * 1024, pp=1
         )
-        self.assertEqual(
-            summary.series, (4096.0, 2048.0, 1024.0)
-        )
         self.assertAlmostEqual(summary.mean, (4096.0 + 2048.0 + 1024.0) / 3)
         self.assertAlmostEqual(summary.median, 2048.0)
+        self.assertAlmostEqual(summary.p95, 4096.0)
 
     def test_the_pipeline_degree_divides_the_cost(self) -> None:
         summary = step_ms([1000], tokens_per_step=4 * 1024, pp=4)
-        self.assertAlmostEqual(summary.series[0], 1024.0)
-
-    def test_the_series_keeps_step_order(self) -> None:
-        summary = step_ms([4000, 1000, 2000], tokens_per_step=1000, pp=1)
-        self.assertEqual(summary.series, (250.0, 1000.0, 500.0))
+        self.assertAlmostEqual(summary.median, 1024.0)
 
     def test_p95_takes_the_nearest_rank_and_never_interpolates(self) -> None:
         # Twenty samples: ceil(0.95 * 20) = 19, so the 19th smallest.
@@ -801,14 +1108,10 @@ class StepMsArithmeticTests(unittest.TestCase):
             [1000] * 19 + [500], tokens_per_step=1000, pp=1
         )
         self.assertAlmostEqual(summary.p95, 1000.0)
-        self.assertIn(summary.p95, summary.series)
 
-    def test_an_empty_series_publishes_no_statistic(self) -> None:
-        summary = step_ms([], tokens_per_step=1000, pp=1)
-        self.assertEqual(summary.series, ())
-        self.assertIsNone(summary.mean)
-        self.assertIsNone(summary.median)
-        self.assertIsNone(summary.p95)
+    def test_an_empty_series_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            step_ms([], tokens_per_step=1000, pp=1)
 
 
 if __name__ == "__main__":

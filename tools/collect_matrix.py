@@ -4,7 +4,7 @@ tools/run_matrix_cell.sh writes one cell directory per cell of the tree.
 
     .venv/bin/python tools/collect_matrix.py out/matrix-<utc> [--size 1b] [--json matrix.json]
 
-The tool reads manifest schemas 18, 19 and 20, and results schema 6 alone.
+The tool reads manifest schemas 18, 19 and 20, and results schema 7 alone.
 """
 
 from __future__ import annotations
@@ -24,10 +24,8 @@ from benchmarks.artifacts.manifests import (
     load_run_record,
 )
 from benchmarks.e2e.engines.registry import engine_for
+from benchmarks.e2e.results import RESULTS_SCHEMA_VERSION
 from benchmarks.models.piper_qwen3.shape import canonical_size_name
-
-RESULTS_SCHEMA_VERSION = 6
-"""The one results schema this tool reads."""
 
 MOVED_ASIDE = (".contaminated-", ".failed-", ".nomanifest-")
 """Directory-name marks that run_matrix_cell.sh puts on an abandoned cell; older trees also hold ``.nomanifest-``."""
@@ -45,9 +43,11 @@ COLUMNS = (
     ("profile", "prof"),
     ("engine", "engine"),
     ("extra_flags", "extra flags"),
-    ("stable_tokens_per_second", "tokens/s"),
-    ("stable_sample_count", "n"),
+    ("tokens_per_second_median", "tokens/s"),
+    ("tokens_per_second_mean", "mean tok/s"),
+    ("sample_count", "n"),
     ("step_ms_median", "step ms"),
+    ("step_ms_mean", "mean ms"),
     ("step_ms_p95", "p95 ms"),
     ("peak_memory_gib", "peak GiB"),
     ("contaminated", "bad"),
@@ -112,9 +112,10 @@ def cell_rows(cell_dir: Path) -> list[dict[str, Any]]:
     marker = cell_dir.with_name(cell_dir.name + ".CONTAMINATED")
     axes = cell_axes(record)
     rows = []
-    for arm in results.get("arms", []):
-        summary = (results.get("results") or {}).get(arm) or {}
-        step_ms = summary.get("step_ms") or {}
+    for arm in results["arms"]:
+        summary = results["results"][arm]
+        tokens_per_second = summary["tokens_per_second"]
+        step_ms = summary["step_ms"]
         config = record.arm(arm).arm.config
         rows.append(
             {
@@ -126,13 +127,15 @@ def cell_rows(cell_dir: Path) -> list[dict[str, Any]]:
                 "engine": engine_for(record.arm(arm).arm).name,
                 "extra_flags": " ".join(config.extra_flags),
                 "config": config_json(config),
-                "stable_tokens_per_second": summary.get(
-                    "stable_tokens_per_second"
-                ),
-                "stable_sample_count": summary.get("stable_sample_count"),
-                "step_ms_median": step_ms.get("median"),
-                "step_ms_p95": step_ms.get("p95"),
-                "peak_memory_gib": summary.get("peak_memory_gib"),
+                "tokens_per_second_median": tokens_per_second["median"],
+                "tokens_per_second_median_rank": tokens_per_second["median_rank"],
+                "tokens_per_second_mean": tokens_per_second["mean"],
+                "tokens_per_second_mean_rank": tokens_per_second["mean_rank"],
+                "sample_count": summary["sample_count"],
+                "step_ms_median": step_ms["median"],
+                "step_ms_mean": step_ms["mean"],
+                "step_ms_p95": step_ms["p95"],
+                "peak_memory_gib": summary["peak_memory_gib"]["max"],
             }
         )
     return rows
