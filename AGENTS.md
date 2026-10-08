@@ -80,6 +80,12 @@ the three overrides of those two arms, sets `packed_offsets`, and carries
 the trace markers of both. It imports the per-expert overrides, so it needs
 `--ep 2` or more.
 
+Parallelism rules 9 and 14 also apply to both per-expert arms: the expert
+degree must divide `--dp`, and it needs `--zero 1`. So two GPUs take
+`--dp 2 --ep 2 --zero 1`, and `--ep 2` alone is refused. `--model-size 1b`
+fits that mesh. The stacked comparison ran at `--model-size 30b-a3b-20l
+--dp 4 --ep 4 --zero 1 --batch 4 --profile --steps 80`.
+
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
 
