@@ -70,7 +70,7 @@ class ArgvTests(unittest.TestCase):
             (
                 "-u",
                 "-m",
-                "torch.distributed.run",
+                "benchmarks.execution.torchrun",
                 "--nproc-per-node=2",
                 "--rdzv-backend",
                 "c10d",

@@ -217,6 +217,8 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.engine.correctness",
     "benchmarks.kernel.engine.measurement",
     "benchmarks.kernel.engine.run",
+    # The torchrun agent of a per-rank launch. It runs torch's launcher.
+    "benchmarks.execution.torchrun",
 )
 
 # The third category, and the reason two lists were never enough. These run in

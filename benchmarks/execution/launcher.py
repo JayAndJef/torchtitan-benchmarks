@@ -14,8 +14,8 @@ from benchmarks.execution.affinity import CpuPinning
 from benchmarks.execution.environment import device_environment
 
 
-TORCHRUN_MODULE = "torch.distributed.run"
-"""The module name of torchrun, which the harness interpreter runs."""
+TORCHRUN_MODULE = "benchmarks.execution.torchrun"
+"""The module that runs torchrun with a tee that writes whole lines."""
 
 LOG_RANK_TEMPLATE = "[rank${rank}]:"
 """The prefix that torchrun puts on every line a rank writes."""

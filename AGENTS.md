@@ -237,12 +237,20 @@ command line and the child environment. The command line is the pinning
 prefix, then the interpreter, then the torchrun flags, then the target. A
 `per_rank` launch uses torchrun at every world size, also at one rank.
 
-The torchrun flags start with `-u`. Torchrun tees each rank into the arm
-log through a thread of its own, and all the threads write to one stream.
-With a buffered stream, a thread race in CPython 3.10 loses lines and
-writes NUL bytes in their place. With `-u`, each line is one write.
+The torchrun flags start with `-u`, and they run torchrun through
+`benchmarks.execution.torchrun`. Torchrun tees each rank into the arm log
+through a thread of its own, and all the threads write to one stream. With
+a buffered stream, a thread race in CPython 3.10 loses lines and writes NUL
+bytes in their place. With `-u`, each write of a thread is one call.
 Torchrun already starts its workers with `-u`, so the flag now also applies
-to the torchrun agent. Keep `-u`, and `tests/test_rank_log.py` checks it.
+to the torchrun agent.
+
+A worker can write one line in two calls: `print` writes the text, then the
+newline. A tee thread can read the file between the two calls. Torch's tee
+then writes the text alone, and the line of another rank joins it.
+`benchmarks.execution.torchrun:tail_whole_lines` holds a partial line until
+its newline arrives. The module refuses a torch whose tee function changed.
+Keep `-u` and the module, and `tests/test_rank_log.py` checks both.
 
 The launcher owns six environment keys: `CUDA_DEVICE_ORDER`,
 `CUDA_VISIBLE_DEVICES`, `NGPU`, `LOG_RANK`,
@@ -609,9 +617,9 @@ under the names that the engine gives them.
   after the prefix `bench-step: `. The reader also reads the text step line
   that the stored run directories hold.
 
-Every rank writes to one log, so a torn write can join the lines of two
-ranks. A tee thread can read a partial line between two writes of a worker,
-and `-u` does not stop this:
+A log that torchrun wrote before `benchmarks.execution.torchrun` can join
+the lines of two ranks. Its tee wrote a partial line when a worker wrote
+one line in two calls. The readers still read such a log:
 
 - When the prefix of another rank cuts a step line, the reader drops the
   step line. `results.json` records a warning that names the arm, the rank,
@@ -619,7 +627,7 @@ and `-u` does not stop this:
 - When a whole step line comes first, the reader reads it.
 - **A known gap:** when a whole step line of one rank comes after the text
   of another rank on one log line, the reader loses the step with no
-  warning. Per-rank log files would remove this gap.
+  warning. A log that the launcher writes now holds no such line.
 
 A lost step that the sample rule takes refuses the arm, as the lost-step
 refusal below states. A lost step outside the sample rule changes no figure.

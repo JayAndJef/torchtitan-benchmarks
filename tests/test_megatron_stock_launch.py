@@ -549,7 +549,7 @@ class StockArgvTests(unittest.TestCase):
                 sys.executable,
                 "-u",
                 "-m",
-                "torch.distributed.run",
+                "benchmarks.execution.torchrun",
                 "--nproc-per-node=8",
                 "--rdzv-backend",
                 "c10d",

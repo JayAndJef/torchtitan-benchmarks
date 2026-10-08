@@ -343,6 +343,12 @@ def _torchrun_runs_unbuffered(record: dict[str, Any]) -> None:
             argv.insert(argv.index("torch.distributed.run") - 1, "-u")
 
 
+def _torchrun_tees_whole_lines(record: dict[str, Any]) -> None:
+    for _, argv in _argvs(record):
+        if "torch.distributed.run" in argv:
+            argv[argv.index("torch.distributed.run")] = "benchmarks.execution.torchrun"
+
+
 EXECUTION_MODEL_SENTENCES = (
     " The manifest's execution_model reads plain-bf16 because it is "
     "composed from the parallelism spec; it describes the TorchTitan arms "
@@ -450,6 +456,12 @@ ACCEPTED_DIFFERENCES = (
         "shared one buffered stream, and a thread race in it lost lines of "
         "the arm log and wrote NUL bytes in their place.",
         _torchrun_runs_unbuffered,
+    ),
+    AcceptedDifference(
+        "The launcher runs torchrun through benchmarks.execution.torchrun. "
+        "Its tee holds a partial worker line until the newline arrives, so "
+        "the line of another rank no longer joins it in the arm log.",
+        _torchrun_tees_whole_lines,
     ),
 )
 """The changes from the baseline that the plan names or that the review accepted."""
