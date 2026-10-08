@@ -150,8 +150,9 @@ and the ``titan/flash_attention_3`` arm consumes the same tensor.
 ``create_varlen_metadata_for_document`` pads to a multiple of
 ``_CU_SEQLENS_MULTIPLE`` = 128 (``models/common/attention.py:600``,
 ``:654-661``), so the segment count here is a fixed 128 whatever the draw
-contains. The e2e megatron driver pads to the run's own maximum document
-count instead (``benchmarks/e2e/megatron/train.py:177-186``). So this
+contains. The e2e stock Megatron driver
+(``benchmarks.e2e.engines.megatron_stock.driver.data``) pads ``cu_seqlens``
+to the packed length plus one, as ``GPTDataset`` pads it. So this
 scenario's segment count is **not** the e2e arm's, and it is not "exactly
 what the driver feeds it". Both engines here receive the identical tensor,
 which is what the cross-engine comparison needs; the e2e difference is a
@@ -175,8 +176,7 @@ Three ways to break this scenario that nothing guards
 
 **This scenario does not run as shipped on a host that has cuDNN in
 ``/usr/lib64``, and the failure is an environment split, not a bug here.**
-Measured on this H200 on 2026-08-20, on the first run this scenario ever
-had. The five other arms build, and ``titan/flash_attention_3`` then dies
+Measured on this H200 on 2026-08-20. The five other arms build, and ``titan/flash_attention_3`` then dies
 inside ``torch.nn.attention.varlen._varlen_attn`` with "cuDNN version
 incompatibility: PyTorch was compiled against (9, 24, 0) but found runtime
 version (9, 23, 2)".
@@ -211,8 +211,8 @@ find them already mapped. The cuDNN split is an accident of lazy loading,
 and its consequence is that **which cuDNN every megatron arm in this repo
 runs is decided by the host, not by the pin**.
 
-**Measured on 2026-08-21, and it settles two questions this file used to
-leave open** (``reports/20260821-cudnn-version-comparison.md``).
+**Two facts, measured on 2026-08-21**
+(``reports/20260821-cudnn-version-comparison.md``).
 
 *The version changes no value.* Every correctness gate row matches to the
 float64 bit pattern under 9.23.2 and 9.24.0, and the raw output bytes of all
@@ -236,18 +236,16 @@ combination was measured to leave zero ``/usr/lib64/libcudnn`` mappings.
 ``PYTORCH_SKIP_CUDNN_COMPATIBILITY_CHECK=1``
 leaves TE on 9.23.2 and only stops torch refusing to answer: the version
 read returns 92302 rather than raising
-(``torch/backends/cudnn/__init__.py:58``). It selects no kernel here, but
-**not** for the reason this file gave until 2026-08-20. The version read is
-the *first* test in ``_can_use_cudnn`` (``varlen.py:54``), not a later one,
-and the predicate that actually rejects this arm is the fourth,
+(``torch/backends/cudnn/__init__.py:58``). It selects no kernel here. The
+version read is the *first* test in ``_can_use_cudnn`` (``varlen.py:54``),
+and the predicate that rejects this arm is the fourth,
 ``window_size != [-1, -1]`` (``varlen.py:60``), because torchtitan passes
-``(-1, 0)``. ``enable_gqa`` is the fifth test and never decides it. The
-outcome holds and the gate values stand; the stated mechanism was wrong.
+``(-1, 0)``. ``enable_gqa`` is the fifth test and never decides it. The gate
+values stand.
 
 **The flag is not confined to the process you set it in.**
-``benchmarks/execution/environment.py:56`` builds the child environment as
-``dict(environment or os.environ)``, so an exported flag reaches *every*
-worker. A timing run started from a shell that exports it publishes every
+``benchmarks/execution/environment.py:56`` builds the child environment
+from the inherited environment, so an exported flag reaches *every* worker. A timing run started from a shell that exports it publishes every
 number under it. Do **not** initialize torch's cuDNN before TE
 imports as a third option: that loads the wheel's ``libcudnn_graph.so.9``
 and leaves TE running a 9.24.0 graph engine against 9.23.2 ops, which is a
@@ -374,13 +372,11 @@ untuned or eager opponent.
 There is no isolated ``backward`` mode
 ---------------------------------------
 
-The retained-graph trick most scenarios use is unavailable on both sides
-here. TE's fused-attention autograd function consumes its saved-tensor
-context on the first backward and then raises "ctx must have
-.tensor_objects", and the deleted kernel ``attention`` scenario recorded the
-same for its own arms. Both engines therefore declare ``forward`` and
-``forward_backward`` only, which keeps them comparable; backward cost is
-still forward_backward minus forward.
+The retained-graph trick most scenarios use is unavailable here. TE's
+fused-attention autograd function consumes its saved-tensor context on the
+first backward and then raises "ctx must have .tensor_objects". So every
+arm declares ``forward`` and ``forward_backward`` only, and the arms stay
+comparable. Backward cost is forward_backward minus forward.
 
 No bandwidth floor
 ------------------
@@ -402,14 +398,6 @@ a module-scope import would make this whole module unimportable without the
 ``flash3`` dependency group, taking every other arm down with it. The
 megatron arms alone need the submodule on ``sys.path`` and the TE
 environment set before TE loads.
-
-Relationship to the deleted kernel ``attention`` scenario
------------------------------------------------------------
-
-The three titan arms here are that scenario's ``baseline``, ``flex_flash``
-and ``flash_attention_3``, renamed ``titan``, ``titan/flex_flash`` and
-``titan/flash_attention_3``. Their treatment is unchanged, so their numbers
-stay comparable to the older scenario's.
 """
 
 from __future__ import annotations
@@ -776,9 +764,8 @@ def attention_core_inputs(
         block_mask=mask_at(128),
         block_mask_flash=mask_at(FLEX_FLASH_BLOCK_SIZE),
         cu_seqlens=varlen.cu_seq_q,
-        # Pinned to seq_len on both sides, matching what
-        # benchmarks/e2e/megatron/train.py hands the e2e arm and what
-        # create_varlen_metadata_for_document reports.
+        # Pinned to seq_len on both sides, as create_varlen_metadata_for_document
+        # reports it; the e2e stock Megatron driver passes its longest document.
         max_seqlen=seq,
         scale=shape.head_dim**-0.5,
         num_documents=int((positions == 0).sum()),
@@ -946,13 +933,12 @@ def _attention_core_arm(
 ) -> BuiltArm:
     """Forward and forward+backward only, with independent leaf sets.
 
-    There is no isolated ``backward`` mode, and both engines are why. The
-    retained-graph trick other scenarios use re-runs backward over one graph;
-    TE's fused-attention autograd function consumes its saved-tensor context
-    on the first backward and then raises "ctx must have .tensor_objects",
-    and the deleted kernel ``attention`` scenario recorded the same for the
-    titan arms. Dropping the mode from every arm keeps them comparable --
-    backward cost is still forward_backward minus forward.
+    There is no isolated ``backward`` mode. The retained-graph trick other
+    scenarios use re-runs backward over one graph; TE's fused-attention
+    autograd function consumes its saved-tensor context on the first
+    backward and then raises "ctx must have .tensor_objects". Dropping the
+    mode from every arm keeps them comparable -- backward cost is still
+    forward_backward minus forward.
     """
 
     forward_leaves = layout.make_leaves()
@@ -1508,8 +1494,8 @@ def _build_mcore_arm(
         # layer and TEDotProductAttention carries no jit_fuser. The argument
         # list is the one Attention.forward uses at attention.py:1559-1566,
         # with attention_mask=None because the THD path derives every
-        # boundary from cu_seqlens -- which is what
-        # benchmarks/e2e/megatron/train.py:283 passes too.
+        # boundary from cu_seqlens -- which is what the e2e stock Megatron
+        # driver passes too.
         return module(
             q,
             k,
