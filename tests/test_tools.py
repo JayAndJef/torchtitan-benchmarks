@@ -414,6 +414,7 @@ class MatrixCellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertEqual(self._status(), "ERROR")
         self.assertIn("keeps its name", result.stdout)
+        self.assertIn("a resubmit clears it", result.stdout)
         self.assertTrue((self.root / "cell").is_dir())
         self.assertEqual(list(self.root.glob("cell.failed-*/*")), [])
 

@@ -226,7 +226,8 @@ rename_cell() {   # $1 is failed or contaminated
     stamp="$(date -u +%Y%m%dT%H%M%SZ)-j$SLURM_JOB_ID"
     for suffix in "" .log .watch .rc; do
         if [ -e "$OUT$suffix" ] && [ -e "$OUT.$kind-$stamp$suffix" ]; then
-            fail "$OUT.$kind-$stamp$suffix exists, so $OUT$suffix keeps its name"
+            fail "$OUT.$kind-$stamp$suffix exists, so $OUT$suffix keeps its name." \
+                 "This collision is a coincidence: a resubmit clears it, because the next job id gives a new name"
         fi
     done
     for suffix in "" .log .watch .rc; do

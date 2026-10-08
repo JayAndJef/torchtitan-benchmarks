@@ -930,6 +930,9 @@ Four structural tests deserve naming:
 - `ERROR`, `PLACEMENT` and a `FAIL` that repeats with the same message are
   deterministic. Fix the copy or the code, and do not resubmit the same
   copy.
+- One `ERROR` is a coincidence: the runner refuses to rename a cell onto a
+  name that exists. A resubmit clears it, because the next job id gives a
+  new name.
 - The watchdog flags foreign compute processes, unaccounted GPU memory,
   host-load spikes and a failed card query. **Never report a cell it marked
   `CONTAMINATED`.**
