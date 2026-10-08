@@ -137,6 +137,10 @@ shares one pre-push hook.
 - `run_bench.sh` sources `cuda_compat.sh`. On a kernel driver below r580,
   that script stages NVIDIA's CUDA 13.0 forward-compat userspace driver
   under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`.
+- `run_bench.sh` then sources `cudnn_env.sh`. That script sets
+  `CUDNN_HOME` to torch's wheel cuDNN and puts its `lib` directory first on
+  `LD_LIBRARY_PATH`. Without it, TransformerEngine maps the system cuDNN
+  beside torch's, and `torch.backends.cudnn.version()` raises.
 - TorchTitan is a submodule at `third_party/torchtitan`, installed editable.
   It is our fork, pinned on the `bench/torchtitan-benchmarks` branch.
 - Megatron-LM is a submodule at `third_party/Megatron-LM`. It is **not**
