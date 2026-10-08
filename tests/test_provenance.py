@@ -144,6 +144,11 @@ class CudnnRefusalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "'92500' against the build 92400"):
             provenance.cudnn_loader_resolves(output)
 
+    def test_a_probe_that_maps_no_cudnn_raises(self) -> None:
+        """TransformerEngine loads cuDNN at import, so an empty list means a broken probe."""
+        with self.assertRaisesRegex(ValueError, "found no mapped cuDNN"):
+            provenance.cudnn_loader_resolves(probe_output([]))
+
     def test_an_output_without_a_json_line_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "no JSON line"):
             provenance.cudnn_loader_resolves("Segmentation fault")
@@ -191,6 +196,20 @@ class CudnnRefusalTests(unittest.TestCase):
         self.assertEqual(
             self._compiler_probe("export CC=gcc\n"), f"92400 {VENV_CUDNN}"
         )
+
+    def test_a_compiler_script_that_breaks_the_probe_raises(self) -> None:
+        """A probe that fails under the compiler script alone does not pass for the TorchTitan arms."""
+        def fake_run_text(command, **kwargs):
+            if kwargs["env"].get("CUDNN_HOME") == "/other":
+                return "unavailable: x"
+            return probe_output([VENV_CUDNN])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler_env = Path(temporary) / "compiler.sh"
+            compiler_env.write_text("export CUDNN_HOME=/other\n")
+            with mock.patch.object(provenance, "run_text", fake_run_text):
+                with self.assertRaisesRegex(ValueError, "changes the cuDNN"):
+                    provenance._cudnn_loader_resolves(runtime_paths(compiler_env))
 
     def test_a_compiler_script_that_moves_the_cudnn_raises(self) -> None:
         """The TorchTitan arms run under the compiler script, so its cuDNN is theirs."""

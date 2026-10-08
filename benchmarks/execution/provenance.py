@@ -115,6 +115,8 @@ def cudnn_loader_resolves(output: str) -> str:
             return lines[-1]
         raise ValueError(f"the cuDNN loader probe printed no JSON line: {output}")
     probe = json.loads(probes[-1])
+    if not probe["loaded"]:
+        raise ValueError(f"the cuDNN loader probe found no mapped cuDNN: {probe}")
     foreign = [path for path in probe["loaded"] if path != probe["wheel"]]
     if foreign or probe["runtime"] != probe["build"]:
         raise ValueError(

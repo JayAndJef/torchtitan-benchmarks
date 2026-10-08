@@ -412,6 +412,8 @@ each one before you compare against an older run.
 Before `cudnn_env.sh`, every TransformerEngine process ran its cuDNN
 attention on the system cuDNN 9.23.2. The Megatron arms of job 9406 did too.
 So a Megatron attention number from before `cudnn_env.sh` is not comparable.
+A manifest from before it records `cudnn_loader_resolves` as one library
+path, with no leading version number.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every
 Megatron number published before that flip had both at `on`. State the
