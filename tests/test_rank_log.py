@@ -86,16 +86,65 @@ class TeedLogTests(unittest.TestCase):
         )
         self.assertIn("-u", self.launched.argv)
 
-    def test_buffered_torchrun_loses_lines(self) -> None:
-        """Without ``-u`` the tee threads share one buffered stream, and CPython 3.10 drops a line there and writes its length in NUL or stale bytes."""
-        argv = tuple(token for token in self.launched.argv if token != "-u")
-        log = _run(self.launched, argv, self.root / "buffered.log")
-        self.assertGreater(_lost_lines(log), 0)
-
     def test_the_launcher_torchrun_loses_no_line(self) -> None:
         log = _run(self.launched, self.launched.argv, self.root / "arm.log")
         self.assertEqual(log.count(b"\x00"), 0)
         self.assertEqual(_lost_lines(log), 0)
+
+
+class _SwitchInWrite(io.BytesIO):
+    """A buffer whose first write runs the write of another thread on the same wrapper, as a thread switch inside the write does."""
+
+    def __init__(self, other: str) -> None:
+        super().__init__()
+        self.other = other
+        self.wrapper: io.TextIOWrapper | None = None
+
+    def write(self, data) -> int:
+        if self.other:
+            other, self.other = self.other, ""
+            self.wrapper.write(other)
+        return super().write(data)
+
+
+OTHER_LINE = "rank=1 line=0\n"
+"""The line that the second thread writes."""
+
+TEE_LINES = tuple(f"rank=0 line={index} " + "x" * 100 + "\n" for index in range(200))
+"""The lines that the tee thread writes, more than one buffer of them."""
+
+
+def _wrapper_write(write_through: bool) -> bytes:
+    """The bytes that the tee thread and the second thread give a wrapper over ``_SwitchInWrite``."""
+    buffer = _SwitchInWrite(OTHER_LINE)
+    wrapper = io.TextIOWrapper(buffer, encoding="utf-8", write_through=write_through)
+    buffer.wrapper = wrapper
+    for line in TEE_LINES:
+        wrapper.write(line)
+    wrapper.flush()
+    return buffer.getvalue()
+
+
+class StdoutTests(unittest.TestCase):
+    def test_a_buffered_wrapper_loses_the_line_of_another_thread(self) -> None:
+        """The CPython 3.10 race that ``-u`` stops: a write that flushes a full buffer drops the line that another thread wrote meanwhile, and NUL or stale bytes take its place."""
+        written = _wrapper_write(write_through=False)
+        self.assertNotIn(OTHER_LINE.encode(), written)
+        self.assertEqual(len(written), len(OTHER_LINE) + sum(map(len, TEE_LINES)))
+
+    def test_a_write_through_wrapper_keeps_every_line(self) -> None:
+        written = Counter(_wrapper_write(write_through=True).decode().splitlines(keepends=True))
+        self.assertEqual(written, Counter((OTHER_LINE, *TEE_LINES)))
+
+    def test_u_makes_the_standard_streams_write_through(self) -> None:
+        printed = subprocess.run(
+            [sys.executable, "-u", "-c", "import sys; print(sys.stdout.write_through, sys.stderr.write_through)"],
+            env={key: value for key, value in os.environ.items() if key != "PYTHONUNBUFFERED"},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        self.assertEqual(printed, "True True\n")
 
 
 class _SecondWrite(threading.Event):
