@@ -1104,7 +1104,8 @@ class CanonicalImportRootsTest(unittest.TestCase):
 class BenchmarksNameShadowingTest(unittest.TestCase):
     """Guards a name collision that is invisible until it silently isn't.
 
-    The **training** subprocess -- and only that one -- is exposed. It runs
+    The **training** subprocess -- and the torchrun agent that starts it,
+    ``benchmarks.execution.torchrun`` -- are exposed. Both run
     with ``cwd=third_party/torchtitan`` (each engine's ``Launch.cwd``) and
     ``PYTHONPATH=<repo root>`` (``benchmarks/execution/environment.py``,
     ``runtime_environment``; the root itself is ``BENCH_DIR``, in

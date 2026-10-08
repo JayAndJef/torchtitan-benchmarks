@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import os
 import time
@@ -13,8 +14,8 @@ from torch.distributed.elastic.multiprocessing import tail_log
 from torch.distributed.run import main
 
 
-TAIL_PARAMETERS = ("header", "file", "dst", "finished", "interval_sec", "log_line_filter")
-"""The parameters of torch's ``tail_logfile``, which ``TailLog.start`` passes by keyword."""
+TAIL_SOURCE_SHA256 = "283496f2a8c65f833d6d57ecf37652a506f95f618330a89f289fd34fc8cda2b6"
+"""The SHA-256 of the source of torch's ``tail_logfile``, which ``tail_whole_lines`` replaces."""
 
 
 def tail_whole_lines(
@@ -25,11 +26,7 @@ def tail_whole_lines(
     interval_sec: float,
     log_line_filter: Callable[[str], bool] | None = None,
 ) -> None:
-    """Torch's ``tail_logfile``, which writes a line only when it is whole.
-
-    A worker can write one line in two calls, and torch's version then
-    writes the first part with no newline, so another rank's line joins it.
-    """
+    """Torch's ``tail_logfile``, but it writes a line only when its newline has arrived."""
     while not os.path.exists(file):
         if finished.is_set():
             return
@@ -38,6 +35,8 @@ def tail_whole_lines(
     with open(file, errors="replace") as fp:
         line = ""
         while True:
+            # Read the event first, so that a line the worker wrote before it exited is read.
+            done = finished.is_set()
             part = fp.readline()
             if part:
                 line += part
@@ -45,7 +44,7 @@ def tail_whole_lines(
                     if log_line_filter and log_line_filter(line):
                         dst.write(f"{header}{line}")
                     line = ""
-            elif finished.is_set():
+            elif done:
                 # The worker exited inside a line, so end that line here.
                 if line and log_line_filter and log_line_filter(line):
                     dst.write(f"{header}{line}\n")
@@ -55,11 +54,11 @@ def tail_whole_lines(
 
 
 def install() -> None:
-    """Make ``TailLog`` call ``tail_whole_lines``; raise when torch's tail no longer matches it."""
-    found = tuple(inspect.signature(tail_log.tail_logfile).parameters)
-    if found != TAIL_PARAMETERS:
+    """Make ``TailLog`` call ``tail_whole_lines``; raise when torch's tail differs from the one it replaces."""
+    found = hashlib.sha256(inspect.getsource(tail_log.tail_logfile).encode()).hexdigest()
+    if found != TAIL_SOURCE_SHA256:
         raise RuntimeError(
-            f"torch's tail_logfile takes {found}, not {TAIL_PARAMETERS}; "
+            f"torch's tail_logfile has the source SHA-256 {found}, not {TAIL_SOURCE_SHA256}; "
             "port tail_whole_lines to the new torch"
         )
     if "tail_logfile" not in tail_log.TailLog.start.__code__.co_names:

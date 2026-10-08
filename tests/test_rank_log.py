@@ -9,6 +9,7 @@ import threading
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -85,6 +86,7 @@ class TeedLogTests(unittest.TestCase):
             },
         )
         self.assertIn("-u", self.launched.argv)
+        self.assertIn(torchrun.__name__, self.launched.argv)
 
     def test_the_launcher_torchrun_loses_no_line(self) -> None:
         log = _run(self.launched, self.launched.argv, self.root / "arm.log")
@@ -147,20 +149,36 @@ class StdoutTests(unittest.TestCase):
         self.assertEqual(printed, "True True\n")
 
 
-class _SecondWrite(threading.Event):
-    """A finished event that appends the rest of a line the first time a tail finds the end of the file."""
+class _Worker(threading.Event):
+    """A worker that writes its next part each time a tail sleeps, and that has exited when it has no part left."""
 
-    def __init__(self, path: Path, rest: str) -> None:
+    def __init__(self, path: Path, parts: tuple[str, ...]) -> None:
         super().__init__()
         self.path = path
-        self.rest = rest
+        self.parts = list(parts)
+
+    def write_next(self, _: float) -> None:
+        if self.parts:
+            with self.path.open("a") as file:
+                file.write(self.parts.pop(0))
 
     def is_set(self) -> bool:
-        if self.rest:
+        return not self.parts
+
+
+class _ExitAtCheck(threading.Event):
+    """A worker that writes its last line and exits just before a tail first reads the event."""
+
+    def __init__(self, path: Path, last: str) -> None:
+        super().__init__()
+        self.path = path
+        self.last = last
+
+    def is_set(self) -> bool:
+        if self.last:
             with self.path.open("a") as file:
-                file.write(self.rest)
-            self.rest = ""
-            return False
+                file.write(self.last)
+            self.last = ""
         return True
 
 
@@ -170,46 +188,81 @@ class TailTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "stdout.log"
 
-    def _tail(self, tail, first: str, rest: str) -> str:
-        """The text that ``tail`` writes for a worker that writes ``first`` and then ``rest``."""
+    def _tail(self, tail, first: str, finished: threading.Event) -> str:
+        """The text that ``tail`` writes for a worker that wrote ``first`` and then acts as ``finished`` says."""
         self.path.write_text(first)
         dst = io.StringIO()
         tail(
             header="[rank0]:",
             file=str(self.path),
             dst=dst,
-            finished=_SecondWrite(self.path, rest),
+            finished=finished,
             interval_sec=0,
             log_line_filter=lambda _: True,
         )
         return dst.getvalue()
 
+    def _tail_while_writing(self, tail, first: str, *parts: str) -> str:
+        """The text that ``tail`` writes for a worker that writes ``first``, then one of ``parts`` at each sleep of the tail."""
+        worker = _Worker(self.path, parts)
+        with mock.patch("time.sleep", worker.write_next):
+            return self._tail(tail, first, worker)
+
     def test_torch_tail_writes_a_partial_line(self) -> None:
         """The cause: a worker writes the text and the newline of one line in two calls, and torch writes the text alone."""
         self.assertEqual(
-            self._tail(tail_log.tail_logfile, "step 1", "\n"), "[rank0]:step 1[rank0]:\n"
+            self._tail_while_writing(tail_log.tail_logfile, "step 1", "\n"),
+            "[rank0]:step 1[rank0]:\n",
         )
 
     def test_the_launcher_tail_writes_a_whole_line(self) -> None:
         self.assertEqual(
-            self._tail(torchrun.tail_whole_lines, "a\nstep 1", "\nb\n"),
+            self._tail_while_writing(torchrun.tail_whole_lines, "a\nstep", " 1", "\nb\n"),
             "[rank0]:a\n[rank0]:step 1\n[rank0]:b\n",
         )
 
     def test_the_launcher_tail_ends_the_last_partial_line(self) -> None:
         self.assertEqual(
-            self._tail(torchrun.tail_whole_lines, "a\nstep", " 1"),
+            self._tail_while_writing(torchrun.tail_whole_lines, "a\nstep", " 1"),
             "[rank0]:a\n[rank0]:step 1\n",
         )
 
+    def test_torch_tail_loses_a_line_written_just_before_the_exit(self) -> None:
+        self.assertEqual(
+            self._tail(tail_log.tail_logfile, "step 1\n", _ExitAtCheck(self.path, "done\n")),
+            "[rank0]:step 1\n",
+        )
+
+    def test_the_launcher_tail_keeps_a_line_written_just_before_the_exit(self) -> None:
+        self.assertEqual(
+            self._tail(torchrun.tail_whole_lines, "step 1\n", _ExitAtCheck(self.path, "done\n")),
+            "[rank0]:step 1\n[rank0]:done\n",
+        )
+
+
+class InstallTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.addCleanup(setattr, tail_log, "tail_logfile", tail_log.tail_logfile)
+        self.addCleanup(setattr, tail_log.TailLog, "start", tail_log.TailLog.start)
+
+    def test_install_replaces_the_torch_tail(self) -> None:
+        torchrun.install()
+        self.assertIs(tail_log.tail_logfile, torchrun.tail_whole_lines)
+
     def test_install_refuses_a_changed_torch_tail(self) -> None:
-        def other(header, file, dst, finished):
+        def other(header, file, dst, finished, interval_sec, log_line_filter=None):
             pass
 
-        original = tail_log.tail_logfile
         tail_log.tail_logfile = other
-        self.addCleanup(setattr, tail_log, "tail_logfile", original)
-        with self.assertRaisesRegex(RuntimeError, "port tail_whole_lines"):
+        with self.assertRaisesRegex(RuntimeError, "source SHA-256"):
+            torchrun.install()
+
+    def test_install_refuses_a_start_that_calls_no_torch_tail(self) -> None:
+        def start(self):
+            return self
+
+        tail_log.TailLog.start = start
+        with self.assertRaisesRegex(RuntimeError, "no longer calls tail_logfile"):
             torchrun.install()
 
 

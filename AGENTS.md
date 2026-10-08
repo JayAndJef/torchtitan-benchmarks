@@ -140,6 +140,9 @@ shares one pre-push hook.
   runtime.
 - No number compares across a torch change. After a change, rerun the
   baselines.
+- A torch change that changes torch's tee function stops every per-rank
+  launch. Port `benchmarks.execution.torchrun:tail_whole_lines` and its
+  source hash then.
 - `run_bench.sh` sources `cuda_compat.sh`. On a kernel driver below r580,
   that script stages NVIDIA's CUDA 13.0 forward-compat userspace driver
   under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`.
@@ -171,7 +174,7 @@ shares one pre-push hook.
 | `benchmarks/e2e/data/c4_replay.py` | The pre-tokenized c4_test stream that both engines read. |
 | `benchmarks/artifacts/` | `manifest.json` and its schema 18 and 19 readers, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
-| `benchmarks/execution/` | The launcher in `benchmarks/execution/launcher.py`, the subprocess environment, device parsing, CPU pinning, provenance and the progress events. A runner prints nothing: it emits events, and `benchmarks/cli/rendering.py` prints them. |
+| `benchmarks/execution/` | The launcher in `benchmarks/execution/launcher.py`, the torchrun module in `benchmarks/execution/torchrun.py`, the subprocess environment, device parsing, CPU pinning, provenance and the progress events. A runner prints nothing: it emits events, and `benchmarks/cli/rendering.py` prints them. |
 | `benchmarks/kernel/` | The kernel-isolation system: registry, spans, runner, worker, timing engine, results. |
 | `benchmarks/models/piper_qwen3/` | The model port: `benchmarks/models/piper_qwen3/shape.py`, the TorchTitan model config in `benchmarks/models/piper_qwen3/titan_model.py`, the megatron-core model builder and the kernel components. |
 | `tools/` | The matrix job template `tools/matrix_job.sbatch` and its cell runner `tools/run_matrix_cell.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |
@@ -249,7 +252,9 @@ A worker can write one line in two calls: `print` writes the text, then the
 newline. A tee thread can read the file between the two calls. Torch's tee
 then writes the text alone, and the line of another rank joins it.
 `benchmarks.execution.torchrun:tail_whole_lines` holds a partial line until
-its newline arrives. The module refuses a torch whose tee function changed.
+its newline arrives. It also reads a line that a worker wrote just before
+it exited, which torch's tee can lose. The module pins the SHA-256 of the
+source of torch's tee function, and it refuses any other source.
 Keep `-u` and the module, and `tests/test_rank_log.py` checks both.
 
 The launcher owns six environment keys: `CUDA_DEVICE_ORDER`,
