@@ -164,7 +164,7 @@ shares one pre-push hook.
 | `benchmarks/execution/` | The launcher in `benchmarks/execution/launcher.py`, the subprocess environment, device parsing, CPU pinning, provenance and the progress events. A runner prints nothing: it emits events, and `benchmarks/cli/rendering.py` prints them. |
 | `benchmarks/kernel/` | The kernel-isolation system: registry, spans, runner, worker, timing engine, results. |
 | `benchmarks/models/piper_qwen3/` | The model port: `benchmarks/models/piper_qwen3/shape.py`, the TorchTitan model config in `benchmarks/models/piper_qwen3/titan_model.py`, the megatron-core model builder and the kernel components. |
-| `tools/` | `tools/run_matrix.sh` and its in-job half `tools/run_matrix_cell.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |
+| `tools/` | The matrix job template `tools/matrix_job.sbatch` and its cell runner `tools/run_matrix_cell.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |
 | `tests/` | The CPU and GPU test suite. |
 | `third_party/torchtitan/` | Our TorchTitan fork, pinned. |
 | `third_party/Megatron-LM/` | Upstream Megatron-LM, pinned, on `sys.path` only. |
@@ -981,38 +981,83 @@ Four structural tests deserve naming:
 
 - Run GPU work as a Slurm job. Read the admin skill `run-gpu-job` before
   you submit. It sets the partitions and the time limits.
-- Drive a multi-cell matrix with `tools/run_matrix.sh`, never a loop of
-  `run` calls. The script submits one Slurm job per cell. It submits the
-  next cell only after the previous job ends.
-- The script refuses a dirty tree and holds a lock. Inside each job,
-  `tools/run_matrix_cell.sh` runs the watchdog and the `run` command.
-- A cell is a **quoted string of `run` flags**, one per array entry, and
-  the script word-splits it. A cell string may hold no quote and no space
-  inside a value. The `dp * pp` of each cell must equal `NGPUS`.
-- The script reads these environment variables. Its header lists the
-  others.
+- Run a multi-cell matrix as one Slurm job, never as a loop of `run`
+  calls. Make a new output root under `out/`. Copy `tools/matrix_job.sbatch`
+  into it, and edit the copy. The template is a working example: six
+  dp4 x ep4 cells of the `engines` and `attention` arms, with one arm twice.
+- The copy holds the `#SBATCH` lines, `ROOT` (the output root), the
+  job-local device list, the shared flags and one `cell <name> <run flags>`
+  line per cell. A cell name holds only letters, digits, `_` and `-`.
+- Each cell needs exactly one `--scenario`. The `dp * pp` of each cell must
+  equal the number of cards. The job word-splits the flags, so a value may
+  hold no quote and no space.
+- The `--time` of the job must cover the sum of the run times of the cells.
+  It must also cover up to `IDLE_MAX_WAIT` seconds of load gate per cell.
+  A copy can lower `IDLE_MAX_WAIT`, as the template does.
+- Submit the copy from the repository root, on a clean tree. The output
+  root must exist, because `sbatch` does not make the directory of its log.
+
+  ```bash
+  MATRIX_REV=$(git rev-parse HEAD) sbatch -o out/<root>/slurm-%j.out out/<root>/matrix.sbatch
+  ```
+
+- In the job, `tools/run_matrix_cell.sh` runs each cell into
+  `out/<root>/<name>`. It adds the output option itself, so a cell must not
+  send one. A failed cell does not stop the job.
+- Before each cell, the runner checks the commit, the clean tree and the
+  cards of the device list. It also checks that the job holds some CPU on
+  the NUMA node of each card. Then it waits for an idle host, and it runs
+  the watchdog during the cell.
+- The runner reads these environment variables:
 
   | variable | default | meaning |
   |---|---|---|
-  | `NGPUS` | required | The number of cards of each job. |
-  | `TIME` | required | The Slurm time limit of each job. Give a realistic estimate. |
-  | `PARTITION` | `main` | The Slurm partition. The script refuses `placeholder`, `exceptions` and `admin`. |
-  | `GPU_IDX` | none | One specific card, `gpu:idx<n>:1`. It needs `NGPUS=1`. |
-  | `CPUS_PER_GPU` | `32` | The CPUs of each card. |
-  | `MEM_PER_GPU` | `180000` | The host memory of each card, in MB. |
-  | `WAIT_TIMEOUT` | `43200` | The seconds that a job can stay pending. |
-  | `POLL_INTERVAL` | `60` | The seconds between two queue samples. |
-  | `MATRIX_CELLS` | built-in list | Newline-separated cells that replace the built-in list. |
-  | `DRY_RUN` | `0` | `1` prints each `sbatch` command and batch script, and submits nothing. |
+  | `MATRIX_REV` | required | The commit at submission. The job refuses another `HEAD`. |
+  | `IDLE_LOAD` | `80` | The 1-minute load average that the load gate waits for. |
+  | `IDLE_SETTLE` | `3` | The consecutive idle samples that open the gate. |
+  | `IDLE_POLL` | `20` | The seconds between two gate samples. |
+  | `IDLE_MAX_WAIT` | `1200` | The seconds after which the cell runs anyway, flagged. |
+  | `CONTENDED_LOAD` | `150` | The 1-minute load average that condemns the cell. |
+  | `FOREIGN_MEM_MIB` | `2000` | The MiB of GPU memory that no process of ours explains. More condemns the cell. |
+  | `WATCH_INTERVAL` | `15` | The seconds between two watchdog samples. |
 
-- A job has one time limit, and `main` caps it at 2 hours. A cell with
-  every arm of a large shape can need more. Give such a cell one `--arm`.
-- The watchdog flags foreign compute processes, unaccounted GPU memory and
-  host-load spikes. The script moves a flagged cell aside, so the next pass
-  runs it again. **Never report a cell it marked `CONTAMINATED`.**
-- A job that Slurm ends gets the status `SLURM-<state>`, for example
-  `SLURM-TIMEOUT`. A job that stays pending past `WAIT_TIMEOUT` gets
-  `GAVE-UP`, and the script cancels it. The next pass tries both again.
+- Each cell writes one line `STATUS <name> <state>` to
+  `out/<root>/sweep.log`, and the state to `out/<root>/<name>.status`. Read
+  the `.status` files, or the last `STATUS` line of each cell:
+
+  | state | meaning |
+  |---|---|
+  | `OK` | The run passed, and the watchdog flagged nothing. |
+  | `OK(load-flagged)` | The run passed, but the load gate timed out before it. |
+  | `OK(existing:<state>)` | The cell was done, so nothing ran. This state goes to `sweep.log` alone. |
+  | `FAIL(rc=N)` | The run exited with `N`. The runner renames the cell as failed. |
+  | `FAIL(no-results)` | The run exited with 0 and wrote no `results.json`. The runner renames the cell as failed. |
+  | `CONTAMINATED` | The watchdog flagged the cell, or it could not read the cards. The runner renames the cell as contaminated. |
+  | `PLACEMENT` | The job holds no CPU on the node of some card, or that node is unknown. Nothing ran. |
+  | `ERROR` | A check failed. Nothing ran. |
+
+- A cell is done when it has a `results.json` and an OK state. The runner
+  renames a failed cell to `<name>.failed-<stamp>`, and a contaminated cell
+  to `<name>.contaminated-<stamp>`. The log, the watch file and the exit
+  code get the same name. The stamp holds the UTC time and the job id.
+- A cell that is not done, but has a directory or a log, gets the failed
+  name before its run. So a cell that a time limit stopped runs again.
+- To retry the cells that are not OK, submit the same copy again. The
+  runner skips each done cell. Retry only a coincidental failure, and
+  retry a cell at most 3 times.
+- `ERROR`, `PLACEMENT` and a `FAIL` that repeats with the same message are
+  deterministic. Fix the copy or the code, and do not resubmit the same
+  copy.
+- One `ERROR` is a coincidence: the runner refuses to rename a cell onto a
+  name that exists. A resubmit clears it, because the next job id gives a
+  new name.
+- The watchdog flags foreign compute processes, unaccounted GPU memory,
+  host-load spikes and a card query that fails in two consecutive samples.
+  **Never report a cell it marked `CONTAMINATED`.**
+- An `OK(load-flagged)` cell ran on a busy host. Check its step times by
+  hand before you report it.
+- A job has one time limit, and `main` caps it at 2 hours. All cells of
+  the job share it. When the cells need more, split them into two copies.
 - `tools/collect_matrix.py <root>` merges a matrix tree into one table, one
   row per arm. It reads the manifest and the results file alone, and it
   refuses a results file another schema wrote.
