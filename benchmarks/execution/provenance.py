@@ -70,7 +70,11 @@ def directories():
     return sorted(found)
 import torch
 bundled = directories()
-import transformer_engine.pytorch
+try:
+    import transformer_engine.pytorch
+except ImportError as error:
+    print(f"unavailable: {error}")
+    raise SystemExit
 major, minor, patch = torch._C._cudnn.getCompileVersion()
 try:
     runtime = str(torch.backends.cudnn.version())
@@ -99,13 +103,14 @@ def _cudnn_torch_build() -> str:
 
 
 def cudnn_loader_resolves(output: str) -> str:
-    """The cuDNN directories of one ``CUDNN_LOADER_PROBE`` output; a cuDNN beside torch's own, or another runtime version than torch's build, raises."""
-    if output.startswith("unavailable:"):
-        return output
-    lines = [line for line in output.splitlines() if line.startswith("{")]
-    if not lines:
+    """The cuDNN version and directories of one ``CUDNN_LOADER_PROBE`` output; a cuDNN beside torch's own, or another runtime version than torch's build, raises."""
+    lines = output.splitlines()
+    probes = [line for line in lines if line.startswith("{")]
+    if not probes:
+        if lines and lines[-1].startswith("unavailable:"):
+            return lines[-1]
         raise ValueError(f"the cuDNN loader probe printed no JSON line: {output}")
-    probe = json.loads(lines[-1])
+    probe = json.loads(probes[-1])
     foreign = [path for path in probe["loaded"] if path not in probe["bundled"]]
     if foreign or probe["runtime"] != probe["build"]:
         raise ValueError(
@@ -115,11 +120,11 @@ def cudnn_loader_resolves(output: str) -> str:
             f"the build {probe['build']}; run through ./run_bench.sh, which "
             "sources cudnn_env.sh"
         )
-    return ", ".join(probe["loaded"])
+    return f"{probe['runtime']} {', '.join(probe['loaded'])}"
 
 
 def _cudnn_loader_resolves() -> str:
-    """The cuDNN directories that a process maps after it imports TransformerEngine."""
+    """The cuDNN version and directories that a process maps after it imports TransformerEngine."""
     return cudnn_loader_resolves(
         run_text([sys.executable, "-c", CUDNN_LOADER_PROBE]).strip()
     )

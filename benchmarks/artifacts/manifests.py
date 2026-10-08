@@ -43,6 +43,7 @@ HOST_KEYS = (
     "torchtitan_git_rev",
     "benchmarks_git_rev",
     "megatron_git_rev",
+    "cudnn_loader_resolves",
 )
 """The ``hardware_metadata`` keys that a resume must find unchanged."""
 

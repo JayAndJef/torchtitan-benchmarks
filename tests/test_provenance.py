@@ -10,7 +10,6 @@ cuBLASLt version gets the provenance tests too, because a reader must see
 which cuBLASLt a run bound.
 """
 
-import ctypes.util
 import json
 import os
 import re
@@ -22,6 +21,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmarks.artifacts.manifests import host_mismatches
 from benchmarks.execution import provenance
 
 _UNAVAILABLE = re.compile(r"^unavailable: ")
@@ -109,10 +109,18 @@ class CudnnProvenanceTests(unittest.TestCase):
 class CudnnRefusalTests(unittest.TestCase):
     """The refusal of a cuDNN that TransformerEngine maps beside torch's own."""
 
-    def test_torch_cudnn_alone_records_its_directory(self) -> None:
+    def test_torch_cudnn_alone_records_its_version_and_directory(self) -> None:
         self.assertEqual(
             provenance.cudnn_loader_resolves(probe_output([VENV_CUDNN])),
-            VENV_CUDNN,
+            f"92400 {VENV_CUDNN}",
+        )
+
+    def test_a_probe_without_transformer_engine_records_the_error(self) -> None:
+        """A host without TransformerEngine has no TE process, so the run goes on."""
+        output = "UserWarning: CUDA initialization\nunavailable: No module named 'transformer_engine'"
+        self.assertEqual(
+            provenance.cudnn_loader_resolves(output),
+            "unavailable: No module named 'transformer_engine'",
         )
 
     def test_a_second_cudnn_directory_raises(self) -> None:
@@ -134,6 +142,21 @@ class CudnnRefusalTests(unittest.TestCase):
     def test_an_output_without_a_json_line_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "no JSON line"):
             provenance.cudnn_loader_resolves("Segmentation fault")
+
+    def test_a_resume_refuses_another_cudnn(self) -> None:
+        """A run that resumes on another cuDNN would mix two attention kernels in one directory."""
+        manifest = {
+            "hardware": "h200",
+            "hardware_metadata": {"cudnn_loader_resolves": "92302 /usr/lib64"},
+        }
+        self.assertEqual(
+            host_mismatches(
+                manifest,
+                hardware="h200",
+                metadata={"cudnn_loader_resolves": f"92400 {VENV_CUDNN}"},
+            ),
+            ["hardware_metadata.cudnn_loader_resolves"],
+        )
 
     def test_the_metadata_refuses_a_second_cudnn(self) -> None:
         def fake_run_text(command, **kwargs):
@@ -161,6 +184,20 @@ def unfixed_environment() -> dict[str, str]:
 class CudnnLoadTests(unittest.TestCase):
     """The loader probe in a real TransformerEngine process, without and with ``cudnn_env.sh``."""
 
+    @staticmethod
+    def _wheel_cudnn() -> str:
+        """The resolved ``lib`` directory of the wheel cuDNN of this interpreter."""
+        return subprocess.check_output(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import os, nvidia.cudnn; "
+                "print(os.path.realpath(nvidia.cudnn.__path__[0] + '/lib'))",
+            ],
+            text=True,
+        ).strip()
+
     def _probe(self, command: list[str]) -> dict:
         result = subprocess.run(
             command,
@@ -173,8 +210,11 @@ class CudnnLoadTests(unittest.TestCase):
         return json.loads(result.stdout.splitlines()[-1])
 
     def test_the_unfixed_load_maps_a_second_cudnn(self) -> None:
-        if ctypes.util.find_library("cudnn") is None:
-            self.skipTest("the loader knows no system cuDNN, so the load cannot mix")
+        cache = subprocess.run(
+            ["ldconfig", "-p"], capture_output=True, text=True
+        ).stdout
+        if "libcudnn.so.9 " not in cache:
+            self.skipTest("the loader knows no system cuDNN 9, so the load cannot mix")
         probe = self._probe([sys.executable, "-c", provenance.CUDNN_LOADER_PROBE])
         foreign = [path for path in probe["loaded"] if path not in probe["bundled"]]
         self.assertTrue(
@@ -199,13 +239,10 @@ class CudnnLoadTests(unittest.TestCase):
         )
         self.assertEqual(probe["runtime"], probe["build"])
         self.assertEqual(probe["loaded"], probe["bundled"])
-        self.assertEqual(len(probe["bundled"]), 1)
-        self.assertTrue(
-            Path(probe["bundled"][0]).is_relative_to(Path(sys.prefix).resolve()),
-            probe["bundled"],
-        )
+        self.assertEqual(probe["bundled"], [self._wheel_cudnn()])
         self.assertEqual(
-            provenance.cudnn_loader_resolves(json.dumps(probe)), probe["bundled"][0]
+            provenance.cudnn_loader_resolves(json.dumps(probe)),
+            f"{probe['build']} {probe['bundled'][0]}",
         )
 
 

@@ -31,7 +31,8 @@ On a kernel driver older than r580, `run_bench.sh` stages NVIDIA's CUDA 13.0
 forward-compat driver under `.cuda-compat/`. No action is necessary.
 `run_bench.sh` also puts torch's own cuDNN first on `LD_LIBRARY_PATH`,
 because TransformerEngine otherwise loads the system cuDNN beside it. A run
-outside `run_bench.sh` that loads two cuDNN copies is refused.
+that loads two cuDNN copies, or a cuDNN version other than torch's build, is
+refused.
 
 ## Run
 
