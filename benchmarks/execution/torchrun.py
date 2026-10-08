@@ -35,7 +35,7 @@ def tail_whole_lines(
     with open(file, errors="replace") as fp:
         line = ""
         while True:
-            # Read the event first, so that a line the worker wrote before it exited is read.
+            # Read the event first, so that the loop also reads a line that the worker wrote before it exited.
             done = finished.is_set()
             part = fp.readline()
             if part:

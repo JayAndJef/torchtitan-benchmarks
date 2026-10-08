@@ -140,9 +140,9 @@ shares one pre-push hook.
   runtime.
 - No number compares across a torch change. After a change, rerun the
   baselines.
-- A torch change that changes torch's tee function stops every per-rank
-  launch. Port `benchmarks.execution.torchrun:tail_whole_lines` and its
-  source hash then.
+- A torch bump that edits torch's `tail_logfile` stops every per-rank
+  launch. Then port `benchmarks.execution.torchrun:tail_whole_lines` and its
+  source hash.
 - `run_bench.sh` sources `cuda_compat.sh`. On a kernel driver below r580,
   that script stages NVIDIA's CUDA 13.0 forward-compat userspace driver
   under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`.
