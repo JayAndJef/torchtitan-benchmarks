@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.artifacts.manifests import host_mismatches
 from benchmarks.execution import provenance
+from benchmarks.execution.paths import RuntimePaths
 
 _UNAVAILABLE = re.compile(r"^unavailable: ")
 
@@ -38,7 +40,7 @@ VENV_CUDNN = "/venv/site-packages/nvidia/cudnn/lib"
 def probe_output(loaded: list[str], runtime: str = "92400") -> str:
     """One fake ``CUDNN_LOADER_PROBE`` output, after a warning that ``run_text`` merged in."""
     probe = {
-        "bundled": [VENV_CUDNN],
+        "wheel": VENV_CUDNN,
         "loaded": loaded,
         "build": "92400",
         "runtime": runtime,
@@ -79,9 +81,10 @@ class CudnnProvenanceTests(unittest.TestCase):
             mock.patch.object(provenance, "_megatron_git_rev", return_value="r"),
             mock.patch.object(provenance, "_te_version", return_value="v"),
         ):
-            _, metadata = provenance.hardware_metadata(mock.Mock(), "0", "label")
+            paths = mock.Mock()
+            _, metadata = provenance.hardware_metadata(paths, "0", "label")
         build.assert_called_once_with()
-        loader.assert_called_once_with()
+        loader.assert_called_once_with(paths)
         self.assertEqual(metadata["cudnn_torch_build"], "9.24.0")
         self.assertEqual(metadata["cudnn_loader_resolves"], VENV_CUDNN)
 
@@ -97,7 +100,9 @@ class CudnnProvenanceTests(unittest.TestCase):
         with mock.patch.object(
             provenance, "run_text", return_value="unavailable: boom"
         ):
-            self.assertRegex(provenance._cudnn_loader_resolves(), _UNAVAILABLE)
+            self.assertRegex(
+                provenance._cudnn_loader_resolves(runtime_paths()), _UNAVAILABLE
+            )
 
     def test_run_text_turns_a_missing_command_into_a_diagnostic(self) -> None:
         """The property both probes rely on, pinned once."""
@@ -166,7 +171,38 @@ class CudnnRefusalTests(unittest.TestCase):
 
         with mock.patch.object(provenance, "run_text", fake_run_text):
             with self.assertRaisesRegex(ValueError, "beside torch's cuDNN"):
-                provenance.hardware_metadata(mock.Mock(), "0", "auto")
+                provenance.hardware_metadata(runtime_paths(), "0", "auto")
+
+    def _compiler_probe(self, script: str) -> str:
+        """The recorded value when the compiler script holds ``script``; the fake probe reads ``CUDNN_HOME``."""
+        def fake_run_text(command, **kwargs):
+            if kwargs["env"].get("CUDNN_HOME") == "/other":
+                return probe_output([VENV_CUDNN, "/other/lib"])
+            return probe_output([VENV_CUDNN])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler_env = Path(temporary) / "compiler.sh"
+            compiler_env.write_text(script)
+            paths = runtime_paths(compiler_env)
+            with mock.patch.object(provenance, "run_text", fake_run_text):
+                return provenance._cudnn_loader_resolves(paths)
+
+    def test_a_compiler_script_that_keeps_the_cudnn_passes(self) -> None:
+        self.assertEqual(
+            self._compiler_probe("export CC=gcc\n"), f"92400 {VENV_CUDNN}"
+        )
+
+    def test_a_compiler_script_that_moves_the_cudnn_raises(self) -> None:
+        """The TorchTitan arms run under the compiler script, so its cuDNN is theirs."""
+        with self.assertRaisesRegex(ValueError, "cuDNN in /other/lib beside"):
+            self._compiler_probe("export CUDNN_HOME=/other\n")
+
+
+def runtime_paths(compiler_env: Path | None = None) -> RuntimePaths:
+    """The paths of this checkout, with ``compiler_env`` as the compiler script."""
+    return RuntimePaths.resolve(
+        compiler_env=compiler_env, environment={"PATH": os.environ["PATH"]}
+    )
 
 
 def unfixed_environment() -> dict[str, str]:
@@ -216,7 +252,7 @@ class CudnnLoadTests(unittest.TestCase):
         if "libcudnn.so.9 " not in cache:
             self.skipTest("the loader knows no system cuDNN 9, so the load cannot mix")
         probe = self._probe([sys.executable, "-c", provenance.CUDNN_LOADER_PROBE])
-        foreign = [path for path in probe["loaded"] if path not in probe["bundled"]]
+        foreign = [path for path in probe["loaded"] if path != probe["wheel"]]
         self.assertTrue(
             foreign or probe["runtime"] != probe["build"],
             f"no mixed load without cudnn_env.sh: {probe}",
@@ -238,11 +274,11 @@ class CudnnLoadTests(unittest.TestCase):
             ]
         )
         self.assertEqual(probe["runtime"], probe["build"])
-        self.assertEqual(probe["loaded"], probe["bundled"])
-        self.assertEqual(probe["bundled"], [self._wheel_cudnn()])
+        self.assertEqual(probe["wheel"], self._wheel_cudnn())
+        self.assertEqual(probe["loaded"], [probe["wheel"]])
         self.assertEqual(
             provenance.cudnn_loader_resolves(json.dumps(probe)),
-            f"{probe['build']} {probe['bundled'][0]}",
+            f"{probe['build']} {probe['wheel']}",
         )
 
 
