@@ -43,7 +43,7 @@ ROOT=out/CHANGE-ME
 # Slurm runs a copy of this file from its spool directory, so the job finds
 # the repository through the directory of the submission.
 cd "${SLURM_SUBMIT_DIR:?this file runs only as a Slurm job}" || exit 2
-: "${MATRIX_REV:?submit with MATRIX_REV=$(git rev-parse HEAD)}"
+: "${MATRIX_REV:?submit with MATRIX_REV=\$(git rev-parse HEAD)}"
 [ -x tools/run_matrix_cell.sh ] || fail "submit from the repository root"
 [ -d "$ROOT" ] || fail "the output root $ROOT is not a directory"
 
