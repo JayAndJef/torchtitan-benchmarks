@@ -409,8 +409,9 @@ the manifest's `run` block, each arm's `config`, the CPU pinning,
 `torchtitan_git_rev`, `benchmarks_git_rev` and `megatron_git_rev`. Check
 each one before you compare against an older run.
 
-Before `cudnn_env.sh`, every TransformerEngine process ran the system cuDNN
-9.23.2, so a Megatron attention number from before it is not comparable.
+Before `cudnn_env.sh`, every TransformerEngine process ran its cuDNN
+attention on the system cuDNN 9.23.2. The Megatron arms of job 9406 did too.
+So a Megatron attention number from before `cudnn_env.sh` is not comparable.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every
 Megatron number published before that flip had both at `on`. State the
@@ -484,8 +485,10 @@ refuses any other version by name.
 A provenance probe that fails records `unavailable: <error>` and does not
 stop the run. A device list of two GPU models stops it. A TransformerEngine
 process that maps a second cuDNN beside torch's, or a cuDNN version other
-than torch's build, also stops it. This check runs before `kernel-bench`
-too. `cudnn_loader_resolves` records the cuDNN version and directory.
+than torch's build, also stops it. The probe runs in the environment of a
+training process, and again under the `--compiler-env` script when the run
+has one. This check runs before `kernel-bench` too. `cudnn_loader_resolves`
+records the cuDNN version and directory.
 
 The tokens/s of a step sample, and each tokens/s figure of `results.json`,
 are **per device**. Both engines divide one rank's token count by `cp * tp * pp`. The
