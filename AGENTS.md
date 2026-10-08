@@ -983,8 +983,9 @@ Four structural tests deserve naming:
   you submit. It sets the partitions and the time limits.
 - Run a multi-cell matrix as one Slurm job, never as a loop of `run`
   calls. Make a new output root under `out/`. Copy `tools/matrix_job.sbatch`
-  into it, and edit the copy. The template is a working example: six
-  dp4 x ep4 cells of the `engines` and `attention` arms, with one arm twice.
+  into it, and edit the copy. The template is a working example: the seven
+  dp4 x ep4 cells of the stacked comparison, with `titan_compiled` first and
+  last.
 - The copy holds the `#SBATCH` lines, `ROOT` (the output root), the
   job-local device list, the shared flags and one `cell <name> <run flags>`
   line per cell. A cell name holds only letters, digits, `_` and `-`.
