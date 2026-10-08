@@ -422,10 +422,12 @@ the manifest's `run` block, each arm's `config`, the CPU pinning,
 `torchtitan_git_rev`, `benchmarks_git_rev` and `megatron_git_rev`. Check
 each one before you compare against an older run.
 
-Before `cudnn_env.sh`, every TransformerEngine process ran its cuDNN
-attention on the system cuDNN 9.23.2. The Megatron arms of job 9406 did too.
-So a Megatron attention number from before `cudnn_env.sh` is not comparable.
-A manifest from before it records `cudnn_loader_resolves` as one library
+Before `cudnn_env.sh`, a TransformerEngine process ran its cuDNN attention
+on the system cuDNN 9.23.2, unless its job put the cuDNN of torch first. Job
+9393 ran on the system cuDNN. Job 9406 put the cuDNN of torch first. So a
+Megatron attention number from before `cudnn_env.sh` is not comparable until
+its job script shows which cuDNN it ran. A manifest from before
+`cudnn_env.sh` records `cudnn_loader_resolves` as one library
 path, with no leading version number.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every
