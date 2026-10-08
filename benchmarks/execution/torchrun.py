@@ -55,6 +55,8 @@ def tail_whole_lines(
 
 def install() -> None:
     """Make ``TailLog`` call ``tail_whole_lines``; raise when torch's tail differs from the one it replaces."""
+    if tail_log.tail_logfile is tail_whole_lines:
+        return
     found = hashlib.sha256(inspect.getsource(tail_log.tail_logfile).encode()).hexdigest()
     if found != TAIL_SOURCE_SHA256:
         raise RuntimeError(

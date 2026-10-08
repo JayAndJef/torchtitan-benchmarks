@@ -249,6 +249,11 @@ class InstallTests(unittest.TestCase):
         torchrun.install()
         self.assertIs(tail_log.tail_logfile, torchrun.tail_whole_lines)
 
+    def test_install_twice_keeps_the_launcher_tail(self) -> None:
+        torchrun.install()
+        torchrun.install()
+        self.assertIs(tail_log.tail_logfile, torchrun.tail_whole_lines)
+
     def test_install_refuses_a_changed_torch_tail(self) -> None:
         def other(header, file, dst, finished, interval_sec, log_line_filter=None):
             pass

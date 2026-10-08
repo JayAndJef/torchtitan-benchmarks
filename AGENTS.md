@@ -426,7 +426,8 @@ Before `cudnn_env.sh`, a TransformerEngine process ran its cuDNN attention
 on the system cuDNN 9.23.2, unless its job put the cuDNN of torch first. Job
 9393 ran on the system cuDNN. Job 9406 put the cuDNN of torch first. So a
 Megatron attention number from before `cudnn_env.sh` is not comparable until
-its job script shows which cuDNN it ran. A manifest from before
+its job script or its manifest's `cudnn_loader_resolves` path shows which
+cuDNN it ran. A manifest from before
 `cudnn_env.sh` records `cudnn_loader_resolves` as one library
 path, with no leading version number.
 
