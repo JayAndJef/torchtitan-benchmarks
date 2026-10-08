@@ -63,28 +63,8 @@ class HostCountDispatcher(AllToAllTokenDispatcher):
 
     def __init__(self, config: "HostCountDispatcher.Config"):
         super().__init__(config)
+        # Rows per local expert, (e,) int64 on the host: the hook sets it, dispatch takes it.
         self._host_rows_e: torch.Tensor | None = None
-
-    def _sync_token_count_exchange(
-        self,
-        num_local_tokens_per_expert_E: torch.Tensor,
-        num_global_tokens_per_local_expert_EP_e: torch.Tensor,
-        ep_size: int,
-    ) -> tuple[torch.Tensor, list[int], list[int]]:
-        num_global_tokens_per_local_expert_EP_e = (
-            torch.ops._c10d_functional.wait_tensor(
-                num_global_tokens_per_local_expert_EP_e
-            )
-        )
-        input_splits, output_splits, self._host_rows_e = host_token_counts(
-            num_local_tokens_per_expert_E,
-            num_global_tokens_per_local_expert_EP_e.view(ep_size, -1),
-        )
-        return (
-            num_global_tokens_per_local_expert_EP_e.reshape(-1),
-            input_splits.tolist(),
-            output_splits.tolist(),
-        )
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -103,6 +83,7 @@ class HostCountDispatcher(AllToAllTokenDispatcher):
             raise RuntimeError(
                 "HostCountDispatcher has no SPMD type rule for its custom op"
             )
+        # Runs the hook _sync_token_count_exchange below, which sets _host_rows_e.
         routed_input_RD, _, metadata = super().dispatch(
             x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
         )
@@ -110,6 +91,28 @@ class HostCountDispatcher(AllToAllTokenDispatcher):
         if host_rows_e is None:
             raise RuntimeError("HostCountDispatcher.dispatch made no count exchange")
         return routed_input_RD, host_rows_e, metadata
+
+    def _sync_token_count_exchange(
+        self,
+        num_local_tokens_per_expert_E: torch.Tensor,
+        num_global_tokens_per_local_expert_EP_e: torch.Tensor,
+        ep_size: int,
+    ) -> tuple[torch.Tensor, list[int], list[int]]:
+        """The stock ``dispatch`` calls this hook once; it also keeps the rows of each local expert in ``_host_rows_e``."""
+        num_global_tokens_per_local_expert_EP_e = (
+            torch.ops._c10d_functional.wait_tensor(
+                num_global_tokens_per_local_expert_EP_e
+            )
+        )
+        input_splits, output_splits, self._host_rows_e = host_token_counts(
+            num_local_tokens_per_expert_E,
+            num_global_tokens_per_local_expert_EP_e.view(ep_size, -1),
+        )
+        return (
+            num_global_tokens_per_local_expert_EP_e.reshape(-1),
+            input_splits.tolist(),
+            output_splits.tolist(),
+        )
 
 
 @override(
