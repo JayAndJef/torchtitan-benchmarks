@@ -194,23 +194,32 @@ esac
 """A ``run_bench.sh`` that writes the outcome ``STUB_MODE`` names, and no more."""
 
 FAKE_NVIDIA_SMI = """#!/usr/bin/env bash
+fails() {
+    local count
+    count=$(( $(cat "$FAKE_COUNTS/$1" 2>/dev/null || echo 0) + 1 ))
+    echo "$count" >"$FAKE_COUNTS/$1"
+    case ",$2," in *",$count,"*) return 0 ;; esac
+    return 1
+}
 for arg in "$@"; do
     case "$arg" in
         --query-gpu=index) echo 0 ;;
         --query-gpu=pci.bus_id) echo "$FAKE_BUS_ID" ;;
         --query-gpu=memory.used)
-            [ -z "${FAKE_FAIL_MEM:-}" ] || { echo "fake memory failure" >&2; exit 9; }
+            fails memory "${FAKE_FAIL_MEM:-}" && { echo "fake memory failure" >&2; exit 9; }
             echo 0 ;;
         --query-compute-apps=*)
-            [ -z "${FAKE_FAIL_APPS:-}" ] || { echo "fake apps failure" >&2; exit 9; } ;;
+            fails apps "${FAKE_FAIL_APPS:-}" && { echo "fake apps failure" >&2; exit 9; } ;;
         --query-gpu=*) echo "0, Fake GPU, GPU-fake, $FAKE_BUS_ID, 0.0" ;;
     esac
 done
 """
 """An ``nvidia-smi`` that shows one idle card at ``FAKE_BUS_ID``.
 
-``FAKE_FAIL_MEM`` and ``FAKE_FAIL_APPS`` make the two watchdog queries fail,
-and the checks before the run still pass.
+The fake counts its calls of each watchdog query in ``FAKE_COUNTS``. The
+calls that ``FAKE_FAIL_MEM`` or ``FAKE_FAIL_APPS`` list, such as ``1,2``,
+fail. The checks before the run make neither query, so the first call is
+the first watchdog sample.
 """
 
 ABSENT_BUS_ID = "0000FFFF:00:00.0"
@@ -283,6 +292,8 @@ class MatrixCellTests(unittest.TestCase):
         smi.chmod(0o755)
         self.loadavg = base / "loadavg"
         self.loadavg.write_text("1.00 1.00 1.00 1/100 1\n")
+        self.counts = base / "counts"
+        self.counts.mkdir()
         self.root = base / "root"
         self.root.mkdir()
 
@@ -304,6 +315,7 @@ class MatrixCellTests(unittest.TestCase):
             MATRIX_REV=self._git("rev-parse", "HEAD").strip(),
             MATRIX_LOADAVG=str(self.loadavg),
             FAKE_BUS_ID=bus,
+            FAKE_COUNTS=str(self.counts),
             STUB_MODE="ok",
             IDLE_SETTLE="1",
             IDLE_POLL="1",
@@ -498,21 +510,33 @@ class MatrixCellTests(unittest.TestCase):
         )
 
     def test_a_blind_watchdog_contaminates_the_cell(self) -> None:
-        """The run sleeps, so the watchdog samples the failed query in it."""
-        self.env["STUB_SLEEP"] = "2"
+        """Two failed samples in a row condemn the cell, and one does not.
+
+        The run sleeps 3 s, so the watchdog takes samples 1 and 2 in it. The
+        check after the run makes a later call of the memory query, which
+        passes.
+        """
+        self.env["STUB_SLEEP"] = "3"
         for failure, reason in (
             ("FAKE_FAIL_MEM", "WATCH-BLIND memory.used is unreadable"),
             ("FAKE_FAIL_APPS", "WATCH-BLIND compute-apps gpu=0: fake apps failure"),
         ):
-            with self.subTest(failure=failure):
-                self.env[failure] = "1"
-                name = failure.lower()
-                result = self._cell(name)
-                del self.env[failure]
-                self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertEqual(self._status(name), "CONTAMINATED")
-                (watch,) = self.root.glob(f"{name}.contaminated-*.watch")
-                self.assertIn(reason, watch.read_text())
+            for calls, state in (("1,2", "CONTAMINATED"), ("1", "OK")):
+                with self.subTest(failure=failure, calls=calls):
+                    shutil.rmtree(self.counts, ignore_errors=True)
+                    self.counts.mkdir()
+                    self.env[failure] = calls
+                    name = f"{failure.lower()}_{len(calls)}"
+                    result = self._cell(name)
+                    del self.env[failure]
+                    self.assertEqual(self._status(name), state, result.stdout)
+                    if state == "OK":
+                        self.assertEqual(
+                            (self.root / f"{name}.watch").read_text(), ""
+                        )
+                    else:
+                        (watch,) = self.root.glob(f"{name}.contaminated-*.watch")
+                        self.assertIn(reason, watch.read_text())
 
     def test_a_busy_host_runs_the_cell_and_flags_it(self) -> None:
         """The load stays between IDLE_LOAD and CONTENDED_LOAD, so the gate

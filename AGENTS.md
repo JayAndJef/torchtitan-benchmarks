@@ -934,8 +934,8 @@ Four structural tests deserve naming:
   name that exists. A resubmit clears it, because the next job id gives a
   new name.
 - The watchdog flags foreign compute processes, unaccounted GPU memory,
-  host-load spikes and a failed card query. **Never report a cell it marked
-  `CONTAMINATED`.**
+  host-load spikes and a card query that fails in two consecutive samples.
+  **Never report a cell it marked `CONTAMINATED`.**
 - An `OK(load-flagged)` cell ran on a busy host. Check its step times by
   hand before you report it.
 - A job has one time limit, and `main` caps it at 2 hours. All cells of

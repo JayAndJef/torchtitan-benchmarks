@@ -283,22 +283,22 @@ gpu_mem() {   # summed over every card of the job; -1 when unreadable
 # watchdog uses two independent signals:
 #   FOREIGN_PID  a compute PID that is not a descendant of the batch script
 #   FOREIGN_MEM  GPU memory that no PID of ours explains
-# A failed query writes WATCH-BLIND, because a blind watchdog proves nothing.
+# A failed query in two consecutive samples writes WATCH-BLIND, because a
+# blind watchdog proves nothing. One failed sample can be a transient error.
 # The load average is host-wide, so it also includes the jobs of other users.
 # The workload is host-bound, so host load corrupts tokens/s.
 watchdog() {
     local watch_file="$1"
-    local mem load pid used ours residual id mem_streak=0 noted=0
+    local mem load pid used ours residual id blind mem_streak=0 blind_streak=0 noted=0
     while :; do
         mem=$(gpu_mem); load=$(load1)
-        [ "$mem" = "-1" ] && \
-            echo "WATCH-BLIND memory.used is unreadable $(date -u +%T)" >>"$watch_file"
+        blind=""
+        [ "$mem" = "-1" ] && blind="memory.used is unreadable"
         ours=0
         for id in "${GPU_IDS[@]}"; do
             if ! apps="$(nvidia-smi --id="$id" --query-compute-apps=pid,used_memory \
                          --format=csv,noheader 2>&1)"; then
-                echo "WATCH-BLIND compute-apps gpu=$id: $(head -n 1 <<<"$apps") $(date -u +%T)" \
-                    >>"$watch_file"
+                blind="${blind:+$blind; }compute-apps gpu=$id: $(head -n 1 <<<"$apps")"
                 continue
             fi
             while IFS=',' read -r pid used; do
@@ -339,6 +339,13 @@ watchdog() {
             else
                 mem_streak=0
             fi
+        fi
+        if [ -n "$blind" ]; then
+            [ "$blind_streak" -ge 1 ] && \
+                echo "WATCH-BLIND $blind $(date -u +%T)" >>"$watch_file"
+            blind_streak=$((blind_streak + 1))
+        else
+            blind_streak=0
         fi
         [ "$load" -gt "$CONTENDED_LOAD" ] && \
             echo "CONTENDED load1=${load} (limit ${CONTENDED_LOAD}) $(date -u +%T)" \
