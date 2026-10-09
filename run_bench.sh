@@ -15,6 +15,9 @@ fi
 # libcuda; this is a no-op on drivers that are already r580+.
 source "$BENCH_DIR/cuda_compat.sh"
 
+# TransformerEngine otherwise maps the system cuDNN beside torch's bundled one.
+source "$BENCH_DIR/cudnn_env.sh"
+
 # A stable, writable datasets cache. HF_HOME can point at a directory another
 # user owns, and every arm then dies on a builder.lock PermissionError before
 # it trains one step. A matrix cell and a single run both need this cache.

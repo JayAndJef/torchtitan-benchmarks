@@ -31,6 +31,8 @@ from tests.engine_helpers import configured, run_spec
 PARALLEL_SPEC = ParallelismSpec(dp=2, pp=2, ep=2, zero=1, pp_schedule="1F1B")
 ENGINES = scenario_by_name("engines")
 ATTENTION = scenario_by_name("attention")
+EXPERTS = scenario_by_name("experts")
+STACKED = scenario_by_name("stacked")
 OVERRIDE_ARM = Arm(
     name="override_arm",
     description="an arm with an override import",
@@ -111,7 +113,12 @@ def _megatron_argvs() -> list[list[str]]:
 
 def _titan_argvs() -> list[list[str]]:
     argvs = []
-    for arm in (*ENGINES.arms, ATTENTION.arm("titan_compiled_fa3"), OVERRIDE_ARM):
+    override_arms = (
+        ATTENTION.arm("titan_compiled_fa3"),
+        EXPERTS.arm("titan_compiled_te_per_expert"),
+        STACKED.arm("titan_compiled_fa3_te_per_expert"),
+    )
+    for arm in (*ENGINES.arms, *override_arms, OVERRIDE_ARM):
         if engine_for(arm).name != "torchtitan":
             continue
         for spec, profile, ac_mode in (
@@ -365,6 +372,26 @@ class TitanTableTests(unittest.TestCase):
         arm = configured(TITAN_ARM, extra_flags=("--training.new-field",))
         (refusal,) = engine_for(arm).check(run_spec(ac_mode="none"), arm)
         self.assertIn("--training.new-field (not classified", refusal)
+
+    def test_flag_value_reads_the_last_value_in_either_form(self) -> None:
+        name = "--parallelism.spmd-backend"
+        for tokens, value in (
+            ((), None),
+            (("--compile.backend", "inductor"), None),
+            (("--parallelism.spmd-backend", "spmd_types"), "spmd_types"),
+            (("--parallelism.spmd_backend=spmd_types",), "spmd_types"),
+            (
+                (
+                    "--parallelism.spmd-backend=spmd_types",
+                    "--parallelism.spmd-backend",
+                    "default",
+                ),
+                "default",
+            ),
+            (("--parallelism.spmd-backend",), None),
+        ):
+            with self.subTest(tokens=tokens):
+                self.assertEqual(titan_flags.flag_value(tokens, name), value)
 
 
 if __name__ == "__main__":

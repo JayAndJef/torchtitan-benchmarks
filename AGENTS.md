@@ -4,7 +4,7 @@
 
 Two measurement systems share one CLI. Never mix their numbers.
 
-**End-to-end throughput.** Two scenarios train the same Qwen3 MoE model
+**End-to-end throughput.** Four scenarios train the same Qwen3 MoE model
 on one pre-tokenized c4_test stream. Each publishes tokens/s, step time and
 peak memory. `--model-size` selects the shape. The `engines` scenario has
 three arms:
@@ -31,6 +31,61 @@ cap and no device assert. Their width changes per batch, so the override
 marks that length dynamic. Each block compiles once, with a dynamic offsets
 length.
 
+The `experts` scenario has three arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds one arm that replaces the expert
+GEMMs of `titan_compiled` through overrides:
+
+| arm | engine | expert GEMM |
+|---|---|---|
+| `titan_compiled` | `torchtitan` | `torch._grouped_mm`, one CUTLASS grouped kernel |
+| `titan_compiled_te_per_expert` | `torchtitan` | one TransformerEngine cuBLAS GEMM per expert |
+| `megatron_stock` | `megatron_stock` | one TransformerEngine cuBLAS GEMM per expert |
+
+The per-expert arm moves the expert GEMM path alone against
+`titan_compiled`. The two TorchTitan arms share their init, seed and data,
+so their routing matches. Megatron routes from another init, so its row is
+a reference.
+
+- `titan_compiled_te_per_expert` imports two overrides.
+  `benchmarks/models/piper_qwen3/components/moe/host_count_dispatcher.py`
+  copies the whole count matrix in the dispatcher's one blocking copy, and
+  it returns the rows of each local expert on the host.
+  `benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py`
+  runs TE's legacy grouped GEMM, the path of Megatron's `GroupedLinear`.
+  TorchTitan has no fp32 `main_grad`, so the arm writes a fresh bf16
+  weight gradient and does not fuse the accumulation as Megatron does.
+  cuBLAS picks the kernel from the rows of each expert, so the arm's trace
+  marker is not a kernel name. It is the profiler range that each op opens,
+  `torchtitan_benchmarks::te_per_expert_mm`.
+- The engine's check refuses either per-expert override without the other,
+  and either one at ep 1. It also refuses an arm with either override that
+  selects the `spmd_types` backend, because their custom ops have no SPMD
+  type rule.
+
+The `stacked` scenario has three arms. It reuses `titan_compiled` and
+`megatron_stock` unchanged, and it adds one arm that moves two axes
+together:
+
+| arm | engine | attention kernel | expert GEMM |
+|---|---|---|---|
+| `titan_compiled` | `torchtitan` | compiled FlexAttention with a BlockMask | `torch._grouped_mm` |
+| `titan_compiled_fa3_te_per_expert` | `torchtitan` | FA3 varlen | one TransformerEngine cuBLAS GEMM per expert |
+| `megatron_stock` | `megatron_stock` | TransformerEngine's cuDNN attention | one TransformerEngine cuBLAS GEMM per expert |
+
+The stacked arm moves the attention kernel and the expert GEMM path
+against `titan_compiled`. It answers whether the two gains add. FA3 alone
+is the `attention` arm `titan_compiled_fa3`. The per-expert GEMM alone is
+the `experts` arm `titan_compiled_te_per_expert`. The stacked arm imports
+the three overrides of those two arms, sets `packed_offsets`, and carries
+the trace markers of both. It imports the per-expert overrides, so it needs
+`--ep 2` or more.
+
+Parallelism rules 9 and 14 also apply to both per-expert arms: the expert
+degree must divide `--dp`, and it needs `--zero 1`. So two GPUs take
+`--dp 2 --ep 2 --zero 1`, and `--ep 2` alone is refused. `--model-size 1b`
+fits that mesh. The stacked comparison ran at `--model-size 30b-a3b-20l
+--dp 4 --ep 4 --zero 1 --batch 4 --profile --steps 80`.
+
 `--arm` applies to every selected scenario, so an arm name that one of them
 lacks needs `--scenario`.
 
@@ -41,9 +96,9 @@ isolation can be irrelevant once the compiler fuses the graph around it.
 A kernel number is never an end-to-end number, and an end-to-end number is
 never a kernel number. State which system produced a figure.
 
-The `engines` and `attention` scenarios carry four deliberate differences
-by default, and each one moves the number. The Megatron arm keeps fp32 master weights and
-reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
+The `engines`, `attention`, `experts` and `stacked` scenarios carry four
+deliberate differences by default, and each one moves the number. The
+Megatron arm keeps fp32 master weights and reduces gradients in fp32. It runs Megatron's unfused native cross entropy.
 It keeps `--init-method-std 0.01` with no weight transfer. It applies no
 permutation fusion. A `megatron_stock.extra_flags` value can remove the two
 fusion differences, and the manifest records it. State the four differences
@@ -85,9 +140,16 @@ shares one pre-push hook.
   runtime.
 - No number compares across a torch change. After a change, rerun the
   baselines.
+- A torch bump that edits torch's `tail_logfile` stops every per-rank
+  launch. Then port `benchmarks.execution.torchrun:tail_whole_lines` and its
+  source hash.
 - `run_bench.sh` sources `cuda_compat.sh`. On a kernel driver below r580,
   that script stages NVIDIA's CUDA 13.0 forward-compat userspace driver
   under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`.
+- `run_bench.sh` then sources `cudnn_env.sh`. That script sets
+  `CUDNN_HOME` to torch's wheel cuDNN and puts its `lib` directory first on
+  `LD_LIBRARY_PATH`. Without it, TransformerEngine maps the system cuDNN
+  beside torch's, and `torch.backends.cudnn.version()` raises.
 - TorchTitan is a submodule at `third_party/torchtitan`, installed editable.
   It is our fork, pinned on the `bench/torchtitan-benchmarks` branch.
 - Megatron-LM is a submodule at `third_party/Megatron-LM`. It is **not**
@@ -112,7 +174,7 @@ shares one pre-push hook.
 | `benchmarks/e2e/data/c4_replay.py` | The pre-tokenized c4_test stream that both engines read. |
 | `benchmarks/artifacts/` | `manifest.json` and its schema 18 and 19 readers, `run_state.json`, the output layout and the atomic JSON writer. |
 | `benchmarks/traces/extraction.py` | Chrome-trace parsing, used under `--profile` alone. |
-| `benchmarks/execution/` | The launcher in `benchmarks/execution/launcher.py`, the subprocess environment, device parsing, CPU pinning, provenance and the progress events. A runner prints nothing: it emits events, and `benchmarks/cli/rendering.py` prints them. |
+| `benchmarks/execution/` | The launcher in `benchmarks/execution/launcher.py`, the torchrun module in `benchmarks/execution/torchrun.py`, the subprocess environment, device parsing, CPU pinning, provenance and the progress events. A runner prints nothing: it emits events, and `benchmarks/cli/rendering.py` prints them. |
 | `benchmarks/kernel/` | The kernel-isolation system: registry, spans, runner, worker, timing engine, results. |
 | `benchmarks/models/piper_qwen3/` | The model port: `benchmarks/models/piper_qwen3/shape.py`, the TorchTitan model config in `benchmarks/models/piper_qwen3/titan_model.py`, the megatron-core model builder and the kernel components. |
 | `tools/` | The matrix job template `tools/matrix_job.sbatch` and its cell runner `tools/run_matrix_cell.sh`, `tools/collect_matrix.py`, `tools/pre-push.sh`, and the knowledge-base scripts. |
@@ -178,6 +240,23 @@ command line and the child environment. The command line is the pinning
 prefix, then the interpreter, then the torchrun flags, then the target. A
 `per_rank` launch uses torchrun at every world size, also at one rank.
 
+The torchrun flags start with `-u`, and they run torchrun through
+`benchmarks.execution.torchrun`. Torchrun tees each rank into the arm log
+through a thread of its own, and all the threads write to one stream. With
+a buffered stream, a thread race in CPython 3.10 loses lines and writes NUL
+bytes in their place. With `-u`, each write of a thread is one call.
+Torchrun already starts its workers with `-u`, so the flag now also applies
+to the torchrun agent.
+
+A worker can write one line in two calls: `print` writes the text, then the
+newline. A tee thread can read the file between the two calls. Torch's tee
+then writes the text alone, and the line of another rank joins it.
+`benchmarks.execution.torchrun:tail_whole_lines` holds a partial line until
+its newline arrives. It also reads a line that a worker wrote just before
+it exited, which torch's tee can lose. The module pins the SHA-256 of the
+source of torch's tee function, and it refuses any other source.
+Keep `-u` and the module, and `tests/test_rank_log.py` checks both.
+
 The launcher owns six environment keys: `CUDA_DEVICE_ORDER`,
 `CUDA_VISIBLE_DEVICES`, `NGPU`, `LOG_RANK`,
 `TORCHELASTIC_LOG_LINE_PREFIX_TEMPLATE` and `PYTORCH_ALLOC_CONF`. The
@@ -227,7 +306,14 @@ Inside a Slurm job, the job sees only its own cards, and their indices
 start at 0. So give `0`, or `0,1` and so on, and never a physical index.
 
 `run` executes, validates and evaluates. It runs every scenario unless
-`--scenario` narrows the set. It stops at the first arm that fails.
+`--scenario` narrows the set. It checks every selected scenario before the
+first arm starts, so one refused scenario stops the whole command. It stops
+at the first arm that fails.
+
+At ep 1 the `experts` scenario refuses `titan_compiled_te_per_expert`, and
+the `stacked` scenario refuses `titan_compiled_fa3_te_per_expert`. So a
+one-GPU run names its scenarios with `--scenario`. A one-GPU run of
+`experts` or `stacked` also names its arms with `--arm`.
 
 Named scenarios run one at a time, in the order given. A name may repeat,
 and each repeat is another run with a `-run<n>` suffix on its scenario
@@ -332,9 +418,18 @@ unless the engine has a negative form of it.
 
 Numbers are comparable only within one value of each of these: each key of
 the manifest's `run` block, each arm's `config`, the CPU pinning,
-`torch_version`, `cublaslt_version`, `torchtitan_git_rev`,
-`benchmarks_git_rev` and `megatron_git_rev`. Check each one before you
-compare against an older run.
+`torch_version`, `cublaslt_version`, `cudnn_loader_resolves`,
+`torchtitan_git_rev`, `benchmarks_git_rev` and `megatron_git_rev`. Check
+each one before you compare against an older run.
+
+Before `cudnn_env.sh`, a TransformerEngine process ran its cuDNN attention
+on the system cuDNN 9.23.2, unless its job put the cuDNN of torch first. Job
+9393 ran on the system cuDNN. Job 9406 put the cuDNN of torch first. So a
+Megatron attention number from before `cudnn_env.sh` is not comparable until
+its job script or its manifest's `cudnn_loader_resolves` path shows which
+cuDNN it ran. A manifest from before
+`cudnn_env.sh` records `cudnn_loader_resolves` as one library
+path, with no leading version number.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every
 Megatron number published before that flip had both at `on`. State the
@@ -406,7 +501,12 @@ converts a schema 19 manifest to schema 20. It gives each TorchTitan arm
 refuses any other version by name.
 
 A provenance probe that fails records `unavailable: <error>` and does not
-stop the run. A device list of two GPU models stops it.
+stop the run. A device list of two GPU models stops it. A TransformerEngine
+process that maps a second cuDNN beside torch's, or a cuDNN version other
+than torch's build, also stops it. The probe runs in the environment of a
+training process, and again under the `--compiler-env` script when the run
+has one. This check runs before `kernel-bench` too. `cudnn_loader_resolves`
+records the cuDNN version and directory.
 
 The tokens/s of a step sample, and each tokens/s figure of `results.json`,
 are **per device**. Both engines divide one rank's token count by `cp * tp * pp`. The
@@ -437,12 +537,13 @@ not comparable with a run on the whole node. `--resume` refuses to mix them, and
 
 `benchmarks.e2e.validation:validate_arm` gates every arm before the harness
 publishes its numbers. It splits `<arm>.log` by rank, because one log holds
-every rank's output. The split drops NUL bytes first, because a concurrent
-write can put NUL bytes in front of a rank prefix. The arm's engine reads
-one `RankEvidence` from each rank's log. Then `validate_arm` checks the
-harness facts and runs the engine's `validate`. It raises one error that
-lists every failure. A step line that does not parse, and a step that does
-not follow the previous step of its rank, also fail the arm.
+every rank's output. The split drops NUL bytes first, because a log that
+torchrun wrote without `-u` can put NUL bytes in front of a rank prefix.
+The arm's engine reads one `RankEvidence` from each rank's log. Then
+`validate_arm` checks the harness facts and runs the engine's `validate`.
+It raises one error that lists every failure. A step line that does not
+parse, and a step that does not follow the previous step of its rank, also
+fail the arm.
 
 The four harness facts live in `benchmarks/e2e/evidence.py`. They apply to
 every engine:
@@ -524,8 +625,9 @@ under the names that the engine gives them.
   after the prefix `bench-step: `. The reader also reads the text step line
   that the stored run directories hold.
 
-Every rank writes to one log, so a torn write can join the lines of two
-ranks:
+A log that torchrun wrote before `benchmarks.execution.torchrun` can join
+the lines of two ranks. Its tee wrote a partial line when a worker wrote
+one line in two calls. The readers still read such a log:
 
 - When the prefix of another rank cuts a step line, the reader drops the
   step line. `results.json` records a warning that names the arm, the rank,
@@ -533,7 +635,7 @@ ranks:
 - When a whole step line comes first, the reader reads it.
 - **A known gap:** when a whole step line of one rank comes after the text
   of another rank on one log line, the reader loses the step with no
-  warning. Per-rank log files would remove this gap.
+  warning. A log that the launcher writes now holds no such line.
 
 A lost step that the sample rule takes refuses the arm, as the lost-step
 refusal below states. A lost step outside the sample rule changes no figure.
@@ -918,8 +1020,9 @@ Four structural tests deserve naming:
   you submit. It sets the partitions and the time limits.
 - Run a multi-cell matrix as one Slurm job, never as a loop of `run`
   calls. Make a new output root under `out/`. Copy `tools/matrix_job.sbatch`
-  into it, and edit the copy. The template is a working example: six
-  dp4 x ep4 cells of the `engines` and `attention` arms, with one arm twice.
+  into it, and edit the copy. The template is a working example: the seven
+  dp4 x ep4 cells of the stacked comparison, with `titan_compiled` first and
+  last.
 - The copy holds the `#SBATCH` lines, `ROOT` (the output root), the
   job-local device list, the shared flags and one `cell <name> <run flags>`
   line per cell. A cell name holds only letters, digits, `_` and `-`.
@@ -1048,6 +1151,21 @@ unchanged behaviour:
 The kernel scenarios additionally depend on `HelionCosSinRoPE`,
 `FusedGroupedExperts`, `GroupedExperts`, `QKVLinear`, `FusedQKVLinear`,
 `FlexAttention` and `create_varlen_metadata_for_document`.
+
+`benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py`
+copies the forward of `GroupedExperts`, and it imports `get_spmd_backend`.
+After a bump, compare that forward with the fork's forward again.
+
+`benchmarks/models/piper_qwen3/components/moe/host_count_dispatcher.py`
+subclasses `AllToAllTokenDispatcher`. After a bump, verify these points:
+
+- `_sync_token_count_exchange` keeps its signature and its one blocking
+  copy, and `dispatch` still calls it once.
+- `dispatch` still returns the routed rows, the counts of each local
+  expert and the metadata. `RoutedExperts.forward` passes those counts to
+  `inner_experts` alone.
+- The standard communication backend still builds
+  `AllToAllTokenDispatcher.Config` exactly.
 
 Three fork features are no longer load-bearing, and the list above drops
 them. The compile-mode field served the deleted compile-mode axis; the

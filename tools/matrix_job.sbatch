@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One Slurm job that runs the cells of a benchmark matrix, one after another.
 #
-# This file is a template, and a working example: a dp4 x ep4 matrix of the
-# engines and attention arms, with six cells. Cells a and b repeat one arm,
-# so their spread shows the run-to-run noise.
+# This file is a template, and a working example: the dp4 x ep4 stacked
+# matrix, with seven cells. Cells a and b repeat one arm, so their spread
+# shows the run-to-run drift.
 #
 # Copy the template into a new output root, and edit the copy:
 #   mkdir -p out/<root>
@@ -12,10 +12,12 @@
 # cell lines. Read the admin skill run-gpu-job for the partition and the
 # time limit. The `dp * pp` of each cell must equal the number of cards.
 # Each cell needs exactly one --scenario, and a name of [A-Za-z0-9_-]+.
+# tests/test_tools.py runs the run checks on each cell of this template.
 #
 # The --time must cover the sum of the run times of the cells, plus up to
 # IDLE_MAX_WAIT seconds of load gate per cell. With the default of 1200 s,
-# the gate alone can take 2 h for six cells, so this example sets 300 s.
+# the gate alone can take 2 h 20 min for seven cells, so this example sets
+# 300 s.
 # The 2026-10-07 job ran seven such cells in about 26 min.
 #
 # Submit the copy from the repository root, on a clean tree:
@@ -50,7 +52,7 @@ cd "${SLURM_SUBMIT_DIR:?this file runs only as a Slurm job}" || exit 2
 # Each cell gets its own --out. An exported WARMUP_STEPS refuses a profiled run.
 unset OUT WARMUP_STEPS
 
-# Six cells at about 4 min each, plus at most 5 min of load gate each, fit
+# Seven cells at about 4 min each, plus at most 5 min of load gate each, fit
 # the --time above.
 export IDLE_MAX_WAIT=300
 
@@ -68,9 +70,10 @@ cell() {
 
 # The flag strings are unquoted on purpose: the word split turns each one
 # into arguments. So a value may hold no space and no quote.
-cell 1-titan_compiled-a        --scenario engines   --arm titan_compiled $C
-cell 2-titan_eager             --scenario engines   --arm titan_eager $C
-cell 3-titan_compiled_fa3      --scenario attention --arm titan_compiled_fa3 $C
-cell 4-megatron_stock          --scenario engines   --arm megatron_stock $C
-cell 5-megatron_stock_4flags   --scenario engines   --arm megatron_stock $F $C
-cell 6-titan_compiled-b        --scenario engines   --arm titan_compiled $C
+cell 1-titan_compiled-a                    --scenario stacked   --arm titan_compiled $C
+cell 2-titan_compiled_fa3                  --scenario attention --arm titan_compiled_fa3 $C
+cell 3-titan_compiled_te_per_expert        --scenario experts   --arm titan_compiled_te_per_expert $C
+cell 4-titan_compiled_fa3_te_per_expert    --scenario stacked   --arm titan_compiled_fa3_te_per_expert $C
+cell 5-megatron_stock                      --scenario stacked   --arm megatron_stock $C
+cell 6-megatron_stock_4flags               --scenario stacked   --arm megatron_stock $F $C
+cell 7-titan_compiled-b                    --scenario stacked   --arm titan_compiled $C

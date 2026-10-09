@@ -109,9 +109,9 @@ class LogsByRankTests(unittest.TestCase):
     def test_a_nul_run_before_a_prefix_does_not_hide_the_rank(self) -> None:
         """One eight-rank run wrote 232 NUL bytes in front of rank 3's line.
 
-        Every rank writes to one descriptor, so a concurrent write can leave
-        a hole. The prefix anchor then missed the line and arm rule 1 failed
-        a rank that had trained every step.
+        Torchrun wrote that log without ``-u``, and a thread race in its tee
+        wrote NUL bytes. The prefix anchor then missed the line and arm rule
+        1 failed a rank that had trained every step.
         """
         text = (
             _prefixed(0, "first stage\nTraining completed")

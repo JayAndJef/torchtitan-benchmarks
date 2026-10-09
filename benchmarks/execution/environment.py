@@ -28,7 +28,7 @@ def runtime_environment(
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """The inherited environment, with the repository on ``PYTHONPATH`` and each build cache that the caller did not set."""
-    result = dict(environment or os.environ)
+    result = dict(os.environ if environment is None else environment)
     pythonpath = result.get("PYTHONPATH")
     result.update(
         {

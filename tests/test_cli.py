@@ -25,9 +25,10 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
 )
 from benchmarks.e2e.overrides import Override
-from benchmarks.e2e.runner import execute_run
+from benchmarks.e2e.runner import check_request, execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.models.piper_qwen3.shape import HUGE
+from tests.engine_helpers import patch_cli_check
 
 
 class CliTests(unittest.TestCase):
@@ -39,6 +40,11 @@ class CliTests(unittest.TestCase):
         evaluate = mock.patch("benchmarks.cli.e2e._evaluate")
         self.addCleanup(evaluate.stop)
         evaluate.start()
+        # The plumbing tests patch the runner, so they also patch its checks.
+        # CheckEveryScenarioFirstTests runs the real checks.
+        check = patch_cli_check()
+        self.addCleanup(check.stop)
+        check.start()
 
     def _two_scenarios(self) -> dict:
         """The registry with a second scenario, for the multi-scenario rules.
@@ -179,7 +185,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2", "--ac", "none"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].axes.ac_mode, "none")
+        self.assertEqual(execute.call_args.args[0].request.axes.ac_mode, "none")
 
     def test_ac_mode_defaults_to_unrequested(self) -> None:
         completed = SimpleNamespace(
@@ -191,7 +197,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].axes.ac_mode)
+        self.assertIsNone(execute.call_args.args[0].request.axes.ac_mode)
 
     def test_ac_mode_applies_to_every_swept_scenario(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -204,10 +210,10 @@ class CliTests(unittest.TestCase):
                     ["run", "0", "--ac", "none", "--model-size", "huge"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
-        ac_modes = {call.args[0].axes.ac_mode for call in execute.call_args_list}
+        ac_modes = {call.args[0].request.axes.ac_mode for call in execute.call_args_list}
         self.assertEqual(ac_modes, {"none"})
         # The third global axis must reach every swept scenario too.
-        sizes = {call.args[0].axes.model_size for call in execute.call_args_list}
+        sizes = {call.args[0].request.axes.model_size for call in execute.call_args_list}
         self.assertEqual(sizes, {"huge"})
 
     def test_model_size_defaults_to_unrequested_and_rejects_unknowns(self) -> None:
@@ -220,7 +226,7 @@ class CliTests(unittest.TestCase):
         ) as execute:
             result = self.runner.invoke(cli, ["run", "2"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIsNone(execute.call_args.args[0].axes.model_size)
+        self.assertIsNone(execute.call_args.args[0].request.axes.model_size)
 
         rejected = self.runner.invoke(cli, ["run", "2", "--model-size", "enormous"])
         self.assertNotEqual(rejected.exit_code, 0)
@@ -251,8 +257,8 @@ class CliTests(unittest.TestCase):
                     json.dump({"traceEvents": []}, trace_file)
             return SimpleNamespace(returncode=0)
 
-        def run_with_fake_process(request, **kwargs):
-            return execute_run(request, process_runner=fake_process, **kwargs)
+        def run_with_fake_process(checked, **kwargs):
+            return execute_run(checked, process_runner=fake_process, **kwargs)
 
         metadata = {
             "requested_gpu": "0",
@@ -262,6 +268,8 @@ class CliTests(unittest.TestCase):
             "benchmarks_git_rev": "bench-rev",
         }
         with tempfile.TemporaryDirectory() as temporary, mock.patch(
+            "benchmarks.cli.e2e.check_request", check_request
+        ), mock.patch(
             "benchmarks.cli.e2e.execute_run", side_effect=run_with_fake_process
         ), mock.patch(
             "benchmarks.e2e.runner.hardware_metadata",
@@ -325,7 +333,7 @@ class CliTests(unittest.TestCase):
             "--set=megatron_stock.nan_guard=on",
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        request = execute.call_args.args[0]
+        request = execute.call_args.args[0].request
         self.assertEqual(request.gpu, "2")
         self.assertEqual(
             request.overrides,
@@ -340,7 +348,7 @@ class CliTests(unittest.TestCase):
     def test_an_absent_set_reaches_the_request_empty(self) -> None:
         result, execute = self._invoke_run()
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute.call_args.args[0].overrides, ())
+        self.assertEqual(execute.call_args.args[0].request.overrides, ())
 
     def test_a_malformed_set_is_refused(self) -> None:
         result, execute = self._invoke_run("--set", "megatron_stock nan_guard on")
@@ -425,7 +433,7 @@ class CliTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(
-            execute.call_args.args[0].arm_names, ("titan_eager", "titan_compiled")
+            execute.call_args.args[0].request.arm_names, ("titan_eager", "titan_compiled")
         )
 
     def test_run_executes_then_evaluates_same_output(self) -> None:
@@ -440,7 +448,7 @@ class CliTests(unittest.TestCase):
                     ["run", "6", "--scenario", "engines", "--ac", "none"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
-        request = execute.call_args.args[0]
+        request = execute.call_args.args[0].request
         self.assertEqual(request.arm_names, ())
         evaluate.assert_called_once_with(out_dir, (), None)
 
@@ -456,7 +464,7 @@ class CliTests(unittest.TestCase):
                     cli, ["run", "0", "--ac", "none"]
                 )
         self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
+        requests = [call.args[0].request for call in execute.call_args_list]
         self.assertEqual(
             [request.scenario_name for request in requests], list(SCENARIOS)
         )
@@ -511,7 +519,7 @@ class CliTests(unittest.TestCase):
                 result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(
-            [call.args[0].scenario_name for call in execute.call_args_list],
+            [call.args[0].request.scenario_name for call in execute.call_args_list],
             ["engines"],
         )
 
@@ -527,7 +535,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(DEFAULT_AC_MODE, "none")
         self.assertEqual(
-            [call.args[0].scenario_name for call in execute.call_args_list],
+            [call.args[0].request.scenario_name for call in execute.call_args_list],
             list(SCENARIOS),
         )
 
@@ -541,7 +549,7 @@ class CliTests(unittest.TestCase):
                     cli, ["run", "0", "--ac", "none"]
                 )
         self.assertEqual(result.exit_code, 0, result.output)
-        names = [call.args[0].scenario_name for call in execute.call_args_list]
+        names = [call.args[0].request.scenario_name for call in execute.call_args_list]
         self.assertEqual(names, list(SCENARIOS))
 
     def test_all_scenarios_stops_at_the_first_failing_scenario(self) -> None:
@@ -572,7 +580,7 @@ class CliTests(unittest.TestCase):
                 result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(
-            [call.args[0].scenario_name for call in execute.call_args_list],
+            [call.args[0].request.scenario_name for call in execute.call_args_list],
             list(SCENARIOS),
         )
 
@@ -664,7 +672,7 @@ class CliTests(unittest.TestCase):
             ) as execute:
                 result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
         self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
+        requests = [call.args[0].request for call in execute.call_args_list]
         self.assertEqual(
             [request.scenario_name for request in requests],
             ["engines", "engines_copy"],
@@ -686,7 +694,7 @@ class CliTests(unittest.TestCase):
                     ["run", "0", "--scenario", "engines", "--scenario", "engines"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
+        requests = [call.args[0].request for call in execute.call_args_list]
         self.assertEqual(
             [request.scenario_name for request in requests], ["engines", "engines"]
         )
@@ -712,7 +720,7 @@ class CliTests(unittest.TestCase):
             ) as execute:
                 result = self.runner.invoke(cli, ["run", "0", "--ac", "none"])
         self.assertEqual(result.exit_code, 0, result.output)
-        requests = [call.args[0] for call in execute.call_args_list]
+        requests = [call.args[0].request for call in execute.call_args_list]
         self.assertEqual([request.occurrence for request in requests], [1, 1])
         self.assertEqual(
             _default_output_dir(ENGINES, "h200", None, {}, "STAMP", 1).name, "h200"
@@ -754,6 +762,64 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(state["status"], "evaluation_failed")
         self.assertIn("bad trace", state["evaluation"]["error"])
+
+
+class CheckEveryScenarioFirstTests(unittest.TestCase):
+    """A refused scenario stops the command before the first arm of any scenario starts."""
+
+    def _invoke(self, *arguments: str):
+        with mock.patch("benchmarks.cli.e2e.execute_run") as execute, mock.patch(
+            "benchmarks.cli.e2e._evaluate"
+        ), mock.patch("benchmarks.cli.e2e.record_evaluation_status"):
+            result = CliRunner().invoke(cli, ["run", *arguments])
+        return result, execute
+
+    def test_an_omitted_scenario_at_ep_1_refuses_before_any_arm(self) -> None:
+        result, execute = self._invoke("0", "--model-size", "1b", "--ac", "none")
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("scenario 'experts': titan_compiled_te_per_expert", result.output)
+        self.assertIn("needs an expert-parallel mesh", result.output)
+        execute.assert_not_called()
+
+    def test_a_refused_later_scenario_stops_the_earlier_one(self) -> None:
+        for later, arm in (
+            ("experts", "titan_compiled_te_per_expert"),
+            ("stacked", "titan_compiled_fa3_te_per_expert"),
+        ):
+            with self.subTest(scenario=later):
+                result, execute = self._invoke(
+                    "0", "--model-size", "1b", "--scenario", "engines", "--scenario", later
+                )
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn(f"scenario '{later}': {arm}", result.output)
+                self.assertIn("needs an expert-parallel mesh", result.output)
+                execute.assert_not_called()
+
+    def test_named_scenarios_that_pass_their_checks_run(self) -> None:
+        result, execute = self._invoke(
+            "0", "--model-size", "1b", "--scenario", "engines", "--scenario", "attention"
+        )
+        self.assertEqual(result.exit_code, 0, f"{result.output}{result.exception!r}")
+        self.assertEqual(
+            [call.args[0].request.scenario_name for call in execute.call_args_list],
+            ["engines", "attention"],
+        )
+
+    def test_each_scenario_is_checked_once_and_runs_its_checked_run(self) -> None:
+        checked = []
+
+        def check(request):
+            checked.append(check_request(request))
+            return checked[-1]
+
+        with mock.patch("benchmarks.cli.e2e.check_request", side_effect=check):
+            result, execute = self._invoke(
+                "0", "--model-size", "1b", "--scenario", "engines", "--scenario", "attention"
+            )
+        self.assertEqual(result.exit_code, 0, f"{result.output}{result.exception!r}")
+        self.assertEqual(len(checked), 2)
+        for call, made in zip(execute.call_args_list, checked, strict=True):
+            self.assertIs(call.args[0], made)
 
 
 if __name__ == "__main__":

@@ -179,6 +179,8 @@ WORKER_SIDE_MODULES = (
     "benchmarks.models.piper_qwen3.components.rope.te_rope_override",
     "benchmarks.models.piper_qwen3.components.attention.packed",
     "benchmarks.models.piper_qwen3.components.attention.fa3_override",
+    "benchmarks.models.piper_qwen3.components.moe.host_count_dispatcher",
+    "benchmarks.models.piper_qwen3.components.moe.te_per_expert_experts",
     # The cross-engine weight map. It reshapes and copies tensors, so torch at
     # module scope is what it is, not an oversight -- unlike mcore_profiles,
     # which describes the same model and stays parent-side.
@@ -215,6 +217,8 @@ WORKER_SIDE_MODULES = (
     "benchmarks.kernel.engine.correctness",
     "benchmarks.kernel.engine.measurement",
     "benchmarks.kernel.engine.run",
+    # The torchrun agent of a per-rank launch. It runs torch's launcher.
+    "benchmarks.execution.torchrun",
 )
 
 # The third category, and the reason two lists were never enough. These run in
@@ -1100,7 +1104,8 @@ class CanonicalImportRootsTest(unittest.TestCase):
 class BenchmarksNameShadowingTest(unittest.TestCase):
     """Guards a name collision that is invisible until it silently isn't.
 
-    The **training** subprocess -- and only that one -- is exposed. It runs
+    The **training** subprocess -- and the torchrun agent that starts it,
+    ``benchmarks.execution.torchrun`` -- are exposed. Both run
     with ``cwd=third_party/torchtitan`` (each engine's ``Launch.cwd``) and
     ``PYTHONPATH=<repo root>`` (``benchmarks/execution/environment.py``,
     ``runtime_environment``; the root itself is ``BENCH_DIR``, in

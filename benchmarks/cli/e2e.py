@@ -29,7 +29,7 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
 )
 from benchmarks.e2e.results import evaluate_run, render_evaluation, write_results
-from benchmarks.e2e.runner import RunResult, execute_run
+from benchmarks.e2e.runner import CheckedRun, RunResult, check_request, execute_run
 from benchmarks.models.piper_qwen3.shape import MODEL_SIZE_CHOICES
 
 
@@ -321,9 +321,9 @@ def _request(
     )
 
 
-def _execute(request: RunRequest) -> RunResult:
+def _execute(checked: CheckedRun) -> RunResult:
     try:
-        return execute_run(request, event_handler=_show_event)
+        return execute_run(checked, event_handler=_show_event)
     except (OSError, ValueError, RuntimeError) as error:
         raise click.ClickException(str(error)) from error
 
@@ -407,7 +407,7 @@ def run_command(
     # One stamp above every scenario of a multi-scenario run.
     timestamp = run_timestamp() if len(selected) > 1 else None
     skipped: list[str] = []
-    executed = False
+    planned: list[tuple[str, RunRequest]] = []
     occurrences: Counter[str] = Counter()
     for name in selected:
         occurrences[name] += 1
@@ -417,27 +417,37 @@ def run_command(
                 click.echo(f"\n===== scenario: {name} =====\nskipped: {reason}")
                 skipped.append(f"{name}: {reason}")
                 continue
-        if len(selected) > 1:
-            click.echo(f"\n===== scenario: {name} =====")
         # A copy per scenario, because _axes pops the axis options out.
         scenario_options: dict[str, Any] = dict(options)
-        _run_and_evaluate(
-            _request(
-                gpu,
-                # A resume reads the scenario from the manifest.
-                scenario_name=(
-                    name if requested or resume_dir is None else None
+        planned.append(
+            (
+                name,
+                _request(
+                    gpu,
+                    # A resume reads the scenario from the manifest.
+                    scenario_name=(
+                        name if requested or resume_dir is None else None
+                    ),
+                    arm_names=arm_names,
+                    resume_dir=resume_dir,
+                    timestamp=timestamp,
+                    occurrence=occurrences[name],
+                    **scenario_options,
                 ),
-                arm_names=arm_names,
-                resume_dir=resume_dir,
-                timestamp=timestamp,
-                occurrence=occurrences[name],
-                **scenario_options,
-            ),
-            results_path,
+            )
         )
-        executed = True
-    if not executed:
+    # Every scenario is checked before the first arm starts.
+    checked_runs: list[tuple[str, CheckedRun]] = []
+    for name, request in planned:
+        try:
+            checked_runs.append((name, check_request(request)))
+        except (OSError, ValueError, RuntimeError) as error:
+            raise click.ClickException(f"scenario {name!r}: {error}") from error
+    for name, checked in checked_runs:
+        if len(selected) > 1:
+            click.echo(f"\n===== scenario: {name} =====")
+        _run_and_evaluate(checked, results_path)
+    if not planned:
         raise click.ClickException(
             "every selected scenario declines one of the run axes, so "
             "nothing ran:\n  "
@@ -518,9 +528,9 @@ def evaluate_command(
     _evaluate(out_dir, arms, results_path)
 
 
-def _run_and_evaluate(request: RunRequest, results_path: Path | None) -> None:
+def _run_and_evaluate(checked: CheckedRun, results_path: Path | None) -> None:
     """Run, then evaluate, and record an evaluation failure so that a resume retries it."""
-    result = _execute(request)
+    result = _execute(checked)
     click.echo("\nAll arms validated. Evaluating...")
     try:
         _evaluate(result.out_dir, (), results_path)

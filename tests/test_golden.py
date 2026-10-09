@@ -36,7 +36,7 @@ from benchmarks.e2e.axes import RequestedAxes, RunRequest
 from benchmarks.e2e.overrides import parse_override
 from benchmarks.e2e.parallelism import ParallelismSpec
 from benchmarks.e2e.results import RESULTS_SCHEMA_VERSION, evaluate_run
-from benchmarks.e2e.runner import execute_run
+from benchmarks.e2e.runner import check_request, execute_run
 from benchmarks.execution.affinity import CpuPinning
 from benchmarks.execution.launcher import LAUNCHER_KEYS
 from benchmarks.execution.paths import BENCH_DIR
@@ -70,7 +70,7 @@ METADATA = {
     "megatron_git_rev": "59b72fa57f2059e858cb4bb5c094e62cc590754f",
     "te_version": "2.17.1",
     "cudnn_torch_build": "9.24.0",
-    "cudnn_loader_resolves": "/usr/lib64/libcudnn.so.9.23.2",
+    "cudnn_loader_resolves": "92400 /venv/lib/python3.10/site-packages/nvidia/cudnn/lib",
 }
 """The provenance block the stubbed host probe returns."""
 
@@ -242,9 +242,11 @@ def capture_launch(case: dict[str, Any]) -> dict[str, Any]:
     ):
         out_dir = Path(temporary) / "run"
         execute_run(
-            _request(case, out_dir),
+            check_request(
+                _request(case, out_dir),
+                environment=dict(HOST_ENVIRONMENT),
+            ),
             process_runner=process_runner,
-            environment=dict(HOST_ENVIRONMENT),
         )
         manifest = json.loads((out_dir / "manifest.json").read_text())
         return _neutral(
@@ -333,6 +335,18 @@ def _megatron_driver_moves_into_the_engine_package(record: dict[str, Any]) -> No
     for _, argv in _argvs(record):
         if OLD_MEGATRON_DRIVER in argv:
             argv[argv.index(OLD_MEGATRON_DRIVER)] = MEGATRON_DRIVER
+
+
+def _torchrun_runs_unbuffered(record: dict[str, Any]) -> None:
+    for _, argv in _argvs(record):
+        if "torch.distributed.run" in argv:
+            argv.insert(argv.index("torch.distributed.run") - 1, "-u")
+
+
+def _torchrun_tees_whole_lines(record: dict[str, Any]) -> None:
+    for _, argv in _argvs(record):
+        if "torch.distributed.run" in argv:
+            argv[argv.index("torch.distributed.run")] = "benchmarks.execution.torchrun"
 
 
 EXECUTION_MODEL_SENTENCES = (
@@ -436,6 +450,18 @@ ACCEPTED_DIFFERENCES = (
         "model, so the scenario description and the Megatron arm description "
         "drop the sentence about the top-level execution model.",
         _descriptions_drop_the_execution_model,
+    ),
+    AcceptedDifference(
+        "The launcher starts torchrun with '-u'. The tee threads of torchrun "
+        "shared one buffered stream, and a thread race in it lost lines of "
+        "the arm log and wrote NUL bytes in their place.",
+        _torchrun_runs_unbuffered,
+    ),
+    AcceptedDifference(
+        "The launcher runs torchrun through benchmarks.execution.torchrun. "
+        "Its tee holds a partial worker line until the newline arrives, so "
+        "the line of another rank no longer joins it in the arm log.",
+        _torchrun_tees_whole_lines,
     ),
 )
 """The changes from the baseline that the plan names or that the review accepted."""

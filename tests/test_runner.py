@@ -1,9 +1,11 @@
 """CPU-only tests for benchmark scenario construction and validation helpers."""
 
+import ast
 import gzip
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -42,6 +44,7 @@ from benchmarks.e2e.engines.api import ProfileWindow, StepSample
 from benchmarks.e2e.results import arm_steps, stable_samples
 from benchmarks.e2e.runner import (
     _resolve_run,
+    check_request,
     execute_run,
     select_arms,
 )
@@ -60,11 +63,13 @@ from benchmarks.e2e.engines.torchtitan.plugins.parallelize import (
     skip_data_parallel,
 )
 from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B, PIPER_SHAPES
+from benchmarks.models.piper_qwen3.titan_model import apply_config_overrides
 from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.override import parse_cli_imports
 from torchtitan.distributed import ParallelDims
 
 
@@ -111,13 +116,13 @@ class ScenarioTests(unittest.TestCase):
 
         A default could only be reached by an omission, and it would then
         measure one scenario under whatever label the operator assumed --
-        a wrong result rather than a missing one. ``_resolve_run`` holds the
+        a wrong result rather than a missing one. ``check_request`` holds the
         rule, so the CLI and every programmatic caller inherit it, and no
         scenario name is written anywhere as a default.
 
         The two patches prove the refusal lands before any work starts.
         ``hardware_metadata`` is the first host probe ``_resolve_run`` makes
-        after it resolves the scenario, and ``process_runner`` launches the
+        after the check resolves the scenario, and ``process_runner`` launches the
         training subprocess; neither may run.
         """
 
@@ -130,12 +135,34 @@ class ScenarioTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError) as caught:
                 execute_run(
-                    RunRequest(gpu="0"),
+                    check_request(
+                        RunRequest(gpu="0"),
+                        environment={"PATH": os.environ["PATH"]},
+                    ),
                     process_runner=never,
-                    environment={"PATH": os.environ["PATH"]},
                 )
         self.assertIn("no scenario requested", str(caught.exception))
         self.assertIn("--scenario", str(caught.exception))
+
+    def test_the_check_reads_the_given_environment_even_when_it_is_empty(self) -> None:
+        request = RunRequest(
+            axes=RequestedAxes(ac_mode="none", model_size="1b"),
+            gpu="0",
+            scenario_name="engines",
+            out_dir=Path("/tmp/check-environment-test"),
+        )
+        cache_root = Path("/tmp/check-environment-cache")
+        with mock.patch.dict(
+            os.environ, {"STEPS": "77", "BENCHMARK_CACHE_ROOT": str(cache_root)}
+        ):
+            checked = check_request(request, environment={})
+            inherited = check_request(request)
+        self.assertEqual(inherited.run.data.steps, 77)
+        self.assertEqual(inherited.paths.cache_root, cache_root)
+        self.assertEqual(checked.environment, {})
+        self.assertIs(checked.request, request)
+        self.assertEqual(checked.run.data.steps, ENGINES.data.steps)
+        self.assertNotEqual(checked.paths.cache_root, cache_root)
 
     def test_the_stock_config_uses_plain_cross_entropy(self) -> None:
         self.assertIsInstance(
@@ -176,7 +203,7 @@ class UncompiledScheduleRefusalTests(unittest.TestCase):
     PyTorch's zero-bubble and DualPipeV classes call
     ``_check_torch_compile_compatibility``, which raises on a compiled
     stage module. Compile is a property of each arm, so a spec alone
-    cannot answer this: ``_resolve_run`` reads the selected arms and names
+    cannot answer this: ``check_request`` reads the selected arms and names
     the one that compiles.
     """
 
@@ -201,18 +228,20 @@ class UncompiledScheduleRefusalTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
-                        parallelism=self.ZBV,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode="none",
+                            parallelism=self.ZBV,
+                        ),
+                        gpu="0,1",
+                        scenario_name="engines",
+                        arm_names=names,
+                        out_dir=Path(temporary) / "run",
+                        batch=8,
                     ),
-                    gpu="0,1",
-                    scenario_name="engines",
-                    arm_names=names,
-                    out_dir=Path(temporary) / "run",
-                    batch=8,
+                    environment={"PATH": os.environ["PATH"]},
                 ),
-                {"PATH": os.environ["PATH"]},
             )
 
     def test_a_compiled_arm_is_refused_and_named(self) -> None:
@@ -277,7 +306,12 @@ class SelectedArmTests(unittest.TestCase):
             arm_names=names,
             out_dir=Path("/tmp/selected-arm-test"),
         )
-        return _resolve_run(request, {"PATH": os.environ["PATH"]})
+        return _resolve_run(
+            check_request(
+                request,
+                environment={"PATH": os.environ["PATH"]},
+            ),
+        )
 
     def test_every_subset_resolves_and_keeps_its_order(self) -> None:
         cases = (
@@ -321,17 +355,19 @@ class SelectedArmTests(unittest.TestCase):
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             out_dir = Path(temporary) / "run"
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode="none",
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode="none",
+                        ),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("titan_eager", "titan_compiled"),
+                        out_dir=out_dir,
                     ),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("titan_eager", "titan_compiled"),
-                    out_dir=out_dir,
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             state = json.loads((out_dir / "run_state.json").read_text())
@@ -346,13 +382,15 @@ class SelectedArmTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "existing manifest: arms$"):
                 execute_run(
-                    RunRequest(
-                        gpu="0",
-                        arm_names=("titan_compiled", "titan_eager"),
-                        resume_dir=out_dir,
+                    check_request(
+                        RunRequest(
+                            gpu="0",
+                            arm_names=("titan_compiled", "titan_eager"),
+                            resume_dir=out_dir,
+                        ),
+                        environment={"PATH": os.environ["PATH"]},
                     ),
                     process_runner=fake_process,
-                    environment={"PATH": os.environ["PATH"]},
                 )
 
 
@@ -407,19 +445,21 @@ def _resolve(
         return_value=CpuPinning((), "none: test"),
     ):
         return _resolve_run(
-            RunRequest(
-                axes=RequestedAxes(
-                    ac_mode=None if resume_dir else "none",
-                    parallelism=parallelism,
+            check_request(
+                RunRequest(
+                    axes=RequestedAxes(
+                        ac_mode=None if resume_dir else "none",
+                        parallelism=parallelism,
+                    ),
+                    gpu=gpu,
+                    scenario_name=None if resume_dir else "engines",
+                    arm_names=names,
+                    out_dir=None if resume_dir else Path("/tmp/override-test"),
+                    resume_dir=resume_dir,
+                    overrides=_overrides(*overrides),
                 ),
-                gpu=gpu,
-                scenario_name=None if resume_dir else "engines",
-                arm_names=names,
-                out_dir=None if resume_dir else Path("/tmp/override-test"),
-                resume_dir=resume_dir,
-                overrides=_overrides(*overrides),
+                environment={"PATH": os.environ["PATH"]},
             ),
-            {"PATH": os.environ["PATH"]},
         )
 
 
@@ -436,15 +476,17 @@ def _refused_before_any_probe(
     ):
         with test.assertRaisesRegex(ValueError, pattern):
             _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none", **keywords),
-                    gpu="0,1" if keywords.get("parallelism") else "0",
-                    scenario_name="engines",
-                    arm_names=names,
-                    out_dir=Path("/tmp/override-test"),
-                    overrides=_overrides(*overrides),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none", **keywords),
+                        gpu="0,1" if keywords.get("parallelism") else "0",
+                        scenario_name="engines",
+                        arm_names=names,
+                        out_dir=Path("/tmp/override-test"),
+                        overrides=_overrides(*overrides),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
-                {"PATH": os.environ["PATH"]},
             )
 
 
@@ -555,16 +597,18 @@ class OverrideResolutionTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ), mock.patch("benchmarks.e2e.runner.validate_arm") as validate:
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none"),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("megatron_stock",),
-                    out_dir=Path(temporary) / "run",
-                    overrides=_overrides("megatron_stock.nan_guard=on"),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none"),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("megatron_stock",),
+                        out_dir=Path(temporary) / "run",
+                        overrides=_overrides("megatron_stock.nan_guard=on"),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
         self.assertEqual(validate.call_count, 1)
         arm = validate.call_args.args[1]
@@ -587,18 +631,20 @@ class OverrideResolutionTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 execute_run(
-                    RunRequest(
-                        axes=RequestedAxes(ac_mode="none"),
-                        gpu="0",
-                        scenario_name="engines",
-                        arm_names=("megatron_stock",),
-                        out_dir=Path(temporary) / "run",
+                    check_request(
+                        RunRequest(
+                            axes=RequestedAxes(ac_mode="none"),
+                            gpu="0",
+                            scenario_name="engines",
+                            arm_names=("megatron_stock",),
+                            out_dir=Path(temporary) / "run",
+                        ),
+                        environment={"PATH": os.environ["PATH"]},
                     ),
                     event_handler=lambda event: events.append(
                         event.message if event.kind == "summary" else ""
                     ),
                     process_runner=failing_process,
-                    environment={"PATH": os.environ["PATH"]},
                 )
         (line,) = [event for event in events if event.startswith("config ")]
         self.assertIn("config megatron_stock: megatron_stock {", line)
@@ -617,16 +663,18 @@ class OverrideResumeTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none", parallelism=parallelism),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("megatron_stock",),
-                    out_dir=out_dir,
-                    overrides=_overrides(*overrides),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none", parallelism=parallelism),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("megatron_stock",),
+                        out_dir=out_dir,
+                        overrides=_overrides(*overrides),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=lambda command, **kwargs: SimpleNamespace(returncode=0),
-                environment={"PATH": os.environ["PATH"]},
             )
 
     def test_an_omitted_field_inherits_the_recorded_value(self) -> None:
@@ -1123,7 +1171,19 @@ class EnginesScenarioTests(unittest.TestCase):
             scenario_name="engines",
         )
         with self.assertRaisesRegex(ValueError, "does not support ac mode"):
-            execute_run(request, environment={"PATH": os.environ["PATH"]})
+            execute_run(
+                check_request(
+                    request,
+                    environment={"PATH": os.environ["PATH"]},
+                ),
+            )
+
+
+FA3_TARGET = "benchmarks.models.piper_qwen3.components.attention.fa3_override.packed_fa3_attention"
+"""The override that replaces each block's attention with FA3 varlen attention."""
+
+FA3_MARKERS = ("FlashAttnFwdSm90",)
+"""The Hopper forward kernel of FA3 varlen attention."""
 
 
 class AttentionScenarioTests(unittest.TestCase):
@@ -1143,22 +1203,13 @@ class AttentionScenarioTests(unittest.TestCase):
         self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
 
     def test_each_kernel_arm_overrides_one_attention_per_block(self) -> None:
-        scenario = scenario_by_name("attention")
-        prefix = "benchmarks.models.piper_qwen3.components.attention"
-        for name, target, marker in (
-            (
-                "titan_compiled_fa3",
-                f"{prefix}.fa3_override.packed_fa3_attention",
-                "FlashAttnFwdSm90",
-            ),
-        ):
-            with self.subTest(arm=name):
-                config = scenario.arm(name).config
-                self.assertEqual(engine_for(scenario.arm(name)).name, "torchtitan")
-                self.assertEqual(config.compile, CompileMode.TORCH)
-                self.assertEqual(config.override_imports, (target,))
-                self.assertEqual(config.overrides_per_block, 1)
-                self.assertEqual(config.trace_kernel_markers, (marker,))
+        arm = scenario_by_name("attention").arm("titan_compiled_fa3")
+        config = arm.config
+        self.assertEqual(engine_for(arm).name, "torchtitan")
+        self.assertEqual(config.compile, CompileMode.TORCH)
+        self.assertEqual(config.override_imports, (FA3_TARGET,))
+        self.assertEqual(config.overrides_per_block, 1)
+        self.assertEqual(config.trace_kernel_markers, FA3_MARKERS)
 
     def test_every_arm_command_builds_at_ac_none(self) -> None:
         for arm in scenario_by_name("attention").arms:
@@ -1206,6 +1257,360 @@ class AttentionScenarioTests(unittest.TestCase):
         )
 
 
+MOE_PACKAGE = "benchmarks.models.piper_qwen3.components.moe"
+
+HOST_COUNT_TARGET = f"{MOE_PACKAGE}.host_count_dispatcher.host_count_dispatcher"
+
+PER_EXPERT_TARGET = f"{MOE_PACKAGE}.te_per_expert_experts.te_per_expert_experts"
+
+PER_EXPERT_MARKERS = ("torchtitan_benchmarks::te_per_expert_mm",)
+"""The profiler range that each per-expert op opens, at every shape."""
+
+EP2_SPEC = ParallelismSpec(dp=2, ep=2, zero=1)
+"""A two-GPU mesh at ep 2, at which every arm of the experts and stacked scenarios can run."""
+
+OVERRIDE_COUNT_SIZES = ("1b", "30b-a3b")
+"""The model sizes at which each override arm is counted."""
+
+
+def _override_counts(
+    scenario_name: str, names: list[str]
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Per arm of ``scenario_name``, size and override target: the number of nodes it replaced."""
+    scenario = scenario_by_name(scenario_name)
+    counts: dict[str, dict[str, dict[str, int]]] = {}
+    for name in names:
+        config = scenario.arm(name).config
+        for size in OVERRIDE_COUNT_SIZES:
+            lines = apply_config_overrides(
+                qwen3_piper_1b_pretokenized(size=size),
+                config.override_imports,
+                expected=config.overrides_per_block * PIPER_SHAPES[size].n_layers,
+            )
+            counts.setdefault(name, {})[size] = {
+                target: sum(line.startswith(f"[Override] {target}:") for line in lines)
+                for target in config.override_imports
+            }
+    return counts
+
+
+OVERRIDE_COUNT_SCRIPT = """
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from tests.test_runner import _override_counts
+
+print(json.dumps(_override_counts(sys.argv[2], sys.argv[3:])))
+"""
+"""Counts the arms ``argv[3:]`` of the scenario ``argv[2]`` in a fresh process and prints the counts as JSON."""
+
+
+def _count_in_subprocess(test: unittest.TestCase, scenario: str, names: list[str]) -> dict:
+    """The ``_override_counts`` of ``names`` from a fresh process, so TE does not patch this process."""
+    repo = Path(__file__).resolve().parent.parent
+    completed = subprocess.run(
+        [sys.executable, "-c", OVERRIDE_COUNT_SCRIPT, str(repo), scenario, *names],
+        cwd=repo,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    test.assertEqual(completed.returncode, 0, completed.stderr)
+    return json.loads(completed.stdout.splitlines()[-1])
+
+
+class ExpertsScenarioTests(unittest.TestCase):
+    def test_scenario_registration(self) -> None:
+        scenario = scenario_by_name("experts")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            [
+                "titan_compiled",
+                "titan_compiled_te_per_expert",
+                "megatron_stock",
+            ],
+        )
+        self.assertIs(scenario.data, C4_REPLAY_DATA)
+        self.assertEqual(scenario.supported_ac_modes, ("none",))
+        self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
+        self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
+        self.assertEqual(set(SCENARIOS), {"engines", "attention", "experts", "stacked"})
+
+    def test_the_override_arm_declares_its_imports_count_and_markers(self) -> None:
+        arm = scenario_by_name("experts").arm("titan_compiled_te_per_expert")
+        config = arm.config
+        self.assertEqual(engine_for(arm).name, "torchtitan")
+        self.assertEqual(config.compile, CompileMode.TORCH)
+        self.assertEqual(config.override_imports, (HOST_COUNT_TARGET, PER_EXPERT_TARGET))
+        self.assertEqual(config.overrides_per_block, 2)
+        self.assertEqual(config.trace_kernel_markers, PER_EXPERT_MARKERS)
+        self.assertIs(config.packed_offsets, False)
+        self.assertEqual(config.extra_flags, ())
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        self.assertEqual(engine_for(arm).check(run, arm), [])
+
+    def test_the_per_expert_marker_is_the_range_that_its_ops_open(self) -> None:
+        """The source is parsed, so TE stays out of this process."""
+        source = Path(__file__).resolve().parent.parent / (
+            "benchmarks/models/piper_qwen3/components/moe/te_per_expert_experts.py"
+        )
+        (value,) = [
+            node.value.value
+            for node in ast.parse(source.read_text()).body
+            if isinstance(node, ast.Assign)
+            and [t.id for t in node.targets if isinstance(t, ast.Name)] == ["TRACE_MARKER"]
+        ]
+        self.assertEqual(PER_EXPERT_MARKERS, (value,))
+        self.assertEqual(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert").config.trace_kernel_markers,
+            (value,),
+        )
+
+    def test_every_arm_command_builds_at_ac_none(self) -> None:
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for arm in scenario_by_name("experts").arms:
+            argv = command(run, arm, Path("/out") / arm.name)
+            self.assertTrue(argv, arm.name)
+
+    def test_each_override_arm_sends_its_imports(self) -> None:
+        scenario = scenario_by_name("experts")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for name, targets in (
+            ("titan_compiled", ()),
+            ("titan_compiled_te_per_expert", (HOST_COUNT_TARGET, PER_EXPERT_TARGET)),
+        ):
+            with self.subTest(arm=name):
+                argv = command(run, scenario.arm(name), Path("/out"))
+                sent = [
+                    argv[index + 1]
+                    for index, token in enumerate(argv)
+                    if token == "--override.imports"
+                ]
+                self.assertEqual(len(sent), 1 if targets else 0)
+                self.assertEqual(tuple(parse_cli_imports(sent)), targets)
+                self.assertNotIn("--dataloader.offset-rows", argv)
+
+    def test_the_te_arm_replaces_its_count_of_nodes(self) -> None:
+        """A subprocess counts the TE arm, so TE does not patch this process."""
+        counts = _count_in_subprocess(self, "experts", ["titan_compiled_te_per_expert"])
+        self.assertEqual(sorted(counts), ["titan_compiled_te_per_expert"])
+        for name, sizes in counts.items():
+            self.assertEqual(sorted(sizes), sorted(OVERRIDE_COUNT_SIZES))
+            config = scenario_by_name("experts").arm(name).config
+            for size, targets in sizes.items():
+                self.assertEqual(sorted(targets), sorted(config.override_imports))
+                for target, count in targets.items():
+                    with self.subTest(arm=name, size=size, target=target):
+                        self.assertEqual(count, PIPER_SHAPES[size].n_layers)
+
+    def test_packed_offsets_on_the_te_arm_is_refused(self) -> None:
+        arm = configured(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
+            packed_offsets=True,
+        )
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn("titan_compiled_te_per_expert: packed_offsets is on", refusal)
+
+    def test_the_per_expert_experts_without_the_host_count_dispatcher_is_refused(self) -> None:
+        arm = configured(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
+            overrides_per_block=1,
+            override_imports=(PER_EXPERT_TARGET,),
+        )
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn(f"titan_compiled_te_per_expert: the override import {PER_EXPERT_TARGET}", refusal)
+        self.assertIn("add the host count dispatcher", refusal)
+
+    def test_the_host_count_dispatcher_without_the_per_expert_experts_is_refused(self) -> None:
+        arm = configured(
+            scenario_by_name("experts").arm("titan_compiled_te_per_expert"),
+            overrides_per_block=1,
+            override_imports=(HOST_COUNT_TARGET,),
+        )
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn(
+            f"titan_compiled_te_per_expert: the override import {HOST_COUNT_TARGET}",
+            refusal,
+        )
+        self.assertIn("add the per-expert experts", refusal)
+
+    def test_either_host_count_override_at_ep_1_is_refused(self) -> None:
+        arm = scenario_by_name("experts").arm("titan_compiled_te_per_expert")
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=2)):
+            for imports in (
+                (HOST_COUNT_TARGET, PER_EXPERT_TARGET),
+                (PER_EXPERT_TARGET,),
+                (HOST_COUNT_TARGET,),
+            ):
+                with self.subTest(dp=spec.dp, imports=imports):
+                    swapped = configured(arm, override_imports=imports)
+                    refusals = engine_for(swapped).check(
+                        run_spec(ac_mode="none", parallelism=spec), swapped
+                    )
+                    (refusal,) = [r for r in refusals if "ep 1" in r]
+                    self.assertIn(f"the override import {imports[0]}", refusal)
+                    self.assertIn("needs an expert-parallel mesh", refusal)
+        self.assertEqual(
+            engine_for(arm).check(run_spec(ac_mode="none", parallelism=EP2_SPEC), arm), []
+        )
+
+    def test_a_te_override_under_spmd_types_is_refused(self) -> None:
+        name = "titan_compiled_te_per_expert"
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for flags in (
+            ("--parallelism.spmd-backend", "spmd_types"),
+            ("--parallelism.spmd-backend=spmd_types",),
+            ("--parallelism.spmd_backend", "spmd_types"),
+            (
+                "--parallelism.spmd-backend",
+                "default",
+                "--parallelism.spmd-backend=spmd_types",
+            ),
+        ):
+            with self.subTest(flags=flags):
+                arm = configured(scenario_by_name("experts").arm(name), extra_flags=flags)
+                (refusal,) = engine_for(arm).check(run, arm)
+                self.assertIn(f"{name}: the override import {HOST_COUNT_TARGET}", refusal)
+                self.assertIn("no SPMD type rule", refusal)
+                self.assertIn("--parallelism.spmd-backend spmd_types", refusal)
+
+    def test_a_te_override_under_another_backend_passes(self) -> None:
+        scenario = scenario_by_name("experts")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for name, flags in (
+            ("titan_compiled_te_per_expert", ("--parallelism.spmd-backend", "full_dtensor")),
+            (
+                "titan_compiled_te_per_expert",
+                (
+                    "--parallelism.spmd-backend=spmd_types",
+                    "--parallelism.spmd-backend=default",
+                ),
+            ),
+            ("titan_compiled", ("--parallelism.spmd-backend", "spmd_types")),
+        ):
+            with self.subTest(arm=name, flags=flags):
+                arm = configured(scenario.arm(name), extra_flags=flags)
+                self.assertEqual(engine_for(arm).check(run, arm), [])
+
+
+STACKED_ARM = "titan_compiled_fa3_te_per_expert"
+
+
+class StackedScenarioTests(unittest.TestCase):
+    def test_scenario_registration(self) -> None:
+        scenario = scenario_by_name("stacked")
+        self.assertEqual(
+            [arm.name for arm in scenario.arms],
+            ["titan_compiled", STACKED_ARM, "megatron_stock"],
+        )
+        self.assertIs(scenario.data, C4_REPLAY_DATA)
+        self.assertEqual(scenario.supported_ac_modes, ("none",))
+        self.assertIs(scenario.arm("titan_compiled"), ENGINES.arm("titan_compiled"))
+        self.assertIs(scenario.arm("megatron_stock"), ENGINES.arm("megatron_stock"))
+
+    def test_the_stacked_arm_declares_its_imports_count_markers_and_offsets(self) -> None:
+        arm = scenario_by_name("stacked").arm(STACKED_ARM)
+        self.assertEqual(engine_for(arm).name, "torchtitan")
+        self.assertEqual(
+            arm.config,
+            TorchTitanConfig(
+                compile=CompileMode.TORCH,
+                overrides_per_block=3,
+                override_imports=(FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET),
+                trace_kernel_markers=(*FA3_MARKERS, *PER_EXPERT_MARKERS),
+                packed_offsets=True,
+            ),
+        )
+
+    def test_the_stacked_arm_joins_the_fa3_arm_and_the_per_expert_arm(self) -> None:
+        stacked = scenario_by_name("stacked").arm(STACKED_ARM).config
+        fa3 = scenario_by_name("attention").arm("titan_compiled_fa3").config
+        per_expert = scenario_by_name("experts").arm("titan_compiled_te_per_expert").config
+        self.assertEqual(
+            stacked.override_imports, (*fa3.override_imports, *per_expert.override_imports)
+        )
+        self.assertEqual(
+            stacked.overrides_per_block,
+            fa3.overrides_per_block + per_expert.overrides_per_block,
+        )
+        self.assertEqual(
+            stacked.trace_kernel_markers,
+            (*fa3.trace_kernel_markers, *per_expert.trace_kernel_markers),
+        )
+        self.assertEqual(stacked.packed_offsets, fa3.packed_offsets)
+        self.assertEqual(stacked.compile, per_expert.compile)
+
+    def test_the_engine_accepts_the_stacked_arm_at_ep_4_and_refuses_it_at_ep_1(self) -> None:
+        arm = scenario_by_name("stacked").arm(STACKED_ARM)
+        ep4 = ParallelismSpec(dp=4, ep=4, zero=1)
+        self.assertEqual(engine_for(arm).check(run_spec(ac_mode="none", parallelism=ep4), arm), [])
+        for spec in (TRIVIAL_SPEC, ParallelismSpec(dp=4, zero=1)):
+            with self.subTest(dp=spec.dp):
+                (refusal,) = engine_for(arm).check(
+                    run_spec(ac_mode="none", parallelism=spec), arm
+                )
+                self.assertIn(f"{STACKED_ARM}: the override import {HOST_COUNT_TARGET}", refusal)
+                self.assertIn("needs an expert-parallel mesh", refusal)
+
+    def test_the_stacked_arm_under_spmd_types_is_refused(self) -> None:
+        arm = configured(
+            scenario_by_name("stacked").arm(STACKED_ARM),
+            extra_flags=("--parallelism.spmd-backend", "spmd_types"),
+        )
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        (refusal,) = engine_for(arm).check(run, arm)
+        self.assertIn(f"{STACKED_ARM}: the override import {HOST_COUNT_TARGET}", refusal)
+        self.assertIn("no SPMD type rule", refusal)
+
+    def test_the_stacked_arm_without_packed_offsets_is_refused(self) -> None:
+        (arm,) = apply_overrides(
+            (scenario_by_name("stacked").arm(STACKED_ARM),),
+            _overrides(f"{STACKED_ARM}.packed_offsets=off"),
+        )
+        (refusal,) = engine_for(arm).check(run_spec(ac_mode="none", parallelism=EP2_SPEC), arm)
+        self.assertIn(f"{STACKED_ARM}: the override import {FA3_TARGET}", refusal)
+        self.assertIn("packed_offsets is off", refusal)
+
+    def test_every_arm_command_builds_at_ac_none(self) -> None:
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC)
+        for arm in scenario_by_name("stacked").arms:
+            argv = command(run, arm, Path("/out") / arm.name)
+            self.assertTrue(argv, arm.name)
+
+    def test_the_stacked_arm_sends_its_imports_and_the_rows_of_one_microbatch(self) -> None:
+        scenario = scenario_by_name("stacked")
+        run = run_spec(ac_mode="none", parallelism=EP2_SPEC, local_batch_size=8)
+        argv = command(run, scenario.arm(STACKED_ARM), Path("/out"))
+        sent = [
+            argv[index + 1] for index, token in enumerate(argv) if token == "--override.imports"
+        ]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            tuple(parse_cli_imports(sent)), (FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET)
+        )
+        self.assertEqual(argv[argv.index("--dataloader.offset-rows") + 1], "8")
+
+    def test_the_stacked_arm_replaces_its_count_of_nodes(self) -> None:
+        """A subprocess counts the stacked arm, so TE does not patch this process."""
+        counts = _count_in_subprocess(self, "stacked", [STACKED_ARM])
+        self.assertEqual(sorted(counts), [STACKED_ARM])
+        sizes = counts[STACKED_ARM]
+        self.assertEqual(sorted(sizes), sorted(OVERRIDE_COUNT_SIZES))
+        for size, targets in sizes.items():
+            self.assertEqual(
+                sorted(targets), sorted((FA3_TARGET, HOST_COUNT_TARGET, PER_EXPERT_TARGET))
+            )
+            for target, count in targets.items():
+                with self.subTest(size=size, target=target):
+                    self.assertEqual(count, PIPER_SHAPES[size].n_layers)
+            self.assertEqual(sum(targets.values()), 3 * PIPER_SHAPES[size].n_layers)
+
+
 class CompilerEnvironmentTests(unittest.TestCase):
     """The ``requires_gcc_toolset`` branch, against the synthetic arm.
 
@@ -1244,15 +1649,17 @@ class CompilerEnvironmentTests(unittest.TestCase):
             "benchmarks.e2e.runner.scenario_by_name", return_value=scenario
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none"),
-                    gpu="0",
-                    scenario_name="engines",
-                    out_dir=Path(temporary) / "run",
-                    compiler_env=compiler_env,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none"),
+                        gpu="0",
+                        scenario_name="engines",
+                        out_dir=Path(temporary) / "run",
+                        compiler_env=compiler_env,
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
         return captured
 
@@ -1358,16 +1765,18 @@ class ManifestTests(unittest.TestCase):
         ), mock.patch("benchmarks.e2e.runner.validate_arm"):
             out_dir = Path(temporary) / "run"
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(ac_mode="none", model_size="1b"),
-                    gpu="3",
-                    scenario_name="engines",
-                    arm_names=("titan_eager",),
-                    out_dir=out_dir,
-                    overrides=_overrides(f"titan_eager.extra_flags+={extra}"),
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(ac_mode="none", model_size="1b"),
+                        gpu="3",
+                        scenario_name="engines",
+                        arm_names=("titan_eager",),
+                        out_dir=out_dir,
+                        overrides=_overrides(f"titan_eager.extra_flags+={extra}"),
+                    ),
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=lambda command, **kwargs: SimpleNamespace(returncode=0),
-                environment={"PATH": os.environ["PATH"]},
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
@@ -1439,18 +1848,20 @@ class EagerArmTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        model_size="1b",
-                        ac_mode="none",
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            model_size="1b",
+                            ac_mode="none",
+                        ),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("titan_eager",),
+                        out_dir=out_dir,
                     ),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("titan_eager",),
-                    out_dir=out_dir,
+                    environment={"PATH": os.environ["PATH"]},
                 ),
                 process_runner=fake_process,
-                environment={"PATH": os.environ["PATH"]},
             )
         return json.loads((out_dir / "manifest.json").read_text())
 
@@ -1741,9 +2152,11 @@ class ResumeTests(unittest.TestCase):
                 overrides=_overrides("titan_compiled.extra_flags+=--debug.deterministic"),
             )
             execute_run(
-                request,
+                check_request(
+                    request,
+                    environment=environment,
+                ),
                 process_runner=fake_process,
-                environment=environment,
             )
 
             resumed = RunRequest(
@@ -1754,9 +2167,11 @@ class ResumeTests(unittest.TestCase):
             )
             process = mock.Mock(side_effect=fake_process)
             execute_run(
-                resumed,
+                check_request(
+                    resumed,
+                    environment=environment,
+                ),
                 process_runner=process,
-                environment=environment,
                 event_handler=events.append,
             )
             process.assert_not_called()
@@ -1765,9 +2180,11 @@ class ResumeTests(unittest.TestCase):
             (out_dir / "titan_compiled.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
-                resumed,
+                check_request(
+                    resumed,
+                    environment=environment,
+                ),
                 process_runner=retry_process,
-                environment=environment,
             )
             retry_command = retry_process.call_args.args[0]
             self.assertEqual(
@@ -1799,9 +2216,11 @@ class ResumeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "existing manifest: run.data$"):
                 execute_run(
-                    incompatible,
+                    check_request(
+                        incompatible,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_args = RunRequest(
@@ -1815,9 +2234,11 @@ class ResumeTests(unittest.TestCase):
                 ValueError, "existing manifest: titan_compiled.config.extra_flags$"
             ):
                 execute_run(
-                    conflicting_args,
+                    check_request(
+                        conflicting_args,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_size = RunRequest(
@@ -1831,9 +2252,11 @@ class ResumeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "existing manifest: run.shape$"):
                 execute_run(
-                    conflicting_size,
+                    check_request(
+                        conflicting_size,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_profile = RunRequest(
@@ -1849,9 +2272,11 @@ class ResumeTests(unittest.TestCase):
                 "run.warmup_steps$",
             ):
                 execute_run(
-                    conflicting_profile,
+                    check_request(
+                        conflicting_profile,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             conflicting_profile_and_args = RunRequest(
@@ -1868,9 +2293,11 @@ class ResumeTests(unittest.TestCase):
                 "run.warmup_steps, titan_compiled.config.extra_flags$",
             ):
                 execute_run(
-                    conflicting_profile_and_args,
+                    check_request(
+                        conflicting_profile_and_args,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
             manifest_path = out_dir / "manifest.json"
@@ -1881,9 +2308,11 @@ class ResumeTests(unittest.TestCase):
                 ValueError, "warmup_steps 10 does not match profile True"
             ):
                 execute_run(
-                    resumed,
+                    check_request(
+                        resumed,
+                        environment=environment,
+                    ),
                     process_runner=fake_process,
-                    environment=environment,
                 )
 
     def test_resume_rehydrates_the_recorded_ac_mode(self) -> None:
@@ -1913,18 +2342,20 @@ class ResumeTests(unittest.TestCase):
             out_dir = Path(temporary) / "run"
             environment = {"PATH": os.environ["PATH"]}
             execute_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        model_size="1b",
-                        ac_mode=mode,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            model_size="1b",
+                            ac_mode=mode,
+                        ),
+                        gpu="0",
+                        scenario_name="engines",
+                        arm_names=("titan_eager",),
+                        out_dir=out_dir,
                     ),
-                    gpu="0",
-                    scenario_name="engines",
-                    arm_names=("titan_eager",),
-                    out_dir=out_dir,
+                    environment=environment,
                 ),
                 process_runner=fake_process,
-                environment=environment,
             )
             manifest = json.loads((out_dir / "manifest.json").read_text())
             self.assertEqual(manifest["run"]["ac_mode"], mode)
@@ -1932,14 +2363,16 @@ class ResumeTests(unittest.TestCase):
             (out_dir / "titan_eager.log").write_text("interrupted\n")
             retry_process = mock.Mock(side_effect=fake_process)
             execute_run(
-                RunRequest(
-                    gpu="0",
-                    scenario_name=None,
-                    arm_names=("titan_eager",),
-                    resume_dir=out_dir,
+                check_request(
+                    RunRequest(
+                        gpu="0",
+                        scenario_name=None,
+                        arm_names=("titan_eager",),
+                        resume_dir=out_dir,
+                    ),
+                    environment=environment,
                 ),
                 process_runner=retry_process,
-                environment=environment,
             )
             retry_command = retry_process.call_args.args[0]
             self.assertNotIn("--compile.enable", retry_command)

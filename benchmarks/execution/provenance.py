@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+from benchmarks.execution.environment import (
+    add_compiler_environment,
+    runtime_environment,
+)
 from benchmarks.execution.paths import RuntimePaths
 
 
@@ -58,21 +63,35 @@ def _cublaslt_version() -> str:
     return run_text([sys.executable, "-c", _CUBLASLT_PROBE]).strip()
 
 
-_CUDNN_LOADER_PROBE = """
-import ctypes, ctypes.util, os
-name = ctypes.util.find_library("cudnn") or "libcudnn.so.9"
+CUDNN_LOADER_PROBE = """
+import json, os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # The TransformerEngine import touches no card.
+def directories():
+    found = set()
+    for line in open("/proc/self/maps"):
+        if "libcudnn" in line:
+            found.add(os.path.dirname(os.path.realpath(line.rsplit(" ", 1)[-1].strip())))
+    return sorted(found)
+import torch
 try:
-    ctypes.CDLL(name)
-except OSError as error:
+    import nvidia.cudnn
+    import transformer_engine.pytorch
+except ImportError as error:
     print(f"unavailable: {error}")
     raise SystemExit
-for line in open("/proc/self/maps"):
-    if "libcudnn.so" in line:
-        print(os.path.realpath(line.rsplit(" ", 1)[-1].strip()))
-        break
-else:
-    print("unavailable: libcudnn not mapped after load")
+major, minor, patch = torch._C._cudnn.getCompileVersion()
+try:
+    runtime = str(torch.backends.cudnn.version())
+except RuntimeError as error:
+    runtime = f"raises: {error}"
+print(json.dumps({
+    "wheel": os.path.realpath(os.path.join(nvidia.cudnn.__path__[0], "lib")),
+    "loaded": directories(),
+    "build": str(major * 10000 + minor * 100 + patch),
+    "runtime": runtime,
+}))
 """
+"""A probe that prints, as one JSON line, the wheel cuDNN directory, the cuDNN directories after the TransformerEngine import, torch's cuDNN build and ``torch.backends.cudnn.version()``."""
 
 
 def _cudnn_torch_build() -> str:
@@ -87,16 +106,61 @@ def _cudnn_torch_build() -> str:
     ).strip()
 
 
-def _cudnn_loader_resolves() -> str:
-    """The cuDNN library that the dynamic loader binds, which TransformerEngine uses."""
-    return run_text([sys.executable, "-c", _CUDNN_LOADER_PROBE]).strip()
+def cudnn_loader_resolves(output: str) -> str:
+    """The cuDNN version and directories of one ``CUDNN_LOADER_PROBE`` output; a cuDNN outside the torch wheel, or another runtime version than torch's build, raises."""
+    lines = output.splitlines()
+    probes = [line for line in lines if line.startswith("{")]
+    if not probes:
+        if lines and lines[-1].startswith("unavailable:"):
+            return lines[-1]
+        raise ValueError(f"the cuDNN loader probe printed no JSON line: {output}")
+    probe = json.loads(probes[-1])
+    if not probe["loaded"]:
+        raise ValueError(f"the cuDNN loader probe found no mapped cuDNN: {probe}")
+    foreign = [path for path in probe["loaded"] if path != probe["wheel"]]
+    if foreign or probe["runtime"] != probe["build"]:
+        raise ValueError(
+            f"TransformerEngine maps the cuDNN in {', '.join(foreign) or 'none'} "
+            f"beside torch's cuDNN in {probe['wheel']}, and "
+            f"torch.backends.cudnn.version() gives {probe['runtime']!r} against "
+            f"the build {probe['build']}; run through ./run_bench.sh, which "
+            "sources cudnn_env.sh"
+        )
+    return f"{probe['runtime']} {', '.join(probe['loaded'])}"
 
 
-def run_text(command: list[str], *, cwd: Path | None = None) -> str:
+def _cudnn_loader_resolves(paths: RuntimePaths) -> str:
+    """The cuDNN version and directories that a training process maps after it imports TransformerEngine, with and without the compiler script."""
+    environment = runtime_environment(paths)
+    environments = [environment]
+    if paths.compiler_env is not None:
+        environments.append(add_compiler_environment(environment, paths.compiler_env))
+    resolved = {
+        cudnn_loader_resolves(
+            run_text(
+                [sys.executable, "-c", CUDNN_LOADER_PROBE], env=probe_environment
+            ).strip()
+        )
+        for probe_environment in environments
+    }
+    if len(resolved) > 1:
+        raise ValueError(
+            f"the compiler script {paths.compiler_env} changes the cuDNN that "
+            f"TransformerEngine maps: {' against '.join(sorted(resolved))}"
+        )
+    return resolved.pop()
+
+
+def run_text(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
     """The output of a provenance command; a failure gives ``unavailable: <error>`` and does not raise."""
     try:
         return subprocess.check_output(
-            command, text=True, stderr=subprocess.STDOUT, cwd=cwd
+            command, text=True, stderr=subprocess.STDOUT, cwd=cwd, env=env
         )
     except (OSError, subprocess.CalledProcessError) as error:
         return f"unavailable: {error}"
@@ -147,7 +211,7 @@ def hardware_metadata(
         "te_version": _te_version(),
         "cublaslt_version": _cublaslt_version(),
         "cudnn_torch_build": _cudnn_torch_build(),
-        "cudnn_loader_resolves": _cudnn_loader_resolves(),
+        "cudnn_loader_resolves": _cudnn_loader_resolves(paths),
     }
     if hardware_label != "auto":
         return hardware_label, metadata

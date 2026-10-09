@@ -28,7 +28,7 @@ from benchmarks.e2e.registry import (
     scenario_by_name,
 )
 from benchmarks.e2e.axes import RequestedAxes, RunRequest
-from benchmarks.e2e.runner import execute_run
+from benchmarks.e2e.runner import check_request, execute_run
 from benchmarks.execution.affinity import CpuPinning
 from tests.engine_helpers import command, run_spec, validate, write_run_manifest
 from benchmarks.models.piper_qwen3.shape import (
@@ -1314,9 +1314,11 @@ class ManifestAndResumeTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return execute_run(
-                RunRequest(gpu="0", axes=axes, **request_kwargs),
+                check_request(
+                    RunRequest(gpu="0", axes=axes, **request_kwargs),
+                    environment={"PATH": os.environ["PATH"]},
+                ),
                 process_runner=_fake_process(_size_line(HUGE)),
-                environment={"PATH": os.environ["PATH"]},
             )
 
     def test_a_huge_run_records_the_shape(self) -> None:

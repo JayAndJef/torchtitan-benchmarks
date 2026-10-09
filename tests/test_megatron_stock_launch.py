@@ -40,7 +40,7 @@ from benchmarks.e2e.registry import (
     SCENARIOS,
     scenario_by_name,
 )
-from benchmarks.e2e.runner import _resolve_run
+from benchmarks.e2e.runner import _resolve_run, check_request
 from benchmarks.e2e.engines.megatron_stock.evidence import (
     COMPLETION_LINE,
     read_evidence,
@@ -544,11 +544,12 @@ class StockArgvTests(unittest.TestCase):
             _stock_arm(), parallelism=MESH, local_batch_size=32
         )
         self.assertEqual(
-            command[:15],
+            command[:16],
             [
                 sys.executable,
+                "-u",
                 "-m",
-                "torch.distributed.run",
+                "benchmarks.execution.torchrun",
                 "--nproc-per-node=8",
                 "--rdzv-backend",
                 "c10d",
@@ -563,7 +564,7 @@ class StockArgvTests(unittest.TestCase):
                 "-m",
             ],
         )
-        self.assertEqual(command[15], DRIVER_MODULE)
+        self.assertEqual(command[16], DRIVER_MODULE)
 
     def test_the_mesh_argv_is_exactly_its_two_parts(self) -> None:
         command = _command(
@@ -1411,16 +1412,18 @@ class StockRunResolutionTests(unittest.TestCase):
             return_value=CpuPinning((), "none: test"),
         ):
             return _resolve_run(
-                RunRequest(
-                    axes=RequestedAxes(
-                        ac_mode=ac_mode,
+                check_request(
+                    RunRequest(
+                        axes=RequestedAxes(
+                            ac_mode=ac_mode,
+                        ),
+                        gpu="0",
+                        scenario_name=SCENARIO_NAME,
+                        arm_names=names,
+                        out_dir=Path(temporary) / "run",
                     ),
-                    gpu="0",
-                    scenario_name=SCENARIO_NAME,
-                    arm_names=names,
-                    out_dir=Path(temporary) / "run",
+                    environment={"PATH": os.environ["PATH"]},
                 ),
-                {"PATH": os.environ["PATH"]},
             )
 
     def test_sac_is_refused_for_the_whole_scenario(self) -> None:

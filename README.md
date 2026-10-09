@@ -29,13 +29,18 @@ that build, use `./sync.sh --no-group flash3`.
 
 On a kernel driver older than r580, `run_bench.sh` stages NVIDIA's CUDA 13.0
 forward-compat driver under `.cuda-compat/`. No action is necessary.
+`run_bench.sh` also puts torch's own cuDNN first on `LD_LIBRARY_PATH`,
+because TransformerEngine otherwise loads the system cuDNN beside it. A run
+that loads two cuDNN copies, or a cuDNN version other than torch's build, is
+refused.
 
 ## Run
 
 ```bash
 ./run_bench.sh scenarios                            # list scenarios and arms
-./run_bench.sh run 0 --model-size 1b                # one GPU
+./run_bench.sh run 0 --model-size 1b --scenario engines   # one GPU
 ./run_bench.sh run 0,1 --pp 2 --pp-schedule 1F1B    # two-GPU pipeline
+./run_bench.sh run 0,1 --model-size 1b --dp 2 --ep 2 --zero 1 --scenario experts   # two-GPU expert parallel
 ./run_bench.sh run 0 --model-size 1b --scenario engines --arm titan_eager
 ./run_bench.sh evaluate out/<timestamp>/<scenario>/<hardware>
 ./run_bench.sh run 0 --resume out/<timestamp>/<scenario>/<hardware>
@@ -57,10 +62,25 @@ The `attention` scenario keeps `titan_compiled` and `megatron_stock`, and
 adds `titan_compiled_fa3`, which replaces TorchTitan's FlexAttention with
 FA3 varlen.
 
+The `experts` scenario keeps `titan_compiled` and `megatron_stock`, and
+adds `titan_compiled_te_per_expert`. That arm replaces TorchTitan's expert
+GEMMs with one TransformerEngine cuBLAS GEMM per expert, as Megatron runs
+them. It needs `--ep 2` or more. The expert degree must divide `--dp`, and
+it needs `--zero 1`, so two GPUs take `--dp 2 --ep 2 --zero 1`.
+
+The `stacked` scenario keeps `titan_compiled` and `megatron_stock`, and
+adds `titan_compiled_fa3_te_per_expert`. That arm runs FA3 varlen and the
+per-expert GEMMs together, so it shows whether the two gains add. It needs
+the same mesh as `titan_compiled_te_per_expert`. The four-GPU comparison is
+`--model-size 30b-a3b-20l --dp 4 --ep 4 --zero 1 --batch 4 --profile
+--steps 80`.
+
 Read these points before you publish a number:
 
 - **The default shape needs a mesh.** `30b-a3b` does not fit one GPU. Use
-  `--model-size 1b` on one GPU.
+  `--model-size 1b` on one GPU, and name the scenarios with `--scenario`,
+  because the `experts` and `stacked` scenarios need `--ep 2` or more. An
+  expert degree above 1 also needs `--zero 1` and a `--dp` that it divides.
 - **The Megatron arm differs by design.** It keeps fp32 optimizer state and
   unfused kernels. `AGENTS.md` lists the four differences. State them
   beside each cross-engine number.
