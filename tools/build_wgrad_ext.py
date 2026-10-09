@@ -33,7 +33,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.e2e.megatron_stock.bootstrap import (  # noqa: E402
+from benchmarks.e2e.engines.megatron_stock.driver.bootstrap import (  # noqa: E402
     WGRAD_BUILD_DIR,
     WGRAD_MODULE,
     WGRAD_SOURCE_DIR,

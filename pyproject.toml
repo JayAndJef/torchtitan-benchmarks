@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "End-to-end and kernel benchmarks for the Piper Qwen3-1B TorchTitan port"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.14.0.dev20260729+cu130",
-    # Declared only so tool.uv.sources can route it; sources ignore transitives.
-    "triton==3.8.0+git10f6be36 ; sys_platform == 'linux'",
+    "torch==2.14.1",
+    # Pinned with torch, so that a new resolution cannot move triton.
+    "triton==3.8.0 ; sys_platform == 'linux'",
     "torchtitan",
     "helion==1.4.0",
     "click>=8.1,<9",
@@ -18,7 +18,7 @@ dependencies = [
 # Transformer Engine for the Megatron baseline arm
 # (benchmarks/e2e/engines/megatron_stock/ and benchmarks/models/piper_qwen3/).
 # core-cu13 is a prebuilt wheel; the torch binding compiles at install
-# against the pinned torch nightly, hence no-build-isolation below.
+# against the pinned torch, hence no-build-isolation below.
 megatron = [
     "transformer-engine[pytorch,core-cu13]==2.17.1",
     "setuptools>=75",
@@ -27,11 +27,9 @@ megatron = [
 # FlashAttention-3 for the attention arms. FA3 is NOT on PyPI (the `flash-attn`
 # package there is FA2) and publishes no prebuilt wheel, so it is a source
 # build of CUTLASS sm90a kernels from the repo's hopper/ subdirectory --
-# 15-40 minutes depending on MAX_JOBS. uv's cache only serves it back on a sync
-# that changes nothing: because it is no-build-isolation it builds inside the
-# project env, so ANY resolution change (adding a group, bumping a pin)
-# invalidates the wheel and pays the build again. TE escapes this as a PyPI
-# sdist whose built wheel is cached independently.
+# 15-40 minutes depending on MAX_JOBS. uv caches the built wheel by its source
+# alone, as it does TE's torch binding, so sync.sh keeps one uv cache per
+# torch pin.
 # The four nvidia packages must share ONE CUDA version: mixing nvcc 13.0 with
 # a 13.3 nvvm makes the frontend emit PTX ISA 9.3 that 13.0 ptxas rejects.
 flash3 = [
@@ -60,14 +58,6 @@ package = false
 default-groups = ["megatron", "flash3", "fa4"]
 no-build-isolation-package = ["transformer-engine-torch", "flash-attn-3"]
 
-[[tool.uv.index]]
-name = "pytorch-nightly-cu130"
-url = "https://download.pytorch.org/whl/nightly/cu130"
-explicit = true
-
 [tool.uv.sources]
-# torch's metadata requires triton==3.8.0+git10f6be36, which PyPI cannot host.
-torch = { index = "pytorch-nightly-cu130" }
-triton = { index = "pytorch-nightly-cu130" }
 torchtitan = { path = "third_party/torchtitan", editable = true }
 flash-attn-3 = { git = "https://github.com/Dao-AILab/flash-attention.git", subdirectory = "hopper", rev = "69e1bcbe77c359c84b3a4589e92a7c076e33a202" }

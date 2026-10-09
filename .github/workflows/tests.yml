@@ -1,10 +1,8 @@
 # CPU-only tests on a hosted runner.
 #
-# The list of modules below is explicit, not `unittest discover`. Three
+# The list of modules below is explicit, not `unittest discover`. Two
 # properties of this repository make discovery unrunnable here:
 #
-#   * torch is pinned to an exact nightly build, which no hosted runner can
-#     install in a reasonable time;
 #   * the training engines are git submodules that this job does not fetch;
 #     and
 #   * the kernel tests need a GPU.

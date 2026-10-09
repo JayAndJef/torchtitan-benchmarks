@@ -30,7 +30,8 @@ from torchtitan.tools.logging import logger, warn_once
 _EXT_DIR = Path(
     os.environ.get("TORCH_EXTENSIONS_DIR", "/data/zejiaqi/tmp/torch_extensions")
 )
-_BUILD_DIR = _EXT_DIR / "te_rope"
+_BUILD_DIR = _EXT_DIR / f"te_rope-{torch.__version__}"
+"""The build folder; the JIT hash ignores the torch version, so each torch gets its own."""
 _BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
 _te = load(
