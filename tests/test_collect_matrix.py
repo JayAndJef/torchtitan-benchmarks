@@ -235,14 +235,15 @@ class CollectTests(unittest.TestCase):
         self.assertNotIn("model-size-huge-ac-none", cells)
 
     def test_moved_aside_cell_is_skipped(self) -> None:
-        write_cell(
-            self.root,
-            "model-size-1b-ac-none.contaminated-20260920T000000Z",
-            model_size="1b",
-            dp=1,
-            zero=0,
-            results_data=results(tokens_per_second=1.0),
-        )
+        for mark in ("contaminated", "failed"):
+            write_cell(
+                self.root,
+                f"model-size-1b-ac-none.{mark}-20260920T000000Z",
+                model_size="1b",
+                dp=1,
+                zero=0,
+                results_data=results(tokens_per_second=1.0),
+            )
         names = {cell.name for cell in collect_matrix.cell_dirs(self.root)}
         self.assertEqual(names, {
             "model-size-1b-ac-none",

@@ -41,6 +41,9 @@ forward-compat driver under `.cuda-compat/`. No action is necessary.
 ./run_bench.sh run 0 --resume out/<timestamp>/<scenario>/<hardware>
 ```
 
+On a Slurm host, run these commands inside a job. The job numbers its
+cards from 0, so `0` is the first card of the job.
+
 `run` trains, validates and evaluates the arms of each scenario. The
 `engines` scenario has three arms:
 
@@ -122,7 +125,7 @@ The suite runs on the CPU in about a minute. The pre-push hook runs it.
 | `benchmarks/kernel/` | Kernel-isolation system |
 | `benchmarks/models/piper_qwen3/` | The model port and its shapes |
 | `benchmarks/cli/` | The command line |
-| `tools/` | Matrix runner, matrix collector, pre-push hook |
+| `tools/` | Slurm matrix job template and cell runner, matrix collector, pre-push hook |
 | `third_party/` | Pinned TorchTitan fork and Megatron-LM |
 
 ## Licenses

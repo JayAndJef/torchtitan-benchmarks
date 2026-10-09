@@ -17,9 +17,9 @@ source "$BENCH_DIR/cuda_compat.sh"
 
 # A stable, writable datasets cache. HF_HOME can point at a directory another
 # user owns, and every arm then dies on a builder.lock PermissionError before
-# it trains one step. tools/run_matrix.sh has set this since it was written;
-# a single run needs it for the same reason. An explicit HF_DATASETS_CACHE
-# still wins, so an operator who has a writable shared cache keeps it.
+# it trains one step. A matrix cell and a single run both need this cache.
+# An explicit HF_DATASETS_CACHE still wins, so an operator who has a writable
+# shared cache keeps it.
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HOME/.cache/hf-datasets}"
 mkdir -p "$HF_DATASETS_CACHE"
 
