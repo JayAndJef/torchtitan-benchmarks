@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # uv sync wrapper. Two dependency groups build CUDA code without isolation
-# against the pinned torch nightly and need the venv's bundled NVIDIA headers
+# against the pinned torch and need the venv's bundled NVIDIA headers
 # plus a C++20 host compiler:
 #
 #   megatron  transformer-engine-torch (prebuilt core wheel, torch binding
 #             compiles at install)
 #   flash3    flash-attn-3, a full source build of CUTLASS sm90a kernels from
 #             the flash-attention repo's hopper/ subdirectory (15-40 min).
-#             Being no-build-isolation it builds inside the project env, so
-#             any resolution change rebuilds it -- the cache only helps on a
-#             sync that changes nothing.
+#
+# uv caches both builds by their source alone and ignores the torch they built
+# against. The first pass also uninstalls both, so the second pass reinstalls
+# them from the cache. So each torch pin gets its own uv cache, and a pin bump
+# rebuilds both against the new torch. Delete the old pin's cache, which holds
+# several GiB.
 #
 # The first pass installs torch and the header wheels; the second builds both.
 # Skip the long one with:  ./sync.sh --no-group flash3
@@ -18,6 +21,14 @@
 # generates its kernels at compile time and ships pure-Python wheels.
 set -euo pipefail
 cd "$(dirname "$0")"
+torch_pin="$(grep -oE '"torch==[^" ;]+' pyproject.toml | tr -d '"' || true)"
+if [ "$(printf '%s\n' "$torch_pin" | grep -c .)" -ne 1 ]; then
+    echo "sync.sh: expected one torch== pin in pyproject.toml, found: ${torch_pin:-none}" >&2
+    exit 1
+fi
+uv_cache_base="${UV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/uv}"
+export UV_CACHE_DIR="${uv_cache_base%/}-${torch_pin#torch==}"
+echo "sync.sh: uv cache $UV_CACHE_DIR"
 if [ -f /opt/rh/gcc-toolset-13/enable ]; then
     source /opt/rh/gcc-toolset-13/enable
 fi

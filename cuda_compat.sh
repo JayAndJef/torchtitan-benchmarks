@@ -3,7 +3,7 @@
 # The torch pin is cu130, but this box's kernel driver (570.211.01) reports
 # CUDA 12.8 in the nvidia-smi header. NVIDIA's forward-compat package layers
 # a newer userspace libcuda over the older kernel module. This script stages
-# those libraries under .cuda-compat/ (gitignored) and prepends them to
+# those libraries under .cuda-compat/<rpm>/ (gitignored) and prepends them to
 # LD_LIBRARY_PATH -- but only when the driver actually needs it.
 #
 # Source it (run_bench.sh does this automatically):
@@ -11,9 +11,11 @@
 # Or run it to stage the libraries and print the export line:
 #   bash ./cuda_compat.sh
 
-_compat_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.cuda-compat"
 _compat_rpm="cuda-compat-13-0-580.178.04-1.el9.x86_64.rpm"
 _compat_url="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/${_compat_rpm}"
+# One folder per rpm, so a new pin stages new libraries and never reuses old ones.
+_compat_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.cuda-compat/${_compat_rpm%.rpm}"
+_compat_driver_major=580
 
 _cuda_compat_needed() {
     # cu130 needs the r580+ userspace driver. Check the kernel driver
@@ -24,7 +26,7 @@ _cuda_compat_needed() {
         2>/dev/null | head -n1)" || return 0
     major="${driver%%.*}"
     case "$major" in "" | *[!0-9]*) return 0 ;; esac
-    [ "$major" -ge 580 ] && return 1
+    [ "$major" -ge "$_compat_driver_major" ] && return 1
     return 0
 }
 
@@ -58,6 +60,6 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     if _cuda_compat_needed; then
         echo "export LD_LIBRARY_PATH=$_compat_dir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
     else
-        echo "# driver already reports CUDA 13.0+; no compat needed"
+        echo "# driver is r${_compat_driver_major}+; no compat needed"
     fi
 fi

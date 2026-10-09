@@ -61,21 +61,33 @@ git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
 
 `sync.sh` wraps `uv sync` in two passes. The first pass installs torch and
 the NVIDIA header wheels. The second pass builds the groups that compile
-without build isolation against the pinned nightly. It also links
+without build isolation against the pinned torch. It also links
 `tools/pre-push.sh` into the common git hook directory, so every worktree
 shares one pre-push hook.
 
 - Three default dependency groups: `megatron` (TransformerEngine), `flash3`
   (a CUTLASS sm90a source build) and `fa4`.
-- **Any resolution change rebuilds FA3 from source**, in 15 to 40
-  minutes. Never benchmark during the build, because it saturates the host.
+- A build of FA3 from source takes 15 to 40 minutes. Never benchmark
+  during the build, because it saturates the host.
+- **uv caches a wheel that builds without isolation by its source alone**,
+  and ignores the torch version. So `sync.sh` appends the torch pin to
+  `UV_CACHE_DIR`, and a pin bump rebuilds TE's torch binding and FA3. A
+  plain `uv sync` uses the shared cache and can install the old torch's
+  builds. Each pin's cache holds several GiB. After a bump, delete the
+  old pin's cache when no venv still syncs from it.
 - Skip the long build with `./sync.sh --no-group flash3`.
-- torch is pinned to an exact nightly. The nightly index keeps roughly 60
-  days, so the pin needs a bump eventually. A bump changes the numbers.
-  Rerun the baselines and do not compare across it.
-- `run_bench.sh` sources `cuda_compat.sh`. On a driver below CUDA 13.0,
-  that script stages NVIDIA's forward-compat userspace driver under
-  `.cuda-compat/` and prepends it to `LD_LIBRARY_PATH`.
+- torch is pinned to the stable `2.14.1` build from PyPI, which uses CUDA
+  13.0. A stable release stays on PyPI, so the pin has no index expiry.
+  `torch.__version__`, and so the manifest's `torch_version`, reads
+  `2.14.1+cu130`.
+- The `flash3` group pins nvcc, crt and nvvm at 13.0.88 and cccl at
+  13.0.85. All four must come from CUDA 13.0, the CUDA version of the torch
+  runtime.
+- No number compares across a torch change. After a change, rerun the
+  baselines.
+- `run_bench.sh` sources `cuda_compat.sh`. On a kernel driver below r580,
+  that script stages NVIDIA's CUDA 13.0 forward-compat userspace driver
+  under `.cuda-compat/<rpm>/` and prepends it to `LD_LIBRARY_PATH`.
 - TorchTitan is a submodule at `third_party/torchtitan`, installed editable.
   It is our fork, pinned on the `bench/torchtitan-benchmarks` branch.
 - Megatron-LM is a submodule at `third_party/Megatron-LM`. It is **not**
@@ -317,9 +329,9 @@ unless the engine has a negative form of it.
 
 Numbers are comparable only within one value of each of these: each key of
 the manifest's `run` block, each arm's `config`, the CPU pinning,
-`torch_version`, `torchtitan_git_rev`, `benchmarks_git_rev` and
-`megatron_git_rev`. Check each one before you compare against an older
-run.
+`torch_version`, `cublaslt_version`, `torchtitan_git_rev`,
+`benchmarks_git_rev` and `megatron_git_rev`. Check each one before you
+compare against an older run.
 
 The Megatron `p2p_sync` and `nan_guard` fields both default to `off`. Every
 Megatron number published before that flip had both at `on`. State the
@@ -859,11 +871,10 @@ CUDA is unavailable. Run it after any change under `benchmarks/`.
 shares it. Bypass it with `git push --no-verify` or `PRE_PUSH_SKIP=1`.
 
 `.github/workflows/tests.yml` runs a named module list rather than
-`discover`. Three properties of this repository make discovery unrunnable on
-a hosted runner: torch is pinned to an exact nightly, the engines are
-submodules the job does not fetch, and the kernel tests need a GPU. The
-workflow runs `tests/test_axes.py`, `tests/test_cli.py`,
-`tests/test_docstrings.py`, `tests/test_engines.py`,
+`discover`. Two properties of this repository make discovery unrunnable on
+a hosted runner: the engines are submodules the job does not fetch, and the
+kernel tests need a GPU. The workflow runs `tests/test_axes.py`,
+`tests/test_cli.py`, `tests/test_docstrings.py`, `tests/test_engines.py`,
 `tests/test_evidence.py`, `tests/test_golden.py`,
 `tests/test_import_boundaries.py`, `tests/test_launcher.py`,
 `tests/test_overrides.py`, `tests/test_parallelism_plumbing.py`,

@@ -5,6 +5,8 @@ loads its own cuDNN lazily, so the loader can bind a system cuDNN for TE
 while torch expects the wheel's. Which cuDNN a megatron arm runs is then a
 property of the host. These tests pin that the two versions reach the
 manifest as separate fields, and that collecting them can never fail a run.
+The cuBLASLt version gets the same tests, because a reader must see which
+cuBLASLt a run bound.
 """
 
 import re
@@ -86,6 +88,44 @@ class CudnnProvenanceTests(unittest.TestCase):
             self.skipTest(f"no cuDNN resolvable here: {resolved}")
         self.assertTrue(Path(resolved).exists(), resolved)
         self.assertIn("libcudnn", Path(resolved).name)
+
+
+class CublasltProvenanceTests(unittest.TestCase):
+    def test_the_manifest_records_the_cublaslt_version(self) -> None:
+        """The probe result reaches ``hardware_metadata`` under a stable name."""
+        with (
+            mock.patch.object(
+                provenance,
+                "_cublaslt_version",
+                return_value="130101 /venv/libcublasLt.so.13",
+            ) as probe,
+            mock.patch.object(provenance, "run_text", return_value="x"),
+            mock.patch.object(provenance, "_megatron_git_rev", return_value="r"),
+            mock.patch.object(provenance, "_te_version", return_value="v"),
+        ):
+            _, metadata = provenance.hardware_metadata(mock.Mock(), "0", "label")
+        probe.assert_called_once_with()
+        self.assertEqual(
+            metadata["cublaslt_version"], "130101 /venv/libcublasLt.so.13"
+        )
+
+    def test_collecting_the_cublaslt_version_never_raises(self) -> None:
+        with mock.patch.object(
+            provenance, "run_text", return_value="unavailable: boom"
+        ):
+            self.assertRegex(provenance._cublaslt_version(), _UNAVAILABLE)
+
+    def test_the_cublaslt_probe_reports_a_version_and_a_path_on_this_host(
+        self,
+    ) -> None:
+        """The probe gives the integer version and a real library, or says why it could not."""
+        resolved = provenance._cublaslt_version()
+        if _UNAVAILABLE.match(resolved):
+            self.skipTest(f"no cuBLASLt resolvable here: {resolved}")
+        version, path = resolved.split(" ", 1)
+        self.assertRegex(version, r"^[0-9]{6}$")
+        self.assertTrue(Path(path).exists(), path)
+        self.assertIn("libcublasLt", Path(path).name)
 
 
 if __name__ == "__main__":
