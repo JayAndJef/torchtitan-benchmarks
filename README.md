@@ -1,4 +1,4 @@
-# torchtitan-benchmarks
+# engine-bench
 
 Benchmarks for the Piper Qwen3 MoE port of TorchTitan, measured against
 stock Megatron-LM.
@@ -18,8 +18,8 @@ parallelism rules and reporting rules.
 You need `uv`, a C++20 host compiler, and an NVIDIA GPU.
 
 ```bash
-git clone --recurse-submodules https://github.com/JayAndJef/torchtitan-benchmarks
-cd torchtitan-benchmarks
+git clone --recurse-submodules https://github.com/JayAndJef/engine-bench
+cd engine-bench
 ./sync.sh
 ```
 

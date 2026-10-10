@@ -1,4 +1,4 @@
-# torchtitan-benchmarks: Agent Guide
+# engine-bench: Agent Guide
 
 ## 1. What this repository measures
 
@@ -56,7 +56,7 @@ a reference.
   weight gradient and does not fuse the accumulation as Megatron does.
   cuBLAS picks the kernel from the rows of each expert, so the arm's trace
   marker is not a kernel name. It is the profiler range that each op opens,
-  `torchtitan_benchmarks::te_per_expert_mm`.
+  `engine_bench::te_per_expert_mm`.
 - The engine's check refuses either per-expert override without the other,
   and either one at ep 1. It also refuses an arm with either override that
   selects the `spmd_types` backend, because their custom ops have no SPMD
@@ -110,7 +110,7 @@ One environment owns this repository. Every command runs under
 `.venv/bin/python`, and `run_bench.sh` execs that interpreter directly.
 
 ```bash
-git clone --recurse-submodules <repo> && cd torchtitan-benchmarks
+git clone --recurse-submodules <repo> && cd engine-bench
 ./sync.sh
 ```
 
@@ -151,7 +151,7 @@ shares one pre-push hook.
   `LD_LIBRARY_PATH`. Without it, TransformerEngine maps the system cuDNN
   beside torch's, and `torch.backends.cudnn.version()` raises.
 - TorchTitan is a submodule at `third_party/torchtitan`, installed editable.
-  It is our fork, pinned on the `bench/torchtitan-benchmarks` branch.
+  It is our fork, pinned on the `bench/engine-bench` branch.
 - Megatron-LM is a submodule at `third_party/Megatron-LM`. It is **not**
   pip-installed. `benchmarks/models/piper_qwen3/megatron_bootstrap.py` puts
   it on `sys.path`.
@@ -1106,7 +1106,7 @@ Four structural tests deserve naming:
 
 ## 12. Bumping the TorchTitan submodule
 
-The submodule is our fork, pinned on the `bench/torchtitan-benchmarks`
+The submodule is our fork, pinned on the `bench/engine-bench`
 branch. Pin that branch, not the fork's `main`. The fork carries commits
 upstream does not have, and a rebase must preserve the two this code still
 needs:

@@ -1263,7 +1263,7 @@ HOST_COUNT_TARGET = f"{MOE_PACKAGE}.host_count_dispatcher.host_count_dispatcher"
 
 PER_EXPERT_TARGET = f"{MOE_PACKAGE}.te_per_expert_experts.te_per_expert_experts"
 
-PER_EXPERT_MARKERS = ("torchtitan_benchmarks::te_per_expert_mm",)
+PER_EXPERT_MARKERS = ("engine_bench::te_per_expert_mm",)
 """The profiler range that each per-expert op opens, at every shape."""
 
 EP2_SPEC = ParallelismSpec(dp=2, ep=2, zero=1)

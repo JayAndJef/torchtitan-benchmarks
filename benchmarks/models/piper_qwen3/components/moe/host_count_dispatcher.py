@@ -18,7 +18,7 @@ from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
 
 @torch.library.custom_op(
-    "torchtitan_benchmarks::host_token_counts", mutates_args=(), device_types="cuda"
+    "engine_bench::host_token_counts", mutates_args=(), device_types="cuda"
 )
 def host_token_counts(
     local_E: torch.Tensor, global_EP_e: torch.Tensor

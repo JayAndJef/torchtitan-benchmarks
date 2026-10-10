@@ -43,7 +43,7 @@ from benchmarks.e2e.engines.megatron_stock.flags import (
 
 def add_bench_args(parser: Any) -> Any:
     """Add the harness flags to Megatron's own parser, so that Megatron refuses an unknown one."""
-    group = parser.add_argument_group(title="torchtitan-benchmarks harness")
+    group = parser.add_argument_group(title="engine-bench harness")
     group.add_argument(BENCH_ARM_DIR, type=Path, required=True)
     group.add_argument(BENCH_MODEL_SIZE, type=str, required=True)
     group.add_argument(BENCH_LOCAL_BATCH_SIZE, type=int, required=True)

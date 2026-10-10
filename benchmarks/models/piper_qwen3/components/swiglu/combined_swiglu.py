@@ -239,7 +239,7 @@ def combined_silu_and_mul_backward_kernel(
 
 
 @torch.library.custom_op(
-    "torchtitan_benchmarks::combined_silu_and_mul",
+    "engine_bench::combined_silu_and_mul",
     mutates_args=(),
     device_types="cuda",
 )
@@ -264,7 +264,7 @@ def _combined_silu_and_mul_fake(
 
 
 @torch.library.custom_op(
-    "torchtitan_benchmarks::combined_silu_and_mul_backward",
+    "engine_bench::combined_silu_and_mul_backward",
     mutates_args=(),
     device_types="cuda",
 )

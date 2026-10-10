@@ -24,7 +24,7 @@ from torchtitan.config import derive, override
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.moe import GroupedExperts
 
-TRACE_MARKER = "torchtitan_benchmarks::te_per_expert_mm"
+TRACE_MARKER = "engine_bench::te_per_expert_mm"
 """The profiler range of each op, for the arm's trace marker; it costs this arm one flag check per call, and one range per call while the profiler records."""
 
 
@@ -63,7 +63,7 @@ def _host_splits(x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor) -> list
 
 
 @torch.library.custom_op(
-    "torchtitan_benchmarks::te_per_expert_mm", mutates_args=(), device_types="cuda"
+    "engine_bench::te_per_expert_mm", mutates_args=(), device_types="cuda"
 )
 def te_per_expert_mm(
     x: torch.Tensor, w: torch.Tensor, counts: torch.Tensor
@@ -94,7 +94,7 @@ def _te_per_expert_mm_fake(x, w, counts):
 
 
 @torch.library.custom_op(
-    "torchtitan_benchmarks::te_per_expert_mm_backward",
+    "engine_bench::te_per_expert_mm_backward",
     mutates_args=(),
     device_types="cuda",
 )

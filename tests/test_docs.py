@@ -60,7 +60,7 @@ ARTIFACT_FILE_NAMES = frozenset(
 NOT_PATHS = frozenset(
     {
         # The pinned branch of the TorchTitan fork, not a directory.
-        "bench/torchtitan-benchmarks",
+        "bench/engine-bench",
         # A kernel arm name. A cross-engine arm is named engine/profile.
         "mcore/base",
     }

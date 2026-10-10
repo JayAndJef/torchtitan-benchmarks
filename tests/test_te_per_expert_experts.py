@@ -20,7 +20,7 @@ MOE = "benchmarks.models.piper_qwen3.components.moe"
 EXPERTS_OVERRIDE = f"{MOE}.te_per_expert_experts.te_per_expert_experts"
 DISPATCHER_OVERRIDE = f"{MOE}.host_count_dispatcher.host_count_dispatcher"
 
-TRACE_MARKER = "torchtitan_benchmarks::te_per_expert_mm"
+TRACE_MARKER = "engine_bench::te_per_expert_mm"
 """The trace marker of the experts scenario's per-expert arm; tests/test_runner.py ties it to the op module."""
 
 TINY = PiperShape.derived(name="tiny", dim=256, n_layers=2, vocab_size=64)

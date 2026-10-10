@@ -145,7 +145,7 @@ HOST_COUNT_DISPATCHER = f"{MOE_OVERRIDES}.host_count_dispatcher.host_count_dispa
 TE_PER_EXPERT_EXPERTS = f"{MOE_OVERRIDES}.te_per_expert_experts.te_per_expert_experts"
 """The override import of the routed-expert GEMMs as one TE cuBLAS GEMM per expert; it needs HOST_COUNT_DISPATCHER."""
 
-TE_PER_EXPERT_MARKERS = ("torchtitan_benchmarks::te_per_expert_mm",)
+TE_PER_EXPERT_MARKERS = ("engine_bench::te_per_expert_mm",)
 """The trace marker of the per-expert GEMMs: the profiler range of each op, because cuBLAS picks its kernel from the rows of each expert."""
 
 EXPERTS = Scenario(

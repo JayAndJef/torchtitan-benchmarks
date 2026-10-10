@@ -1,5 +1,5 @@
 [project]
-name = "torchtitan-benchmarks"
+name = "engine-bench"
 version = "0.1.0"
 description = "End-to-end and kernel benchmarks for the Piper Qwen3-1B TorchTitan port"
 requires-python = ">=3.10"

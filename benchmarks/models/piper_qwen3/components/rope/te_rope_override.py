@@ -7,7 +7,7 @@ extension is exposed as torch.library custom ops with fake and autograd
 registrations and swaps CosSinRoPE for the TE-backed module.
 
 Activation:
-    PYTHONPATH=/data/zejiaqi/torchtitan-benchmarks torchtitan_train ... \
+    PYTHONPATH=<checkout> torchtitan_train ... \
         --override.imports benchmarks.models.piper_qwen3.components.rope.te_rope_override.te_rope
 
 The CUDA extension builds on first import (needs a C++20-capable host compiler;
@@ -53,7 +53,7 @@ _te = load(
 
 
 @torch.library.custom_op(
-    "torchtitan_benchmarks::te_rope_fwd", mutates_args=(), device_types="cuda"
+    "engine_bench::te_rope_fwd", mutates_args=(), device_types="cuda"
 )
 def _te_rope_fwd(
     xq: torch.Tensor,
@@ -77,7 +77,7 @@ def _te_rope_fwd_fake(xq, xk, angles, positions):
 
 
 @torch.library.custom_op(
-    "torchtitan_benchmarks::te_rope_bwd", mutates_args=(), device_types="cuda"
+    "engine_bench::te_rope_bwd", mutates_args=(), device_types="cuda"
 )
 def _te_rope_bwd(
     grad_xq: torch.Tensor,

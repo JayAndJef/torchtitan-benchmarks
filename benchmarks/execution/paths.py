@@ -37,7 +37,7 @@ class RuntimePaths:
         environment = os.environ if environment is None else environment
         cache = cache_root or _optional_path(environment.get("BENCHMARK_CACHE_ROOT"))
         if cache is None:
-            cache = Path(tempfile.gettempdir()) / "torchtitan-benchmarks"
+            cache = Path(tempfile.gettempdir()) / "engine-bench"
 
         compiler = compiler_env or _optional_path(environment.get("BENCH_COMPILER_ENV"))
         if compiler is None:
