@@ -660,8 +660,7 @@ def _report_build_residual(before: int) -> None:
     allocation. A surviving reference to the model adds its whole build to
     this arm's peak memory and nothing to the titan arm's, so the memory
     column would then compare two engines and one model. That build is
-    0.67 GiB at ``1b`` and 7.80 GiB at ``huge``, because ``MCORE_BLANK_MLP``
-    leaves the mlp part out.
+    0.67 GiB at ``1b``, because ``MCORE_BLANK_MLP`` leaves the mlp part out.
 
     This reports and does not raise. The timing columns are unaffected, and
     peak memory is the secondary metric of this scenario, so a hard failure

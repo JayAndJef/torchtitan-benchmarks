@@ -78,11 +78,11 @@ MCORE_INIT_SEED = 42
 # megatron's own ``IdentityOp``, which allocates nothing.
 #
 # **Why the mlp part, and why only it.** The mlp holds the router gate and
-# every expert weight, which is 93% of a transformer layer at ``1b`` and 97%
-# at ``48b``. The attention part is the remaining 3% to 7%, so blanking it
-# would buy little and would move the position of the mlp weights in the
-# random stream. The two norm parts and the three bias-dropout-add parts
-# allocate a vector or nothing at all.
+# every expert weight, which is 93% of a transformer layer at ``1b``. The
+# attention part is the remaining 7%, so blanking it would buy little and
+# would move the position of the mlp weights in the random stream. The two
+# norm parts and the three bias-dropout-add parts allocate a vector or nothing
+# at all.
 #
 # **Why the timed module keeps its exact weights.** Megatron builds the nine
 # parts in the order its dataclass declares them, and the mlp is the eighth.

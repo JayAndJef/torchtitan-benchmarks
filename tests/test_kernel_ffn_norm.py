@@ -260,7 +260,7 @@ class GuardTests(unittest.TestCase):
 class RegisteredShapeTests(unittest.TestCase):
     def test_the_inputs_build_at_every_registered_model_size(self) -> None:
         """``--model-size`` is single-valued but not fixed, so both must work."""
-        for name in ("normal", "huge"):
+        for name in ("normal", "30b-a3b"):
             with self.subTest(size=name):
                 shape = shape_by_name(name)
                 workload = KernelWorkload(batch=1, seq_len=2)

@@ -164,11 +164,11 @@ property of the isolated workload, not an asymmetry between these arms.
 (``dot_product_attention/utils.py:2153``), so the unfused arm builds its
 scores over **127** segments and not over the 18 real documents. One bf16
 score tensor is then 4.0 GiB at seq 1024, 15.9 GiB at 2048 and 63.5 GiB at
-4096 on the normal shape, and 47.6 GiB at seq 1024 on huge; the arm holds
-the scores, the saved probabilities and the backward gradient. A sweep past
-seq 2048 will OOM. Because the correctness pass has no per-arm exception
-handling (``benchmarks/kernel/engine/run.py:289-298``), that OOM takes the
-whole scenario with it. An adversarial reviewer measured the segment counts
+4096 on the normal shape; the arm holds the scores, the saved probabilities
+and the backward gradient. A sweep past seq 2048 will OOM. Because the
+correctness pass has no per-arm exception handling
+(``benchmarks/kernel/engine/run.py:289-298``), that OOM takes the whole
+scenario with it. An adversarial reviewer measured the segment counts
 on the real inputs builder; the arm description carries the table.
 
 Three ways to break this scenario that nothing guards
@@ -1411,10 +1411,9 @@ def _report_build_residual(arm: str, before: int) -> None:
 
     ``memory_pass`` reports ``max_memory_allocated``, which counts every live
     allocation. A surviving reference to the model adds its whole build to
-    this arm's peak memory -- 0.67 GiB at ``1b`` and 7.80 GiB at ``huge``,
-    because ``MCORE_BLANK_MLP`` leaves the mlp part out -- and nothing to a
-    titan arm's, so
-    the memory column would then compare two engines and one model.
+    this arm's peak memory -- 0.67 GiB at ``1b``, because ``MCORE_BLANK_MLP``
+    leaves the mlp part out -- and nothing to a titan arm's, so the memory
+    column would then compare two engines and one model.
 
     This reports and does not raise. The timing columns are unaffected, and
     peak memory is a secondary metric here, so a hard failure would cost the

@@ -186,16 +186,9 @@ unconditionally
 gradient is therefore the choice that charges every arm what megatron charges
 it.
 
-**Memory, and why the huge shape is untested.** The shared fp32 weight state is
-three ``(E, F, D)``-sized tensors, and every arm then materializes its own bf16
-copy. At ``normal`` that is 168 MiB of fp32 state and about 84 MiB per arm. At
-``huge`` (dim 12288, expert width 43008) the same three tensors are 23.6 GiB and
-one arm's bf16 weights are 11.8 GiB, on top of a ``build_model`` that allocates
-the whole 10.5 B-parameter megatron model before one layer is read out of it,
-and on top of an fp64 reference whose weight gradients alone are 47.3 GiB.
-Nothing in this scenario has ever run on a GPU at either shape; the ``huge``
-figures are arithmetic, not a measurement, and the warning CLAUDE.md already
-carries for the retired ``swiglu`` scenario applies here unchanged.
+**Memory.** The shared fp32 weight state is three ``(E, F, D)``-sized
+tensors, and every arm then materializes its own bf16 copy. At ``normal`` that
+is 168 MiB of fp32 state and about 84 MiB per arm.
 
 **Every torchtitan, megatron and TransformerEngine import is deferred into the
 builder that needs it**, which is the rule across ``operations/``.

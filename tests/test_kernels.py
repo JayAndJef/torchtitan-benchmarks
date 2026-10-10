@@ -382,14 +382,14 @@ class ShapeAndWorkloadTests(unittest.TestCase):
         self.assertEqual(rope["rotated_rows"], 4096 * 24)
 
     def test_model_size_selects_the_geometry_not_the_workload(self) -> None:
-        shape, workload = resolve_shape_and_workload(model_size="huge")
-        self.assertEqual(shape.name, "huge")
-        self.assertEqual(shape.dim, 12288)
+        shape, workload = resolve_shape_and_workload(model_size="30b-a3b-20l")
+        self.assertEqual(shape.name, "30b-a3b-20l")
+        self.assertEqual(shape.dim, 2048)
         # The workload is untouched by the size: batch is not a model property.
         self.assertEqual(workload, KernelWorkload())
         self.assertEqual(
             shape_summary("lm_head", shape, workload)["hidden"],
-            [4, 1024, 12288],
+            [4, 1024, 2048],
         )
         with self.assertRaisesRegex(ValueError, "Unknown model size"):
             resolve_shape_and_workload(model_size="enormous")
@@ -605,9 +605,10 @@ def _residency_builder(shape, workload, inputs):
 class CorrectnessResidencyTests(unittest.TestCase):
     """One arm is resident at a time, and the pass keeps only the outputs.
 
-    The retired ``swiglu`` scenario at the huge shape exhausted a 139 GiB
-    device in the gate pass while each of its three arms fits alone. The pass held every arm at once;
-    a check only ever needs two output *tensors*. This pins the fix, because
+    The retired ``swiglu`` scenario at the former one-layer dim-12288 shape
+    exhausted a 139 GiB device in the gate pass while each of its three arms
+    fits alone. The pass held every arm at once; a check only ever needs two
+    output *tensors*. This pins the fix, because
     the failure it prevents needs a GPU and a 10 B-parameter shape to
     reproduce and would otherwise be untested.
     """

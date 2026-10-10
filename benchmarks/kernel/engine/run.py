@@ -252,7 +252,7 @@ def _release() -> None:
     ``del`` drops the reference; a reference cycle through the module keeps
     the storage until ``gc`` runs, and a freed block stays in torch's caching
     allocator until it is emptied. Both matter here: the next build asks for
-    a block of the same size, and at the huge shape there is no headroom to
+    a block of the same size, and at a wide shape there is no headroom to
     hold two.
     """
     gc.collect()
@@ -276,8 +276,8 @@ def gate_outputs(
 
     The invariant: when arm N is built, arms 1..N-1 are already collected.
     Only their output tensors survive, and those are a small fraction of what
-    an arm allocates -- at the huge shape an expert arm holds an 11.8 GiB bf16
-    expert copy and grows a weight gradient of the same size, against
+    an arm allocates -- at a dim-12288 shape an expert arm holds an 11.8 GiB
+    bf16 expert copy and grows a weight gradient of the same size, against
     activations measured in tens of MiB.
     """
     outputs: dict[str, dict[str, torch.Tensor]] = {}
@@ -315,9 +315,10 @@ def run_correctness_pass(
     **One arm is resident at a time.** A gate compares tensors, not modules,
     so each arm is built, asked for its outputs, and dropped before the next
     one is built. The pass held every arm at once until this changed, and
-    the retired ``swiglu`` scenario at the huge shape exhausted a 139 GiB
-    device here while each of its three arms fits alone: three bf16 expert copies of about 11.8 GiB,
-    plus a weight gradient of the same size per arm.
+    the retired ``swiglu`` scenario at the former one-layer dim-12288 shape
+    exhausted a 139 GiB device here while each of its three arms fits alone:
+    three bf16 expert copies of about 11.8 GiB, plus a weight gradient of the
+    same size per arm.
 
     The pair that was expected to force separate processes does not.
     TransformerEngine and the FA3 varlen path were measured to import and run

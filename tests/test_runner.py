@@ -62,7 +62,7 @@ from benchmarks.e2e.engines.torchtitan.plugins.parallelize import (
     parallelize_piper1b,
     skip_data_parallel,
 )
-from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B, PIPER_SHAPES
+from benchmarks.models.piper_qwen3.shape import PIPER_1B, PIPER_SHAPES
 from benchmarks.models.piper_qwen3.titan_model import apply_config_overrides
 from torchtitan.config import (
     CompileConfig,
@@ -2243,7 +2243,7 @@ class ResumeTests(unittest.TestCase):
 
             conflicting_size = RunRequest(
                 axes=RequestedAxes(
-                    model_size="huge",
+                    model_size="30b-a3b-20l",
                 ),
                 gpu="0",
                 scenario_name=None,

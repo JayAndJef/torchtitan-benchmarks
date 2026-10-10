@@ -27,7 +27,7 @@ from benchmarks.e2e.registry import (
 from benchmarks.e2e.overrides import Override
 from benchmarks.e2e.runner import check_request, execute_run
 from benchmarks.execution.affinity import CpuPinning
-from benchmarks.models.piper_qwen3.shape import HUGE
+from benchmarks.models.piper_qwen3.shape import PIPER_30B_A3B_CUT
 from tests.engine_helpers import patch_cli_check
 
 
@@ -207,14 +207,14 @@ class CliTests(unittest.TestCase):
             ) as execute, mock.patch("benchmarks.cli.e2e._evaluate"):
                 result = self.runner.invoke(
                     cli,
-                    ["run", "0", "--ac", "none", "--model-size", "huge"],
+                    ["run", "0", "--ac", "none", "--model-size", "30b-a3b-20l"],
                 )
         self.assertEqual(result.exit_code, 0, result.output)
         ac_modes = {call.args[0].request.axes.ac_mode for call in execute.call_args_list}
         self.assertEqual(ac_modes, {"none"})
         # The third global axis must reach every swept scenario too.
         sizes = {call.args[0].request.axes.model_size for call in execute.call_args_list}
-        self.assertEqual(sizes, {"huge"})
+        self.assertEqual(sizes, {"30b-a3b-20l"})
 
     def test_model_size_defaults_to_unrequested_and_rejects_unknowns(self) -> None:
         completed = SimpleNamespace(
@@ -243,7 +243,7 @@ class CliTests(unittest.TestCase):
                 "[titan] - root - INFO - Compiling each TransformerBlock with "
                 "torch.compile (mode=default)\n"
                 "[titan] - root - INFO - Model qwen3 piper_1B "
-                f"size: {HUGE.param_count:,} total parameters\n"
+                f"size: {PIPER_30B_A3B_CUT.param_count:,} total parameters\n"
                 "Training completed\n"
             )
             arm_dir = Path(command[command.index("--dump-folder") + 1])
@@ -291,7 +291,7 @@ class CliTests(unittest.TestCase):
                     "--ac",
                     "none",
                     "--model-size",
-                    "huge",
+                    "30b-a3b-20l",
                     "--out",
                     str(out_dir),
                 ],
@@ -299,14 +299,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, result.output)
             manifest = json.loads((out_dir / "manifest.json").read_text())
 
-        self.assertEqual(manifest["run"]["shape"]["name"], "huge")
+        self.assertEqual(manifest["run"]["shape"]["name"], "30b-a3b-20l")
         (arm,) = manifest["arms"]
         command = arm["command"]
         self.assertEqual(
             command[command.index("--config") + 1], "qwen3_piper_1b_pretokenized"
         )
-        self.assertEqual(command[command.index("--config-arg") + 1], "size=huge")
-        self.assertFalse([token for token in command if token.endswith("_huge")])
+        self.assertEqual(
+            command[command.index("--config-arg") + 1], "size=30b-a3b-20l"
+        )
+        self.assertFalse(
+            [token for token in command if token.endswith("_30b-a3b-20l")]
+        )
 
     def test_unknown_ac_mode_is_rejected(self) -> None:
         result = self.runner.invoke(cli, ["run", "2", "--ac", "turbo"])

@@ -118,9 +118,9 @@ the two engines' wrappers create.
 
 **The weight gradient is gated on its touched rows, and the whole-table norm
 beside it is weak evidence rather than a proof.** An fp64 reference for a
-``[V, D]`` gradient is 1.16 GiB at ``normal`` and 13.9 GiB at ``huge``, in a
-process that also holds a whole ``GPTModel``, so the reference accumulates
-only the rows the tokens touch. ``weight_grad_norm`` -- a scalar over the
+``[V, D]`` gradient is 1.16 GiB at ``normal``, in a process that also holds
+a whole ``GPTModel``, so the reference accumulates only the rows the tokens
+touch. ``weight_grad_norm`` -- a scalar over the
 *entire* table -- is reported next to the compacted rows to catch a write
 outside them, and it catches only a gross one. A Frobenius norm over ``U``
 touched rows moves by ``sqrt(1 + k/U) - 1`` when ``k`` further rows of similar
@@ -213,8 +213,7 @@ def embedding_stage_inputs(
     )
     grad_out = _randn((batch, seq, shape.dim), device, generator)
     # Drawn in fp32 and cast, like every other input here. The transient fp32
-    # table is 594 MiB at ``normal`` and 7.0 GiB at ``huge``; it is freed
-    # before any arm builds.
+    # table is 594 MiB at ``normal``; it is freed before any arm builds.
     weight = _randn(
         (shape.vocab_size, shape.dim),
         device,
@@ -497,8 +496,8 @@ def titan_embedding_module(shape: PiperShape, device: torch.device):
     and then moved, which is what ``build_titan_model`` does and for a reason
     that bites harder here: ``nn.Embedding.__init__`` allocates ``[V, D]`` and
     runs ``normal_`` over it, which on the host is 594 MiB and several seconds
-    at ``normal`` and 7.0 GiB at ``huge``. The values are overwritten with the
-    shared table immediately afterwards.
+    at ``normal``. The values are overwritten with the shared table
+    immediately afterwards.
     """
     from benchmarks.models.piper_qwen3.titan_model import _piper_1b_model
 
@@ -731,17 +730,15 @@ def _assert_parameters_released(watched: tuple[weakref.ref, ...]) -> None:
     arm. A surviving ``GPTModel`` adds its whole build to this arm's peak
     memory and nothing to the titan arm's: 0.67 GiB at the 1b shape, because
     ``MCORE_BLANK_MLP`` leaves the mlp part out. The transient window between
-    the build and the first sample loop costs more: the build is 4.82 GiB at
-    the 48b shape, and a device that carries it into that window can run out
-    of memory.
+    the build and the first sample loop costs more: the whole build is still
+    live there, and at a wide shape a device can run out of memory.
 
     **This reads object identity, and a byte budget could not do the job
     here.** ``rope`` and ``qk_norm`` compare ``torch.cuda.memory_allocated``
     against a 64 MiB budget, which works because each of them keeps a few
-    hundred bytes. This arm keeps the whole table: 297 MiB at the 1b shape
-    and 1.16 GiB at 48b, both far above any budget that could still find a
-    leaked layer. A weak reference has no such problem, and it needs no CUDA
-    device to answer.
+    hundred bytes. This arm keeps the whole table: 297 MiB at the 1b shape,
+    far above any budget that could still find a leaked layer. A weak
+    reference has no such problem, and it needs no CUDA device to answer.
 
     **This also raises where those two print a warning.** Allocator rounding
     moves a byte count, so a failure there can come from the host. A weak

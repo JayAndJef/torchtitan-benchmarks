@@ -664,12 +664,14 @@ class StockArgvTests(unittest.TestCase):
     def test_the_model_size_reaches_the_driver_and_the_flags(self) -> None:
         command = _command(
             _stock_arm(),
-            model_size="9b",
+            model_size="30b-a3b-20l",
             parallelism=MESH,
             local_batch_size=32,
         )
-        self.assertEqual(command[command.index("--bench-model-size") + 1], "9b")
-        shape = shape_by_name("9b")
+        self.assertEqual(
+            command[command.index("--bench-model-size") + 1], "30b-a3b-20l"
+        )
+        shape = shape_by_name("30b-a3b-20l")
         self.assertIn(str(shape.n_layers), command)
         self.assertIn(str(shape.dim), command)
 

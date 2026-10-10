@@ -121,21 +121,20 @@ the other's input.
 forward is ``2 * batch * seq_len * dim * vocab_size`` = 1.27 TFLOP at the
 default workload and the ``normal`` shape, against 8.6 GFLOP for the
 attention output projection at the same workload -- a factor of 148 for the
-same tensor rank. At ``huge`` it is 15.3 TFLOP. The scenario therefore
-declares **no bandwidth floor**: a copy floor answers "is this arm moving
-bytes at device speed", which is the wrong question for a GEMM. The right
+same tensor rank. The scenario therefore declares **no bandwidth floor**: a
+copy floor answers "is this arm moving bytes at device speed", which is the
+wrong question for a GEMM. The right
 reference is a FLOP roofline, which nothing in this repository computes.
 
 **The fp64 gate is the largest allocation in this package.** The logits are
 ``[batch, seq_len, vocab_size]``: 1.16 GiB of bf16 at the default workload,
 and 4.64 GiB once the reference promotes them to fp64. The reference also
-holds an fp64 weight gradient, 1.16 GiB at ``normal`` and 13.9 GiB at
-``huge``, and the correctness pass holds the whole reference while it builds
-each arm. Adding the two arms' outputs and the gates' fp32 temporaries gives
-roughly 16 GiB at ``normal`` and 52 GiB at ``huge`` for that pass. **Those
-two totals are arithmetic, not a measurement**; replace them with a real run
-before reporting anything about them. A timing worker is far smaller: it
-holds one arm and no reference.
+holds an fp64 weight gradient, 1.16 GiB at ``normal``, and the correctness
+pass holds the whole reference while it builds each arm. Adding the two arms'
+outputs and the gates' fp32 temporaries gives roughly 16 GiB at ``normal``
+for that pass. **That total is arithmetic, not a measurement**; replace it
+with a real run before reporting anything about it. A timing worker is far
+smaller: it holds one arm and no reference.
 
 **There is no isolated ``backward`` mode.** ``forward`` and
 ``forward_backward`` are what every cross-engine scenario in this package
@@ -235,7 +234,7 @@ def lm_head_projection_inputs(
     logits at unit scale at every shape -- which is the scale the
     ``cross_entropy`` scenario says its own logits are drawn at, so the
     producer and the consumer of a logit tensor agree. A fixed standard
-    deviation would put the logits at 0.64 at ``normal`` and 2.2 at ``huge``.
+    deviation would put the logits at 0.64 at ``normal``.
 
     Values reach no published number here: a GEMM costs what it costs, and
     every gate is ``max_rel_l2``, which is scale-invariant.
@@ -298,8 +297,8 @@ def titan_lm_head_module(shape: PiperShape, device: torch.device):
     and then moved, which is what ``titan_embedding_module`` does and for the
     same reason: ``nn.Linear.__init__`` calls ``reset_parameters`` over
     ``[vocab_size, dim]``, which on the host is 594 MiB and several seconds at
-    ``normal`` and 7.0 GiB at ``huge``. Those values are overwritten with the
-    shared weight immediately afterwards.
+    ``normal``. Those values are overwritten with the shared weight
+    immediately afterwards.
 
     ``param_init`` on the config node is never applied, because nothing here
     calls ``init_weights``. It only chooses values, which a GEMM's cost does
@@ -567,9 +566,8 @@ def build_lm_head_projection_mcore_base(
     resident memory: ``max_memory_allocated`` is a maximum over time of the
     bytes currently allocated, so the first allocation inside the timed call
     lifts the peak to resident-plus-new. A retained model would therefore be
-    charged to the arm. It holds 0.67 GiB of bf16 parameters at ``1b`` and
-    7.80 GiB at ``huge`` -- ``MCORE_BLANK_MLP`` leaves the mlp part out -- in
-    a process that the
+    charged to the arm. It holds 0.67 GiB of bf16 parameters at ``1b`` --
+    ``MCORE_BLANK_MLP`` leaves the mlp part out -- in a process that the
     correctness pass also asks to build the titan arm and to hold the fp64
     reference.
 

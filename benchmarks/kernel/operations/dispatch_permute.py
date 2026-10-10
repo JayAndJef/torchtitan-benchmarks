@@ -1137,7 +1137,7 @@ def _build_dispatch_permute_mcore(
     **Reading it off a real model costs a real model, and the experts are then
     released.** ``build_model`` allocates the whole network to hand back one
     ``MoELayer``, and the expert weights inside that layer are its largest part
-    -- about 88 MiB of bf16 at ``normal`` and about 12.7 GiB at ``huge``. No
+    -- about 88 MiB of bf16 at ``normal``. No
     phase in this cut touches ``self.experts``: ``preprocess`` and ``dispatch``
     read ``self.config`` and ``self.token_dispatcher``, and
     ``dispatch_postprocess`` is a method on the dispatcher. So the attribute is

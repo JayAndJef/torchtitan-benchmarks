@@ -705,8 +705,8 @@ def _release_model_parameters(model) -> None:
     ``self.pg_collection`` and ``self.tp_group`` and nothing else
     (``language_module.py:172-205``), so the embedding, the decoder and the
     output layer are dead weight once the bound method is in hand -- but they
-    are 0.67 GiB of *resident* weight at ``1b`` and 7.80 GiB at ``huge``
-    (``MCORE_BLANK_MLP`` leaves the mlp part out), and ``memory_pass``
+    are 0.67 GiB of *resident* weight at ``1b`` (``MCORE_BLANK_MLP`` leaves
+    the mlp part out), and ``memory_pass``
     reports ``torch.cuda.max_memory_allocated``, which counts them. Peak
     memory is a headline metric for this scenario precisely because the arms
     differ in what the loss keeps alive, so a resident model would drown the

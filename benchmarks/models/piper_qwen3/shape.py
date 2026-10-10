@@ -26,7 +26,7 @@ class PiperShape:
     max_seq_len: int = 4096
     """The size of the RoPE cache and the sequence ceiling; a longer sequence fails the eager bounds check and reads out of bounds under compile."""
     parity_gate: float = 2e-2
-    """The rel_l2 ceiling of a cross-engine logit comparison; no check gates on it, and only ``1b`` and ``huge`` carry a measured value."""
+    """The rel_l2 ceiling of a cross-engine logit comparison; no check gates on it, and only ``1b`` carries a measured value."""
 
     def __post_init__(self) -> None:
         if self.dim < 1:
@@ -260,50 +260,6 @@ PIPER_1B = PiperShape(
 )
 """Piper 1B: dim 1024, 16 layers, 1,066,241,024 parameters."""
 
-HUGE = PiperShape(
-    name="huge",
-    dim=12288,
-    n_layers=1,
-    head_dim=64,
-    n_kv_heads=96,
-    num_experts=4,
-    parity_gate=5e-2,
-)
-"""One transformer layer at dim 12288, sized to fill an H200."""
-
-LARGE = PiperShape(
-    name="large",
-    dim=4096,
-    n_layers=4,
-    head_dim=64,
-    n_kv_heads=32,
-    num_experts=4,
-    parity_gate=3e-2,
-)
-"""Four transformer layers at dim 4096, 4,264,661,504 parameters, with the parameter split of ``1b``."""
-
-GIANT = PiperShape(
-    name="giant",
-    dim=16384,
-    n_layers=1,
-    head_dim=64,
-    n_kv_heads=128,
-    num_experts=4,
-    parity_gate=6e-2,
-)
-"""One transformer layer at dim 16384, 17,058,349,184 parameters; the ``expert_mlp`` kernel scenario can run out of memory at this shape."""
-
-PIPER_9B = PiperShape(
-    name="9b",
-    dim=2048,
-    n_layers=24,
-    head_dim=64,
-    n_kv_heads=8,
-    num_experts=8,
-    parity_gate=2e-2,
-)
-"""Piper 9B: dim 2048, 24 layers, 9,330,201,600 parameters, with 4:1 grouped-query attention and 8 experts."""
-
 PIPER_30B_A3B = PiperShape(
     name="30b-a3b",
     dim=2048,
@@ -334,23 +290,9 @@ PIPER_30B_A3B_CUT = PiperShape(
 )
 """Qwen3-30B-A3B cut to 20 layers: 13,084,744,704 parameters; it fits four H200 at dp 4 x ep 4 under ZeRO-1."""
 
-PIPER_48B = PiperShape(
-    name="48b",
-    dim=4096,
-    n_layers=32,
-    head_dim=128,
-    n_kv_heads=8,
-    num_experts=8,
-    parity_gate=3e-2,
-)
-"""Piper 48B: dim 4096, 32 layers, 47,685,316,608 parameters; its state needs about 355 GiB, so it does not fit one H200."""
-
 PIPER_SHAPES: dict[str, PiperShape] = {
     shape.name: shape
-    for shape in (
-        PIPER_1B, LARGE, PIPER_9B, HUGE, PIPER_30B_A3B_CUT, GIANT, PIPER_30B_A3B,
-        PIPER_48B
-    )
+    for shape in (PIPER_1B, PIPER_30B_A3B_CUT, PIPER_30B_A3B)
 }
 """Every registered shape, smallest to largest by parameter count."""
 

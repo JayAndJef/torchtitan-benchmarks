@@ -225,14 +225,14 @@ class CollectTests(unittest.TestCase):
     def test_cell_without_results_yields_no_row(self) -> None:
         write_cell(
             self.root,
-            "model-size-huge-ac-none",
-            model_size="huge",
+            "model-size-30b-a3b-20l-ac-none",
+            model_size="30b-a3b-20l",
             dp=1,
             zero=0,
             results_data=None,
         )
         cells = [row["cell"] for row in collect_matrix.collect(self.root, None)]
-        self.assertNotIn("model-size-huge-ac-none", cells)
+        self.assertNotIn("model-size-30b-a3b-20l-ac-none", cells)
 
     def test_moved_aside_cell_is_skipped(self) -> None:
         for mark in ("contaminated", "failed"):
@@ -253,14 +253,17 @@ class CollectTests(unittest.TestCase):
     def test_size_filter_selects_one_size(self) -> None:
         write_cell(
             self.root,
-            "model-size-huge-ac-none",
-            model_size="huge",
+            "model-size-30b-a3b-20l-ac-none",
+            model_size="30b-a3b-20l",
             dp=1,
             zero=0,
             results_data=results(tokens_per_second=900.0),
         )
-        sizes = {row["model_size"] for row in collect_matrix.collect(self.root, "huge")}
-        self.assertEqual(sizes, {"huge"})
+        sizes = {
+            row["model_size"]
+            for row in collect_matrix.collect(self.root, "30b-a3b-20l")
+        }
+        self.assertEqual(sizes, {"30b-a3b-20l"})
 
     def test_another_results_schema_is_refused_by_name(self) -> None:
         payload = results(tokens_per_second=1.0)

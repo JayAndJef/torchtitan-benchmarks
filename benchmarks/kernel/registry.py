@@ -321,8 +321,7 @@ LM_HEAD = KernelScenario(
 #
 # ``weight_grad_rows`` is the gradient restricted to the rows the tokens
 # touched. An fp64 reference for the whole [vocab_size, dim] gradient is
-# 1.16 GiB at ``normal`` and 13.9 GiB at ``huge``, in a process that also holds a
-# whole GPTModel.
+# 1.16 GiB at ``normal``, in a process that also holds a whole GPTModel.
 #
 # ``weight_grad_norm`` is a scalar over the *entire* table, and it is weak
 # evidence rather than a proof. It bounds a gross write outside the touched rows
@@ -3922,12 +3921,11 @@ ATTENTION_CORE = KernelScenario(
                 "document count. cu_seqlens is padded to 128 entries, so "
                 "segments is 127 at every workload: one bf16 score tensor is "
                 "4.0 GiB at seq 1024, 15.9 GiB at 2048 and 63.5 GiB at 4096 "
-                "on the normal shape, and 47.6 GiB at seq 1024 on huge. The "
-                "arm needs the scores, the saved probabilities and the "
-                "backward gradient, so budget three of those. A sweep past "
-                "seq 2048 will OOM, and because the correctness pass has no "
-                "per-arm exception handling that OOM takes the whole "
-                "scenario with it"
+                "on the normal shape. The arm needs the scores, the saved "
+                "probabilities and the backward gradient, so budget three of "
+                "those. A sweep past seq 2048 will OOM, and because the "
+                "correctness pass has no per-arm exception handling that OOM "
+                "takes the whole scenario with it"
             ),
             builder=(
                 "benchmarks.kernel.operations.attention_core"

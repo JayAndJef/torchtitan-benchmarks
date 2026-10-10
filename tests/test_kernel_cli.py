@@ -299,7 +299,7 @@ class KernelCliTests(unittest.TestCase):
                     "5",
                     "--burst",
                     "--model-size",
-                    "huge",
+                    "30b-a3b-20l",
                     "--batch",
                     "1",
                     "--seq-len",
@@ -323,7 +323,7 @@ class KernelCliTests(unittest.TestCase):
             (3, 20, 8, 5, 3),
         )
         self.assertTrue(request.burst)
-        self.assertEqual(request.model_size, "huge")
+        self.assertEqual(request.model_size, "30b-a3b-20l")
         self.assertEqual((request.batch, request.seq_len), (1, 512))
 
     def test_model_size_takes_the_default_and_rejects_unknown(self) -> None:

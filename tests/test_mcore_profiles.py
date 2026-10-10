@@ -32,7 +32,7 @@ from benchmarks.models.piper_qwen3.mcore_profiles import (
     profile_by_name,
     transformer_config_kwargs,
 )
-from benchmarks.models.piper_qwen3.shape import HUGE, PIPER_1B
+from benchmarks.models.piper_qwen3.shape import PIPER_1B, PIPER_30B_A3B, PiperShape
 
 # What benchmarks/models/piper_qwen3/megatron_model.py wrote inline before the
 # profile registry existed, at the normal shape. Every megatron number this
@@ -226,12 +226,13 @@ class BaseProfileExtractionTests(unittest.TestCase):
     def test_the_geometry_moves_with_the_shape_and_nothing_else_does(
         self,
     ) -> None:
-        """A profile carries no geometry, so huge differs only in geometry."""
-        at_huge = transformer_config_kwargs(shape=HUGE, profile=BASE)
+        """A profile carries no geometry, so a wider shape moves only geometry."""
+        wide = PiperShape.derived(name="probe", dim=4096, n_layers=4)
+        at_wide = transformer_config_kwargs(shape=wide, profile=BASE)
         moved = {
             key
-            for key in at_huge
-            if at_huge[key] != BASE_KWARGS_AT_NORMAL[key]
+            for key in at_wide
+            if at_wide[key] != BASE_KWARGS_AT_NORMAL[key]
         }
         self.assertEqual(
             moved,
@@ -244,8 +245,8 @@ class BaseProfileExtractionTests(unittest.TestCase):
                 "moe_ffn_hidden_size",
             },
         )
-        self.assertEqual(at_huge["hidden_size"], HUGE.dim)
-        self.assertEqual(at_huge["num_attention_heads"], HUGE.n_heads)
+        self.assertEqual(at_wide["hidden_size"], wide.dim)
+        self.assertEqual(at_wide["num_attention_heads"], wide.n_heads)
 
     def test_the_kwargs_are_a_fresh_dict_per_call(self) -> None:
         """The correctness pass builds several arms in one interpreter.
@@ -280,10 +281,10 @@ class BaseProfileExtractionTests(unittest.TestCase):
         # moe_layer_freq drives the dense/MoE pattern; 1 means every layer.
         self.assertEqual(at_normal["moe_layer_freq"], 1)
         self.assertEqual(
-            transformer_config_kwargs(shape=HUGE, profile=BASE)[
+            transformer_config_kwargs(shape=PIPER_30B_A3B, profile=BASE)[
                 "num_moe_experts"
             ],
-            HUGE.num_experts,
+            PIPER_30B_A3B.num_experts,
         )
 
 

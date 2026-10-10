@@ -1017,13 +1017,13 @@ class PinnedSourceTests(unittest.TestCase):
 
 class RegisteredShapeTests(unittest.TestCase):
     def test_the_inputs_build_at_every_registered_model_size(self) -> None:
-        """A tiny workload, because ``huge`` allocates by ``dim`` here.
+        """A tiny workload, because the builder allocates by ``dim`` here.
 
         The sequence length is the smallest at or above 8 that the expert
-        count divides: 8 at every shape but ``30b-a3b``, whose 128 experts
-        need 128 tokens. The builder draws one expert offset per token from
-        a permutation reduced modulo ``num_experts``, so the tokens must
-        divide for the draw to balance; that is the builder's own
+        count divides: 8 at ``1b``, and 128 at the two ``30b-a3b`` shapes,
+        whose 128 experts need 128 tokens. The builder draws one expert
+        offset per token from a permutation reduced modulo ``num_experts``, so
+        the tokens must divide for the draw to balance; that is the builder's own
         precondition, not a rounding.
         """
         for name, shape in PIPER_SHAPES.items():

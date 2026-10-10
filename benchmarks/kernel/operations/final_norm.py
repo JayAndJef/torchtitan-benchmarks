@@ -341,9 +341,8 @@ def _assert_parameters_released(watched: tuple[weakref.ref, ...]) -> None:
     arm. A surviving ``GPTModel`` adds its whole build to this arm's peak
     memory and nothing to the titan arm's: 0.67 GiB at the 1b shape, because
     ``MCORE_BLANK_MLP`` leaves the mlp part out. The transient window between
-    the build and the first sample loop costs more: the build is 4.82 GiB at
-    the 48b shape, and a device that carries it into that window can run out
-    of memory.
+    the build and the first sample loop costs more: the whole build is still
+    live there, and at a wide shape a device can run out of memory.
 
     **This raises where ``rope`` and ``qk_norm`` print a warning**, because
     the two checks answer different questions. Those two read

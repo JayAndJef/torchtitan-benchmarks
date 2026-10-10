@@ -970,27 +970,6 @@ class RegisteredShapeTests(unittest.TestCase):
         )
         self.assertEqual(tuple(inputs.probs.shape), (rows,))
 
-    def test_the_huge_shape_is_not_built_here_and_the_reason_is_its_size(
-        self,
-    ) -> None:
-        """``--model-size huge`` is recorded as untested, not attempted.
-
-        The shared fp32 weight state is three ``(E, F, D)`` tensors, and at the
-        huge shape that is tens of gibibytes before an arm materializes its own
-        bf16 copy. Building it in a CPU unit test would make the suite unusable
-        and would prove nothing a GPU has not already refused to run. This
-        asserts the figure the module docstring quotes, from the registered
-        shape, so a shape change moves the warning with it.
-        """
-        shape = shape_by_name("huge")
-        per_tensor_bytes = (
-            shape.num_experts * shape.moe_hidden_dim * shape.dim * 4
-        )
-        self.assertAlmostEqual(3 * per_tensor_bytes / 2**30, 23.6, places=1)
-        # And the fp64 reference's weight gradients, which the correctness
-        # worker holds resident while it builds all eight arms.
-        self.assertAlmostEqual(3 * per_tensor_bytes * 2 / 2**30, 47.3, places=1)
-
 
 if __name__ == "__main__":
     unittest.main()

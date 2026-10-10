@@ -60,8 +60,8 @@ from benchmarks.models.piper_qwen3.shape import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SHAPE_1B = shape_by_name("1b")  # 16 layers, 4 experts
-SHAPE_9B = shape_by_name("9b")  # 24 layers, 4 experts
-SHAPE_HUGE = shape_by_name("huge")  # 1 layer
+SHAPE_30B = shape_by_name("30b-a3b")  # 48 layers, 128 experts
+SHAPE_ONE_LAYER = PiperShape.derived(name="probe", dim=128, n_layers=1)
 
 
 def check(
@@ -943,16 +943,16 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
 
     def test_a_one_layer_shape_is_refused_at_pp_two(self):
         with self.assertRaisesRegex(ValueError, "does not divide evenly"):
-            check(PP2, shape=SHAPE_HUGE)
+            check(PP2, shape=SHAPE_ONE_LAYER)
 
     def test_the_two_suite_shapes_divide_into_four_stages(self):
-        """16 and 24 layers over ``pp 4`` with 1F1B, which is 4 stages.
+        """16 and 48 layers over ``pp 4`` with 1F1B, which is 4 stages.
 
-        Both are the shapes the stock-Megatron suite runs. TorchTitan's own
-        splitter gives [4, 4, 4, 4] and [6, 6, 6, 6] at weight 0, which is
-        the split Megatron gives, so the rule and the engines agree.
+        Both are shapes the stock-Megatron suite runs. TorchTitan's own
+        splitter gives [4, 4, 4, 4] and [12, 12, 12, 12] at weight 0, which
+        is the split Megatron gives, so the rule and the engines agree.
         """
-        for shape in (SHAPE_1B, SHAPE_9B):
+        for shape in (SHAPE_1B, SHAPE_30B):
             with self.subTest(model_size=shape.name):
                 check(DP2_PP4, shape=shape, batch=8, device_count=8)
 
@@ -964,22 +964,21 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
         ):
             check(
                 ParallelismSpec(pp=4, pp_schedule="1F1B"),
-                shape=SHAPE_HUGE,
+                shape=SHAPE_ONE_LAYER,
                 batch=8,
             )
 
     def test_every_registered_shape_at_pp_eight(self):
         """The deepest pipeline the budget holds, shape by shape.
 
-        Four shapes divide: 1b (16 layers, 2 a stage), 9b (24, 3), 30b-a3b
-        (48, 6) and 48b (32, 4). Four do not: large has 4 layers, huge and
-        giant have 1, and 30b-a3b-20l has 20. Rule 7 is the only rule that
+        Two shapes divide: 1b (16 layers, 2 a stage) and 30b-a3b (48, 6).
+        One does not: 30b-a3b-20l has 20 layers. Rule 7 is the only rule that
         reads the layer count, so it is the one that decides which shapes the
         depth-8 cell can run.
 
         Batch 16 is what rule 12 asks for at eight stages.
         """
-        divides = {"1b", "9b", "30b-a3b", "48b"}
+        divides = {"1b", "30b-a3b"}
         spec = ParallelismSpec(pp=8, pp_schedule="1F1B")
         for name, shape in PIPER_SHAPES.items():
             with self.subTest(model_size=name):
@@ -995,13 +994,13 @@ class Rule07LayersDivideIntoStagesTest(unittest.TestCase):
     def test_eight_interleaved_stages_at_pp_four(self):
         """``pp 4`` with a two-stage schedule asks for 8 stages.
 
-        16 and 24 layers both divide by 8. A 4-layer shape does not, and
+        16 and 48 layers both divide by 8. A 4-layer shape does not, and
         rule 7 refuses it at any batch, because rule 7 runs before rules 10
         to 12. Batch 16 is what the two passing shapes need: eight stages
         ask rule 12 for 16 microbatches.
         """
         interleaved = ParallelismSpec(pp=4, pp_schedule="Interleaved1F1B")
-        for shape in (SHAPE_1B, SHAPE_9B):
+        for shape in (SHAPE_1B, SHAPE_30B):
             with self.subTest(model_size=shape.name):
                 check(interleaved, shape=shape, batch=16)
         four_layers = PiperShape.derived(name="probe", dim=128, n_layers=4)
@@ -1375,7 +1374,7 @@ class TheEightGpuCellTest(unittest.TestCase):
     """
 
     def test_the_cell_passes_at_eight_devices(self):
-        for shape in (SHAPE_1B, SHAPE_9B):
+        for shape in (SHAPE_1B, SHAPE_30B):
             for spec, batch in ((DP2_PP4, 8), (DP2_PP4_MICRO4, 32)):
                 with self.subTest(model_size=shape.name, batch=batch):
                     check(spec, shape=shape, batch=batch, device_count=8)
@@ -1438,8 +1437,8 @@ class CapsThatMovedTest(unittest.TestCase):
 
         ``pp 3`` used to fail the cap. The cap admits it now, and 16 layers
         do not divide into 3 stages, so rule 7 refuses it instead. Read the
-        message: the repair is a shape with 24 layers, not a smaller
-        degree.
+        message: the repair is a shape whose layer count divides by 3, not a
+        smaller degree.
         """
         with self.assertRaisesRegex(
             ValueError,
@@ -1448,12 +1447,12 @@ class CapsThatMovedTest(unittest.TestCase):
             check(ParallelismSpec(pp=3, pp_schedule="1F1B"), batch=6)
 
     def test_pipeline_degree_three_passes_on_a_shape_that_divides(self):
-        """24 layers divide into 3 stages, so nothing refuses the spec.
+        """48 layers divide into 3 stages, so nothing refuses the spec.
         Rule 12 asks for 6 microbatches and rule 11 asks that 6 divide by
         3."""
         check(
             ParallelismSpec(pp=3, pp_schedule="1F1B"),
-            shape=SHAPE_9B,
+            shape=SHAPE_30B,
             batch=6,
         )
 

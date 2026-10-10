@@ -833,11 +833,16 @@ class PinnedSourceTests(unittest.TestCase):
 
 class RegisteredShapeTests(unittest.TestCase):
     def test_the_inputs_build_at_every_registered_model_size(self) -> None:
-        """``--model-size`` is single-valued but not fixed, so both must work."""
-        for name in ("normal", "huge"):
+        """``--model-size`` is single-valued but not fixed, so both must work.
+
+        The routed rows must divide among the experts, so ``30b-a3b`` takes
+        16 tokens where ``normal`` takes 2.
+        """
+        for name in ("normal", "30b-a3b"):
             with self.subTest(size=name):
                 shape = shape_by_name(name)
-                workload = KernelWorkload(batch=1, seq_len=2)
+                seq_len = max(2, shape.num_experts // shape.top_k)
+                workload = KernelWorkload(batch=1, seq_len=seq_len)
                 generator = torch.Generator(device="cpu")
                 generator.manual_seed(0)
                 inputs = moe_combine_inputs(
@@ -845,7 +850,7 @@ class RegisteredShapeTests(unittest.TestCase):
                 )
                 self.assertEqual(inputs.x_BLD.shape[-1], shape.dim)
                 self.assertEqual(
-                    inputs.expert_out_ND.shape[0], 2 * shape.top_k
+                    inputs.expert_out_ND.shape[0], seq_len * shape.top_k
                 )
                 self.assertEqual(
                     inputs.tokens_per_expert_E.numel(), shape.num_experts

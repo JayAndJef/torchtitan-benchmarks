@@ -602,8 +602,7 @@ def _report_build_residual(name: str, before: int) -> None:
     ``memory_pass`` reports ``max_memory_allocated``, which counts every live
     allocation. A surviving reference to the model would add its whole build
     to this arm's peak memory and nothing to a titan arm's. That build is
-    0.67 GiB at ``1b`` and 7.80 GiB at ``huge``, because ``MCORE_BLANK_MLP``
-    leaves the mlp part out.
+    0.67 GiB at ``1b``, because ``MCORE_BLANK_MLP`` leaves the mlp part out.
     This reports and does not raise: the timing columns are unaffected, peak
     memory is a secondary metric here, and a hard failure would cost the
     anchor and with it the whole scenario. The worker's stdout lands in

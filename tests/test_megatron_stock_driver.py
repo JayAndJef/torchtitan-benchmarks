@@ -254,7 +254,7 @@ class FlagListTest(unittest.TestCase):
     """What the command line says, for both shapes the suite runs."""
 
     def test_every_declared_flag_is_emitted(self) -> None:
-        for size in ("1b", "9b"):
+        for size in ("1b", "30b-a3b"):
             for spec in (TRIVIAL_SPEC, PP4_SPEC):
                 emitted = set(flags_for(size, spec))
                 for flag in SECTION_7_FLAGS:
@@ -266,7 +266,7 @@ class FlagListTest(unittest.TestCase):
 
         The explicit disable flag must not be passed.
         """
-        for size in ("1b", "9b"):
+        for size in ("1b", "30b-a3b"):
             for spec in (TRIVIAL_SPEC, PP4_SPEC):
                 emitted = set(flags_for(size, spec))
                 with self.subTest(size=size, pp=spec.pp):
@@ -412,7 +412,7 @@ class FlagListTest(unittest.TestCase):
         zero value, because all five sharding flags move from
         declined to required under ``zero 3``.
         """
-        for size in ("1b", "9b"):
+        for size in ("1b", "30b-a3b"):
             for spec in (
                 TRIVIAL_SPEC,
                 PP4_SPEC,

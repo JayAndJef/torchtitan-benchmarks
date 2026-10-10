@@ -1173,11 +1173,10 @@ def _release_untimed_moe_submodules(moe_layer: Any, arm: str) -> int:
 
     ``memory_pass`` reads ``torch.cuda.max_memory_allocated``, which is a
     total and not a delta, so anything still resident is charged to the arm.
-    One MoE layer's experts are 44 M parameters at the normal shape and 6.3 G
-    at the huge one, against activations measured in megabytes -- so a
-    retained expert stack would make this scenario's memory column a statement
-    about what each arm happened to keep, and titan's router holds nothing but
-    an ``[E, D]`` gate.
+    One MoE layer's experts are 44 M parameters at the normal shape, against
+    activations measured in megabytes -- so a retained expert stack would make
+    this scenario's memory column a statement about what each arm happened to
+    keep, and titan's router holds nothing but an ``[E, D]`` gate.
 
     ``route`` provably does not reach them: it is
     ``apply_module(self.router)(hidden_states, padding_mask)``
